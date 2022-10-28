@@ -1,0 +1,15 @@
+#makefile foriPIC PROJECT
+
+CPP = /usr/bin/c++
+OPTFLAGS=  -O2 -DMPICH_IGNORE_CXX_SEEK
+ 
+INC_HDF5 =  -I/usr/local/hdf5-1.8.13/include 
+LIB_HDF5 = -L/usr/local/hdf5-1.8.13/lib
+HDF5LIBS = -lm -lhdf5 -lhdf5_hl 
+
+
+HDF5_2_VTK: HDF5_2_VTK.cpp 
+	${CPP} -o  HDF5_2_VTK ${INC_HDF5}  ${LIB_HDF5}  HDF5_2_VTK.cpp  ${HDF5LIBS} 	
+
+clean:
+	rm -rf   HDF5_2_VTK HDF5_2_GDA HDF5_2_VTKB Test_Part  Part_vFreq

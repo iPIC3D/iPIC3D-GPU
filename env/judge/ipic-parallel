@@ -1,0 +1,41 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "************************************************************"
+puts stderr " set environment to compile and run iPic3D with parallel IO "
+puts stderr "************************************************************"
+}
+
+module-whatis "set environment for iPic3D"
+
+module load ipic-base
+
+# use H5hut
+# note that H5hut does not work for hdf5/1.8.13 or higher.
+module load hdf5/1.8.12
+setenv H5HUT_DIR $env(HOME)/install/judge
+# -DPARALLEL_IO must be used when compiling to correct for a bug in H5hut
+setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-openmp -O3 -xHost -vec-report -DPARALLEL_IO'"
+# make cmake search in the correct path.
+# I used "module show hdf5/1.8.13" to figure out the path to use.
+setenv IPIC_CMAKE_ARGS "$env(IPIC_CMAKE_ARGS) -DCMAKE_PREFIX_PATH=/usr/local/hdf5/v1.8.12"
+# turn on H5hut output
+setenv IPIC_CMAKE_ARGS "$env(IPIC_CMAKE_ARGS) -DIPIC_H5HUT_OUTPUT=ON"
+
+# commands that I used to configure, compile, and install H5hut:
+#
+#  ssh judge
+#  mkdir -p install/judge
+#  module load hdf5/1.8.12
+#  tar xvf H5hut-1.99.12.tar.bz2
+#  cd H5hut-1.99.12
+#  ./configure \
+#    --enable-parallel \
+#    --enable-large-indices \
+#    --prefix=$HOME/install/judge \
+#    --with-hdf5=/usr/local/hdf5/v1.8.12
+#  make
+#  make install
+

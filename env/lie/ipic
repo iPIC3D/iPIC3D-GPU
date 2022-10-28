@@ -1,0 +1,24 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "*******************************************"
+puts stderr " set environment to compile and run iPic3D "
+puts stderr "*******************************************"
+}
+
+module-whatis "set environment for iPic3D"
+
+module load hdf5/1.8.11-par
+module load mpich/3.0.4
+module load cmake/2.8.12
+
+# definitions used to run ipic3d
+#
+setenv IPIC_MPIRUN mpiexec
+
+set-alias isession {qsub -I -l nodes=${1:-1}:ppn=${2:-16},walltime=0:30:00}
+
+prepend-path PATH $env(IPIC_HOME)/scripts
+prepend-path PATH $env(IPIC_HOME)/env/lie

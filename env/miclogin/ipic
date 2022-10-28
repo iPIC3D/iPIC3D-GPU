@@ -1,0 +1,17 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "***************************************************************"
+puts stderr " set environment to compile and run iPic3D without parallel IO "
+puts stderr "***************************************************************"
+}
+
+module-whatis "set environment for iPic3D"
+
+module load ipic-base
+
+module load hdf5/1.8.10-patch1
+setenv I_MPI_FABRICS shm:tcp
+setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-openmp -fno-exceptions -O3 -xHost -vec-report'"

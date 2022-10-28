@@ -1,0 +1,22 @@
+#%Module1.0####################################################################
+##
+##  mymodule modulefile
+##
+##  My new module that sets my personal environment
+##
+proc ModulesHelp { } {
+        puts stderr "\tset environment to compile and run iPic3D on MIC"
+}
+
+## Create a whatis file.  Not necessary but cool.
+module-whatis   "set environment to run iPic3D on MIC"
+
+module load ipic-mic-base
+
+module load hdf5/1.8.10-patch1-mic
+prepend-path HDF5_ROOT "/opt/hdf5/1.8.10-patch1-mic"
+# module show doesn't work for this:
+#prepend-path PATH $env(HDF5_ROOT)
+prepend-path PATH "/opt/hdf5/1.8.10-patch1-mic"
+
+setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-O3 -openmp -fno-exceptions -fp-model fast=2 -vec-report -mmic' -DIPIC_H5HUT_OUTPUT=OFF"

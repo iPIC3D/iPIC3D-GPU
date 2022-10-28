@@ -1,0 +1,20 @@
+#!/bin/bash
+
+ME=${0##*/}
+PURPOSE="prepare to run ipic3d job for supplied parameters"
+
+  PPN=8
+
+  . $IPIC_HOME/scripts/ipic-setjob-helper
+
+echo "
+ To run the job you just defined, do this:
+
+  # check that the job script and input files are correct
+  vim $DATA/job.sh $DATA/parameters.inp
+  # set the striping of the output, e.g.:
+  vim src/inputoutput/phdf5.cpp; # search for striping_unit
+  make # recompile after editing
+  # run the job that you just defined:
+  qsub $DATA/job.sh # use qstat, showq, and qdel for job control.
+"

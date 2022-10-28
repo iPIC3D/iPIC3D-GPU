@@ -1,0 +1,45 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "*************************************************************"
+puts stderr " set environment to compile and run iPic3D with parallel I/O"
+puts stderr "*************************************************************"
+}
+
+module-whatis "set environment for iPic3D with parallel I/O"
+
+module load ipic-base
+
+module load hdf5/1.8.10-patch1-parallel
+# prefixing these with mpi results in link errors
+setenv H5HUT_DIR $env(HOME)/install
+setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-openmp -fno-exceptions -O3 -xHost -vec-report' -DIPIC_H5HUT_OUTPUT=ON"
+
+# commands to install H5hut on knc1:
+#
+#  module load hdf5/1.8.10-patch1-parallel
+#  module load impi #/4.1.0.030
+#  module load intel
+#  export CC=mpiicc
+#  export FC=mpiifort
+#  export CXX=mpiicpc
+#  cd ~/src/H5hut-1.99.12
+#  ./configure --enable-parallel --enable-large-indices --prefix=$HOME/install
+#  make
+#  make install
+
+# loading as few modules as possible:
+#
+# # taken from: module show hdf5/1.8.10-patch1-parallel
+# export HDF5_ROOT=/opt/hdf5/1.8.10-patch1-parallel
+# # taken from: module load impi; which mpiicc
+# export CC=/opt/intel/impi/4.1.2.040/intel64/bin/mpiicc
+# # taken from: module load impi; which mpiicpc
+# export CXX=/opt/intel/impi/4.1.2.040/intel64/bin/mpiicpc
+# module load intel
+# export CC=mpiicc
+# export CXX=mpiicpc
+#  ./configure --enable-parallel --enable-large-indices --prefix=$HOME/install --with-hdf5=$HDF5_ROOT
+

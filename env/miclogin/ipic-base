@@ -1,0 +1,41 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "**************************************************"
+puts stderr " environment to compile and run iPic3D without IO "
+puts stderr "**************************************************"
+}
+
+module-whatis "base environment for iPic3D"
+
+# compiling
+#
+module load impi
+module load intel
+# prefixing with mpi results in link error:
+# ld: MPIR_Thread: TLS definition in /opt/intel/impi/4.1.2.040/intel64/lib/libmpi_mt.so section .tbss mismatches non-TLS definition in /opt/intel/impi/4.1.2.040/        +intel64/lib/libmpi.so section .bss
+# /opt/intel/impi/4.1.2.040/intel64/lib/libmpi_mt.so: could not read symbols: Bad value
+# 
+#setenv CXX mpiicpc
+#setenv CC mpiicc
+#setenv FC mpiifort
+setenv CXX icpc
+setenv CC icc
+setenv FC ifort
+
+# running
+#
+setenv IPIC_MPIRUN mpiexec.hydra
+
+prepend-path PATH $env(IPIC_HOME)/scripts
+
+# stuff needed for OmpSs offloading
+#
+module load OmpSs
+# library needed if you want to use nanox to offload
+prepend-path LD_LIBRARY_PATH /home/fsainz/runtime/nanox-mpi-09072014/lib/performance
+setenv NX_OFFL_HOSTFILE $env(IPIC_HOME)/env/miclogin/offload_hosts
+
+setenv IPIC_RUNENV miclogin.xeon

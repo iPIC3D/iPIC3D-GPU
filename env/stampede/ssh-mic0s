@@ -1,0 +1,9 @@
+#!/bin/bash
+# run this script and hit Ctrl-D a bunch of times.
+# for some reason, I have to do this in order to
+# be able to run the job script in interactive mode.
+scontrol show hostname | sed 's/$/-mic0/' > machinefile
+for machine in `cat machinefile`
+do
+  ssh $machine
+done

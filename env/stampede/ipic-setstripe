@@ -1,0 +1,16 @@
+#!/bin/bash
+
+ME=${0##*/}
+function usage()
+{
+  echo "
+    $ME: set striping parameters for file or directory
+  
+    usage: $ME <stringing-count> <stripe-length> <dir>
+  "
+}
+
+if [ ${1:-a} == "--help" ] || [ ${1:-a} == "-h" ]; then usage; exit 1; fi
+
+set -x
+lfs setstripe -c ${1:-4} -S ${2:-1m} ${3:-data}

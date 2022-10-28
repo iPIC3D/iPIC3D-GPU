@@ -1,0 +1,34 @@
+#%Module1.0
+
+# module file for iPic3D on pleiades front end (pfe)
+# (tested as eajohns5@pfe.nas.nasa.gov)
+proc ModulesHelp { } {
+global version
+puts stderr " set environment to compile and run iPic3D with parallel I/O\n"
+}
+
+module-whatis "set environment for iPic3D with parallel I/O"
+
+module load ipic
+
+setenv H5HUT_DIR $env(HOME)/install
+# turn on H5hut output
+setenv IPIC_CMAKE_ARGS "$env(IPIC_CMAKE_ARGS) -DIPIC_H5HUT_OUTPUT=ON"
+
+# commands that I used to compile and install H5hut:
+#
+#  ssh pfe
+#  mkdir -p install
+#  tar xvf H5hut-1.99.12.tar.bz2
+#  cd H5hut-1.99.12
+#  module load ipic
+#  # otherwise cannot find mpi.h
+#  export CC=mpicc
+#  export CXX=mpicxx
+#  ./configure \
+#    --enable-parallel \
+#    --enable-large-indices \
+#    --prefix=$HOME/install \
+#    --with-hdf5=$HDF5
+#  make
+#  make install

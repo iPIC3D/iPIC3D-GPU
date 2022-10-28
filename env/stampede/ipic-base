@@ -1,0 +1,51 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "******************************************************"
+puts stderr " set environment to compile and run iPic3D without IO "
+puts stderr "******************************************************"
+}
+
+module-whatis "set environment for iPic3D"
+
+# compiling
+#
+#module load impi
+#module swap mvapich2 impi
+#module swap mvapich2 impi/4.1.0.030
+# comment out the next two lines if using mvapich2
+module unload mvapich2
+module load impi
+module load cmake
+setenv I_MPI_MIC 1
+setenv I_MPI_OFA_ADAPTER_NAME mlx4_0
+setenv I_MPI_FABRICS shm:dapl
+setenv I_MPI_DAPL_PROVIDER "ofa-v2-mlx4_0-1u"
+setenv CXX icpc
+setenv CC icc
+setenv FC ifort
+setenv IPIC_CMAKE_ARGS "-DHDF5_imf_LIBRARY_RELEASE=/opt/apps/intel/13/composer_xe_2013.2.146/compiler/lib/intel64 -DCMAKE_CXX_FLAGS='-openmp -fno-exceptions -O3 -xHost -vec-report'"
+
+# running
+#
+# normally we would define isession so that
+# "isession 4" would start an interactive session on 4 nodes,
+# but stampede only allows interactive sessions on a single node.
+# #
+# taken from slide 40 of
+# http://www.cac.cornell.edu/education/training/StampedeJune2013/Envi.pdf
+# set-alias isession {srun --pty -n 16 -t 01:00:00 -p development /bin/bash -l}
+# see: idev -help
+# -pe ppn nodes
+# set-alias isession {idev -pe 16 $1 -m 60}
+# see
+# https://www.tacc.utexas.edu/user-services/user-guides/stampede-user-guide#running
+# ibrun -np 16 ./iPic3D GEM.inp
+# ibrun -n 16 -o 0 ./iPic3D GEM.inp
+setenv IPIC_MPIRUN ibrun
+setenv IPIC_ENV stampede
+
+prepend-path PATH $env(IPIC_HOME)/scripts
+prepend-path PATH $env(IPIC_HOME)/env/stampede

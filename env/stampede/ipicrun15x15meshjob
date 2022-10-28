@@ -1,0 +1,42 @@
+#!/bin/bash
+
+ME=${0##*/}
+function usage()
+{
+  echo "
+    $ME: prepare to run ipic3d job for supplied parameters
+  
+    usage: $ME <XLEN> <YLEN>
+    
+      <XLEN>: number of processors in X direction
+      <YLEN>: number of processors in Y direction
+  "
+}
+
+if [ $# -lt 2 ]; then usage; exit 1; fi
+
+  . $IPIC_HOME/scripts/ipicrun15x15meshinp
+
+  PPN=16
+  NUM_PROCS=$(($XLEN*$YLEN))
+  NUM_NODES=$((($NUM_PROCS-1)/$PPN+1))
+
+  : create job script from template
+  sed " \
+    s@#SBATCH -N .*@#SBATCH -N $NUM_NODES@ ;
+    s@#SBATCH -n .*@#SBATCH -n $NUM_PROCS@ ;
+    s@XLEN=.*@XLEN=$XLEN@
+    s@YLEN=.*@YLEN=$YLEN@
+    s@NUM_PROCS=.*@NUM_PROCS=$NUM_PROCS@
+    s@DATA=.*@DATA=$DATA@
+  " job.sh > "$DATA"/job.sh
+chmod +x "$DATA"/job.sh
+echo "
+Use:
+
+   vim $DATA/job.sh $DATA/parameters.inp
+
+ to check that job script and input files are correct and then do:
+
+   sbatch $DATA/job.sh
+"

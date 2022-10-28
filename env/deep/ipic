@@ -1,0 +1,38 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "***************************************************************"
+puts stderr " set environment to compile and run iPic3D without parallel IO"
+puts stderr "***************************************************************"
+}
+
+module-whatis "set environment for iPic3D without parallel IO"
+
+# definitions used by cmake
+#
+module load cmake/2.8
+#module swap parastation parastation/intel-5.0.27 #otherwise won't find the compiler
+#module switch parastation parastation/intel-5.0.27 #otherwise won't find the compiler
+module load intel
+setenv CXX icpc
+setenv CC icc
+setenv FC ifort
+setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-openmp -fno-exceptions -O3 -xHost -vec-report'"
+
+# definitions used to run ipic3d
+#
+# use mpiexec, not mpiexec.hydra or mpirun
+setenv IPIC_MPIRUN mpiexec
+setenv IPIC_ENV deep
+#
+setenv PSP_MALLOC 0
+
+# usage: "isession 4 8" starts an interactive session on 4 nodes with 8 processors per node
+#   defaults: isession 1 16
+set-alias isession {qsub -I -l nodes=${1:-1}:ppn=${2:-16},walltime=1:00:00}
+
+# maybe put this in module named ipic-common
+prepend-path PATH $env(IPIC_HOME)/scripts
+prepend-path PATH $env(IPIC_HOME)/env/deep

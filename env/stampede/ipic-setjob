@@ -1,0 +1,41 @@
+#!/bin/bash
+
+ME=${0##*/}
+PURPOSE="prepare to run ipic3d job for supplied parameters"
+
+  PPN=16
+
+  . $IPIC_HOME/scripts/ipic-setjob-helper
+
+  # choose values for stripe count and length
+  PROCS_PER_STRIPE=2
+  MAX_STRIPES=64
+  STRIPE_COUNT=$(($NUM_PROCS/$PROCS_PER_STRIPE))
+  # cap the requested stripe count
+  STRIPE_COUNT=$(($STRIPE_COUNT>$MAX_STRIPES?$MAX_STRIPES:$STRIPE_COUNT))
+  STRIPE_LENGTH=256k
+  # round up stripe length to nearest multiple of 64k
+  ARRAYS_PER_STRIPE=8
+  NUM_BYTES_PER_STRIPE=$(($ARRAYS_PER_STRIPE*$NUM_BYTES_PER_PROC_PER_ARRAY))
+  NUM_64KB_PER_STRIPE=$(($(($(($NUM_BYTES_PER_STRIPE-1))/65536))+1))
+  NUM_KB_PER_STRIPE=$((64*$NUM_64KB_PER_STRIPE))
+  STRIPE_LENGTH=$(($NUM_KB_PER_STRIPE))k
+
+  echo "${ind}STRIPE_COUNT=${STRIPE_COUNT}=min(num_procs/$PROCS_PER_STRIPE, $MAX_STRIPES)"
+  echo "${ind}NUM_BYTES_PER_PROC_PER_ARRAY=$NUM_BYTES_PER_PROC_PER_ARRAY"
+  #echo "$ind"NUM_BYTES_PER_STRIPE=$NUM_BYTES_PER_STRIPE
+  #echo "$ind"NUM_64KB_PER_STRIPE=$NUM_64KB_PER_STRIPE
+  #echo "$ind"NUM_KB_PER_STRIPE=$NUM_KB_PER_STRIPE
+  #echo "$ind"STRIPE_LENGTH=$STRIPE_LENGTH
+  echo "${ind}STRIPE_LENGTH=$STRIPE_LENGTH=$ARRAYS_PER_STRIPE*bytes_per_array_per_proc, rounded up to multiple of 64k"
+
+echo "
+ To run the job you just defined, do this:
+
+  # check that the job script and input files are correct
+  vim $DATA/job.sh $DATA/parameters.inp
+  # set the striping of the output
+  lfs setstripe -c $STRIPE_COUNT -S $STRIPE_LENGTH $DATA
+  # run the job that you just defined:
+  sbatch $DATA/job.sh
+"

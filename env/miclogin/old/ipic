@@ -1,0 +1,23 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "****************************************************"
+puts stderr " old environment settings to compile and run iPic3D"
+puts stderr "****************************************************"
+}
+
+module-whatis "old environment for iPic3D"
+
+module load hdf5/1.8.10-patch1
+module load impi
+module load intel
+prepend-path LD_LIBRARY_PATH /opt/intel/composer_xe_2013_sp1.1.106/compiler/lib/mic
+setenv I_MPI_FABRICS shm:tcp
+#setenv CXX mpiicpc
+#setenv CC mpiicc
+#setenv FC mpiifort
+#setenv H5HUT_DIR $env(HOME)/install
+set-alias "ipic-cmake-mic" "cmake -DCMAKE_TOOLCHAIN_FILE=src/cmake/cmake_template.cmake.XeonPhi src"
+

@@ -1,0 +1,60 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "***************************************************************"
+puts stderr " set environment to compile and run iPic3D without parallel IO "
+puts stderr "***************************************************************"
+}
+
+module-whatis "set environment for iPic3D"
+
+module load ipic-base
+
+# compiling
+#
+module load phdf5/1.8.9
+# this gives me problems...
+#setenv HDF5_ROOT $env(TACC_HDF5_DIR)
+# ...so I do this instead:
+#setenv HDF5_ROOT /opt/apps/intel13/mvapich2_1_9/phdf5/1.8.9
+setenv HDF5_ROOT /opt/apps/intel13/impi_4_1/phdf5/1.8.9
+# current dilemma:
+# - parallel HDF5 does not work if I use impi
+# - but offloading does not work if I use mvapich2
+# three changes must be made to switch between use of impi and mvapich2:
+# - ipic-base: choose impi or leave the default of mvapich2
+# - define HDF5_ROOT appropriately
+# - compile H5_HUT with the appropriate definition of HDF5_ROOT.
+
+setenv H5HUT_DIR $env(HOME)/install
+# unfortunately the module command on stampede creates bash aliases
+# instead of bash functions, so this does not work:
+#set-alias ipic-show-setstripe { echo lfs setstripe -c $1 -S $2 $3 }
+#set-alias ipic-show-getstripe { echo lfs getstripe $1 }
+# -DPARALLEL_IO must be used when compiling to correct for a bug in H5hut
+setenv IPIC_CMAKE_ARGS "-DHDF5_imf_LIBRARY_RELEASE=/opt/apps/intel/13/composer_xe_2013.2.146/compiler/lib/intel64 -DCMAKE_CXX_FLAGS='-openmp -O3 -xHost -vec-report -DPARALLEL_IO' -DIPIC_H5HUT_OUTPUT=ON -DCMAKE_PREFIX_PATH=$env(HDF5_ROOT)"
+#setenv IPIC_CMAKE_ARGS "-DHDF5_imf_LIBRARY_RELEASE=/opt/apps/intel/13/composer_xe_2013.2.146/compiler/lib/intel64 -DCMAKE_CXX_FLAGS='-openmp -O3 -xHost -vec-report -DPARALLEL_IO' -DIPIC_H5HUT_OUTPUT=ON -DCMAKE_PREFIX_PATH=/opt/apps/intel13/mvapich2_1_9/phdf5/1.8.9"
+
+# commands that I used to configure, compile, and install H5hut:
+#
+# ssh stampede
+# mkdir -p install
+# module load phdf5
+# tar -jxvf H5hut-1.99.12.tar.bz2
+# # The next two lines seem needed to avoid
+# # 'catastrophic error: cannot open source file "mpi.h"'
+# export CC=mpicc
+# export CXX=mpicxx
+# cd H5hut-1.99.12
+# ./configure \
+#   --enable-parallel \
+#   --enable-large-indices \
+#   --prefix=$HOME/install \
+#   --with-hdf5=$HDF5_ROOT
+# make
+# make install
+
+# note that to get the /opt/apps/intel13/mvapich2_1_9/phdf5/1.8.9 directory
+# using "module show phdf5"

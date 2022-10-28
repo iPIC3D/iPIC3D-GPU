@@ -1,0 +1,47 @@
+#makefile foriPIC PROJECT
+#CPP=	  g++
+#OPTFLAGS=  -O2
+
+CPP = mpicxx
+OPTFLAGS=  -O2 -DMPICH_IGNORE_CXX_SEEK
+
+INC_HDF5 = -I/usr/local/include 
+LIB_HDF5 = -L/usr/local/lib
+HDF5LIBS = -lm -lhdf5 -lhdf5_hl 
+
+
+HDF5_2_VTK: HDF5_2_VTK.cpp 
+	${CPP} -o  HDF5_2_VTK ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} HDF5_2_VTK.cpp 	
+
+HDF5_TestParticles: HDF5_TestParticles.cpp 
+	${CPP} -o  HDF5_TestParticles ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} HDF5_TestParticles.cpp 	
+
+
+HDF5_Particles: HDF5_Particles.cpp 
+	${CPP} -o  HDF5_Particles ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} HDF5_Particles.cpp
+
+HDF5_ParticlesDist: HDF5_ParticlesDist.cpp 
+	${CPP} -o  ParticlesDist ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} HDF5_ParticlesDist.cpp
+ 	
+HDF5_ParticlesDistMerged: HDF5_ParticlesDistMerged.cpp 
+	${CPP} -o  ParticlesMergedDist ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} HDF5_ParticlesDistMerged.cpp
+
+ProcVDist: ProcVDist.cpp 
+	${CPP} -o  ProcVDist ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} ProcVDist.cpp 	
+
+ProcHighVLocation: ProcHighVLocation.cpp
+	${CPP} -o  ProcHighVLocation  ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} ProcHighVLocation.cpp 	
+
+ProcSampleTraj: ProcSampleTraj.cpp
+	${CPP} -o  ProcSampleTraj  ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} ProcSampleTraj.cpp 	
+
+ProcAllTraj: ProcSampleAllTraj.cpp
+	${CPP} -o  ProcAllTraj  ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} ProcSampleAllTraj.cpp 	
+
+ProcAllTrajParallel: ProcAllTrajParallel.cpp
+	${CPP} -o  ProcAllTrajParallel  ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} ProcAllTrajParallel.cpp 	
+
+
+
+clean:
+	rm -rf   HDF5_2_VTK ProcVDist HDF5_2_VTK_Selected ProcHighVLocation  HDF5_TestParticles  ProcSampleTraj ProcAllTraj

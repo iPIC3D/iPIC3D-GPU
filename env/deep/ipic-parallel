@@ -1,0 +1,44 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+puts stderr " set environment to compile and run iPic3D with parallel IO "
+}
+
+module-whatis "set environment for iPic3D with parallel IO"
+
+module load ipic
+
+# use H5hut
+module load hdf5
+setenv IPIC_CMAKE cmake28
+setenv H5HUT_DIR $env(HOME)/install
+# -DPARALLEL_IO must be used when compiling to correct for a bug in H5hut
+setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-openmp -fno-exceptions -O3 -xHost -vec-report -DPARALLEL_IO'"
+# make cmake28 search in the correct path
+setenv IPIC_CMAKE_ARGS "$env(IPIC_CMAKE_ARGS) -DCMAKE_PREFIX_PATH=/usr/local/hdf5/1.8.11-parallel"
+# turn on H5hut output
+setenv IPIC_CMAKE_ARGS "$env(IPIC_CMAKE_ARGS) -DIPIC_H5HUT_OUTPUT=ON"
+#setenv IPIC_CMAKE_ARGS "$env(IPIC_CMAKE_ARGS) -DIPIC_HDF5_C_LIB=/usr/lib64/libhdf5.so -DIPIC_HDF5_HL_LIB=/usr/lib64/libhdf5_hl.so"
+# for linking, cmake will produce -lhdf5_hl -lhdf5
+# which ought to be sufficient but that alone fails to find
+# H5Pset_fapl_mpiposix, H5Pset_fapl_mpio, and H5Pset_dxpl_mpio,
+# maybe because of system config defect, so we must append
+# -DCMAKE_EXE_LINKER_FLAGS=-L/usr/local/hdf5/1.8.11-parallel/lib
+#setenv IPIC_CMAKE_ARGS "$env(IPIC_CMAKE_ARGS) -DCMAKE_EXE_LINKER_FLAGS=-L/usr/local/hdf5/1.8.11-parallel/lib"
+
+# commands that I used to configure, compile, and install H5hut:
+#
+#   ssh deep
+#   mkdir -p install
+#   module load hdf5
+#   tar xvf H5hut-1.99.12.tar.bz2
+#   cd H5hut-1.99.12
+#   ./configure \
+#     --enable-parallel \
+#     --enable-large-indices \
+#     --prefix=$HOME/install \
+#     --with-hdf5=/usr/local/hdf5/1.8.11-parallel
+#   make
+#   make install
+

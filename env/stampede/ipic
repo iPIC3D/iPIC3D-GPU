@@ -1,0 +1,22 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "***************************************************************"
+puts stderr " set environment to compile and run iPic3D without parallel IO "
+puts stderr "***************************************************************"
+}
+
+module-whatis "set environment for iPic3D"
+
+module load ipic-base
+
+# compiling
+#
+module load hdf5/1.8.9
+# this gives me problems...
+#setenv HDF5_ROOT $env(TACC_HDF5_DIR)
+# ...so I do this instead:
+setenv HDF5_ROOT /opt/apps/intel13/hdf5/1.8.9
+

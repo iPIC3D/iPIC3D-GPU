@@ -1,0 +1,65 @@
+#%Module1.0#####################################################################
+#
+# $Id: 4.1.0.018 1396 2012-08-08 11:32:33Z karl $
+#------------------------------------------------------------------------------
+# Note: this file is managed via LosF
+#
+# You should, in general, not edit this file directly as you will 
+# *lose* the contents during the next sync process. Instead, 
+# edit the template file in your local config directory:
+# 
+# /admin/build/admin/config/const_files/Stampede/login/4.1.0.030
+#
+# Questions? karl@tacc.utexas.edu
+#
+#------------------------------------------------------------------------------
+
+
+##
+## Modulefile definition for Intel MPI
+##
+
+proc ModulesHelp { } {
+
+puts stderr " "
+puts stderr "This module loads the Intel MPI environment built with"
+puts stderr "Intel compilers. By loading this module, the following commands"
+puts stderr "will be automatically available for compiling MPI applications:"
+puts stderr "\n"
+puts stderr "mpif77       (F77 source)"
+puts stderr "mpif90       (F90 source)"
+puts stderr "mpicc        (C   source)"
+puts stderr "mpiCC/mpicxx (C++ source)"
+puts stderr "\n"
+puts stderr "Version 4.1.0.018\n"
+
+}
+
+module-whatis "Name: Intel MPI"
+module-whatis "Version: 4.1.0.030"
+module-whatis "Category: library, runtime support"
+module-whatis "Description: Intel MPI Library (C/C++/Fortran for x86_64)"
+module-whatis "URL: http://software.intel.com/en-us/articles/intel-mpi-library/"
+
+set     version         	4.1.0.030
+set     intel_base              /opt/apps/intel13/impi/4.1.0.030
+
+prepend-path    PATH            $intel_base/mic/bin
+prepend-path    MANPATH         $intel_base/man/
+prepend-path    MODULEPATH      /opt/apps/intel13/impi_4_1/modulefiles
+
+prepend-path    I_MPI_ROOT $intel_base
+
+setenv		MPICH_HOME       $intel_base
+setenv          TACC_MPI_GETMODE impi_hydra
+setenv          TACC_IMPI_LIB    $intel_base/mic/lib
+
+# (ks 10/8/12): Required with 4.1.024 to ensure standard
+#  mpicc,mpif90,mpicxx wrappers use Intel compiler
+
+setenv          I_MPI_CC 	icc
+setenv          I_MPI_CXX 	icpc
+setenv          I_MPI_F90 	ifort
+
+family "MPI"
+

@@ -1,0 +1,17 @@
+#%Module1.0####################################################################
+##
+##  mymodule modulefile
+##
+##  My new module that sets my personal environment
+##
+proc ModulesHelp { } {
+        puts stderr "\tset environment to compile and run iPic3D on MIC with parallel hdf5"
+}
+
+## Create a whatis file.  Not necessary but cool.
+module-whatis   "set environment to run iPic3D on MIC"
+
+setenv HDF5_ROOT "/opt/hdf5/1.8.10-patch1-mic-parallel"
+setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-O3 -openmp -fno-exceptions -fp-model fast=2 -vec-report -mmic' -DIPIC_H5HUT_OUTPUT=ON"
+module load ipic-mic-base
+prepend-path PATH $env(HDF5_ROOT)

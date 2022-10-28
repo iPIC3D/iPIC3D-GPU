@@ -1,0 +1,51 @@
+#%Module1.0####################################################################
+##
+##  mymodule modulefile
+##
+##  My new module that sets my personal environment
+##
+proc ModulesHelp { } {
+        puts stderr "\tset environment to compile and run iPic3D on MIC for given HDF5_ROOT"
+}
+
+## Create a whatis file.  Not necessary but cool.
+module-whatis   "set environment to run iPic3D on MIC"
+
+### stuff needed to compile ###
+
+setenv CFLAGS "-mmic"
+setenv FFLAGS "-mmic"
+setenv CXXFLAGS "-mmic"
+setenv CC icc
+setenv CXX icpc
+setenv I_MPI_CC icc
+
+module load impi/4.1.2.040
+module load intel/2013_sp1.1.106
+
+prepend-path PATH /opt/intel/composer_xe_2013_sp1.1.106/bin/intel64_mic:/opt/intel/impi/4.1.3/mic/bin:/opt/intel/composer_xe_2013_sp1.1.106/mpirt/bin/mic
+#prepend-path PATH /opt/intel/composer_xe_2013_sp1.1.106/bin/intel64_mic:/opt/intel/composer_xe_2013_sp1.1.106/mpirt/bin/mic
+
+# stuff needed for OmpSs offloading
+#
+module load OmpSs
+# library needed if you want to use nanox to offload
+prepend-path LD_LIBRARY_PATH /home/fsainz/runtime/nanox-mpi-09072014/lib/performance
+setenv NX_OFFL_HOSTFILE $env(IPIC_HOME)/env/miclogin/offload_hosts-mic
+
+# set up mpiexec
+#
+# This is needed in order to find the appropriate mpiexec.hydra,
+# but then the build is wrong ...
+#prepend-path PATH=/opt/intel/impi/4.1.2.040/intel64/bin:$PATH
+# ... so instead we directly access the binary:
+setenv IPIC_MPIRUN /opt/intel/impi/4.1.2.040/intel64/bin/mpiexec.hydra
+# conveniences to override the bad guys
+set-alias "mpirun" $env(IPIC_MPIRUN)
+set-alias "mpiexec" $env(IPIC_MPIRUN)
+set-alias "mpiexec.hydra" $env(IPIC_MPIRUN)
+setenv IPIC_RUNENV miclogin.mic
+
+### stuff needed to run ###
+
+prepend-path PATH $env(IPIC_HOME)/scripts

@@ -1,0 +1,20 @@
+#!/bin/bash
+
+ME=${0##*/}
+function usage()
+{
+  echo "
+    $ME: show how to get striping parameters for file or directory
+  
+    usage: $ME <dir>
+  "
+}
+
+if [ ${1:-a} == "--help" ] || [ ${1:-a} == "-h" ]; then usage; exit 1; fi
+
+echo + fhgfs-ctl --getentryinfo "$@"
+if [ ${1:-a} == "--show" ]; then
+  :
+else
+  fhgfs-ctl --getentryinfo "$@"
+fi

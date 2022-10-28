@@ -1,0 +1,35 @@
+#%Module1.0
+
+# module file for iPic3D on pleiades front end (pfe)
+# (tested as eajohns5@pfe.nas.nasa.gov)
+proc ModulesHelp { } {
+global version
+puts stderr " set environment to compile and run iPic3D with serial I/O\n"
+}
+
+module-whatis "set environment for iPic3D with serial I/O"
+
+setenv CXX icpc
+setenv CC icc
+setenv FC ifort
+
+module load cmake
+module load comp-intel
+module load mpi-intel
+#module load mpi-sgi/mpt.2.06rp16
+module load hdf5/1.8.3/intel/mpt
+#module load hdf5
+# module show hdf5/1.8.3/intel/mpt reveals this directory:
+setenv HDF5_ROOT /nasa/hdf5/1.8.3.sles11/intel/mpt
+
+setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-openmp -fno-exceptions -O3 -xHost -vec-report'"
+
+# definitions used by "ipic run"
+#
+setenv IPIC_MPIRUN mpirun
+setenv IPIC_ENV pfe
+
+set-alias isession {qsub -I -l select=${1:-1}:ncpus=${2:-16},walltime=0:30:00}
+
+prepend-path PATH $env(IPIC_HOME)/scripts
+prepend-path PATH $env(IPIC_HOME)/env/pfe

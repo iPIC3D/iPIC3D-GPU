@@ -1,0 +1,74 @@
+#%Module1.0####################################################################
+##
+##  mymodule modulefile
+##
+##  My new module that sets my personal environment
+##
+proc ModulesHelp { } {
+        puts stderr "\tset environment to compile and run iPic3D on MIC for given HDF5_ROOT"
+}
+
+## Create a whatis file.  Not necessary but cool.
+module-whatis   "set environment to run iPic3D on MIC"
+
+### stuff needed to compile ###
+
+setenv CFLAGS "-mmic"
+setenv FFLAGS "-mmic"
+setenv CXXFLAGS "-mmic"
+setenv CC icc
+setenv CXX icpc
+setenv I_MPI_CC icc
+setenv H5HUT_DIR $env(HOME)/install-mic
+
+prepend-path PATH /opt/intel/composer_xe_2013_sp1.1.106/bin/intel64_mic:/opt/intel/impi/4.1.3/mic/bin:/opt/intel/composer_xe_2013_sp1.1.106/mpirt/bin/mic
+# can we change this to prepend-path? that is indeed what I have below
+#append-path LD_LIBRARY_PATH /opt/intel/composer_xe_2013_sp1.1.106/compiler/lib/mic
+
+# set up mpiexec
+#
+# This is needed in order to find the appropriate mpiexec.hydra,
+# but then the build is wrong ...
+#prepend-path PATH=/opt/intel/impi/4.1.2.040/intel64/bin:$PATH
+# ... so instead we directly access the binary:
+setenv IPIC_MPIRUN /opt/intel/impi/4.1.2.040/intel64/bin/mpiexec.hydra
+# conveniences to override the bad guys
+set-alias "mpirun" $env(IPIC_MPIRUN)
+set-alias "mpiexec" $env(IPIC_MPIRUN)
+set-alias "mpiexec.hydra" $env(IPIC_MPIRUN)
+setenv IPIC_RUNENV miclogin.mic
+
+### stuff needed to run ###
+
+# taken from /opt/modules/intel/2013_sp1.1.106
+prepend-path LD_LIBRARY_PATH /opt/intel/composer_xe_2013_sp1.1.106/compiler/lib/mic
+# taken from /opt/modules/impi/4.1.2.040
+setenv I_MPI_ROOT /opt/intel/impi/4.1.2.040
+setenv I_MPI_MIC 1
+
+# commands I used to compile H5hut on MIC:
+#
+#  cd ~
+#  export CC=mpiicc
+#  export FC=mpiifort
+#  export CXX=mpiicpc
+#  export CFLAGS="-mmic"
+#  export FFLAGS="-mmic"
+#  export CXXFLAGS="-mmic"
+#  module unload hdf5
+#  module load knc/hdf5/1.8.10-patch1-mic-parallel
+#  export PATH="$PATH:/opt/hdf5/1.8.10-patch1-mic-parallel"
+#  export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/intel/composer_xe_2013_sp1.1.106/compiler/lib/mic"
+#  
+#  mkdir install-mic
+#  cd H5hut-1.99.12
+#  ./configure --enable-parallel --enable-large-indices --prefix=$HOME/install-mic
+#  make
+#  make install
+#
+# Jorge used the equivalent of:
+#   CC=mpicc CXX=mpicxx CXXFLAGS=-mmic CFLAGS=-mmic \
+#      ./configure --enable-parallel --enable-large-indices --prefix=$HOME/install-mic --with-hdf5=$HDF5_ROOT
+# but I don't know what path he used for mpicc and mpicxx
+
+prepend-path PATH $env(IPIC_HOME)/scripts

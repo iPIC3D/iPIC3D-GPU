@@ -1,0 +1,21 @@
+#!/bin/bash
+
+ME=${0##*/}
+function usage()
+{
+  echo "
+    $ME: set striping parameters for file or directory
+  
+    usage: $ME <stringing-count> <stripe-length> <dir>
+  "
+}
+
+if [ ${1:-a} == "--help" ] || [ ${1:-a} == "-h" ]; then usage; exit 1; fi
+
+echo + fhgfs-ctl --setpattern numtargets=${1:-4} chunksize=${2:-1m} ${3:-data}
+
+if [ ${1:-a} == "--show" ]; then
+  :
+else
+  fhgfs-ctl --setpattern numtargets=${1:-4} chunksize=${2:-1m} ${3:-data}
+fi

@@ -1,0 +1,32 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "***************************************************************"
+puts stderr " set environment to compile and run iPic3D without IO "
+puts stderr "***************************************************************"
+}
+
+module-whatis "set environment for iPic3D without IO"
+
+setenv CXX icpc
+setenv CC icc
+setenv FC ifort
+setenv IPIC_CMAKE "/homeb/zam/alvarez/bin/cmake/3.0.0/bin/cmake"
+setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-openmp -O3 -xHost -vec-report'"
+
+# definitions used to run ipic3d
+#
+setenv IPIC_MPIRUN mpiexec
+setenv IPIC_ENV judge
+
+# for documentation see 
+# http://www.fz-juelich.de/ias/jsc/EN/Expertise/Supercomputers/JUDGE/Userinfo/Quick_Introduction.html
+# judge has 12 physical cores and 24 virtual cores
+# (i.e. each core is a 2-way SMT (symmetric multi-thread)).
+set-alias isession {msub -I -l nodes=${1:-1}:ppn=${2:-12},walltime=0:30:00}
+
+# maybe put this in module named ipic-common
+prepend-path PATH $env(IPIC_HOME)/scripts
+prepend-path PATH $env(IPIC_HOME)/env/judge

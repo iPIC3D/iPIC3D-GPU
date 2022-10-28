@@ -1,0 +1,23 @@
+#%Module1.0
+
+proc ModulesHelp { } {
+global version
+
+puts stderr "****************************************************"
+puts stderr " set environment to compile and run iPic3D using offload
+puts stderr "****************************************************"
+}
+
+module-whatis "set environment for iPic3D using offload"
+
+module load ipic
+# to build MPI applications using MPI_Comm_spawn for the DEEP
+# cluster, in addition to the intel module, use the module:
+#module unload parastation/intel12-5.0.28
+#module load parastation/intel12-5.0.28-3.1
+module swap parastation/intel12-5.0.28 parastation/intel12-5.0.28-3.1
+# For the offload, besides "-np $NUM_CLUSTER_RANKS", you have
+# also to specify the MPI universe size to get a process
+# partition large enough to spawn additional processes:
+#let "TOTAL_NUM_RANKS = $NUM_CLUSTER_RANKS + $NUM_SPAWNED_RANKS"
+#mpiexec -np $CLUSTER_RANKS -u $TOTAL_NUM_RANKS ./iPic3D

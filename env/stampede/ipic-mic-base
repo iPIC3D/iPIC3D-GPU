@@ -1,0 +1,56 @@
+#%Module1.0####################################################################
+##
+##  mymodule modulefile
+##
+##  My new module that sets my personal environment
+##
+proc ModulesHelp { } {
+        puts stderr "\tset environment to compile and run iPic3D on MIC for given HDF5_ROOT"
+}
+
+## Create a whatis file.  Not necessary but cool.
+module-whatis   "set environment to run iPic3D on MIC"
+
+# compiling
+#
+#module load impi
+#module swap mvapich2 impi
+#module swap mvapich2 impi/4.1.0.030
+# comment out the next two lines if using mvapich2
+module unload mvapich2
+module load impi-mic
+module load cmake
+setenv I_MPI_MIC 1
+setenv I_MPI_OFA_ADAPTER_NAME mlx4_0
+setenv I_MPI_FABRICS shm:dapl
+setenv I_MPI_DAPL_PROVIDER "ofa-v2-mlx4_0-1u"
+# settings for MIC
+setenv CFLAGS "-mmic"
+setenv FFLAGS "-mmic"
+setenv CXXFLAGS "-mmic"
+setenv CC icc
+setenv CXX icpc
+setenv FC ifort
+# how should this be modified for the MIC?
+setenv IPIC_CMAKE_ARGS "-DHDF5_imf_LIBRARY_RELEASE=/opt/apps/intel/13/composer_xe_2013.2.146/compiler/lib/mic -DCMAKE_CXX_FLAGS='-openmp -fno-exceptions -O3 -xHost -vec-report'"
+setenv I_MPI_CC icc
+
+# set up mpiexec
+#
+setenv IPIC_MPIRUN ibrun.symm
+setenv IPIC_ENV stampede
+# This is needed in order to find the appropriate mpiexec.hydra,
+# but then the build is wrong ...
+#prepend-path PATH=/opt/intel/impi/4.1.2.040/intel64/bin:$PATH
+# ... so instead we directly access the binary:
+#setenv IPIC_MPIRUN /opt/intel/impi/4.1.2.040/intel64/bin/mpiexec.hydra
+# conveniences to override the bad guys
+set-alias "mpirun" $env(IPIC_MPIRUN)
+set-alias "mpiexec" $env(IPIC_MPIRUN)
+set-alias "mpiexec.hydra" $env(IPIC_MPIRUN)
+setenv IPIC_RUNENV stampede.mic
+
+### stuff needed to run ###
+
+prepend-path PATH $env(IPIC_HOME)/scripts
+prepend-path PATH $env(IPIC_HOME)/env/stampede

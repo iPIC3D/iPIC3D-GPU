@@ -1,0 +1,34 @@
+CPP = mpicxx
+OPTFLAGS=  -O2 -DMPICH_IGNORE_CXX_SEEK
+
+INC_ALL = -I/usr/include
+LIB_ALL = -L/usr/lib
+INC_HDF5 = -I/Users/Ivy/Software/install/hdf5-1.8.14/include
+LIB_HDF5 = -L/Users/Ivy/Software/install/hdf5-1.8.14/lib
+HDF5LIBS = -lm -ldl -lz -lhdf5 -lhdf5_hl 
+
+HDF5_2_VTK: HDF5_2_VTK.cpp 
+	${CPP} ${OPTFLAGS} -o  HDF5_2_VTK ${INC_HDF5} ${INC_ALL} ${LIB_ALL} ${LIB_HDF5} ${HDF5LIBS} HDF5_2_VTK.cpp 	
+
+HDF5_2_VTK_Selected: HDF5_2_VTK_Selected.cpp 
+	${CPP} -o  HDF5_2_VTK_Selected ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} HDF5_2_VTK_Selected.cpp 	
+
+ProcVDist: ProcVDist.cpp 
+	${CPP} -o  ProcVDist ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} ProcVDist.cpp 	
+
+ProcHighVLocation: ProcHighVLocation.cpp
+	${CPP} -o  ProcHighVLocation  ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} ProcHighVLocation.cpp 	
+
+ProcSampleTraj: ProcSampleTraj.cpp
+	${CPP} -o  ProcSampleTraj  ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} ProcSampleTraj.cpp 	
+
+ProcAllTraj: ProcSampleAllTraj.cpp
+	${CPP} -o  ProcAllTraj  ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} ProcSampleAllTraj.cpp 	
+
+ProcAllTrajParallel: ProcAllTrajParallel.cpp
+	${CPP} -o  ProcAllTrajParallel  ${INC_HDF5} ${LIB_HDF5} ${HDF5LIBS} ProcAllTrajParallel.cpp 	
+
+
+
+clean:
+	rm -rf   HDF5_2_VTK ProcVDist HDF5_2_VTK_Selected ProcHighVLocation  ProcSampleTraj ProcAllTraj

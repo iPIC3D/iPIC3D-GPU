@@ -37,7 +37,7 @@ jobs:
 
     - name: Build
       # Build your program with the given configuration
-      run: cmake --build ${{github.workspace}}/build -j0 #--config ${{env.BUILD_TYPE}}
+      run: cmake --build ${{github.workspace}}/build -j4 #--config ${{env.BUILD_TYPE}}
 
     # - name: Test
     #   working-directory: ${{github.workspace}}/build

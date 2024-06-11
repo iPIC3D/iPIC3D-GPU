@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.10)
 
 project(iPic3D)
 
+set(CMAKE_CXX_STANDARD 14)
+
 cmake_policy(SET CMP0042 NEW)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)

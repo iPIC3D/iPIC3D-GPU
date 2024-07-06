@@ -875,11 +875,11 @@ void EMfields3D::sumMoments_AoS(const Particles3Dcomm* part)
       const double vwi=vi*wi;
       const double wwi=wi*wi;
       double velmoments[10];
-      velmoments[0] = 1.;
-      velmoments[1] = ui;
+      velmoments[0] = 1.; // charge density
+      velmoments[1] = ui; // momentum density 
       velmoments[2] = vi;
       velmoments[3] = wi;
-      velmoments[4] = uui;
+      velmoments[4] = uui; // second time momentum
       velmoments[5] = uvi;
       velmoments[6] = uwi;
       velmoments[7] = vvi;
@@ -962,11 +962,11 @@ void EMfields3D::sumMoments_AoS(const Particles3Dcomm* part)
       for(int j=0;j<nyn;j++)
       for(int k=0;k<nzn;k++)
       {
-        rhons[is][i][j][k] += invVOL*moments[i][j][k][0];
-        Jxs  [is][i][j][k] += invVOL*moments[i][j][k][1];
+        rhons[is][i][j][k] += invVOL*moments[i][j][k][0]; // charge density
+        Jxs  [is][i][j][k] += invVOL*moments[i][j][k][1]; // current density
         Jys  [is][i][j][k] += invVOL*moments[i][j][k][2];
         Jzs  [is][i][j][k] += invVOL*moments[i][j][k][3];
-        pXXsn[is][i][j][k] += invVOL*moments[i][j][k][4];
+        pXXsn[is][i][j][k] += invVOL*moments[i][j][k][4]; // pressure density
         pXYsn[is][i][j][k] += invVOL*moments[i][j][k][5];
         pXZsn[is][i][j][k] += invVOL*moments[i][j][k][6];
         pYYsn[is][i][j][k] += invVOL*moments[i][j][k][7];
@@ -2091,7 +2091,7 @@ void EMfields3D::calculateE(int cycle)
   array3_double gradPHIY (nxn, nyn, nzn);
   array3_double gradPHIZ (nxn, nyn, nzn);
 
-  double *xkrylov = new double[3 * (nxn - 2) * (nyn - 2) * (nzn - 2)];  // 3 E components
+  double *xkrylov = new double[3 * (nxn - 2) * (nyn - 2) * (nzn - 2)];  // 3 E components, in serial
   double *bkrylov = new double[3 * (nxn - 2) * (nyn - 2) * (nzn - 2)];  // 3 components
   // set to zero all the stuff 
   eqValue(0.0, xkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2));
@@ -2103,6 +2103,7 @@ void EMfields3D::calculateE(int cycle)
   eqValue(0.0, gradPHIY, nxn, nyn, nzn);
   eqValue(0.0, gradPHIZ, nxn, nyn, nzn);
   // Adjust E calculating laplacian(PHI) = div(E) -4*PI*rho DIVERGENCE CLEANING
+  // correct the e field regularly, to fulfill the Gussian law 
   if (PoissonCorrection &&  cycle%PoissonCorrectionCycle == 0) {
 		double *xkrylovPoisson = new double[(nxc - 2) * (nyc - 2) * (nzc - 2)];
 		double *bkrylovPoisson = new double[(nxc - 2) * (nyc - 2) * (nzc - 2)];

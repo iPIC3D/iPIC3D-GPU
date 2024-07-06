@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 
 project(iPic3D)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
 cmake_policy(SET CMP0042 NEW)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
@@ -80,7 +80,7 @@ if (USE_HDF5)
 
   if (NOT DEFINED HDF5_C_TARGET)
     message(STATUS "Creating a proper target for HDF5")
-    add_library(hdf5::hdf5 INTERFACE IMPORTED)
+    #add_library(hdf5::hdf5 INTERFACE IMPORTED)
     set_target_properties(hdf5::hdf5 PROPERTIES
       INTERFACE_COMPILE_DEFINITIONS "${HDF5_C_DEFINITIONS}"
       INTERFACE_INCLUDE_DIRECTORIES "${HDF5_C_INCLUDE_DIRS}"
@@ -91,7 +91,7 @@ if (USE_HDF5)
 
   if (NOT DEFINED HDF5_C_HL_TARGET)
     message(STATUS "Creating a proper target for HDF5 HL")
-    add_library(hdf5::hdf5_hl INTERFACE IMPORTED)
+    #add_library(hdf5::hdf5_hl INTERFACE IMPORTED)
     set_target_properties(hdf5::hdf5_hl PROPERTIES
       INTERFACE_LINK_LIBRARIES "hdf5::hdf5;${HDF5_C_HL_LIBRARIES}"
       )
@@ -183,6 +183,10 @@ target_link_libraries(
   iPIC3D
   iPIC3Dlib
   )
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_definitions(-DDEBUG_MODE)
+endif()
 
 ## to save the executable in the folder where the CMakeLists.txt file is, i.e. CMAKE_CURRENT_SOURCE_DIR
 set_target_properties(iPIC3D PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})

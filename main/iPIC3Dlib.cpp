@@ -34,6 +34,7 @@
 #include "Particles3D.h"
 #include "Timing.h"
 #include "ParallelIO.h"
+#include "outputPrepare.h"
 //
 #ifndef NO_HDF5
 #include "WriteOutputParallel.h"
@@ -133,6 +134,8 @@ int c_Solver::Init(int argc, char **argv) {
 
   // Print the initial settings to stdout and a file
   if (myrank == 0) {
+    //check and create the output directory
+    checkOutputFolder(SaveDirName);
     MPIdata::instance().Print();
     vct->Print();
     col->Print();
@@ -299,9 +302,12 @@ void c_Solver::CalculateMoments() {
         EMf->sumMoments(part);
         break;
       case Parameters::AoS:
-        EMf->setZeroPrimaryMoments();
-        convertParticlesToAoS();
-        EMf->sumMoments_AoS(part);
+        EMf->setZeroPrimaryMoments(); // clear the data to 0
+        convertParticlesToAoS(); // convert 
+        EMf->sumMoments_AoS(part); // sum up the 10 densities of each particles of each species
+        // then calculate the weight according to their position
+        // map the 10 momentum to the grid(node) with the weight
+        
         break;
       case Parameters::AoSintr:
         EMf->setZeroPrimaryMoments();
@@ -754,6 +760,7 @@ void c_Solver::Finalize() {
   my_clock->stopTiming();
 }
 
+//! place the particles into new cells according to their current position
 void c_Solver::sortParticles() {
 
   for(int species_idx=0; species_idx<ns; species_idx++)

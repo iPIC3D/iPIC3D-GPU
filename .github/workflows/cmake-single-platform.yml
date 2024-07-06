@@ -1,6 +1,6 @@
 # This starter workflow is for a CMake project running on a single platform. There is a different starter workflow if you need cross-platform coverage.
 # See: https://github.com/actions/starter-workflows/blob/main/ci/cmake-multi-platform.yml
-name: CMake on a single platform
+name: Build & Test with MPICH
 
 on:
   push:
@@ -14,7 +14,7 @@ env:
   BUILD_TYPE: Release
 
 jobs:
-  build:
+  build_test:
     strategy:
       matrix:
         mpi: ['mpich']
@@ -39,6 +39,8 @@ jobs:
       # Build your program with the given configuration
       run: cmake --build ${{github.workspace}}/build -j4 #--config ${{env.BUILD_TYPE}}
 
+    - name: Test
+      run: timeout 10m mpirun -np 4 ${{github.workspace}}/build/iPIC3D ${{github.workspace}}/.github/input/testGEM2Dsmall.inp
     # - name: Test
     #   working-directory: ${{github.workspace}}/build
     #   # Execute tests defined by the CMake configuration.

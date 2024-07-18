@@ -38,6 +38,16 @@ using std::string;
 #ifndef NO_HDF5
 class OutputWrapperFPP;
 #endif
+
+#if CUDA_ON == true
+#include "cuda.h"
+#include "cudaTypeDef.cuh"
+#include "moverKernel.cuh"
+#include "momentKernel.cuh"
+#include "particleArrayCUDA.cuh"
+#include "gridCUDA.cuh"
+#endif
+
 namespace iPic3D {
 
   class c_Solver {
@@ -62,6 +72,7 @@ namespace iPic3D {
 
 
     int Init(int argc, char **argv);
+    int initCUDA();
     void CalculateMoments();
     void CalculateField(int cycle);
     bool ParticlesMover();
@@ -103,6 +114,31 @@ namespace iPic3D {
     double        *momentum; // an array of doubles, total momentum of all particle species
     double        *Qremoved; // array of double, with species length, removed charges from the depopulation area
     Timing        *my_clock;
+
+#if CUDA_ON == true
+    cudaStream_t*       streams;
+
+	//! Host pointers of objects, to be copied to device, for management later
+	  particleArrayCUDA** pclsArrayHostPtr;     // array of pointer, point to objects on host
+    grid3DCUDA* 		grid3DCUDAHostPtr;     	  // one grid, used in all specieses
+    moverParameter**    moverParamHostPtr;		// for every species
+    momentParameter**   momentParamHostPtr;		// for every species
+    
+	//! CUDA pointers of objects, copied to device
+    particleArrayCUDA** pclsArrayCUDAPtr;       // array of pointer, point to pclsArray on device
+    grid3DCUDA* 		grid3DCUDACUDAPtr;    	// one grid, used in all specieses
+    moverParameter**    moverParamCUDAPtr;		// for every species
+    momentParameter**   momentParamCUDAPtr;		// for every species
+
+	//! simple device buffers
+    // [10][nxn][nyn][nzn], a piece of cuda memory to hold the moment
+    cudaTypeArray1<cudaCommonType>* momentsCUDAPtr; // for every species
+    // [nxn][nyn][nzn][2*4], a piece of cuda memory to hold E and B from host
+    cudaTypeArray1<cudaCommonType> fieldForPclCUDAPtr; // for all species
+    
+
+#endif
+
 
 #ifndef NO_HDF5
     OutputWrapperFPP& fetch_outputWrapperFPP(){

@@ -27,6 +27,7 @@ developers: Stefano Markidis, Giovanni Lapenta
 #define Basic_H
 #include "arraysfwd.h"
 #include <math.h>
+#include "mpi.h"
 
 /**
  *  

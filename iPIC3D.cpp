@@ -38,6 +38,9 @@ while(j == 0){
   
 }
 #endif
+#if CUDA_ON==true
+  std::cout << "The Software was compiled with CUDA" << std::endl;
+#endif
 
   iPic3D::c_Solver KCode;
   KCode.Init(argc, argv); //! load param from file, init the grid, fields

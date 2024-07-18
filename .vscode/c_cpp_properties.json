@@ -1,0 +1,20 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/usr/lib/x86_64-linux-gnu/mpich/include",
+                "/usr/include/hdf5/mpich"
+            ],
+            "defines": [
+                "CUDA_ON=true"
+            ],
+            "compilerPath": "/usr/local/cuda-12.4/bin/nvcc",
+            "cStandard": "c17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}

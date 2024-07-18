@@ -399,6 +399,7 @@ protected:
           <li>3 = periodic condition </li>
           </ul>
           */
+public:
   /** Boundary Condition Particles: FaceXright */
   int bcPfaceXright;
   /** Boundary Condition Particles: FaceXleft */
@@ -411,6 +412,7 @@ protected:
   int bcPfaceZright;
   /** Boundary Condition Particles: FaceYleft */
   int bcPfaceZleft;
+protected:
   //
   // Other variables
   //
@@ -437,6 +439,7 @@ protected:
   double umin;
   double vmin;
   double wmin;
+
 };
 
 // find the particles with particular IDs and print them

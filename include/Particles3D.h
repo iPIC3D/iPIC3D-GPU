@@ -40,7 +40,7 @@ developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
  *
  */
 class Particles3D:public Particles3Dcomm {
-
+  friend class moverParameter;
   public:
     /** constructor */
     //Particles3D();

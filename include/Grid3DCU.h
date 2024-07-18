@@ -326,6 +326,8 @@ public: // accessors (inline)
   double getVOL()const{ return (VOL); }
   double getInvVOL()const{ return (invVOL); }
 
+  double getEpsilon()const{ return (epsilon); }
+
   // inline methods to calculate mesh cell and weights.
   static void get_weights(double weights[8],
     double w0x, double w0y, double w0z,

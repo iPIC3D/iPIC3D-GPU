@@ -1,6 +1,6 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.20)
 
-project(iPic3D)
+project(iPic3D LANGUAGES C CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -41,7 +41,8 @@ include("${CMAKE_SOURCE_DIR}/cmake/sites/${SITE}.cmake")
 option(BUILD_SHARED_LIBS "Use shared libraries if ON, static if OFF" ON)
 option(USE_CATALYST "Use Catalyst adaptor" OFF)
 option(USE_BATSRUS "Use BATSRUS flag" OFF)
-option(USE_HDF5 "Use HDF5 library" OFF)
+option(USE_HDF5 "Use HDF5 library" ON)
+option(CUDA_ON "Enable CUDA" ON)
 
 include(GNUInstallDirs)
 
@@ -124,15 +125,31 @@ file(
   utility/*.cpp
   main/*.cpp
   )
+# CUDA source files
+if(CUDA_ON)
+  file(GLOB cuda_src_files cudaKernel/*.cu main/*.cu)
+  list(APPEND src_files ${cuda_src_files})
+endif()
 
-add_library(
-  iPIC3Dlib
-  ${src_files}
-  )
+add_library( iPIC3Dlib ${src_files} )
+if(CUDA_ON)
+  set_target_properties(iPIC3Dlib PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  
+  set_property(TARGET iPIC3Dlib PROPERTY CUDA_ARCHITECTURES 75) # required for double atomicadd
+  set_property(TARGET iPIC3Dlib PROPERTY CUDA_STANDARD 17)
+  set_property(TARGET iPIC3Dlib PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+  set_property(TARGET iPIC3Dlib PROPERTY LINK_OPTIONS -fno-lto)
+endif()
 
+set(include_path include)
+# CUDA header files
+if(CUDA_ON)
+  list(APPEND include_path include/CUDA)
+  list(APPEND include_path ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+endif()
 target_include_directories(
   iPIC3Dlib
-  PUBLIC include
+  PUBLIC ${include_path}
   )
 
 #
@@ -143,7 +160,12 @@ target_link_libraries(
   PUBLIC MPI::MPI_CXX
   PRIVATE ${HDF5_C_HL_TARGET}
   )
-
+if(CUDA_ON) # link CUDA library
+  target_link_libraries(
+    iPIC3Dlib
+    PRIVATE cuda cudart 
+    )
+endif()
 if (USE_CATALYST)
   target_link_libraries(
     iPIC3Dlib
@@ -169,6 +191,10 @@ if (BUILD_SHARED_LIBS)
   install(TARGETS iPIC3Dlib)
 endif()
 
+if (CUDA_ON)
+  target_compile_definitions(iPIC3Dlib PUBLIC CUDA_ON=true)
+endif()
+
 #
 # Executable declaration
 #
@@ -185,7 +211,7 @@ target_link_libraries(
   )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_definitions(-DDEBUG_MODE)
+  add_compile_definitions(DEBUG_MODE)
 endif()
 
 ## to save the executable in the folder where the CMakeLists.txt file is, i.e. CMAKE_CURRENT_SOURCE_DIR
@@ -227,3 +253,4 @@ message("HDF5_INCLUDE_DIRS is ${HDF5_INCLUDE_DIRS}")
 message("HDF5_LIBRARIES   is ${HDF5_LIBRARIES}")
 message("HDF5_HL_LIBRARIES is ${HDF5_HL_LIBRARIES}")
 message("MPI_LIBRARIES is ${MPI_LIBRARIES}")
+message("Compiling with CUDA ${CUDA_ON}")

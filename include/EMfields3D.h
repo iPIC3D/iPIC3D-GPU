@@ -27,6 +27,7 @@
 #include "ipicfwd.h"
 #include "Alloc.h"
 #include "Basic.h"
+#include "mpi.h"
 
 
 /*! Electromagnetic fields and sources defined for each local grid, and for an implicit maxwell's solver @date May 2008 @par Copyright: (C) 2008 KUL @author Stefano Markidis, Giovanni Lapenta. @version 3.0 */

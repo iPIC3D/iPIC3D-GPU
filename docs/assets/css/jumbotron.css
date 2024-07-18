@@ -1,0 +1,8 @@
+html {
+  scroll-behavior: smooth;
+}
+
+.jumbotron{
+	background: url("/iPIC3D/assets/img/cover_pic.png") no-repeat center center; 
+	background-size: cover;
+}

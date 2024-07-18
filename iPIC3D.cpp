@@ -31,10 +31,18 @@ int main(int argc, char **argv) {
 
  MPIdata::init(&argc, &argv);
  {
-  iPic3D::c_Solver KCode;
-  KCode.Init(argc, argv);
+#ifdef DEBUG_MODE
+//DBG
+int volatile j = 0;
+while(j == 0){
+  
+}
+#endif
 
-  timeTasks.resetCycle();
+  iPic3D::c_Solver KCode;
+  KCode.Init(argc, argv); //! load param from file, init the grid, fields
+
+  timeTasks.resetCycle(); //reset timer
   KCode.CalculateMoments();
   for (int i = KCode.FirstCycle(); i < KCode.LastCycle(); i++) {
 
@@ -42,10 +50,13 @@ int main(int argc, char **argv) {
       printf(" ======= Cycle %d ======= \n",i);
 
     timeTasks.resetCycle();
-    KCode.CalculateField(i);
-    KCode.ParticlesMover();
-    KCode.CalculateB();
-    KCode.CalculateMoments();
+    KCode.CalculateField(i); // E field
+    KCode.ParticlesMover(); //use the fields to calculate the new v and x for particles
+    KCode.CalculateB(); // B field
+    KCode.CalculateMoments(); // the charge intense, current intense and pressure tensor, 
+    //calculated from particles position and celocity, then mapped to node(grid) for further solving
+    // some are mapped to cell center
+    
     KCode.WriteOutput(i);
     // print out total time for all tasks
     //timeTasks.print_cycle_times(i);

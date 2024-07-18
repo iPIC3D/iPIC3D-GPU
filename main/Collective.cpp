@@ -23,6 +23,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <vector>
 #include "input_array.h"
 #include "ipichdf5.h"
 #include "Collective.h"
@@ -143,7 +144,7 @@ void Collective::ReadInput(string inputfile) {
     PoissonCorrection = config.read<string>("PoissonCorrection");
     PoissonCorrectionCycle = config.read<int>("PoissonCorrectionCycle",10);
 
-    rhoINIT = new double[ns];
+    rhoINIT = std::make_unique<double[]>(ns);
     array_double rhoINIT0 = config.read < array_double > ("rhoINIT");
     rhoINIT[0] = rhoINIT0.a;
     if (ns > 1)
@@ -157,7 +158,7 @@ void Collective::ReadInput(string inputfile) {
     if (ns > 5)
       rhoINIT[5] = rhoINIT0.f;
 
-    rhoINJECT = new double[ns];
+    rhoINJECT =std::make_unique<double[]>(ns);
     array_double rhoINJECT0 = config.read<array_double>( "rhoINJECT" );
     rhoINJECT[0]=rhoINJECT0.a;
     if (ns > 1)
@@ -188,6 +189,7 @@ void Collective::ReadInput(string inputfile) {
     testPartFlushCycle = config.read < int >("TestParticlesOutputCycle",10);
     RestartOutputCycle = config.read < int >("RestartOutputCycle",5000);
     DiagnosticsOutputCycle = config.read < int >("DiagnosticsOutputCycle", FieldOutputCycle);
+    ParaviewScriptPath     =   config.read <string>("ParaviewScriptPath", "");
     CallFinalize = config.read < bool >("CallFinalize", true);
   }
 
@@ -230,12 +232,12 @@ void Collective::ReadInput(string inputfile) {
   L_square = config.read < double >("L_square",5.0);
 
 
-  uth = new double[ns];
-  vth = new double[ns];
-  wth = new double[ns];
-  u0 = new double[ns];
-  v0 = new double[ns];
-  w0 = new double[ns];
+  uth = std::make_unique<double[]>(ns);
+  vth = std::make_unique<double[]>(ns);
+  wth = std::make_unique<double[]>(ns);
+  u0 = std::make_unique<double[]>(ns);
+  v0 = std::make_unique<double[]>(ns);
+  w0 = std::make_unique<double[]>(ns);
 
   array_double uth0 = config.read < array_double > ("uth");
   array_double vth0 = config.read < array_double > ("vth");
@@ -294,8 +296,8 @@ void Collective::ReadInput(string inputfile) {
   if (nstestpart > 0) {
 		array_double pitch_angle0 = config.read < array_double > ("pitch_angle");
 		array_double energy0 	  = config.read < array_double > ("energy");
-		pitch_angle = new double[nstestpart];
-		energy      = new double[nstestpart];
+		pitch_angle = std::make_unique<double[]>(nstestpart);
+		energy      = std::make_unique<double[]>(nstestpart);
 		if (nstestpart > 0) {
 			pitch_angle[0] = pitch_angle0.a;
 			energy[0] 	   = energy0.a;
@@ -331,10 +333,10 @@ void Collective::ReadInput(string inputfile) {
   }
 
 
-  npcelx = new int[ns+nstestpart];
-  npcely = new int[ns+nstestpart];
-  npcelz = new int[ns+nstestpart];
-  qom = new double[ns+nstestpart];
+  npcelx = std::make_unique<int[]>(ns+nstestpart);
+  npcely = std::make_unique<int[]>(ns+nstestpart);
+  npcelz = std::make_unique<int[]>(ns+nstestpart);
+  qom = std::make_unique<double[]>(ns+nstestpart);
   array_int npcelx0 = config.read < array_int > ("npcelx");
   array_int npcely0 = config.read < array_int > ("npcely");
   array_int npcelz0 = config.read < array_int > ("npcelz");
@@ -668,19 +670,19 @@ int Collective::ReadRestart(string inputfile) {
   status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &bcPfaceZright);
   status = H5Dclose(dataset_id);
   // allocate fields depending on species
-  npcelx = new int[ns+nstestpart];
-  npcely = new int[ns+nstestpart];
-  npcelz = new int[ns+nstestpart];
-  qom = new double[ns+nstestpart];
-  uth = new double[ns];
-  vth = new double[ns];
-  wth = new double[ns];
-  u0 = new double[ns];
-  v0 = new double[ns];
-  w0 = new double[ns];
+  npcelx = std::make_unique<int[]>(ns+nstestpart);
+  npcely = std::make_unique<int[]>(ns+nstestpart);
+  npcelz = std::make_unique<int[]>(ns+nstestpart);
+  qom = std::make_unique<double[]>(ns+nstestpart);
+  uth = std::make_unique<double[]>(ns);
+  vth = std::make_unique<double[]>(ns);
+  wth = std::make_unique<double[]>(ns);
+  u0 = std::make_unique<double[]>(ns);
+  v0 = std::make_unique<double[]>(ns);
+  w0 = std::make_unique<double[]>(ns);
   // read data from species0, species 1, species2,...
-  string *name_species = new string[ns];
-  stringstream *ss = new stringstream[ns];
+  std::vector<string> name_species(ns);
+  std::vector<stringstream> ss(ns);
   string *name_testspecies;
   stringstream *testss;
 
@@ -696,8 +698,8 @@ int Collective::ReadRestart(string inputfile) {
 		  name_testspecies[i] = "/collective/testspecies_" + testss[i].str() + "/";
 	  }
 
-	  pitch_angle = new double[nstestpart];
-	  energy      = new double[nstestpart];
+	  pitch_angle = std::make_unique<double[]>(nstestpart);
+	  energy      = std::make_unique<double[]>(nstestpart);
 	  for (int i = 0; i < nstestpart; i++) {
 	    dataset_id = H5Dopen2(file_id, (name_testspecies[i] + "pitch_angle").c_str(), H5P_DEFAULT); // HDF 1.8.8
 	    status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &pitch_angle[i]);
@@ -815,8 +817,6 @@ int Collective::ReadRestart(string inputfile) {
   status = H5Fclose(file_id);
 
   // deallocate
-  delete[]name_species;
-  delete[]ss;
 #endif
   return (0);
 }
@@ -873,8 +873,8 @@ void Collective::read_field_restart(
     dataspace = H5Dget_space(dataset_id);
     status_n = H5Sget_simple_extent_dims(dataspace, dims_out, NULL);
 
-    double *temp_storage = new double[dims_out[0] * dims_out[1] * dims_out[2]];
-    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage);
+    std::vector<double> temp_storage(dims_out[0] * dims_out[1] * dims_out[2]);
+    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage.data());
     int k = 0;
     for (int i = 1; i < nxn - 1; i++)
       for (int j = 1; j < nyn - 1; j++)
@@ -887,7 +887,7 @@ void Collective::read_field_restart(
     // Byn
     ss.str("");ss << "/fields/By/cycle_" << lastcycle;
     dataset_id = H5Dopen2(file_id, ss.str().c_str(), H5P_DEFAULT); // HDF 1.8.8
-    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage);
+    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage.data());
     k = 0;
     for (int i = 1; i < nxn - 1; i++)
       for (int j = 1; j < nyn - 1; j++)
@@ -900,7 +900,7 @@ void Collective::read_field_restart(
     // Bzn
     ss.str("");ss << "/fields/Bz/cycle_" << lastcycle;
     dataset_id = H5Dopen2(file_id, ss.str().c_str(), H5P_DEFAULT); // HDF 1.8.8
-    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage);
+    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage.data());
     k = 0;
     for (int i = 1; i < nxn - 1; i++)
       for (int j = 1; j < nyn - 1; j++)
@@ -913,7 +913,7 @@ void Collective::read_field_restart(
     // Ex
     ss.str("");ss << "/fields/Ex/cycle_" << lastcycle;
     dataset_id = H5Dopen2(file_id, ss.str().c_str(), H5P_DEFAULT); // HDF 1.8.8
-    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage);
+    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage.data());
     k = 0;
     for (int i = 1; i < nxn - 1; i++)
       for (int j = 1; j < nyn - 1; j++)
@@ -926,7 +926,7 @@ void Collective::read_field_restart(
     // Ey
     ss.str("");ss << "/fields/Ey/cycle_" << lastcycle;
     dataset_id = H5Dopen2(file_id, ss.str().c_str(), H5P_DEFAULT); // HDF 1.8.8
-    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage);
+    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage.data());
     k = 0;
     for (int i = 1; i < nxn - 1; i++)
       for (int j = 1; j < nyn - 1; j++)
@@ -938,7 +938,7 @@ void Collective::read_field_restart(
     // Ez
     ss.str("");ss << "/fields/Ez/cycle_" << lastcycle;
     dataset_id = H5Dopen2(file_id, ss.str().c_str(), H5P_DEFAULT); // HDF 1.8.8
-    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage);
+    status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage.data());
     k = 0;
     for (int i = 1; i < nxn - 1; i++)
       for (int j = 1; j < nyn - 1; j++)
@@ -951,7 +951,7 @@ void Collective::read_field_restart(
     for (int is = 0; is < ns; is++) {
       ss.str("");ss << "/moments/species_" << is << "/rho/cycle_" << lastcycle;
       dataset_id = H5Dopen2(file_id, ss.str().c_str(), H5P_DEFAULT); // HDF 1.8.8
-      status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage);
+      status = H5Dread(dataset_id, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, temp_storage.data());
       status = H5Dclose(dataset_id);
       array4_double& rhons = *rhons_;
       k = 0;
@@ -963,7 +963,6 @@ void Collective::read_field_restart(
 
     // close the hdf file
     status = H5Fclose(file_id);
-    delete[]temp_storage;
 #endif
 }
 
@@ -1152,7 +1151,7 @@ void Collective::init_derived_parameters()
   /*! dz = space step - Z direction */
   dz = Lz / (double) nzc;
   /*! npcel = number of particles per cell */
-  npcel = new int[ns+nstestpart];
+  npcel = std::make_unique<int[]>(ns+nstestpart);
   /*! np = number of particles of different species */
   //np = new int[ns];
   /*! npMax = maximum number of particles of different species */
@@ -1206,32 +1205,6 @@ void Collective::init_derived_parameters()
   }
 }
 
-/*! destructor */
-Collective::~Collective() {
-  //delete[]np;
-  delete[]npcel;
-  delete[]npcelx;
-  delete[]npcely;
-  delete[]npcelz;
-  //delete[]npMax;
-  delete[]qom;
-
-  delete[]uth;
-  delete[]vth;
-  delete[]wth;
-
-  delete[]u0;
-  delete[]v0;
-  delete[]w0;
-
-  //delete[]TrackParticleID;
-
-  delete[]rhoINIT;
-  delete[]rhoINJECT;
-
-  delete[]pitch_angle;
-  delete[]energy;
-}
 /*! Print Simulation Parameters */
 void Collective::Print() {
   cout << endl;

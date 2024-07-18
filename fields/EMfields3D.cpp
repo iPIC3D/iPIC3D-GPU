@@ -366,7 +366,7 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
 
 }
 void EMfields3D::freeDataType(){
-	MPI_Type_free(&yzFacetypeC);
+    MPI_Type_free(&yzFacetypeC);
     MPI_Type_free(&xzFacetypeC);
     MPI_Type_free(&xyFacetypeC);
     MPI_Type_free(&xEdgetypeC);
@@ -388,8 +388,12 @@ void EMfields3D::freeDataType(){
     MPI_Type_free(&zEdgetypeN2);
     MPI_Type_free(&cornertypeN);
 
-    MPI_Type_free(&procview);
-    MPI_Type_free(&xyzcomp);
+    if (_col.getWriteMethod() == "pvtk" || _col.getWriteMethod() == "nbcvtk"){
+        MPI_Type_free(&procview);
+        MPI_Type_free(&xyzcomp);
+        MPI_Type_free(&procviewXYZ);
+        MPI_Type_free(&ghosttype);
+    }
 }
 
 // This was Particles3Dcomm::interpP2G()
@@ -871,11 +875,11 @@ void EMfields3D::sumMoments_AoS(const Particles3Dcomm* part)
       const double vwi=vi*wi;
       const double wwi=wi*wi;
       double velmoments[10];
-      velmoments[0] = 1.;
-      velmoments[1] = ui;
+      velmoments[0] = 1.; // charge density
+      velmoments[1] = ui; // momentum density 
       velmoments[2] = vi;
       velmoments[3] = wi;
-      velmoments[4] = uui;
+      velmoments[4] = uui; // second time momentum
       velmoments[5] = uvi;
       velmoments[6] = uwi;
       velmoments[7] = vvi;
@@ -958,11 +962,11 @@ void EMfields3D::sumMoments_AoS(const Particles3Dcomm* part)
       for(int j=0;j<nyn;j++)
       for(int k=0;k<nzn;k++)
       {
-        rhons[is][i][j][k] += invVOL*moments[i][j][k][0];
-        Jxs  [is][i][j][k] += invVOL*moments[i][j][k][1];
+        rhons[is][i][j][k] += invVOL*moments[i][j][k][0]; // charge density
+        Jxs  [is][i][j][k] += invVOL*moments[i][j][k][1]; // current density
         Jys  [is][i][j][k] += invVOL*moments[i][j][k][2];
         Jzs  [is][i][j][k] += invVOL*moments[i][j][k][3];
-        pXXsn[is][i][j][k] += invVOL*moments[i][j][k][4];
+        pXXsn[is][i][j][k] += invVOL*moments[i][j][k][4]; // pressure density
         pXYsn[is][i][j][k] += invVOL*moments[i][j][k][5];
         pXZsn[is][i][j][k] += invVOL*moments[i][j][k][6];
         pYYsn[is][i][j][k] += invVOL*moments[i][j][k][7];
@@ -2039,17 +2043,17 @@ void EMfields3D::sumMoments_vectorized_AoS(const Particles3Dcomm* part)
 
 /** method to convert a 1D field in a 3D field not considering guard cells*/
 void solver2phys(arr3_double vectPhys, double *vectSolver, int nx, int ny, int nz) {
-  for (register int i = 1; i < nx - 1; i++)
-    for (register int j = 1; j < ny - 1; j++)
-      for (register int k = 1; k < nz - 1; k++)
+  for (int i = 1; i < nx - 1; i++)
+    for (int j = 1; j < ny - 1; j++)
+      for (int k = 1; k < nz - 1; k++)
         vectPhys[i][j][k] = *vectSolver++;
 
 }
 /** method to convert a 1D field in a 3D field not considering guard cells*/
 void solver2phys(arr3_double vectPhys1, arr3_double vectPhys2, arr3_double vectPhys3, double *vectSolver, int nx, int ny, int nz) {
-  for (register int i = 1; i < nx - 1; i++)
-    for (register int j = 1; j < ny - 1; j++)
-      for (register int k = 1; k < nz - 1; k++) {
+  for (int i = 1; i < nx - 1; i++)
+    for (int j = 1; j < ny - 1; j++)
+      for (int k = 1; k < nz - 1; k++) {
         vectPhys1[i][j][k] = *vectSolver++;
         vectPhys2[i][j][k] = *vectSolver++;
         vectPhys3[i][j][k] = *vectSolver++;
@@ -2057,16 +2061,16 @@ void solver2phys(arr3_double vectPhys1, arr3_double vectPhys2, arr3_double vectP
 }
 /** method to convert a 3D field in a 1D field not considering guard cells*/
 void phys2solver(double *vectSolver, const arr3_double vectPhys, int nx, int ny, int nz) {
-  for (register int i = 1; i < nx - 1; i++)
-    for (register int j = 1; j < ny - 1; j++)
-      for (register int k = 1; k < nz - 1; k++)
+  for (int i = 1; i < nx - 1; i++)
+    for (int j = 1; j < ny - 1; j++)
+      for (int k = 1; k < nz - 1; k++)
         *vectSolver++ = vectPhys.get(i,j,k);
 }
 /** method to convert a 3D field in a 1D field not considering guard cells*/
 void phys2solver(double *vectSolver, const arr3_double vectPhys1, const arr3_double vectPhys2, const arr3_double vectPhys3, int nx, int ny, int nz) {
-  for (register int i = 1; i < nx - 1; i++)
-    for (register int j = 1; j < ny - 1; j++)
-      for (register int k = 1; k < nz - 1; k++) {
+  for (int i = 1; i < nx - 1; i++)
+    for (int j = 1; j < ny - 1; j++)
+      for (int k = 1; k < nz - 1; k++) {
         *vectSolver++ = vectPhys1.get(i,j,k);
         *vectSolver++ = vectPhys2.get(i,j,k);
         *vectSolver++ = vectPhys3.get(i,j,k);
@@ -2087,7 +2091,7 @@ void EMfields3D::calculateE(int cycle)
   array3_double gradPHIY (nxn, nyn, nzn);
   array3_double gradPHIZ (nxn, nyn, nzn);
 
-  double *xkrylov = new double[3 * (nxn - 2) * (nyn - 2) * (nzn - 2)];  // 3 E components
+  double *xkrylov = new double[3 * (nxn - 2) * (nyn - 2) * (nzn - 2)];  // 3 E components, in serial
   double *bkrylov = new double[3 * (nxn - 2) * (nyn - 2) * (nzn - 2)];  // 3 components
   // set to zero all the stuff 
   eqValue(0.0, xkrylov, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2));
@@ -2099,6 +2103,7 @@ void EMfields3D::calculateE(int cycle)
   eqValue(0.0, gradPHIY, nxn, nyn, nzn);
   eqValue(0.0, gradPHIZ, nxn, nyn, nzn);
   // Adjust E calculating laplacian(PHI) = div(E) -4*PI*rho DIVERGENCE CLEANING
+  // correct the e field regularly, to fulfill the Gussian law 
   if (PoissonCorrection &&  cycle%PoissonCorrectionCycle == 0) {
 		double *xkrylovPoisson = new double[(nxc - 2) * (nyc - 2) * (nzc - 2)];
 		double *bkrylovPoisson = new double[(nxc - 2) * (nyc - 2) * (nzc - 2)];
@@ -3271,9 +3276,9 @@ void EMfields3D::communicateGhostP2G(int ns)
 
 void EMfields3D::setZeroDerivedMoments()
 {
-  for (register int i = 0; i < nxn; i++)
-    for (register int j = 0; j < nyn; j++)
-      for (register int k = 0; k < nzn; k++) {
+  for (int i = 0; i < nxn; i++)
+    for (int j = 0; j < nyn; j++)
+      for (int k = 0; k < nzn; k++) {
         Jx  [i][j][k] = 0.0;
         Jxh [i][j][k] = 0.0;
         Jy  [i][j][k] = 0.0;
@@ -3282,9 +3287,9 @@ void EMfields3D::setZeroDerivedMoments()
         Jzh [i][j][k] = 0.0;
         rhon[i][j][k] = 0.0;
       }
-  for (register int i = 0; i < nxc; i++)
-    for (register int j = 0; j < nyc; j++)
-      for (register int k = 0; k < nzc; k++) {
+  for (int i = 0; i < nxc; i++)
+    for (int j = 0; j < nyc; j++)
+      for (int k = 0; k < nzc; k++) {
         rhoc[i][j][k] = 0.0;
         rhoh[i][j][k] = 0.0;
       }
@@ -3294,10 +3299,10 @@ void EMfields3D::setZeroPrimaryMoments() {
 
   // set primary moments to zero
   //
-  for (register int kk = 0; kk < ns; kk++)
-    for (register int i = 0; i < nxn; i++)
-      for (register int j = 0; j < nyn; j++)
-        for (register int k = 0; k < nzn; k++) {
+  for (int kk = 0; kk < ns; kk++)
+    for (int i = 0; i < nxn; i++)
+      for (int j = 0; j < nyn; j++)
+        for (int k = 0; k < nzn; k++) {
           rhons[kk][i][j][k] = 0.0;
           Jxs  [kk][i][j][k] = 0.0;
           Jys  [kk][i][j][k] = 0.0;
@@ -3321,18 +3326,18 @@ void EMfields3D::setZeroDensities() {
 void EMfields3D::sumOverSpecies()
 {
   for (int is = 0; is < ns; is++)
-    for (register int i = 0; i < nxn; i++)
-      for (register int j = 0; j < nyn; j++)
-        for (register int k = 0; k < nzn; k++)
+    for (int i = 0; i < nxn; i++)
+      for (int j = 0; j < nyn; j++)
+        for (int k = 0; k < nzn; k++)
           rhon[i][j][k] += rhons[is][i][j][k];
 }
 
 /*!SPECIES: Sum current density for different species */
 void EMfields3D::sumOverSpeciesJ() {
   for (int is = 0; is < ns; is++)
-    for (register int i = 0; i < nxn; i++)
-      for (register int j = 0; j < nyn; j++)
-        for (register int k = 0; k < nzn; k++) {
+    for (int i = 0; i < nxn; i++)
+      for (int j = 0; j < nyn; j++)
+        for (int k = 0; k < nzn; k++) {
           Jx[i][j][k] += Jxs[is][i][j][k];
           Jy[i][j][k] += Jys[is][i][j][k];
           Jz[i][j][k] += Jzs[is][i][j][k];

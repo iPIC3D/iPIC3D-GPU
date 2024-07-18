@@ -55,7 +55,8 @@ VCtopology3D::VCtopology3D(const Collective& col) {
   RIGHT = 1;
   LEFT = -1;
 
-  reorder = 1;
+  // Cray MPI has a bug when using reorder
+  reorder = 0;
 
   dims[0] = XLEN;
   dims[1] = YLEN;

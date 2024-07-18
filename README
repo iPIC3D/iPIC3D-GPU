@@ -1,3 +1,5 @@
+Refer to https://kth-hpc.github.io/iPIC3D/install/ for more information.
+
 To install and run iPIC3D, you need: 
    cmake (at least version 2.8), MPI and HDF5 (optional).
 

@@ -1,0 +1,42 @@
+<Servers>
+  <Server name="iPICmini" resource="csrc://10.33.0.123:11111">
+    <CommandStartup>
+      <Options>
+        <Option label="SSH user:" name="SSH_USER" save="true">
+          <String default="michael"/>
+        </Option>
+        <Option label="Remote Script Path:" name="SSH_SCRIPT" save="true">
+          <String default="/home/michael/run.sh"/>
+        </Option>
+        <Option label="Remote ParaView server Path:" name="PARAVIEW_PATH" save="true">
+          <String default="/home/michael/Dev/paraview/build/bin/pvserver"/>
+        </Option>
+        <Option label="Remote iPICmini Path:" name="IPICMINI_PATH" save="true">
+          <String default="/home/michael/Dev/ipicmini/src/build/iPICmini_d"/>
+        </Option>
+        <Option label="Remote input file:" name="INPUT_PATH" save="true">
+          <String default="/home/michael/Dev/ipicmini/inputfiles/GEM.inp"/>
+        </Option>
+        <Option label="Remote input file:" name="MPI_NPROCS" save="true">
+          <String default="4"/>
+        </Option>
+      </Options>
+      <SSHCommand exec="$SSH_SCRIPT$" timeout="0" delay="5">
+        <SSHConfig user="$SSH_USER$">
+          <Terminal/>
+          <PortForwarding local="8080"/>
+        </SSHConfig>
+        <Arguments>
+          <Argument value="$PV_SSH_PF_SERVER_PORT$"/>
+          <Argument value="$PARAVIEW_PATH$"/>
+          <Argument value="$IPICMINI_PATH$"/>
+          <Argument value="$INPUT_PATH$"/>
+          <Argument value="$MPI_NPROCS$"/>
+        </Arguments>
+      </SSHCommand>
+    </CommandStartup>
+  </Server>
+  <Server name="iPICmini (Manual)" configuration="" resource="csrc://localhost:11111">
+    <ManualStartup/>
+  </Server>
+</Servers>

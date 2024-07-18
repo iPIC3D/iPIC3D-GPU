@@ -59,6 +59,8 @@ namespace iPic3D {
       Qremoved(0),
       my_clock(0)
     {}
+
+
     int Init(int argc, char **argv);
     void CalculateMoments();
     void CalculateField(int cycle);
@@ -90,16 +92,16 @@ namespace iPic3D {
 
   private:
     //static MPIdata * mpi;
-    Collective    *col;
-    VCtopology3D  *vct;
-    Grid3DCU      *grid;
-    EMfields3D    *EMf;
+    Collective    *col; // the input parameters
+    VCtopology3D  *vct; // mpi topology 
+    Grid3DCU      *grid; // 3d cartesion grid, local grid
+    EMfields3D    *EMf; // 
     Particles3D   *part;
     Particles3D   *testpart;
-    double        *Ke;
-    double        *BulkEnergy;
-    double        *momentum;
-    double        *Qremoved;
+    double        *Ke; // kinetic energy of each species, the normal one, added up
+    double        *BulkEnergy; // bulk kinetic energy of each species, consider the bulk motion
+    double        *momentum; // an array of doubles, total momentum of all particle species
+    double        *Qremoved; // array of double, with species length, removed charges from the depopulation area
     Timing        *my_clock;
 
 #ifndef NO_HDF5

@@ -145,7 +145,7 @@ void eq(arr4_double vect1, const arr3_double vect2, int nx, int ny, int is);
 /** method to set equal two vectors */
 void eq(arr4_double vect1, const arr3_double vect2, int nx, int ny, int nz, int is);
 inline void eq(double *vect1, double *vect2, int n){
-  for (register int i = 0; i < n; i++)
+  for (int i = 0; i < n; i++)
     vect1[i] = vect2[i];
 }
 /** method to set a vector to a Value */

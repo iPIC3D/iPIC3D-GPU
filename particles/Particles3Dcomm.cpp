@@ -1503,7 +1503,7 @@ void Particles3Dcomm::communicate_particles()
 double Particles3Dcomm::getKe() {
   double localKe = 0.0;
   double totalKe = 0.0;
-  for (register int i = 0; i < _pcls.size(); i++)
+  for (int i = 0; i < _pcls.size(); i++)
   {
     SpeciesParticle& pcl = _pcls[i];
     const double u = pcl.get_u();
@@ -1525,7 +1525,7 @@ double Particles3Dcomm::getKe() {
 double Particles3Dcomm::getP() {
   double localP = 0.0;
   double totalP = 0.0;
-  for (register int i = 0; i < _pcls.size(); i++)
+  for (int i = 0; i < _pcls.size(); i++)
   {
     SpeciesParticle& pcl = _pcls[i];
     const double u = pcl.get_u();
@@ -1648,7 +1648,7 @@ void Particles3Dcomm::sort_particles_serial_AoS()
     {
       const SpeciesParticle& pcl = get_pcl(pidx);
       // get the cell indices of the particle
-      int cx,cy,cz;
+      int cx,cy,cz; // the cell index from their actual position
       grid->get_safe_cell_coordinates(cx,cy,cz,pcl.get_x(),pcl.get_y(),pcl.get_z());
 
       // increment the number of particles in bucket of this particle
@@ -1675,7 +1675,7 @@ void Particles3Dcomm::sort_particles_serial_AoS()
     {
       const SpeciesParticle& pcl = get_pcl(pidx);
       // get the cell indices of the particle
-      int cx,cy,cz;
+      int cx,cy,cz; // the address of the new bucket of this particle
       grid->get_safe_cell_coordinates(cx,cy,cz,pcl.get_x(),pcl.get_y(),pcl.get_z());
 
       // compute where the data should go
@@ -1706,6 +1706,7 @@ void Particles3Dcomm::sort_particles_serial_AoS()
       for(int cy=0;cy<nyc;cy++)
       for(int cz=0;cz<nzc;cz++)
       {
+        // check the number of particles in every cell is reasonable
         assert_eq((*numpcls_in_bucket_now)[cx][cy][cz], (*numpcls_in_bucket)[cx][cy][cz]);
       }
     }

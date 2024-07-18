@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <link rel="icon" href="assets/img/favicons/favicon.png">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="iPIC3D">
+    <meta name="keywords" content="iPIC3D MPI space weather">
+    <meta name="description" content="iPIC3D is a three-dimensional parallel PIC code." />
+
+    <!-- OG Meta Tags to improve the way the post looks when you share the page on LinkedIn, Facebook, Google+ -->
+    <meta property="og:title" content="iPIC3D" />
+    <meta property="og:description" content="iPIC3D is a three-dimensional parallel PIC code." />
+    <!--<meta property="og:image" content="http://www.pycon.se/images/facebook-thumbnail-resize.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="fb:admins" content="538208697" />-->
+    <meta property="og:site_name" content="iPIC3D" />
+    <meta property="og:type" content="website" />
+    <!--<meta property="og:image" content="http://www.pycon.se/images/linkedin-thumbnail.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="180" />
+    <meta property="og:image:height" content="95" />-->
+
+    <!--<meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:site" content="@pyconse">-->
+    <meta name="twitter:title" content="iPIC3D">
+    <meta name="twitter:description" content="iPIC3D is a three-dimensional parallel PIC code.">
+    <!--<meta name="twitter:image" content="http://www.pycon.se/images/facebook-thumbnail-resize.png">-->
+
+    <title>iPIC3D</title>
+
+    <link rel="canonical" href="https://getbootstrap.com/docs/4.0/examples/jumbotron/">
+
+    <!-- Bootstrap core CSS -->
+    <link href="dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap Font Icon CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+
+    <!-- Custom styles for this template -->
+    <link href="assets/css/jumbotron.css" rel="stylesheet">
+  </head>
+
+  <body>
+
+    <nav id="navbar-ipic3d" class="navbar navbar-expand-md navbar-dark fixed-top bg-dark">
+      <a class="navbar-brand nav-link" href="index.html#home">iPIC3D</a>
+      <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarsExampleDefault" aria-controls="navbarsExampleDefault" aria-expanded="false" aria-label="Toggle navigation">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+
+      <div class="collapse navbar-collapse" id="navbarsExampleDefault">
+        <ul class="navbar-nav mr-auto">
+          <li class="nav-item ">
+            <a class="nav-link active" href="index.html#home">Home <span class="sr-only">(current)</span></a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="#install">Install</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="index.html#publications">Publications</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="index.html#about">About</a>
+          </li>
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle" href="#documentation" id="dropdown01" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">Documentation</a>
+            <div class="dropdown-menu" aria-labelledby="dropdown01">
+              <a class="dropdown-item" href="inputfiles.html">Input Files</a>
+              <a class="dropdown-item" href="running.html">Running iPIC3D</a>
+            </div>
+          </li>
+        </ul>
+        <!--<form class="form-inline my-2 my-lg-0">-->
+        <!--  <input class="form-control mr-sm-2" type="text" placeholder="Search" aria-label="Search">-->
+        <!--  <button class="btn btn-outline-success my-2 my-sm-0" type="submit">Search</button>-->
+        <!--</form>-->
+      </div>
+    </nav>
+
+    <main role="main" id="home" style="padding-top: 50px;">
+
+      <!-- Main jumbotron for a primary marketing message or call to action -->
+      <div class="jumbotron">
+        <div class="container">
+          <h1 class="text-light display-3">iPIC3D</h1>
+          <p class="text-light">Multi-scale simulations of plasma using Particle-In-Cell method</p>
+          <p><a class="btn btn-primary btn-lg" href="#install" role="button">Install &raquo;</a></p>
+        </div>
+      </div>
+
+      <!-- summary -->
+      <div class="container">
+        <div class="row bg-light">
+          <div class="col-md-4">
+            <div class="text-center">
+              <i class="bi bi-rocket-takeoff" style="font-size: 60px;"></i>
+              <p><b>Space weather and plasma simulations</b></p>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="text-center">
+              <i class="bi bi-speedometer" style="font-size: 60px;"></i>
+              <p><b>Massive parallelism with MPI</b></p>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="text-center">
+              <i class="bi bi-images" style="font-size: 60px;"></i>
+              <p><b>VTK products for visualization</b></p>
+            </div>
+          </div>
+        </div>
+        <p></p>
+        <div class="row">
+          <div class="col-md-12">
+            <h2>About iPIC3D</h2>
+            <p>iPIC3D is a three-dimensional parallel PIC code. On multiprocessor architectures, the domain decomposition technique is used to divide the computational workload among processors. For implicit PIC where the cost of particle moving and of field solving are of the same order (unlike explicit PIC where most of the cost resides with the particles), it is crucial that both field solving and particle moving be parallelized efficiently. An important aspect of efficiency is the need to retain the particles and cells belonging to a subdomain on the same processor. Large amounts of information is exchanged between grid and particles residing in the same physical domain and therefore it is important to avoid that this information exchange results in inter processor communication. The simulation box is divided among processors using a generic Cartesian virtual topology. Particles are divided among processors also depending on their location, and communicated to adjacent processors if exiting from the processor domain. The parallelization of the code is based on MPI libraries and blocking parallel communication has been chosen for the communication among processors.</p>
+          </div>
+        </div>
+        <hr>
+      </div>
+      <!-- end of summary -->
+
+      <!-- install -->
+      <div class="container">
+        <div class="row">
+          <div class="col-md-12">
+            <h2 id="install">Getting iPIC3D</h2>
+              <p>iPIC3D is open-source and can be downloaded from Github. CMake is required to configure the build, and HDF5 is optional.</p>
+              <h4>Download</h4>
+              <p>Clone the repository from Github:</p>
+              <pre class="bg-light"><code>
+$ git clone https://github.com/KTH-HPC/iPIC3D.git
+              </code></pre>
+              <h4>Configure and build:</h4>
+              <p>Clone the repository from Github:</p>
+              <pre class="bg-light"><code>
+$ mkdir build
+$ cd build
+$ CC=mpicc CXX=mpicxx cmake ..
+$ make
+              </code></pre>
+              <p>Optionally install the software:</p>
+              <pre class="bg-light"><code>
+$ sudo make install
+              </code></pre>
+              <p>Refer to our documentation (dropdown menu) on how to configure inputfiles and run simulations.</p>
+          </div>
+        </div>
+        <hr>
+      </div>
+      <!-- end of install -->
+
+      <!-- publications -->
+      <div class="container">
+        <div class="row">
+          <div class="col-md-12">
+            <h2 id="publications">Publications</h2>
+            <p>We appreciate that you cite the following paper if you used iPIC3D in your work:</p>
+            <pre>
+@article{MARKIDIS20101509,
+         title = "Multi-scale simulations of plasma with iPIC3D",
+         journal = "Mathematics and Computers in Simulation",
+         volume = "80",
+         number = "7",
+         pages = "1509 - 1519",
+         year = "2010",
+         note = "Multiscale modeling of moving interfaces in materials",
+         issn = "0378-4754",
+         doi = "https://doi.org/10.1016/j.matcom.2009.08.038",
+         url = "http://www.sciencedirect.com/science/article/pii/S0378475409002444",
+         author = "Stefano Markidis and Giovanni Lapenta and  Rizwan-uddin",
+         keywords = "Particle-in-Cell, Computational plasma physics, Implicit PIC, 3D Magnetic reconnection",
+         abstract = "The implicit Particle-in-Cell method for the computer simulation of plasma, and its implementation in a three-dimensional parallel code, called iPIC3D, are presented. The implicit integration in time of the Vlasov–Maxwell system, removes the numerical stability constraints and it enables kinetic plasma simulations at magnetohydrodynamics time scales. Simulations of magnetic reconnection in plasma are presented to show the effectiveness of the algorithm."
+}
+            </pre>
+            <h4>Related publication with iPIC3D</h4>
+            <p>S. W. D. Chien, J. Nylund, G. Bengtsson, I. B. Peng, A. Podobas and S. Markidis, "sputniPIC: An Implicit Particle-in-Cell Code for Multi-GPU Systems," <i>2020 IEEE 32nd International Symposium on Computer Architecture and High Performance Computing (SBAC-PAD)</i>, Porto, Portugal, 2020, pp. 149-156, doi: <a target="_blank" href="https://doi.org/10.1109/SBAC-PAD49847.2020.00030">10.1109/SBAC-PAD49847.2020.00030.</a> [<a href="" target="_blank">BibTex</a>]</p>
+            <p>Sishtla, C.P., Chien, S.W.D., Olshevsky, V., Laure, E., Markidis, S. (2019). Multi-GPU Acceleration of the iPIC3D Implicit Particle-in-Cell Code. In: , <i>et al</i>. Computational Science – ICCS 2019. ICCS 2019. Lecture Notes in Computer Science(), vol 11540. Springer, Cham. doi: <a target="_blank" href="https://doi.org/10.1007/978-3-030-22750-0_58">https://doi.org/10.1007/978-3-030-22750-0_58</a> [<a href="" target="_blank">BibTex</a>]</p>
+            <p>P. Kumar, S. Markidis, G. Lapenta, K. Meerbergen, and D. Roose. "High performance solvers for implicit particle in cell simulation." <i>Procedia Computer Science 18 (2013)</i>: 2251-2258. doi: <a target="_blank" href="https://doi.org/10.1016/j.procs.2013.05.396">https://doi.org/10.1016/j.procs.2013.05.396</a> [<a href="" target="_blank">BibTex</a>]</p>
+            <p>S. Markidis, and G. Lapenta, 2010. Multi-scale simulations of plasma with iPIC3D. <i>Mathematics and Computers in Simulation, 80(7)</i>, pp.1509-1519. doi: <a target="_blank" href="https://doi.org/10.1016/j.matcom.2009.08.038">https://doi.org/10.1016/j.matcom.2009.08.038</a> [<a href="" target="_blank">BibTex</a>]<p>
+          </div>
+        </div>
+        <hr>
+      </div>
+      <!-- end of publications -->
+
+      <!-- about -->
+      <div class="container">
+        <div class="row">
+          <div class="col-md-12">
+            <h2 id="about">About</h2>
+            <p>iPIC3D is developed by Stefano Markidis at KTH Royal Institute of Technology.</p>
+            <h4>Contributors</h4>
+            <ul>
+              <li>Ivy B. Peng</li>
+              <li>Vyacheslav Olshevsky</li>
+              <li>Steven W. D. Chien</li>
+              <li>Chaitanya P. Sishtla</li>
+              <li>Rupert Nash</li>
+            </ul>
+          </div>
+        </div>
+        <hr>
+      </div>
+      <!-- end of about -->
+
+    </main>
+
+    <footer class="container">
+      <p>&copy; Copyright <script type="text/javascript">document.write(new Date().getFullYear());</script> KTH Royal Institute of Technology. Website designed by Steven W. D. Chien.</p>
+    </footer>
+
+    <!-- Bootstrap core JavaScript
+    ================================================== -->
+    <!-- Placed at the end of the document so the pages load faster -->
+    <!--<script src="https://code.jquery.com/jquery-3.2.1.slim.min.js" integrity="sha384-KJ3o2DKtIkvYIK3UENzmM7KCkRr/rE9/Qpg6aAZGJwFDMVNA/GpGFF93hXpG5KkN" crossorigin="anonymous"></script>-->
+    <script src="https://code.jquery.com/jquery-3.1.0.js" crossorigin="anonymous"></script>
+    <script>window.jQuery || document.write('<script src="/assets/js/vendor/jquery-slim.min.js"><\/script>')</script>
+    <script src="assets/js/toggle_nav.js"></script>
+    <!--<script src="/assets/js/vendor/popper.min.js"></script>-->
+    <script src="dist/js/bootstrap.min.js"></script>
+  </body>
+</html>

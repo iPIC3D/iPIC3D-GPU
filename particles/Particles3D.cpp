@@ -2263,7 +2263,7 @@ double Particles3D::delta_f(double u, double v, double w, double x, double y, do
   /** for compilation issues comment this part: PUT in the math stuff */
   // calc_bessel_Jn_seq(lambda, lmax, bessel_Jn_array, bessel_Jn_prime_array);
   factor = (kpar * vperp / omega * df0_dvpar(vpar, vperp) + (1.0 - (kpar * vpar / omega)) * df0_dvperp(vpar, vperp));
-  for (register int l = -lmax; l < 0; l++) {  // negative index
+  for (int l = -lmax; l < 0; l++) {  // negative index
     a1[l + lmax] = factor / lambda * pow(-1.0, -l) * bessel_Jn_array[-l];
     a1[l + lmax] *= (double) l;
     a2[l + lmax] = factor * I * 0.5 * pow(-1.0, -l) * (bessel_Jn_array[-l - 1] - bessel_Jn_array[-l + 1]);
@@ -2272,7 +2272,7 @@ double Particles3D::delta_f(double u, double v, double w, double x, double y, do
     a3[l + lmax] += df0_dvpar(vpar, vperp) * pow(-1.0, -l) * bessel_Jn_array[-l];
   }
 
-  for (register int l = 0; l < lmax + 1; l++) { // positive index
+  for (int l = 0; l < lmax + 1; l++) { // positive index
     a1[l + lmax] = factor / lambda * bessel_Jn_array[l];
     a1[l + lmax] *= (double) l;
     a2[l + lmax] = factor * I * bessel_Jn_prime_array[l];
@@ -2282,7 +2282,7 @@ double Particles3D::delta_f(double u, double v, double w, double x, double y, do
   }
 
   //deltaf = (0.0, 0.0);
-  for (register int l = -lmax; l < lmax + 1; l++) {
+  for (int l = -lmax; l < lmax + 1; l++) {
     deltaf += (a3[l + lmax] * Ex_mod * exp(I * Ex_phase) + a1[l + lmax] * Ey_mod * exp(I * Ey_phase) + a2[l + lmax] * Ez_mod * exp(I * Ez_phase)) / (kpar * vpar + l * om_c - omega) * exp(-I * phi * (double) l);
   }
   deltaf *= I * qom * exp(I * lambda * sin(phi)) * exp(I * (2 * M_PI * kx * x + 2 * M_PI * ky * y));
@@ -2313,7 +2313,7 @@ double Particles3D::f0(double vpar, double vperp) {
 
 void Particles3D::RotatePlaneXY(double theta) {
   double temp, temp2;
-  for (register int s = 0; s < getNOP(); s++) {
+  for (int s = 0; s < getNOP(); s++) {
     temp = u[s];
     temp2 = v[s];
     u[s] = temp * cos(theta) + v[s] * sin(theta);

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <meta name="description" content="">
+    <meta name="author" content="">
+    <link rel="icon" href="assets/img/favicons/favicon.png">
+
+    <title>iPIC3D</title>
+
+    <link rel="canonical" href="https://getbootstrap.com/docs/4.0/examples/jumbotron/">
+
+    <!-- Bootstrap core CSS -->
+    <link href="dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap Font Icon CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+
+    <!-- Custom styles for this template -->
+    <link href="assets/css/jumbotron.css" rel="stylesheet">
+  </head>
+
+  <body>
+
+    <nav id="navbar-ipic3d" class="navbar navbar-expand-md navbar-dark fixed-top bg-dark">
+      <a class="navbar-brand nav-link" href="index.html#home">iPIC3D</a>
+      <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarsExampleDefault" aria-controls="navbarsExampleDefault" aria-expanded="false" aria-label="Toggle navigation">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+
+      <div class="collapse navbar-collapse" id="navbarsExampleDefault">
+        <ul class="navbar-nav mr-auto">
+          <li class="nav-item ">
+            <a class="nav-link" href="index.html#home">Home <span class="sr-only">(current)</span></a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="index.html#install">Install</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="index.html#publications">Publications</a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link" href="index.html#about">About</a>
+          </li>
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle active" href="#documentation" id="dropdown01" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">Documentation</a>
+            <div class="dropdown-menu" aria-labelledby="dropdown01">
+              <a class="dropdown-item" href="inputfiles.html">Input Files</a>
+              <a class="dropdown-item active" href="running.html">Running iPIC3D</a>
+            </div>
+          </li>
+        </ul>
+        <!--<form class="form-inline my-2 my-lg-0">-->
+        <!--  <input class="form-control mr-sm-2" type="text" placeholder="Search" aria-label="Search">-->
+        <!--  <button class="btn btn-outline-success my-2 my-sm-0" type="submit">Search</button>-->
+        <!--</form>-->
+      </div>
+    </nav>
+
+    <main role="main" id="inputfiles" style="padding-top: 100px;">
+
+      <!-- summary -->
+      <div class="container">
+        <div class="row">
+          <div class="col-md-12">
+            <h2>Running iPIC3D</h2>
+            <p>To run iPIC3D, first enter the build directory where <code>iPIC3D</code> binary is located. Ensure the folders specified in <code>SaveDirName</code> and <code>RestartDirName</code> are careated before starting the program.</p>
+            <pre class="bg-light"><code>
+$ cd build
+$ mkdir data
+            </code></pre>
+            <p>Start the simulation with <code>mpirun</code> with any required MPI parameters, and specify the inputfile.</p>
+            <pre class="bg-light"><code>
+$ mpirun -n 1 ./iPIC3D ../inputfiles/testGEM2Dsmall.inp
+            </code></pre>
+            <p>The number of processes can be adjusted by change <code>XLEN</code>, <code>YLEN</code>, and <code>ZLEN</code> in the inputfile. They must be divisible by <code>nxc</code>, <code>nyc</code>, and <code>nzc</code>.</p>
+          </div>
+        </div>
+        <hr>
+      </div>
+      <!-- end of summary -->
+
+    </main>
+
+    <footer class="container">
+      <p>&copy; Copyright <script type="text/javascript">document.write(new Date().getFullYear());</script> KTH Royal Institute of Technology. Website designed by Steven W. D. Chien.</p>
+    </footer>
+
+    <!-- Bootstrap core JavaScript
+    ================================================== -->
+    <!-- Placed at the end of the document so the pages load faster -->
+    <!--<script src="https://code.jquery.com/jquery-3.2.1.slim.min.js" integrity="sha384-KJ3o2DKtIkvYIK3UENzmM7KCkRr/rE9/Qpg6aAZGJwFDMVNA/GpGFF93hXpG5KkN" crossorigin="anonymous"></script>-->
+    <script src="https://code.jquery.com/jquery-3.1.0.js" crossorigin="anonymous"></script>
+    <script>window.jQuery || document.write('<script src="assets/js/vendor/jquery-slim.min.js"><\/script>')</script>
+    <script src="assets/js/toggle_nav.js"></script>
+    <!--<script src="/assets/js/vendor/popper.min.js"></script>-->
+    <script src="dist/js/bootstrap.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-KK94CHFLLe+nY2dmCWGMq91rCGa5gtU4mk92HdvYe+M/SXH301p5ILy+dN9+nJOZ" crossorigin="anonymous">
+  </body>
+</html>

@@ -33,7 +33,11 @@ delta = 0.5
     
 #  %%%%%%%%%%%%%%%%%%% TIME %%%%%%%%%%%%%%%%%%
 dt = 0.15          # dt = time step   
+<<<<<<< HEAD
 ncycles = 51    # cycles
+=======
+ncycles = 100    # cycles
+>>>>>>> other-repo/master
 th = 1.0          # th =   decentering parameter
 c = 1.0
 
@@ -43,6 +47,7 @@ Smooth = 0.2      # Smoothing value (5-points stencil)
 Lx = 10   # Lx = simulation box length - x direction    
 Ly = 10   # Ly = simulation box length - y direction   
 Lz = 10    # Lz = simulation box length - z direction
+<<<<<<< HEAD
 nxc = 20  # nxc = number of cells - x direction        
 nyc = 20  # nyc = number of cells - y direction 
 nzc = 20  # nzc = number of cells - z direction 
@@ -52,6 +57,17 @@ nzc = 20  # nzc = number of cells - z direction
 XLEN = 2
 YLEN = 2
 ZLEN = 2
+=======
+nxc = 64  # nxc = number of cells - x direction        
+nyc = 64  # nyc = number of cells - y direction 
+nzc = 64  # nzc = number of cells - z direction 
+
+# %%%%%%%%%%%%%% MPI TOPOLOGY %%%%%%%%%%%%%%
+# number of MPI subdomains in each direction
+XLEN = 8
+YLEN = 8
+ZLEN = 4
+>>>>>>> other-repo/master
 # topology of subdomains in each dimension (1=true, 0=false)
 PERIODICX = 1
 PERIODICY = 0
@@ -77,11 +93,19 @@ rhoINJECT = 0.0 0.0 0.0 0.0
 # TrackParticleID[species] = 1=true, 0=false --> Assign ID to particles 
 TrackParticleID= 1 1 1 1 
 # npcelx = number of particles per cell - Direction X 
+<<<<<<< HEAD
 npcelx = 2 2 2 2 
 # npcely = number of particles per cell - Direction Y */
 npcely = 2 2 2 2 
 # npcelz = number of particles per cell - Direction Z */
 npcelz = 2 2 2 2
+=======
+npcelx = 4 4 4 4 
+# npcely = number of particles per cell - Direction Y */
+npcely = 4 4 4 4 
+# npcelz = number of particles per cell - Direction Z */
+npcelz = 4 4 4 4
+>>>>>>> other-repo/master
 
 
 # uth = thermal velocity for different species - Direction X  */
@@ -143,6 +167,7 @@ bcPHIfaceZleft  = 1
 # mover predictor corrector iteration 
    NiterMover  = 3
 # Output for field
+<<<<<<< HEAD
    FieldOutputCycle = 25
    FieldOutputTag   = B+E+Je+Ji
    MomentsOutputTag = rho+PXX+PXY+PXZ+PYY+PYZ+PZZ
@@ -151,4 +176,14 @@ bcPHIfaceZleft  = 1
    ParticlesOutputTag = position+velocity+q
 # restart cycle
    RestartOutputCycle = 30
+=======
+   FieldOutputCycle = 50
+   FieldOutputTag   = B+E+Je+Ji
+   MomentsOutputTag = rho+PXX+PXY+PXZ+PYY+PYZ+PZZ
+# Output for particles if 0 it doesnt save particles data
+   ParticlesOutputCycle = 0
+   ParticlesOutputTag = position+velocity+q
+# restart cycle
+   RestartOutputCycle = 3000
+>>>>>>> other-repo/master
    CallFinalize=1

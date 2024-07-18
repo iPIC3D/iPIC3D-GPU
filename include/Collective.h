@@ -32,6 +32,7 @@
 #include "InterfaceFluid.h"
 #endif
 #include <string>
+#include <memory>
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "aligned_vector.h"
@@ -62,8 +63,6 @@ class Collective
   public:
     /*! constructor: initialize physical parameters with values */
     Collective(int argc, char **argv);
-    /*! destructor */
-    ~Collective();
     /*! read input file */
     void ReadInput(string inputfile);
     /*! read the restart input file from HDF5 */
@@ -197,10 +196,12 @@ class Collective
     int bcEx[6], bcEy[6], bcEz[6];
     /*! Boundary condition selection for BCFace for the magnetic field components */
     int bcBx[6], bcBy[6], bcBz[6];
+    string getParaviewScriptPath()const{return ParaviewScriptPath;}
 
   private:
     /*! inputfile */
     string inputfile;
+    string ParaviewScriptPath;
     /*! light speed */
     double c;
     /*! 4 pi */
@@ -270,41 +271,41 @@ class Collective
     /*! number of test particle species */
     int nstestpart;
     /*! number of particles per cell */
-    int *npcel;
+    std::unique_ptr<int[]> npcel;
     /*! number of particles per cell - X direction */
-    int *npcelx;
+    std::unique_ptr<int[]> npcelx;
     /*! number of particles per cell - Y direction */
-    int *npcely;
+    std::unique_ptr<int[]> npcely;
     /*! number of particles per cell - Z direction */
-    int *npcelz;
+    std::unique_ptr<int[]> npcelz;
     // either make these of longid type or do not declare them.
     //int *np; /*! number of particles array for different species */
     //int *npMax; /*! maximum number of particles array for different species */
     /*! max number of particles */
     double NpMaxNpRatio;
     /*! charge to mass ratio array for different species */
-    double *qom;
+    std::unique_ptr<double[]> qom;
     /*! charge to mass ratio array for different species */
-    double *rhoINIT;
+    std::unique_ptr<double[]> rhoINIT;
     /*! density of injection */
-    double *rhoINJECT;
+    std::unique_ptr<double[]> rhoINJECT;
     /*! thermal velocity - Direction X */
-    double *uth;
+    std::unique_ptr<double[]> uth;
     /*! thermal velocity - Direction Y */
-    double *vth;
+    std::unique_ptr<double[]> vth;
     /*! thermal velocity - Direction Z */
-    double *wth;
+    std::unique_ptr<double[]> wth;
     /*! Drift velocity - Direction X */
-    double *u0;
+    std::unique_ptr<double[]> u0;
     /*! Drift velocity - Direction Y */
-    double *v0;
+    std::unique_ptr<double[]> v0;
     /*! Drift velocity - Direction Z */
-    double *w0;
+    std::unique_ptr<double[]> w0;
 
     /*! Pitch Angle for Test Particles */
-    double *pitch_angle;
+    std::unique_ptr<double[]> pitch_angle;
     /*! Energy for Test Particles */
-    double *energy;
+    std::unique_ptr<double[]> energy;
 
 
     /*! Case type */

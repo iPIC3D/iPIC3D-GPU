@@ -34,6 +34,7 @@
 #include "Particles3D.h"
 #include "Timing.h"
 #include "ParallelIO.h"
+#include "outputPrepare.h"
 //
 #ifndef NO_HDF5
 #include "WriteOutputParallel.h"
@@ -45,6 +46,10 @@
 #include <sstream>
 
 #include "Moments.h" // for debugging
+
+#ifdef USE_CATALYST
+#include "Adaptor.h"
+#endif
 
 using namespace iPic3D;
 //MPIdata* iPic3D::c_Solver::mpi=0;
@@ -70,6 +75,9 @@ c_Solver::~c_Solver()
     free(part);
   }
 
+#ifdef USE_CATALYST
+  Adaptor::Finalize();
+#endif
   delete [] Ke;
   delete [] momentum;
   delete [] Qremoved;
@@ -126,6 +134,8 @@ int c_Solver::Init(int argc, char **argv) {
 
   // Print the initial settings to stdout and a file
   if (myrank == 0) {
+    //check and create the output directory
+    checkOutputFolder(SaveDirName);
     MPIdata::instance().Print();
     vct->Print();
     col->Print();
@@ -235,6 +245,19 @@ int c_Solver::Init(int argc, char **argv) {
 
   Qremoved = new double[ns];
 
+#ifdef USE_CATALYST
+  Adaptor::Initialize(col, \
+		  (int)(grid->getXstart()/grid->getDX()), \
+		  (int)(grid->getYstart()/grid->getDY()), \
+		  (int)(grid->getZstart()/grid->getDZ()), \
+		  grid->getNXN(),
+		  grid->getNYN(),
+		  grid->getNZN(),
+		  grid->getDX(),
+		  grid->getDY(),
+		  grid->getDZ());
+#endif
+
   my_clock = new Timing(myrank);
 
   return 0;
@@ -279,9 +302,12 @@ void c_Solver::CalculateMoments() {
         EMf->sumMoments(part);
         break;
       case Parameters::AoS:
-        EMf->setZeroPrimaryMoments();
-        convertParticlesToAoS();
-        EMf->sumMoments_AoS(part);
+        EMf->setZeroPrimaryMoments(); // clear the data to 0
+        convertParticlesToAoS(); // convert 
+        EMf->sumMoments_AoS(part); // sum up the 10 densities of each particles of each species
+        // then calculate the weight according to their position
+        // map the 10 momentum to the grid(node) with the weight
+        
         break;
       case Parameters::AoSintr:
         EMf->setZeroPrimaryMoments();
@@ -438,6 +464,10 @@ bool c_Solver::ParticlesMover()
 }
 
 void c_Solver::WriteOutput(int cycle) {
+
+#ifdef USE_CATALYST
+  Adaptor::CoProcess(col->getDt()*cycle, cycle, EMf);
+#endif
 
   WriteConserved(cycle);
   WriteRestart(cycle);
@@ -730,6 +760,7 @@ void c_Solver::Finalize() {
   my_clock->stopTiming();
 }
 
+//! place the particles into new cells according to their current position
 void c_Solver::sortParticles() {
 
   for(int species_idx=0; species_idx<ns; species_idx++)

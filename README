@@ -1,4 +1,23 @@
-Refer to https://kth-hpc.github.io/iPIC3D/install/ for more information.
+                                                                         
+          ,-.----.                           .--,-``-.                   
+          \    /  \      ,---,   ,----..    /   /     '.       ,---,     
+  ,--,    |   :    \  ,`--.' |  /   /   \  / ../        ;    .'  .' `\   
+,--.'|    |   |  .\ : |   :  : |   :     : \ ``\  .`-    ' ,---.'     \  
+|  |,     .   :  |: | :   |  ' .   |  ;. /  \___\/   \   : |   |  .`\  | 
+`--'_     |   |   \ : |   :  | .   ; /--`        \   :   | :   : |  '  | 
+,' ,'|    |   : .   / '   '  ; ;   | ;           /  /   /  |   ' '  ;  : 
+'  | |    ;   | |`-'  |   |  | |   : |           \  \   \  '   | ;  .  | 
+|  | :    |   | ;     '   :  ; .   | '___    ___ /   :   | |   | :  |  ' 
+'  : |__  :   ' |     |   |  ' '   ; : .'|  /   /\   /   : '   : | /  ;  
+|  | '.'| :   : :     '   :  | '   | '/  : / ,,/  ',-    . |   | '` ,/   
+;  :    ; |   | :     ;   |.'  |   :    /  \ ''\        ;  ;   :  .'     
+|  ,   /  `---'.|     '---'     \   \ .'    \   \     .'   |   ,.'       
+ ---`-'     `---`                `---`       `--`-,,-'     '---'         
+                                                                         
+
+
+
+
 
 To install and run iPIC3D, you need: 
    cmake (at least version 2.8), MPI and HDF5 (optional).
@@ -14,3 +33,6 @@ To install and run iPIC3D, you need:
 # make sure you create an folder for output as specified in the input file
 # make sure no_of_proc = XLEN x YLEN x ZLEN as specified in the input file
   mpiexec -n no_of_proc ./iPIC3D  inputfilename.inp
+
+# Citation
+# Markidis, Stefano, and Giovanni Lapenta. "Multi-scale simulations of plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.

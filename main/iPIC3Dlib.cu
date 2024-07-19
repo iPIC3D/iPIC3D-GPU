@@ -332,8 +332,7 @@ void c_Solver::CalculateMoments() {
 
   pad_particle_capacities();
 
-
-#if CUDA_ON == false
+#if MOMENT_CUDA_ON == false
   // vectorized assumes that particles are sorted by mesh cell
   if(Parameters::get_VECTORIZE_MOMENTS())
   {
@@ -407,15 +406,16 @@ void c_Solver::CalculateMoments() {
 
   }
 
+  // synchronize
+  cudaErrChk(cudaDeviceSynchronize());
+  for (int i = 0; i < ns; i++)
+  {
+    EMf->communicateGhostP2G(i);
+  }
+
 #endif
 
   EMf->setZeroDerivedMoments();
-
-#if CUDA_ON==true
-  // synchronize
-  cudaErrChk(cudaDeviceSynchronize());
-#endif
-
   // sum all over the species
   EMf->sumOverSpecies();
   // Fill with constant charge the planet
@@ -460,7 +460,7 @@ bool c_Solver::ParticlesMover()
 
     pad_particle_capacities();
 
-#if CUDA_ON==false
+#if MOVER_CUDA_ON==false
     for (int i = 0; i < ns; i++)  // move each species
     {
       // #pragma omp task inout(part[i]) in(grid) target_device(booster)
@@ -510,11 +510,17 @@ bool c_Solver::ParticlesMover()
   
 #endif
 
-    for (int i = 0; i < ns; i++)  // communicate each species
-    {
-      part[i].communicate_particles();
+    for (int i = 0; i < ns; i++){
+      part[i].openbc_particles_outflow();
+	    part[i].separate_and_send_particles();
       part[i].recommunicate_particles_until_done(1);
     }
+
+    // for (int i = 0; i < ns; i++)  // communicate each species
+    // {
+    //   // part[i].communicate_particles();
+      
+    // }
   }
 
   /* -------------------------------------- */
@@ -537,7 +543,7 @@ bool c_Solver::ParticlesMover()
 	  Qremoved[i] = part[i].deleteParticlesInsideSphere2DPlaneXZ(col->getL_square(),col->getx_center(),col->getz_center());
   }
 
-#if CUDA_ON==true
+#if MOVER_CUDA_ON==true
   for(int i=0; i<ns; i++){
     //! copy particles to device, for each species
     if(part[i].getNOP() >= pclsArrayHostPtr[i]->getSize()){ 

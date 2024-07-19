@@ -42,7 +42,11 @@ option(BUILD_SHARED_LIBS "Use shared libraries if ON, static if OFF" ON)
 option(USE_CATALYST "Use Catalyst adaptor" OFF)
 option(USE_BATSRUS "Use BATSRUS flag" OFF)
 option(USE_HDF5 "Use HDF5 library" ON)
-option(CUDA_ON "Enable CUDA" ON)
+option(CUDA_ON "Enable CUDA" ON) # if this is OFF, following two are ignored, set to false
+option(MOMENT_CUDA_ON "Run Moment on CUDA" ON)
+option(MOVER_CUDA_ON "Run Mover on CUDA" ON)
+
+
 
 include(GNUInstallDirs)
 
@@ -193,6 +197,21 @@ endif()
 
 if (CUDA_ON)
   target_compile_definitions(iPIC3Dlib PUBLIC CUDA_ON=true)
+
+  if(MOMENT_CUDA_ON)
+    target_compile_definitions(iPIC3Dlib PUBLIC MOMENT_CUDA_ON=true)
+  else()
+    target_compile_definitions(iPIC3Dlib PUBLIC MOMENT_CUDA_ON=false)
+  endif()
+  if(MOVER_CUDA_ON)
+    target_compile_definitions(iPIC3Dlib PUBLIC MOVER_CUDA_ON=true)
+  else()
+    target_compile_definitions(iPIC3Dlib PUBLIC MOVER_CUDA_ON=false)
+  endif()
+else()
+  target_compile_definitions(iPIC3Dlib PUBLIC CUDA_ON=false)
+  target_compile_definitions(iPIC3Dlib PUBLIC MOMENT_CUDA_ON=false)
+  target_compile_definitions(iPIC3Dlib PUBLIC MOVER_CUDA_ON=false)
 endif()
 
 #

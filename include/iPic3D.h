@@ -116,6 +116,7 @@ namespace iPic3D {
     Timing        *my_clock;
 
 #if CUDA_ON == true
+    int cudaDeviceInNode;
     cudaStream_t*       streams;
 
 	//! Host pointers of objects, to be copied to device, for management later

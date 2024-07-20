@@ -275,9 +275,34 @@ int c_Solver::Init(int argc, char **argv) {
   return 0;
 }
 
-
+/**
+ * @brief CUDA initilaize 
+ */
 int c_Solver::initCUDA(){
 
+  // Set device for this MPI process
+  {
+    MPI_Comm sharedComm; int sharedRank, sharedSize; int deviceInNode;
+    MPI_Comm_split_type(MPIdata::get_PicGlobalComm(), MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &sharedComm); 
+    MPI_Comm_rank(sharedComm, &sharedRank);             // rank in the node
+    MPI_Comm_size(sharedComm, &sharedSize);             // total processes in this node
+    cudaErrChk(cudaGetDeviceCount(&deviceInNode));      // GPU in the node
+    int procPerDevice = sharedSize / deviceInNode;
+    if(procPerDevice <= 1){ // process <= device
+      cudaErrChk(cudaSetDevice(sharedSize));
+      cudaDeviceInNode = sharedSize;
+    }else{
+      if(sharedSize % deviceInNode != 0){ // if proc is not a multiple of device
+        cerr << "Error: Can not map process to device in node. " << "Global COMM rank: " << MPIdata::get_rank() <<  
+            " Shared COMM size: " << sharedSize << " Device Number in Node: " << deviceInNode << endl;
+        MPIdata::instance().finalize_mpi();
+        return (1);
+      }
+      cudaErrChk(cudaSetDevice(sharedRank / procPerDevice)); 
+      cudaDeviceInNode = sharedRank / procPerDevice;
+    }
+  }
+  
 	// init the streams according to the species
   streams = new cudaStream_t[ns];
   for(int i=0; i<ns; i++)cudaErrChk(cudaStreamCreate(streams+i));

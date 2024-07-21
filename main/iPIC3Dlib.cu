@@ -319,7 +319,7 @@ int c_Solver::initCUDA(){
 
   cudaDeviceSynchronize();
 
-  std::cout << "CUDA Init finished" << std::endl;
+  if(MPIdata::get_rank() == 0)std::cout << "CUDA Init finished" << std::endl;
 
   return 0;
 

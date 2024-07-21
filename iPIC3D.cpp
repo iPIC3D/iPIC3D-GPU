@@ -39,7 +39,7 @@ while(j == 0){
 }
 #endif
 #if CUDA_ON==true
-  std::cout << "The Software was compiled with CUDA" << std::endl;
+  if(MPIdata::get_rank() == 0)std::cout << "The Software was compiled with CUDA" << std::endl;
 #endif
 
   iPic3D::c_Solver KCode;

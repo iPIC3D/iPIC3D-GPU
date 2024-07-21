@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
 
     // Compare the files
     bool areEqual = compareVTKFiles(file1, file2, tolerance);
-    std::cout << "The files are " << (areEqual ? "similar within the tolerance" : "not similar within the tolerance") << std::endl;
+    std::cout << "The files are " << (areEqual ? "similar within the tolerance" : "[not] similar within the tolerance") << std::endl;
 
     return EXIT_SUCCESS;
 }

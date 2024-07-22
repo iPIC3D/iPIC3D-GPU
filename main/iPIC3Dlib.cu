@@ -507,20 +507,16 @@ bool c_Solver::ParticlesMover()
 
     }
     cudaErrChk(cudaDeviceSynchronize());
-  
-#endif
-
     for (int i = 0; i < ns; i++){
       part[i].openbc_particles_outflow();
-	    part[i].separate_and_send_particles();
+      part[i].separate_and_send_particles();
+    }
+#endif
+
+    for (int i = 0; i < ns; i++)  // communicate each species
+    {
       part[i].recommunicate_particles_until_done(1);
     }
-
-    // for (int i = 0; i < ns; i++)  // communicate each species
-    // {
-    //   // part[i].communicate_particles();
-      
-    // }
   }
 
   /* -------------------------------------- */

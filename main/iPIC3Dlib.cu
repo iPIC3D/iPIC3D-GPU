@@ -408,12 +408,13 @@ void c_Solver::CalculateMoments() {
 
   // synchronize
   cudaErrChk(cudaDeviceSynchronize());
+  
+#endif
+
   for (int i = 0; i < ns; i++)
   {
     EMf->communicateGhostP2G(i);
   }
-
-#endif
 
   EMf->setZeroDerivedMoments();
   // sum all over the species

@@ -82,5 +82,12 @@ __host__ __device__ inline uint32_t toOneDimIndex(uint32_t dim1, uint32_t dim2, 
     return (index1*dim2*dim3*dim4 + index2*dim3*dim4 + index3*dim4 + index4);
 }
 
+////////////////////////////////// Pinned memory allocation
+
+__host__ inline void* allocateHostPinnedMem(size_t typeSize, size_t num){
+    void* ptr = nullptr;
+    cudaErrChk(cudaHostAlloc(&ptr, typeSize*num, cudaHostAllocDefault));
+    return ptr;
+}
 
 #endif

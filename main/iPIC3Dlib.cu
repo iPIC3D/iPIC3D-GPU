@@ -330,9 +330,8 @@ void c_Solver::CalculateMoments() {
 
   timeTasks_set_main_task(TimeTasks::MOMENTS);
 
-  pad_particle_capacities();
-
 #if MOMENT_CUDA_ON == false
+  pad_particle_capacities();
   // vectorized assumes that particles are sorted by mesh cell
   if(Parameters::get_VECTORIZE_MOMENTS())
   {
@@ -459,9 +458,8 @@ bool c_Solver::ParticlesMover()
     // Should change this to add background field
     EMf->set_fieldForPcls();
 
-    pad_particle_capacities();
-
 #if MOVER_CUDA_ON==false
+    pad_particle_capacities();
     for (int i = 0; i < ns; i++)  // move each species
     {
       // #pragma omp task inout(part[i]) in(grid) target_device(booster)

@@ -73,7 +73,7 @@ namespace iPic3D {
 
     int Init(int argc, char **argv);
     int initCUDA();
-    void CalculateMoments();
+    void CalculateMoments(bool isInit);
     void CalculateField(int cycle);
     bool ParticlesMover();
     void CalculateB();

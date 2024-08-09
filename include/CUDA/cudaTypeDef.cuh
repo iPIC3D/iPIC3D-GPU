@@ -67,6 +67,17 @@ __host__ inline T* copyToDevice(T* objectOnHost, cudaStream_t stream = 0){
     return ptr;
 }
 
+template <typename T>
+__host__ inline T* copyArrayToDevice(T* objectOnHost, int numberOfElement, cudaStream_t stream = 0){
+    if(objectOnHost == nullptr)throw std::runtime_error("CopyToDevice: can not copy a nullptr to device.");
+    T* ptr = nullptr;
+    cudaErrChk(cudaMallocAsync(&ptr, numberOfElement * sizeof(T), stream));
+    cudaErrChk(cudaMemcpyAsync(ptr, objectOnHost, numberOfElement * sizeof(T), cudaMemcpyDefault, stream));
+
+    cudaErrChk(cudaStreamSynchronize(stream));
+    return ptr;
+}
+
 ////////////////////////////////// One dimenstion to high dim index
 
 /**

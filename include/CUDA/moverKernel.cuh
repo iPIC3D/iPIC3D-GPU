@@ -6,40 +6,9 @@
 #include "particleArrayCUDA.cuh"
 #include "EMfields3D.h"
 #include "gridCUDA.cuh"
+#include "particleExchange.cuh"
+#include "hashedSum.cuh"
 
-
-
-/*
-class moverOutflowParameter
-{
-    public:
-
-    uint32_t nop; // number of particles (of the species)
-
-    bool isBoundaryProcess_P;
-    bool openXleft, openYleft, openZleft,
-            openXright, openYright, openZright;
-
-
-    __host__ moverOutflowParameter(VirtualTopology3D* vct, Particles3D* p3D)
-    {
-
-        isBoundaryProcess_P = vct->isBoundaryProcess_P();
-        // The below is OpenBC outflow for all other boundaries
-        using namespace BCparticles;
-
-        // the open boundary out condition 3
-        openXleft = !vct->getPERIODICX_P() && vct->noXleftNeighbor_P() && p3D->bcPfaceXleft == OPENBCOut;
-        openYleft = !vct->getPERIODICY_P() && vct->noYleftNeighbor_P() && p3D->bcPfaceYleft == OPENBCOut;
-        openZleft = !vct->getPERIODICZ_P() && vct->noZleftNeighbor_P() && p3D->bcPfaceZleft == OPENBCOut;
-
-        openXright = !vct->getPERIODICX_P() && vct->noXrghtNeighbor_P() && p3D->bcPfaceXright == OPENBCOut;
-        openYright = !vct->getPERIODICY_P() && vct->noYrghtNeighbor_P() && p3D->bcPfaceYright == OPENBCOut;
-        openZright = !vct->getPERIODICZ_P() && vct->noZrghtNeighbor_P() && p3D->bcPfaceZright == OPENBCOut;
-    }
-
-};
-*/
 
 class moverParameter
 {
@@ -48,7 +17,9 @@ public: //particle arrays
 
     particleArrayCUDA* pclsArray; // default main array
 
-    arrayCUDA<uint32_t>* departureArray; // a helper array for marking exiting particles
+    departureArrayType* departureArray; // a helper array for marking exiting particles
+
+    hashedSum* hashedSumArray; // 8 hashed sum
 
 
 public: // common parameter
@@ -77,17 +48,20 @@ public:
     {
         // create the particle array, stream 0
         pclsArray = particleArrayCUDA(p3D).copyToDevice();
-        departureArray = arrayCUDA<uint32_t, 64>(p3D->getNOP() * 1.5).copyToDevice();
+        departureArray = departureArrayType(p3D->getNOP() * 1.5).copyToDevice();
 
     }
 
     //! @param pclsArrayCUDAPtr It should be a device pointer
-    __host__ moverParameter(Particles3D* p3D, particleArrayCUDA* pclsArrayCUDAPtr)
+    __host__ moverParameter(Particles3D* p3D, particleArrayCUDA* pclsArrayCUDAPtr, 
+                            departureArrayType* departureArrayCUDAPtr, hashedSum* hashedSumArrayCUDAPtr)
         : dt(p3D->dt), qom(p3D->qom), c(p3D->c), NiterMover(p3D->NiterMover), DFIELD_3or4(::DFIELD_3or4),
         umax(p3D->umax), umin(p3D->umin), vmax(p3D->vmax), vmin(p3D->vmin), wmax(p3D->wmax), wmin(p3D->wmin)
     {
         // create the particle array, stream 0
         pclsArray = pclsArrayCUDAPtr;
+        departureArray = departureArrayCUDAPtr;
+        hashedSumArray = hashedSumArrayCUDAPtr;
 
     }
 };

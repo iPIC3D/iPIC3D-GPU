@@ -3,7 +3,7 @@
 #include "arrayCUDA.cuh"
 #include "hashedSum.cuh"
 #include "particleArrayCUDA.cuh"
-#include "departureArray.cuh"
+#include "particleExchange.cuh"
 
 
 
@@ -30,6 +30,7 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
 
     __shared__ int x = 0; // x, the number of exiting particles  , can be a increasing array
     if(threadIdx.x == 0)for(int i=0; i < 6; i++)x += hashedSumArray[i].getSum();
+    if(pidx == 0)stayedParticle = pclsArray->getNOP() - x; // for second Moment kernel
 
     auto departureElement = departureArray->getArray() + pidx;
     // the remained are 1. exiting particles in the front part 2. rear part

@@ -22,6 +22,7 @@
 #include "moverKernel.cuh"
 #include "gridCUDA.cuh"
 #include "particleArrayCUDA.cuh"
+#include "hashedSum.cuh"
 
 using commonType = cudaCommonType;
 
@@ -168,6 +169,7 @@ __global__ void moverKernel(moverParameter *moverParam,
 
     // prepare the departure array
 
+    prepareDepartureArray(pcl, moverParam->departureArray, grid, moverParam->hashedSumArray, pidx);
     
 }
 
@@ -208,6 +210,45 @@ __host__ __device__ void get_field_components_for_cell(
 }
 
 
+
+__device__ void prepareDepartureArray(SpeciesParticle* pcl, departureArrayType* departureArray, grid3DCUDA* grid, hashedSum* hashedSumArray, uint32_t pidx){
+
+    departureArrayElementType element;
+
+    if(pcl->get_x() < grid->xStart)
+    {
+        element.dest = 1;
+    }
+    else if(pcl->get_x() > grid->xEnd)
+    {
+        element.dest = 2;
+    }
+    else if(pcl->get_y() < grid->yStart)
+    {
+        element.dest = 3;
+    }
+    else if(pcl->get_y() > grid->yEnd)
+    {
+        element.dest = 4;
+    }
+    else if(pcl->get_z() < grid->zStart)
+    {
+        element.dest = 5;
+    }
+    else if(pcl->get_z() > grid->zEnd)
+    {
+        element.dest = 6;
+    }
+    else element.dest = 0;
+
+    if(element.dest != 0){
+        element.hashedId = hashedSumArray[element.dest - 1].add(pidx);
+    }else{
+        element.hashedId = 0;
+    }
+
+    departureArray->getArray()[pidx] = element;
+}
 
 
 

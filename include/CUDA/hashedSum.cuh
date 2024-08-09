@@ -11,6 +11,7 @@ private:
 
     int bucketNum;
     int* bucket = nullptr;
+    int sum;
 
 private:
 
@@ -47,6 +48,8 @@ public:
         return index;
     }
     __host__ __device__ int getSum(){
+        if(sum != -1)return sum;
+        
         int sum = 0;
         for(int i=0; i < bucketNum; i++)sum += bucket[i];
         return sum;
@@ -54,6 +57,7 @@ public:
 
     __host__ __device__ void resetBucket(){
         for(int i=0; i < bucketNum; i++)bucket[i] = 0;
+        sum = -1;
     }
 
     __host__ __device__ void resize(int buckertNum){

@@ -33,6 +33,12 @@ __host__ __device__ void get_field_components_for_cell(
     cudaTypeArray1<commonType> fieldForPcls, grid3DCUDA *grid,
     int cx, int cy, int cz);
 
+__device__ void prepareDepartureArray(SpeciesParticle* pcl, 
+                                    departureArrayType* departureArray, 
+                                    grid3DCUDA* grid, 
+                                    hashedSum* hashedSumArray, 
+                                    uint32_t pidx);
+
 __global__ void moverKernel(moverParameter *moverParam,
                             cudaTypeArray1<commonType> fieldForPcls,
                             grid3DCUDA *grid)

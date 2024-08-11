@@ -119,7 +119,8 @@ namespace iPic3D {
 
 #if CUDA_ON == true
     cudaStream_t*       streams;
-    __device__ int stayedParticle = 0;
+
+    int* stayedParticle; // stayed particles for each species
 
 	//! Host pointers of objects, to be copied to device, for management later
 	  particleArrayCUDA**   pclsArrayHostPtr;       // array of pointer, point to objects on host

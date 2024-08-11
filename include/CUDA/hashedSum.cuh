@@ -5,12 +5,13 @@
 #include "cudaTypeDef.cuh"
 
 
+
 class hashedSum{
 
 private:
 
     int bucketNum;
-    int* bucket = nullptr;
+    int bucket[10];
     int sum;
 
 private:
@@ -22,52 +23,47 @@ private:
 public:
 
     __host__ hashedSum(int bucketNum):bucketNum(bucketNum){
-        cudaErrChk(cudaMalloc(&bucket, bucketNum * sizeof(int)));
+        // if(bucketNum > bucketSize)throw std::out_of_range("[!]hashedSum out of range");
         resetBucket();
     }
 
-    __device__ hashedSum(int bucketNum):bucketNum(bucketNum){
-        bucket = new int[bucketNum];
-        resetBucket();
-    }
+    // __device__ hashedSum(int bucketNum):bucketNum(bucketNum){
+    //     bucket = new int[bucketNum];
+    //     resetBucket();
+    // }
 
-    __host__ __device__ hashedSum(int bucketNum, int* bucketCUDAPtr):bucketNum(bucketNum){
-        bucket = bucketCUDAPtr;
-        resetBucket();
-    }
+    // __host__ hashedSum(int bucketNum, int* bucketCUDAPtr):bucketNum(bucketNum){
+    //     bucket = bucketCUDAPtr;
+    //     resetBucket();
+    // }
 
-    __host__ __device__ int add(int key){
-        return atomicAdd(&(bucket[hash(key)]), 1);
-    }
+    __device__ int add(int key);
 
     __host__ __device__ int getIndex(int key, int id){
         int index = 0;
         for(int i=0; i < hash(key); i++)index += bucket[i];
-        index += bucket[hash(key)];
+        index += id;
 
         return index;
     }
     __host__ __device__ int getSum(){
         if(sum != -1)return sum;
         
-        int sum = 0;
         for(int i=0; i < bucketNum; i++)sum += bucket[i];
         return sum;
     }
 
-    __host__ __device__ void resetBucket(){
-        for(int i=0; i < bucketNum; i++)bucket[i] = 0;
+    __host__ void resetBucket(){
+        memset(bucket, 0, bucketNum * sizeof(int));
         sum = -1;
     }
 
-    __host__ __device__ void resize(int buckertNum){
-        if(bucket != nullptr)delete[] bucket;
+    __host__ void resize(int buckertNum){
         this->bucketNum = buckertNum;
-        bucket = new int[bucketNum];
+        resetBucket();
     }
 
-    __host__ __device__ ~hashedSum(){
-        delete[] bucket;
+    __host__ ~hashedSum(){
     }
 
 };

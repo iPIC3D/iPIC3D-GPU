@@ -16,10 +16,10 @@
  * 							For the filler particles in rear part.
  */
 __global__ void sortingKernel1(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
-								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray){
+								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int x){
 
 	uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
-	uint x = hashedSumArray->getSum();
+
     if(pidx >= x)return; 		
 	pidx += (pclsArray->getNOP() - x);			// rear part of pclArray
 
@@ -49,10 +49,10 @@ __global__ void sortingKernel1(particleArrayCUDA* pclsArray, departureArrayType*
  * 							For the exiting particles in front part.
  */
 __global__ void sortingKernel2(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
-								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray){
+								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int stayedParticle){
 
 	uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(pidx >= hashedSumArray->getSum())return; 		// front part of pclArray
+    if(pidx >= stayedParticle)return; 		// front part of pclArray
 
 	auto departureElement = departureArray->getArray() + pidx;
     if(departureElement->dest == 0)return; 				// exiting particles, the holes

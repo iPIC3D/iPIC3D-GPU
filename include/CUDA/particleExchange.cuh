@@ -3,8 +3,8 @@
 
 #include "cudaTypeDef.cuh"
 #include "arrayCUDA.cuh"
+#include "hashedSum.cuh"
 
-extern __device__ int stayedParticle; // updated after the Mover kernel, by the exitingKernel
 
 typedef struct departureArrayElement_s{
     uint32_t dest;          // destination of the particle exchange
@@ -23,10 +23,10 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
                                 exitingArray* exitingArray, hashedSum* hashedSumArray);
 
 __global__ void sortingKernel1(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
-								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray);
+								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int x);
 
 __global__ void sortingKernel2(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
-								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray);
+								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int stayedParticle);
 
 
 #endif

@@ -140,7 +140,8 @@ __global__ void momentKernelStayed(momentParameter* momentParam,
 
 __global__ void momentKernelNew(momentParameter* momentParam,
                                 grid3DCUDA* grid,
-                                cudaTypeArray1<commonType> moments)
+                                cudaTypeArray1<commonType> moments,
+                                int stayedParticle)
 {
 
     uint pidx = stayedParticle + blockIdx.x * blockDim.x + threadIdx.x;

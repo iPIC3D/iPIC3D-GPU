@@ -28,10 +28,9 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
     uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
     if(pidx >= pclsArray->getNOP())return;
 
-    __shared__ int x = 0; // x, the number of exiting particles  , can be a increasing array
-    if(threadIdx.x == 0)for(int i=0; i < 6; i++)x += hashedSumArray[i].getSum();
-    if(pidx == 0)stayedParticle = pclsArray->getNOP() - x; // for second Moment kernel
-
+    __shared__ int x; // x, the number of exiting particles  , can be a increasing array
+    if(threadIdx.x == 0){ x = 0; for(int i=0; i < 6; i++)x += hashedSumArray[i].getSum(); }
+    
     auto departureElement = departureArray->getArray() + pidx;
     // the remained are 1. exiting particles in the front part 2. rear part
     if(pidx < (pclsArray->getNOP()-x) && departureElement->dest == 0)return; 

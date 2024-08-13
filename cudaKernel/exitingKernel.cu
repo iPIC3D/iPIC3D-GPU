@@ -30,6 +30,7 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
 
     __shared__ int x; // x, the number of exiting particles  , can be a increasing array
     if(threadIdx.x == 0){ x = 0; for(int i=0; i < 6; i++)x += hashedSumArray[i].getSum(); }
+    __syncthreads();
     
     auto departureElement = departureArray->getArray() + pidx;
     // the remained are 1. exiting particles in the front part 2. rear part

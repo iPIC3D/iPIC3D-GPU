@@ -50,7 +50,7 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
         memcpy(exitingArray->getArray() + index, pcl, sizeof(SpeciesParticle));
 
 
-        if(pidx > (pclsArray->getNOP()-x))return;
+        if(pidx >= (pclsArray->getNOP()-x))return;
         // holes
         departureElement->hashedId = hashedSumArray[6].add(pidx);
 

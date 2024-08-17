@@ -600,7 +600,7 @@ bool c_Solver::ParticlesMover()
       auto x = results[i].get();
       stayedParticle[i] = pclsArrayHostPtr[i]->getNOP() - x;
 
-      part[i].openbc_particles_outflow();
+      // part[i].openbc_particles_outflow();
       auto a = part[i].separate_and_send_particles();
 
       // if(a != x)cout << "I'm sick " << "x: " << x << " sent: " << a << " Now NOP: " << part[i].getNOP() << endl;
@@ -618,21 +618,21 @@ bool c_Solver::ParticlesMover()
   /* Repopulate the buffer zone at the edge */
   /* -------------------------------------- */
 
-  for (int i=0; i < ns; i++) {
-    if (col->getRHOinject(i)>0.0)
-      part[i].repopulate_particles();
-  }
+  // for (int i=0; i < ns; i++) {
+  //   if (col->getRHOinject(i)>0.0)
+  //     part[i].repopulate_particles();
+  // }
 
   /* --------------------------------------- */
   /* Remove particles from depopulation area */
   /* --------------------------------------- */
-  if (col->getCase()=="Dipole") {
-    for (int i=0; i < ns; i++)
-      Qremoved[i] = part[i].deleteParticlesInsideSphere(col->getL_square(),col->getx_center(),col->gety_center(),col->getz_center());
-  }else if (col->getCase()=="Dipole2D") {
-	for (int i=0; i < ns; i++)
-	  Qremoved[i] = part[i].deleteParticlesInsideSphere2DPlaneXZ(col->getL_square(),col->getx_center(),col->getz_center());
-  }
+  // if (col->getCase()=="Dipole") {
+  //   for (int i=0; i < ns; i++)
+  //     Qremoved[i] = part[i].deleteParticlesInsideSphere(col->getL_square(),col->getx_center(),col->gety_center(),col->getz_center());
+  // }else if (col->getCase()=="Dipole2D") {
+	// for (int i=0; i < ns; i++)
+	//   Qremoved[i] = part[i].deleteParticlesInsideSphere2DPlaneXZ(col->getL_square(),col->getx_center(),col->getz_center());
+  // }
 
 #if MOVER_CUDA_ON==true
   for(int i=0; i<ns; i++){

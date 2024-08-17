@@ -588,6 +588,7 @@ bool c_Solver::ParticlesMover()
     auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
     //! copy fieldForPcls to device, for every species 
     cudaErrChk(cudaMemcpyAsync(fieldForPclCUDAPtr, (void*)&(EMf->get_fieldForPcls().get(0,0,0,0)), gridSize*8*sizeof(cudaCommonType), cudaMemcpyDefault, streams[0]));
+    cudaErrChk(cudaStreamSynchronize(streams[0]));
     
     std::future<int> results[ns];
     for(int i=0; i<ns; i++){

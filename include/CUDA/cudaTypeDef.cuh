@@ -101,4 +101,10 @@ __host__ inline void* allocateHostPinnedMem(size_t typeSize, size_t num){
     return ptr;
 }
 
+////////////////////////////////// Round up to
+template <typename T>
+__host__ __device__ inline T roundUpTo(T number, T multiple) {
+    return ((number + multiple - 1) / multiple) * multiple;
+}
+
 #endif

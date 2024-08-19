@@ -49,7 +49,7 @@ __global__ void momentKernelStayed(momentParameter* momentParam,
     uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
     auto pclsArray = momentParam->pclsArray;
     if(pidx >= pclsArray->getNOP())return;
-    if(momentParam->departureArray->getArray()[pidx].dest != 0)return; // return the exiting particles
+    if(momentParam->departureArray->getArray()[pidx].dest != 0)return; // return the exiting particles, which are out of current domian
 
     // can be shared
     const commonType inv_dx = 1.0 / grid->dx;

@@ -479,25 +479,26 @@ int c_Solver::cudaLauncherAsync(const int species){
   cudaEvent_t event1, event2;
   cudaErrChk(cudaEventCreateWithFlags(&event1, cudaEventDisableTiming));
   cudaErrChk(cudaEventCreateWithFlags(&event2, cudaEventDisableTiming));
-
   auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
 
-  moverKernel<<<pclsArrayHostPtr[species]->getNOP()/256 + 1, 256, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+  // Mover
+  moverKernel<<<roundUpTo((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
   cudaErrChk(cudaEventRecord(event1, streams[species]));
+  // Moment stayed
   cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[species], 0, gridSize*10*sizeof(cudaCommonType), streams[species]));  // set moments to 0
-  momentKernelStayed<<<(pclsArrayHostPtr[species]->getNOP()/256 + 1), 256, 0, streams[species] >>>
+  momentKernelStayed<<<roundUpTo((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species] >>>
                           (momentParamCUDAPtr[species], grid3DCUDACUDAPtr, momentsCUDAPtr[species]);
 
+  // Copy 6 exiting hashedSum to host
   cudaErrChk(cudaStreamWaitEvent(streams[species+ns], event1));
   cudaErrChk(cudaMemcpyAsync(hashedSumArrayHostPtr[species], hashedSumArrayCUDAPtr[species], 
                               6*sizeof(hashedSum), cudaMemcpyDefault, streams[species+ns]));
 
+  // After Mover
   cudaErrChk(cudaStreamSynchronize(streams[species+ns]));
-  // now we have the hashedSum for 6 directions
   int x = 0;
   for(int i=0; i<6; i++)x += hashedSumArrayHostPtr[species][i].getSum();
   if(x > exitingArrayHostPtr[species]->getSize()){ 
-    cout << "exiting amd filler expand. " << "Now: " << exitingArrayHostPtr[species]->getSize() << " x: " << x << endl;
     // prepare the exitingArray
     exitingArrayHostPtr[species]->expand(x * 1.5, streams[species+ns]);
     fillerBufferArrayHostPtr[species]->expand(x * 1.5, streams[species+ns]);
@@ -513,23 +514,23 @@ int c_Solver::cudaLauncherAsync(const int species){
     auto pclArray = part[species].get_pcl_array();
     pclArray.reserve(x * 1.5);
   }
-  exitingKernel<<<pclsArrayHostPtr[species]->getNOP()/256 + 1, 256, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species], 
+  exitingKernel<<<roundUpTo((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species], 
                 departureArrayCUDAPtr[species], exitingArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
   cudaErrChk(cudaEventRecord(event2, streams[species+ns]));
-  // what's wrong?
+  // Copy exiting particle to host
   cudaErrChk(cudaMemcpyAsync(part[species].get_pcl_array().getList(), exitingArrayHostPtr[species]->getArray(), 
                               x*sizeof(SpeciesParticle), cudaMemcpyDefault, streams[species+ns]));
   part[species].get_pcl_array().setSize(x);
 
-
+  // Sorting
   cudaErrChk(cudaStreamWaitEvent(streams[species], event2));
-  sortingKernel1<<<x/128 + 1, 128, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
+  sortingKernel1<<<roundUpTo(x, 128), 128, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
                                                           fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+7, x);
-  sortingKernel2<<<(pclsArrayHostPtr[species]->getNOP()-x)/128 + 1, 128, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
+  sortingKernel2<<<roundUpTo((int)(pclsArrayHostPtr[species]->getNOP()-x), 128), 128, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
                                                           fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+6, pclsArrayHostPtr[species]->getNOP()-x);
 
-
-  cudaErrChk(cudaStreamSynchronize(streams[species+ns]));
+  
+  cudaErrChk(cudaStreamSynchronize(streams[species+ns])); // exiting particle copied
   return x;
 }
 
@@ -602,9 +603,6 @@ bool c_Solver::ParticlesMover()
 
       // part[i].openbc_particles_outflow();
       auto a = part[i].separate_and_send_particles();
-
-      // if(a != x)cout << "I'm sick " << "x: " << x << " sent: " << a << " Now NOP: " << part[i].getNOP() << endl;
-      // else cout << "I'm fine " << "x: " << x << " sent: " << a << " Now NOP: " << part[i].getNOP() << endl;
     }
 #endif
 
@@ -636,12 +634,12 @@ bool c_Solver::ParticlesMover()
 
 #if MOVER_CUDA_ON==true
   for(int i=0; i<ns; i++){
+
     // now the host array contains the entering particles
     if((part[i].getNOP() + stayedParticle[i]) >= pclsArrayHostPtr[i]->getSize()){ // not enough size, expand the device array size
-    cout << "pclDevice amd departure expand" << endl;
-
       pclsArrayHostPtr[i]->expand((part[i].getNOP() + stayedParticle[i]) * 1.5, streams[i]);
       departureArrayHostPtr[i]->expand(pclsArrayHostPtr[i]->getSize(), streams[i]);
+      cudaErrChk(cudaMemcpyAsync(departureArrayCUDAPtr[i], departureArrayHostPtr[i], sizeof(departureArrayType), cudaMemcpyDefault, streams[i]));
     }
     // now enough size on device pcls array, copy particles
     cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getpcls() + stayedParticle[i], 
@@ -652,16 +650,14 @@ bool c_Solver::ParticlesMover()
     pclsArrayHostPtr[i]->setNOE(stayedParticle[i] + part[i].getNOP()); 
     // copy the new object to device, device has new copy of the object now
     cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i], sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
-    cudaErrChk(cudaMemcpyAsync(departureArrayCUDAPtr[i], departureArrayHostPtr[i], sizeof(departureArrayType), cudaMemcpyDefault, streams[i]));
-
+    
     // moment for entering particle
-    momentKernelNew<<<(part[i].getNOP()/128 + 1), 128, 0, streams[i] >>>
+    momentKernelNew<<<roundUpTo(part[i].getNOP(), 128), 128, 0, streams[i] >>>
                       (momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
 
-    // reset the departureArray and hashedSum, no need for departureArray it will be cleared in Mover
-    // cudaErrChk(cudaMemsetAsync(departureArrayHostPtr[i]->getArray(), 0, departureArrayHostPtr[i]->getSize() * sizeof(departureArrayElementType), streams[i+ns]));
+    // reset the hashedSum, no need for departureArray it will be cleared in Mover
     for(int j=0; j<8; j++)hashedSumArrayHostPtr[i][j].resetBucket();
-    cudaErrChk(cudaMemcpyAsync(hashedSumArrayCUDAPtr[i], hashedSumArrayHostPtr[i], 8 * sizeof(hashedSum), cudaMemcpyDefault, streams[i+ns]));
+    cudaErrChk(cudaMemcpyAsync(hashedSumArrayCUDAPtr[i], hashedSumArrayHostPtr[i], 8 * sizeof(hashedSum), cudaMemcpyDefault, streams[i]));
 
   }
 

@@ -482,11 +482,11 @@ int c_Solver::cudaLauncherAsync(const int species){
   auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
 
   // Mover
-  moverKernel<<<roundUpTo((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+  moverKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
   cudaErrChk(cudaEventRecord(event1, streams[species]));
   // Moment stayed
   cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[species], 0, gridSize*10*sizeof(cudaCommonType), streams[species]));  // set moments to 0
-  momentKernelStayed<<<roundUpTo((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species] >>>
+  momentKernelStayed<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species] >>>
                           (momentParamCUDAPtr[species], grid3DCUDACUDAPtr, momentsCUDAPtr[species]);
 
   // Copy 6 exiting hashedSum to host
@@ -514,7 +514,7 @@ int c_Solver::cudaLauncherAsync(const int species){
     auto pclArray = part[species].get_pcl_array();
     pclArray.reserve(x * 1.5);
   }
-  exitingKernel<<<roundUpTo((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species], 
+  exitingKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species], 
                 departureArrayCUDAPtr[species], exitingArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
   cudaErrChk(cudaEventRecord(event2, streams[species+ns]));
   // Copy exiting particle to host
@@ -524,9 +524,9 @@ int c_Solver::cudaLauncherAsync(const int species){
 
   // Sorting
   cudaErrChk(cudaStreamWaitEvent(streams[species], event2));
-  sortingKernel1<<<roundUpTo(x, 128), 128, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
+  sortingKernel1<<<getGridSize(x, 128), 128, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
                                                           fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+7, x);
-  sortingKernel2<<<roundUpTo((int)(pclsArrayHostPtr[species]->getNOP()-x), 128), 128, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
+  sortingKernel2<<<getGridSize((int)(pclsArrayHostPtr[species]->getNOP()-x), 256), 256, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
                                                           fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+6, pclsArrayHostPtr[species]->getNOP()-x);
 
   
@@ -652,7 +652,7 @@ bool c_Solver::ParticlesMover()
     cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i], sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
     
     // moment for entering particle
-    momentKernelNew<<<roundUpTo(part[i].getNOP(), 128), 128, 0, streams[i] >>>
+    momentKernelNew<<<getGridSize(part[i].getNOP(), 128), 128, 0, streams[i] >>>
                       (momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
 
     // reset the hashedSum, no need for departureArray it will be cleared in Mover

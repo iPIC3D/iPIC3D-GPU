@@ -45,11 +45,7 @@ void OutputWrapperFPP::init_output_files(
     RestartDirName = col->getRestartDirName();
     int restart_status = col->getRestart_status();
     output_file = SaveDirName + "/proc"   + num_proc_str + ".hdf";
-<<<<<<< HEAD
-    restart_file= SaveDirName + "/restart"+ num_proc_str + ".hdf";
-=======
     restart_file= RestartDirName + "/restart"+ num_proc_str + ".hdf";
->>>>>>> other-repo/master
 
     // Initialize the output (simulation results and restart file)
     hdf5_agent.set_simulation_pointers(EMf, grid, vct, col);

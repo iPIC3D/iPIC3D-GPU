@@ -143,6 +143,8 @@ if(CUDA_ON)
   set_property(TARGET iPIC3Dlib PROPERTY CUDA_STANDARD 17)
   set_property(TARGET iPIC3Dlib PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
   set_property(TARGET iPIC3Dlib PROPERTY LINK_OPTIONS -fno-lto)
+
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
 endif()
 
 set(include_path include)

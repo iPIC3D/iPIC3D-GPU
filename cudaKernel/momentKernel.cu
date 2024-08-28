@@ -51,16 +51,16 @@ __global__ void momentKernelStayed(momentParameter* momentParam,
     if(pidx >= pclsArray->getNOP())return;
     if(momentParam->departureArray->getArray()[pidx].dest != 0)return; // return the exiting particles, which are out of current domian
 
-    // can be shared
-    const commonType inv_dx = 1.0 / grid->dx;
-    const commonType inv_dy = 1.0 / grid->dy;
-    const commonType inv_dz = 1.0 / grid->dz;
-    const int nxn = grid->nxn; // nxn
-    const int nyn = grid->nyn;
-    const int nzn = grid->nzn;
-    const commonType xstart = grid->xStart; // x start
-    const commonType ystart = grid->yStart;
-    const commonType zstart = grid->zStart;
+    // can be const
+    const commonType& inv_dx = grid->invdx;
+    const commonType& inv_dy = grid->invdy;
+    const commonType& inv_dz = grid->invdz;
+    const int& nxn = grid->nxn; // nxn
+    const int& nyn = grid->nyn;
+    const int& nzn = grid->nzn;
+    const commonType& xstart = grid->xStart; // x start
+    const commonType& ystart = grid->yStart;
+    const commonType& zstart = grid->zStart;
     
 
     const SpeciesParticle &pcl = pclsArray->getpcls()[pidx];

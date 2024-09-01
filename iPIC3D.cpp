@@ -62,8 +62,14 @@ while(j == 0){
     
     KCode.WriteOutput(i);
     // print out total time for all tasks
-    //timeTasks.print_cycle_times(i);
+#ifdef LOG_TASKS_TOTAL_TIME
+    timeTasks.print_cycle_times(i);
+#endif
   }
+
+#ifdef LOG_TASKS_TOTAL_TIME
+    timeTasks.print_tasks_total_times();
+#endif
 
   KCode.Finalize();
  }

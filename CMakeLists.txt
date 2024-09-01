@@ -47,6 +47,7 @@ option(MOMENT_CUDA_ON "Run Moment on CUDA" ON)
 option(MOVER_CUDA_ON "Run Mover on CUDA" ON)
 
 
+option(BENCH_MARK "Print tasks time" OFF)
 
 include(GNUInstallDirs)
 
@@ -233,6 +234,16 @@ target_link_libraries(
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(DEBUG_MODE)
+endif()
+
+if(BENCH_MARK)
+target_compile_definitions(iPIC3Dlib PUBLIC LOG_TASKS_TOTAL_TIME)
+target_compile_definitions(iPIC3D PUBLIC LOG_TASKS_TOTAL_TIME)
+endif()
+
+if(BENCH_MARK)
+target_compile_definitions(iPIC3Dlib PUBLIC LOG_TASKS_TOTAL_TIME)
+target_compile_definitions(iPIC3D PUBLIC LOG_TASKS_TOTAL_TIME)
 endif()
 
 ## to save the executable in the folder where the CMakeLists.txt file is, i.e. CMAKE_CURRENT_SOURCE_DIR

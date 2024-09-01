@@ -42,6 +42,7 @@ option(BUILD_SHARED_LIBS "Use shared libraries if ON, static if OFF" ON)
 option(USE_CATALYST "Use Catalyst adaptor" OFF)
 option(USE_BATSRUS "Use BATSRUS flag" OFF)
 option(USE_HDF5 "Use HDF5 library" OFF)
+option(BENCH_MARK "Print tasks time" ON)
 
 include(GNUInstallDirs)
 
@@ -186,6 +187,11 @@ target_link_libraries(
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-DDEBUG_MODE)
+endif()
+
+if(BENCH_MARK)
+target_compile_definitions(iPIC3Dlib PUBLIC LOG_TASKS_TOTAL_TIME)
+target_compile_definitions(iPIC3D PUBLIC LOG_TASKS_TOTAL_TIME)
 endif()
 
 ## to save the executable in the folder where the CMakeLists.txt file is, i.e. CMAKE_CURRENT_SOURCE_DIR

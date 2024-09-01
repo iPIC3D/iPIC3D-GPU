@@ -95,6 +95,10 @@ class TimeTasks
 
   TimeTasks() {
     resetCycle();
+#ifdef LOG_TASKS_TOTAL_TIME
+    for(int e=0;e<NUMBER_OF_TASKS;e++)
+    tasksTotalTime[e] = 0;      
+#endif
   }
 
   // monitoring
@@ -174,6 +178,14 @@ class TimeTasks
   //double allreduce[NUMBER_OF_TASKS];
   int stack_depth[NUMBER_OF_TASKS];
   double start_times[NUMBER_OF_TASKS];
+
+#ifdef LOG_TASKS_TOTAL_TIME
+public:
+  void print_tasks_total_times();
+private:
+  double tasksTotalTime[NUMBER_OF_TASKS];      
+
+#endif
 };
 
 extern TimeTasks timeTasks;

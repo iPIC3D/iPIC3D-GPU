@@ -6,7 +6,7 @@ mkdir build
 
 cd build
 
-cmake ../..
+cmake -DBENCH_MARK=ON ../..
 make -j
 
 exit $?

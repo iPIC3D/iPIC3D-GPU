@@ -1,7 +1,9 @@
 #!/bin/bash
 
-echo "[*]Building iPIC3D"
 
+./clean.sh
+
+echo "[*]Building iPIC3D"
 ./build.sh > /dev/null 2>&1
 
 if [ $? -ne 0 ]; then
@@ -42,3 +44,5 @@ for dir in */; do
         echo "[!]Directory $dir contains multiple .inp files."
     fi
 done
+
+./outputCSV.sh

@@ -48,7 +48,7 @@ option(MOVER_CUDA_ON "Run Mover on CUDA" ON)
 
 
 option(BENCH_MARK "Print tasks time" OFF)
-option(USE_OPENMP "Use OpenMP in support loops" ON) # must delete all cmake cache if you change this option
+option(USE_OPENMP "Use OpenMP in supported loops" OFF) # must delete all cmake cache if you change this option
 
 include(GNUInstallDirs)
 

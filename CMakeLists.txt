@@ -48,6 +48,7 @@ option(MOVER_CUDA_ON "Run Mover on CUDA" ON)
 
 
 option(BENCH_MARK "Print tasks time" OFF)
+option(USE_OPENMP "Use OpenMP in support loops" ON) # must delete all cmake cache if you change this option
 
 include(GNUInstallDirs)
 
@@ -105,8 +106,12 @@ if (USE_HDF5)
   endif()
 endif()
 
-# Find MPI
+# Find MPI and OpenMP
 find_package(MPI REQUIRED COMPONENTS CXX)
+if(USE_OPENMP)
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+endif()
+
 
 #
 # Source file list
@@ -162,23 +167,27 @@ target_include_directories(
 #
 # Link external libraries
 #
-target_link_libraries(
-  iPIC3Dlib
-  PUBLIC MPI::MPI_CXX
-  PRIVATE ${HDF5_C_HL_TARGET}
-  )
-if(CUDA_ON) # link CUDA library
-  target_link_libraries(
-    iPIC3Dlib
-    PRIVATE cuda cudart 
-    )
+set(linkLibraries MPI::MPI_CXX ${HDF5_C_HL_TARGET})
+
+if(USE_OPENMP)
+    list(APPEND linkLibraries OpenMP::OpenMP_CXX)
 endif()
+
+if(USE_CUDA)
+    list(APPEND linkLibraries cuda)
+    list(APPEND linkLibraries cudart)
+endif()
+
 if (USE_CATALYST)
-  target_link_libraries(
-    iPIC3Dlib
-    PUBLIC iPICAdaptor
-    )
+    list(APPEND linkLibraries iPICAdaptor)
 endif()
+
+target_link_libraries(
+    iPIC3Dlib
+    PUBLIC ${linkLibraries}
+)
+
+
 
 #
 # Macro definitions

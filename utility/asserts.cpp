@@ -27,9 +27,11 @@
 #include "asserts.h"
 
 void assert_error(const char *file, int line, const char *func, const char *op, const char *lhs_str, const char *rhs_str, double lhs, double rhs) {
-
+#ifndef NDEBUG 
   eprintf_fileLine(stdout, "ERROR", func,file,line,
     "\n\tassertion failed: %s %s %s, i.e., %24.16e %s %24.16e\n", lhs_str, op, rhs_str, lhs, op, rhs);
+#endif
+
   abort();
 }
 

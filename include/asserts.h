@@ -56,6 +56,8 @@
 #define assert_le(a,b) ((void)0)
 #define assert_isnum(a) ((void)0)
 
+#define builtin_expect(a,b) __builtin_expect(a,b)
+
 #else // ifndef NDEBUG
 
 void eprintf_fileLine(FILE * fptr, const char *type, const char *func,

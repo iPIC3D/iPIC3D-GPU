@@ -47,6 +47,8 @@ option(MOMENT_CUDA_ON "Run Moment on CUDA" ON)
 option(MOVER_CUDA_ON "Run Mover on CUDA" ON)
 
 
+option(BENCH_MARK "Print tasks time" OFF)
+option(USE_OPENMP "Use OpenMP in supported loops" OFF) # must delete all cmake cache if you change this option
 
 include(GNUInstallDirs)
 
@@ -104,8 +106,12 @@ if (USE_HDF5)
   endif()
 endif()
 
-# Find MPI
+# Find MPI and OpenMP
 find_package(MPI REQUIRED COMPONENTS CXX)
+if(USE_OPENMP)
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+endif()
+
 
 #
 # Source file list
@@ -143,6 +149,8 @@ if(CUDA_ON)
   set_property(TARGET iPIC3Dlib PROPERTY CUDA_STANDARD 17)
   set_property(TARGET iPIC3Dlib PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
   set_property(TARGET iPIC3Dlib PROPERTY LINK_OPTIONS -fno-lto)
+
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
 endif()
 
 set(include_path include)
@@ -159,23 +167,27 @@ target_include_directories(
 #
 # Link external libraries
 #
-target_link_libraries(
-  iPIC3Dlib
-  PUBLIC MPI::MPI_CXX
-  PRIVATE ${HDF5_C_HL_TARGET}
-  )
-if(CUDA_ON) # link CUDA library
-  target_link_libraries(
-    iPIC3Dlib
-    PRIVATE cuda cudart 
-    )
+set(linkLibraries MPI::MPI_CXX ${HDF5_C_HL_TARGET})
+
+if(USE_OPENMP)
+    list(APPEND linkLibraries OpenMP::OpenMP_CXX)
 endif()
+
+if(USE_CUDA)
+    list(APPEND linkLibraries cuda)
+    list(APPEND linkLibraries cudart)
+endif()
+
 if (USE_CATALYST)
-  target_link_libraries(
-    iPIC3Dlib
-    PUBLIC iPICAdaptor
-    )
+    list(APPEND linkLibraries iPICAdaptor)
 endif()
+
+target_link_libraries(
+    iPIC3Dlib
+    PUBLIC ${linkLibraries}
+)
+
+
 
 #
 # Macro definitions
@@ -229,8 +241,22 @@ target_link_libraries(
   iPIC3Dlib
   )
 
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(DEBUG_MODE)
+endif()
+
+if(BENCH_MARK)
+target_compile_definitions(iPIC3Dlib PUBLIC LOG_TASKS_TOTAL_TIME)
+target_compile_definitions(iPIC3D PUBLIC LOG_TASKS_TOTAL_TIME)
+endif()
+
+if(BENCH_MARK)
+target_compile_definitions(iPIC3Dlib PUBLIC LOG_TASKS_TOTAL_TIME)
+target_compile_definitions(iPIC3D PUBLIC LOG_TASKS_TOTAL_TIME)
 endif()
 
 ## to save the executable in the folder where the CMakeLists.txt file is, i.e. CMAKE_CURRENT_SOURCE_DIR

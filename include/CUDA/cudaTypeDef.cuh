@@ -67,6 +67,17 @@ __host__ inline T* copyToDevice(T* objectOnHost, cudaStream_t stream = 0){
     return ptr;
 }
 
+template <typename T>
+__host__ inline T* copyArrayToDevice(T* objectOnHost, int numberOfElement, cudaStream_t stream = 0){
+    if(objectOnHost == nullptr)throw std::runtime_error("CopyToDevice: can not copy a nullptr to device.");
+    T* ptr = nullptr;
+    cudaErrChk(cudaMallocAsync(&ptr, numberOfElement * sizeof(T), stream));
+    cudaErrChk(cudaMemcpyAsync(ptr, objectOnHost, numberOfElement * sizeof(T), cudaMemcpyDefault, stream));
+
+    cudaErrChk(cudaStreamSynchronize(stream));
+    return ptr;
+}
+
 ////////////////////////////////// One dimenstion to high dim index
 
 /**
@@ -82,5 +93,18 @@ __host__ __device__ inline uint32_t toOneDimIndex(uint32_t dim1, uint32_t dim2, 
     return (index1*dim2*dim3*dim4 + index2*dim3*dim4 + index3*dim4 + index4);
 }
 
+////////////////////////////////// Pinned memory allocation
+
+__host__ inline void* allocateHostPinnedMem(size_t typeSize, size_t num){
+    void* ptr = nullptr;
+    cudaErrChk(cudaHostAlloc(&ptr, typeSize*num, cudaHostAllocDefault));
+    return ptr;
+}
+
+////////////////////////////////// Round up to
+template <typename T>
+__host__ __device__ inline T getGridSize(T threadNum, T blockSize) {
+    return ((threadNum + blockSize - 1) / blockSize);
+}
 
 #endif

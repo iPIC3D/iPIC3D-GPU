@@ -23,6 +23,9 @@
 #include <cstddef> // for alignment stuff
 #include "asserts.h" // for assert_le, assert_lt
 #include "arraysfwd.h"
+#if CUDA_ON==true
+#include "cudaTypeDef.cuh"
+#endif
 //#include "arrays.h" // fixed-dimension arrays
 
 /*
@@ -94,8 +97,14 @@
     #define ALLOC_ALIGNED
     #define ASSUME_ALIGNED(X)
     #define ALIGNED(X)
+#if CUDA_ON==true
+    #define AlignedFree(S) (cudaErrChk(cudaFreeHost(S)))
+    #define AlignedAlloc(T, NUM) ((T*)allocateHostPinnedMem(sizeof(T), NUM)) 
+#else
     #define AlignedFree(S) (delete[] S)
     #define AlignedAlloc(T, NUM) (new T[NUM]) 
+#endif
+
 #endif
 inline bool is_aligned(void *p, int N)
 {

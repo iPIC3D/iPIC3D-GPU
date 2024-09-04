@@ -5,7 +5,8 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "/usr/lib/x86_64-linux-gnu/mpich/include",
-                "/usr/include/hdf5/mpich"
+                "/usr/include/hdf5/mpich",
+                "/usr/include/vtk-9.1/"
             ],
             "defines": [
                 "CUDA_ON=true"

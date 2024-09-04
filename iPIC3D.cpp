@@ -39,14 +39,14 @@ while(j == 0){
 }
 #endif
 #if CUDA_ON==true
-  std::cout << "The Software was compiled with CUDA" << std::endl;
+  if(MPIdata::get_rank() == 0)std::cout << "The Software was compiled with CUDA" << std::endl;
 #endif
 
   iPic3D::c_Solver KCode;
   KCode.Init(argc, argv); //! load param from file, init the grid, fields
 
   timeTasks.resetCycle(); //reset timer
-  KCode.CalculateMoments();
+  KCode.CalculateMoments(true);
   for (int i = KCode.FirstCycle(); i < KCode.LastCycle(); i++) {
 
     if (KCode.get_myrank() == 0)
@@ -56,14 +56,20 @@ while(j == 0){
     KCode.CalculateField(i); // E field
     KCode.ParticlesMover(); //use the fields to calculate the new v and x for particles
     KCode.CalculateB(); // B field
-    KCode.CalculateMoments(); // the charge intense, current intense and pressure tensor, 
+    KCode.CalculateMoments(false); // the charge intense, current intense and pressure tensor, 
     //calculated from particles position and celocity, then mapped to node(grid) for further solving
     // some are mapped to cell center
     
     KCode.WriteOutput(i);
     // print out total time for all tasks
-    //timeTasks.print_cycle_times(i);
+#ifdef LOG_TASKS_TOTAL_TIME
+    timeTasks.print_cycle_times(i);
+#endif
   }
+
+#ifdef LOG_TASKS_TOTAL_TIME
+    timeTasks.print_tasks_total_times();
+#endif
 
   KCode.Finalize();
  }

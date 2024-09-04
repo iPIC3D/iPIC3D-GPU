@@ -293,6 +293,11 @@ void TimeTasks::print_cycle_times(int cycle,
         commun[e],
         //loccom[e],
         get_taskname(e));
+
+#ifdef LOG_TASKS_TOTAL_TIME
+      tasksTotalTime[e] += tskdur[e];
+#endif
+
     }
 
     // report total times
@@ -359,6 +364,19 @@ void TimeTasks::print_cycle_times(int cycle)
   //print_cycle_times(cycle, task_duration, "min");
   if(!MPIdata::get_rank()) fflush(stdout);
 }
+
+#ifdef LOG_TASKS_TOTAL_TIME
+void TimeTasks::print_tasks_total_times(){
+    if(MPIdata::get_rank()) return;
+    FILE* file = stdout;
+    fprintf(file, "------------------------------------------\n\n");
+    for(int e=FIELDS; e<=MOMENTS; e++){
+      fprintf(file, "Task Total[%s]:%6.3fs\n",
+        get_taskname(e),
+        tasksTotalTime[e]);
+    }
+}
+#endif
 
 // The following three methods provide for a hack by which
 // the timeTasks copies of all threads are averaged.

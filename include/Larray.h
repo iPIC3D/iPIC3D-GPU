@@ -68,6 +68,13 @@ class Larray
   {
     _size = 0;
   }
+  void setSize(int size){
+    _size = size;
+  }
+
+  type* getList(){
+    return list;
+  }
   // this modifies std::vector::resize() by not initializing added elements
   //void resize(int newsize, value_type val = value_type())
   void resize(int newsize)

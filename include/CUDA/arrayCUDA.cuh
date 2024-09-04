@@ -6,6 +6,7 @@
 #include <iostream>
 #include "cudaTypeDef.cuh"
 #include "cuda.h"
+#include <cassert>
 
 
 
@@ -103,6 +104,18 @@ public: // utilities
         cudaErrChk(cudaFreeAsync(oldArray, stream));
 
         cudaErrChk(cudaStreamSynchronize(stream));
+        return arraySize;
+    }
+    //! @brief expand the array, must be bigger than original size
+    __host__ commonInt expand(commonInt targetedSize, cudaStream_t s){
+        if(targetedSize <= arraySize) return arraySize;
+
+        arraySize = roundUpToSizeUnit(targetedSize);
+        auto oldArray = arrayPtr;
+        cudaErrChk(cudaMalloc(&arrayPtr, arraySize * sizeof(T)));
+        cudaErrChk(cudaMemcpyAsync(arrayPtr, oldArray, numberOfElement * sizeof(T), cudaMemcpyDefault, s));
+        cudaErrChk(cudaFreeAsync(oldArray, s));
+
         return arraySize;
     }
 

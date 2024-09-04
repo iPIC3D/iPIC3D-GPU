@@ -46,6 +46,7 @@ class OutputWrapperFPP;
 #include "momentKernel.cuh"
 #include "particleArrayCUDA.cuh"
 #include "gridCUDA.cuh"
+#include "particleExchange.cuh"
 #endif
 
 namespace iPic3D {
@@ -73,8 +74,9 @@ namespace iPic3D {
 
     int Init(int argc, char **argv);
     int initCUDA();
-    void CalculateMoments();
+    void CalculateMoments(bool isInit);
     void CalculateField(int cycle);
+    int cudaLauncherAsync(int species);
     bool ParticlesMover();
     void CalculateB();
     //
@@ -119,17 +121,27 @@ namespace iPic3D {
     int cudaDeviceInNode;
     cudaStream_t*       streams;
 
+    int* stayedParticle; // stayed particles for each species
+
 	//! Host pointers of objects, to be copied to device, for management later
-	  particleArrayCUDA** pclsArrayHostPtr;     // array of pointer, point to objects on host
-    grid3DCUDA* 		grid3DCUDAHostPtr;     	  // one grid, used in all specieses
-    moverParameter**    moverParamHostPtr;		// for every species
-    momentParameter**   momentParamHostPtr;		// for every species
+	  particleArrayCUDA**   pclsArrayHostPtr;       // array of pointer, point to objects on host
+    departureArrayType**  departureArrayHostPtr;  // for every species
+    hashedSum**           hashedSumArrayHostPtr;      // species * 8
+    exitingArray**        exitingArrayHostPtr;        // species
+    fillerBuffer**        fillerBufferArrayHostPtr;   // species
+    grid3DCUDA* 		      grid3DCUDAHostPtr;      // one grid, used in all specieses
+    moverParameter**      moverParamHostPtr;		  // for every species
+    momentParameter**     momentParamHostPtr;		  // for every species
     
-	//! CUDA pointers of objects, copied to device
-    particleArrayCUDA** pclsArrayCUDAPtr;       // array of pointer, point to pclsArray on device
-    grid3DCUDA* 		grid3DCUDACUDAPtr;    	// one grid, used in all specieses
-    moverParameter**    moverParamCUDAPtr;		// for every species
-    momentParameter**   momentParamCUDAPtr;		// for every species
+	//! CUDA pointers of objects, have been copied to device
+    particleArrayCUDA**   pclsArrayCUDAPtr;           // array of pointer, point to pclsArray on device
+    departureArrayType**  departureArrayCUDAPtr;      // for every species
+    hashedSum**           hashedSumArrayCUDAPtr;      // species * 8
+    exitingArray**        exitingArrayCUDAPtr;        // species
+    fillerBuffer**        fillerBufferArrayCUDAPtr;   // species
+    grid3DCUDA* 		      grid3DCUDACUDAPtr;    	    // one grid, used in all specieses
+    moverParameter**      moverParamCUDAPtr;		      // for every species
+    momentParameter**     momentParamCUDAPtr;		      // for every species
 
 	//! simple device buffers
     // [10][nxn][nyn][nzn], a piece of cuda memory to hold the moment

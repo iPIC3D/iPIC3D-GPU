@@ -287,25 +287,29 @@ int c_Solver::initCUDA(){
 
   // Set device for this MPI process
   {
-    MPI_Comm sharedComm; int sharedRank, sharedSize; int deviceInNode;
+    MPI_Comm sharedComm; int sharedRank, sharedSize; int deviceOnNode;
     MPI_Comm_split_type(MPIdata::get_PicGlobalComm(), MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &sharedComm); 
     MPI_Comm_rank(sharedComm, &sharedRank);             // rank in the node
     MPI_Comm_size(sharedComm, &sharedSize);             // total processes in this node
-    cudaErrChk(cudaGetDeviceCount(&deviceInNode));      // GPU in the node
-    int procPerDevice = sharedSize / deviceInNode;
-    if(procPerDevice <= 1){ // process <= device
-      cudaErrChk(cudaSetDevice(sharedSize));
-      cudaDeviceInNode = sharedSize;
+    cudaErrChk(cudaGetDeviceCount(&deviceOnNode));      // GPU on the node
+    
+    if(sharedSize <= deviceOnNode){ // process <= device
+      cudaDeviceOnNode = sharedRank;
     }else{
-      if(sharedSize % deviceInNode != 0){ // if proc is not a multiple of device
-        cerr << "Error: Can not map process to device in node. " << "Global COMM rank: " << MPIdata::get_rank() <<  
-            " Shared COMM size: " << sharedSize << " Device Number in Node: " << deviceInNode << endl;
+      if(sharedSize % deviceOnNode != 0){ // if proc is not a multiple of device
+        cerr << "Error: Can not map process to device on node. " << "Global COMM rank: " << MPIdata::get_rank() <<  
+            " Shared COMM size: " << sharedSize << " Device Number in Node: " << deviceOnNode << endl;
         MPIdata::instance().finalize_mpi();
         return (1);
       }
-      cudaErrChk(cudaSetDevice(sharedRank / procPerDevice)); 
-      cudaDeviceInNode = sharedRank / procPerDevice;
+      int procPerDevice = sharedSize / deviceOnNode;
+      cudaDeviceOnNode = sharedRank / procPerDevice;
     }
+    cudaErrChk(cudaSetDevice(cudaDeviceOnNode)); 
+#ifndef NDEBUG
+    if(sharedRank == 0)
+    cout << "[*]GPU assignment: shared comm size: " << sharedSize << " GPU device on the node: " << deviceOnNode << endl;
+#endif
   }
   
 	// init the streams according to the species
@@ -504,7 +508,7 @@ void c_Solver::CalculateField(int cycle) {
 
 
 int c_Solver::cudaLauncherAsync(const int species){
-  cudaSetDevice(0); // a must on multi-device node
+  cudaSetDevice(cudaDeviceOnNode); // a must on multi-device node
 
   cudaEvent_t event1, event2;
   cudaErrChk(cudaEventCreateWithFlags(&event1, cudaEventDisableTiming));

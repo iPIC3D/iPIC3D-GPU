@@ -118,7 +118,7 @@ namespace iPic3D {
     Timing        *my_clock;
 
 #if CUDA_ON == true
-    int cudaDeviceInNode;
+    int cudaDeviceOnNode; // the device this rank should use
     cudaStream_t*       streams;
 
     int* stayedParticle; // stayed particles for each species

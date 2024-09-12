@@ -19,7 +19,8 @@
                                                                          
 ```
 
-
+## Citation
+Markidis, Stefano, and Giovanni Lapenta. "Multi-scale simulations of plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.
 
 ## Usage
 
@@ -80,27 +81,15 @@ If you are on a super-computer, especially a multi-node system, it's likely that
 
 Assigning MPI processes to nodes and GPUs are vital in performance, for it decides the pipeline and subdomains in the program.
 
-It's recommended to use more than 1 process per GPU, it can be 2, 4, even 8. For example, if we have 4 nodes, each of them is equipped with 4 GPU:
+It's recommended to use more than 1 MPI process per GPU. The following example uses 4 nodes, each equipped with 4 GPU:
 
 ``` shell
 # 1 MPI process per GPU
-srun --nodes=4 --ntasks=16 --ntasks-per-node=4 ./iPIC3D ../inputfiles/testGEM2Dreal.inp 
+srun --nodes=4 --ntasks=16 --ntasks-per-node=4 ./iPIC3D ../benchmark/GEM3Dsmall_4x2x2_100/testGEM3Dsmall.inp 
 
 # 2 MPI processes per GPU
-srun --nodes=4 --ntasks=32 --ntasks-per-node=8 ./iPIC3D ../inputfiles/testGEM2Dreal.inp 
+srun --nodes=4 --ntasks=32 --ntasks-per-node=8 ./iPIC3D ../benchmark/GEM3Dsmall_4x4x2_100/testGEM3Dsmall.inp  
 ```
-
-The MPI processes on one node will be evenly distributed to all the GPU on that node. So the number of process on one node must be a multiply of the number of GPU on that node, or fewer than that. Here are some samples on previous setup:
-
-| MPI process | process per node  | process per GPU | GPU utilized |
-| ----------- | ----------------- | --------------- | ------------ |
-| 4 | 1 | 1 | 4 |
-| 8 | 2 | 1 | 8 |
-| 12 | 3 | 1 | 12 |
-| 16 | 4 | 1 | 16 |
-| 20 | err | err | err |
-| 32 | 8 | 2 | 16 |
-| 64 | 16 | 4 | 16 |
 
 
 ### Result
@@ -143,12 +132,9 @@ In [benchmark](./benchmark/) folder, we prepared some scripts for profiling, ple
 
 Please refer to [Dockerfile](./Dockerfile).
 
-## Trouble Shooting
+## Contact
 
+Feel free to contact Professor Stefano Markidis at KTH for using iPIC3D. 
 
-Feel free to contact [Andong](https://github.com/HuXioAn) at [andonghu@kth.se]() if any problems.
-
-## Citation
-Markidis, Stefano, and Giovanni Lapenta. "Multi-scale simulations of plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.
 
 

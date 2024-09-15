@@ -9,3 +9,7 @@
 - Done.
 
 **NOTE**: The name of the folder must be in the format `name_XxYxZ_cycle`, as the script relies on the second segment to launch MPI processes.
+
+## Baseline
+
+There're few baseline files in this folder, which can be used as a reference for performance evaluation.

@@ -1,6 +1,6 @@
 */*
 !*/*.inp
 *.csv
-!baseline/*
+!*baseline.csv
 
 

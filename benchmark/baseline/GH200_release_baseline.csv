@@ -1,0 +1,8 @@
+Setup,Task Total[fields] (s),Task Total[particles] (s),Task Total[moments] (s),Simulation Time (s)
+GEM3Dsmall_1x1x1_100,29.381,7.331,6.185,43.211
+GEM3Dsmall_2x1x1_100,16.257,8.011,4.368,28.8867
+GEM3Dsmall_2x2x1_100,7.983,8.430,2.849,19.4522
+GEM3Dsmall_2x2x2_100,4.377,9.005,2.184,15.7764
+GEM3Dsmall_4x2x2_100,2.758,10.090,1.121,14.1993
+GEM3Dsmall_4x4x2_100,2.063,11.177,1.000,14.5267
+GEM3Dsmall_4x4x4_100,1.957,15.252,1.451,19.0076

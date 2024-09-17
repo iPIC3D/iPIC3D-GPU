@@ -128,6 +128,16 @@ However, current program won't be benefited from OpenMP.
 ### Benchmark
 In [benchmark](./benchmark/) folder, we prepared some scripts for profiling, please read the [benchmark/readme](./benchmark/readme.md) for more infomation.
 
+What's more, there're two performance baseline files for your reference:
+
+![GH200](./image/GH200_release_baseline.png)
+
+![dual-A100](./image/dual_A100_release_baseline.png)
+
+You can find the corresponding data at [./benchmark/GH200_release_baseline.csv](./benchmark/GH200_release_baseline.csv) and [./benchmark/Dual-A100_release_baseline.csv](./benchmark/Dual-A100_release_baseline.csv). 
+
+Please note that the `Particle` and `Moments` parts are not exactly the time consumption of these two parts, as the kernels are interwaved in this version. The sum of the two parts are precise, though.
+
 ### CUDA-Compatible Docker Image
 
 Please refer to [Dockerfile](./Dockerfile).

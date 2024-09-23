@@ -65,7 +65,7 @@
 using namespace iPic3D;
 //MPIdata* iPic3D::c_Solver::mpi=0;
 
-__constant__ static char grid3DCUDACUDAConst[sizeof(grid3DCUDA)];
+
 
 c_Solver::~c_Solver()
 {
@@ -354,11 +354,9 @@ int c_Solver::initCUDA(){
     }
   }
 
-  // grid for every species
+  // one grid for all species
   grid3DCUDAHostPtr = new grid3DCUDA(grid);
-  // grid3DCUDACUDAPtr = copyToDevice(grid3DCUDAHostPtr, 0);
-  cudaErrChk(cudaMemcpyToSymbol(grid3DCUDACUDAConst, grid3DCUDAHostPtr, sizeof(grid3DCUDA)));
-  cudaErrChk(cudaGetSymbolAddress((void**)&grid3DCUDACUDAPtr, grid3DCUDACUDAConst));
+  grid3DCUDACUDAPtr = copyToDevice(grid3DCUDAHostPtr, 0);
 
 
   // kernelParams 

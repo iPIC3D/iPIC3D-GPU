@@ -101,6 +101,35 @@ __host__ inline void* allocateHostPinnedMem(size_t typeSize, size_t num){
     return ptr;
 }
 
+template <typename T, typename... Args>
+T* newHostPinnedObject(Args... args){
+    T* ptr = (T*)allocateHostPinnedMem(sizeof(T), 1);
+    return new(ptr) T(std::forward<Args>(args)...);
+}
+
+template <typename T, typename... Args>
+T* newHostPinnedObjectArray(size_t num, Args... args){
+    T* ptr = (T*)allocateHostPinnedMem(sizeof(T), num);
+    for(size_t i = 0; i < num; i++){
+        new(ptr + i) T(std::forward<Args>(args)...);
+    }
+    return ptr;
+}
+
+template <typename T>
+void deleteHostPinnedObject(T* ptr){
+    ptr->~T();
+    cudaErrChk(cudaFreeHost(ptr));
+}
+
+template <typename T>
+void deleteHostPinnedObjectArray(T* ptr, size_t num){
+    for(size_t i = 0; i < num; i++){
+        (ptr + i)->~T();
+    }
+    cudaErrChk(cudaFreeHost(ptr));
+}
+
 ////////////////////////////////// Round up to
 template <typename T>
 __host__ __device__ inline T getGridSize(T threadNum, T blockSize) {

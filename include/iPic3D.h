@@ -74,6 +74,8 @@ namespace iPic3D {
 
     int Init(int argc, char **argv);
     int initCUDA();
+    int deInitCUDA();
+    
     void CalculateMoments(bool isInit);
     void CalculateField(int cycle);
     int cudaLauncherAsync(int species);

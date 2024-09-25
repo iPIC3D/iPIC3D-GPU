@@ -147,8 +147,9 @@ int c_Solver::Init(int argc, char **argv) {
 
   // Print the initial settings to stdout and a file
   if (myrank == 0) {
-    //check and create the output directory
-    checkOutputFolder(SaveDirName);
+    //check and create the output directory, only if it is not a restart run
+    if(restart_status == 0){checkOutputFolder(SaveDirName); if(RestartDirName != SaveDirName)checkOutputFolder(RestartDirName); }
+    
     MPIdata::instance().Print();
     vct->Print();
     col->Print();
@@ -872,6 +873,16 @@ void c_Solver::WriteRestart(int cycle)
 {
 #ifndef NO_HDF5
   if (restart_cycle>0 && cycle%restart_cycle==0){
+    
+    { // copy the particles back to host, if restart output
+      for(int i=0; i<ns; i++){
+        cudaErrChk(cudaMemcpyAsync(part[i].get_pcl_array().getList(), pclsArrayHostPtr[i]->getpcls(), 
+                                  pclsArrayHostPtr[i]->getNOP()*sizeof(SpeciesParticle), cudaMemcpyDefault, streams[i]));
+        part[i].get_pcl_array().setSize(pclsArrayHostPtr[i]->getNOP());
+      }
+      cudaErrChk(cudaDeviceSynchronize());
+    }
+
 	  convertParticlesToSynched();
 	  fetch_outputWrapperFPP().append_restart(cycle);
   }

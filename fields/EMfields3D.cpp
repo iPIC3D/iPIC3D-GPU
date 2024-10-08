@@ -2043,38 +2043,53 @@ void EMfields3D::sumMoments_vectorized_AoS(const Particles3Dcomm* part)
 
 /** method to convert a 1D field in a 3D field not considering guard cells*/
 void solver2phys(arr3_double vectPhys, double *vectSolver, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 1; i < nx - 1; i++)
-    for (int j = 1; j < ny - 1; j++)
+    for (int j = 1; j < ny - 1; j++){
+      int idx = (i - 1) * (ny - 2) + (j - 1);
       for (int k = 1; k < nz - 1; k++)
-        vectPhys[i][j][k] = *vectSolver++;
+        vectPhys[i][j][k] = vectSolver[idx * (nz - 2) + (k - 1)];
+    }
+      
 
 }
 /** method to convert a 1D field in a 3D field not considering guard cells*/
 void solver2phys(arr3_double vectPhys1, arr3_double vectPhys2, arr3_double vectPhys3, double *vectSolver, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 1; i < nx - 1; i++)
-    for (int j = 1; j < ny - 1; j++)
+    for (int j = 1; j < ny - 1; j++){
+      int idx = (i - 1) * (ny - 2) + (j - 1);
       for (int k = 1; k < nz - 1; k++) {
-        vectPhys1[i][j][k] = *vectSolver++;
-        vectPhys2[i][j][k] = *vectSolver++;
-        vectPhys3[i][j][k] = *vectSolver++;
+        int idy = (idx * (nz - 2) + (k - 1)) * 3;
+        vectPhys1[i][j][k] = vectSolver[idy];
+        vectPhys2[i][j][k] = vectSolver[idy + 1];
+        vectPhys3[i][j][k] = vectSolver[idy + 2];
       }
+    }
 }
 /** method to convert a 3D field in a 1D field not considering guard cells*/
 void phys2solver(double *vectSolver, const arr3_double vectPhys, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 1; i < nx - 1; i++)
-    for (int j = 1; j < ny - 1; j++)
+    for (int j = 1; j < ny - 1; j++){
+      int idx = (i - 1) * (ny - 2) + (j - 1);
       for (int k = 1; k < nz - 1; k++)
-        *vectSolver++ = vectPhys.get(i,j,k);
+        vectSolver[idx * (nz - 2) + (k - 1)] = vectPhys.get(i,j,k);
+    }
 }
 /** method to convert a 3D field in a 1D field not considering guard cells*/
 void phys2solver(double *vectSolver, const arr3_double vectPhys1, const arr3_double vectPhys2, const arr3_double vectPhys3, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 1; i < nx - 1; i++)
-    for (int j = 1; j < ny - 1; j++)
+    for (int j = 1; j < ny - 1; j++){
+      int idx = (i - 1) * (ny - 2) + (j - 1);
       for (int k = 1; k < nz - 1; k++) {
-        *vectSolver++ = vectPhys1.get(i,j,k);
-        *vectSolver++ = vectPhys2.get(i,j,k);
-        *vectSolver++ = vectPhys3.get(i,j,k);
+        int idy = (idx * (nz - 2) + (k - 1)) * 3;
+        vectSolver[idy] = vectPhys1.get(i,j,k);
+        vectSolver[idy + 1] = vectPhys2.get(i,j,k);
+        vectSolver[idy + 2] = vectPhys3.get(i,j,k);
       }
+    }
 }
 /*! Calculate Electric field with the implicit solver: the Maxwell solver method is called here */
 void EMfields3D::calculateE(int cycle)
@@ -2434,6 +2449,7 @@ void EMfields3D::MUdot(arr3_double MUdotX, arr3_double MUdotY, arr3_double MUdot
 {
   const Grid *grid = &get_grid();
   double beta, edotb, omcx, omcy, omcz, denom;
+  #pragma omp parallel for collapse(2)
   for (int i = 1; i < nxn - 1; i++)
     for (int j = 1; j < nyn - 1; j++)
       for (int k = 1; k < nzn - 1; k++) {
@@ -2443,6 +2459,7 @@ void EMfields3D::MUdot(arr3_double MUdotX, arr3_double MUdotY, arr3_double MUdot
       }
   for (int is = 0; is < ns; is++) {
     beta = .5 * qom[is] * dt / c;
+    #pragma omp parallel for collapse(2)
     for (int i = 1; i < nxn - 1; i++)
       for (int j = 1; j < nyn - 1; j++)
         for (int k = 1; k < nzn - 1; k++) {

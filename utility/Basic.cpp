@@ -26,10 +26,13 @@
 #include "TimeTasks.h"
 #include "errors.h"
 
+#include "ompdefs.h"
+
 /** method to calculate the parallel dot product with vect1, vect2 having the ghost cells*/
 double dotP(const double *vect1, const double *vect2, int n,MPI_Comm* comm) {
   double result = 0;
   double local_result = 0;
+  #pragma omp parallel for reduction(+:local_result)
   for (int i = 0; i < n; i++)
     local_result += vect1[i] * vect2[i];
   MPI_Allreduce(&local_result, &result, 1, MPI_DOUBLE, MPI_SUM, *comm);
@@ -39,6 +42,7 @@ double dotP(const double *vect1, const double *vect2, int n,MPI_Comm* comm) {
 /** method to calculate dot product */
 double dot(const double *vect1, const double *vect2, int n) {
   double result = 0;
+  #pragma omp parallel for reduction(+:result)
   for (int i = 0; i < n; i++)
     result += vect1[i] * vect2[i];
   return (result);
@@ -62,6 +66,7 @@ double norm2(const arr3_double vect, int nx, int ny) {
 /** method to calculate the square norm of a vector */
 double norm2(const double *vect, int nx) {
   double result = 0;
+  #pragma omp parallel for reduction(+:result)
   for (int i = 0; i < nx; i++)
     result += vect[i] * vect[i];
   return (result);
@@ -97,6 +102,7 @@ double norm2P(const double *vect, int n) {
 double normP(const double *vect, int n,MPI_Comm* comm) {
   double result = 0.0;
   double local_result = 0.0;
+  #pragma omp parallel for reduction(+:local_result)
   for (int i = 0; i < n; i++)
     local_result += vect[i] * vect[i];
   MPI_Allreduce(&local_result, &result, 1, MPI_DOUBLE, MPI_SUM, *comm);
@@ -105,11 +111,13 @@ double normP(const double *vect, int n,MPI_Comm* comm) {
 }
 /** method to calculate the difference of two vectors*/
 void sub(double *res, const double *vect1, const double *vect2, int n) {
+  #pragma omp parallel for
   for (int i = 0; i < n; i++)
     res[i] = vect1[i] - vect2[i];
 }
 /** method to calculate the sum of two vectors vector1 = vector1 + vector2*/
 void sum(double *vect1, const double *vect2, int n) {
+  #pragma omp parallel for
   for (int i = 0; i < n; i++)
     vect1[i] += vect2[i];
 
@@ -140,12 +148,14 @@ void sum(arr3_double vect1, const arr4_double vect2, int nx, int ny, int nz, int
 
 /** method to calculate the sum of two vectors vector1 = vector1 + vector2*/
 void sum(arr3_double vect1, const arr4_double vect2, int nx, int ny, int ns) {
+  #pragma omp parallel for
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       vect1.fetch(i,j,0) += vect2.get(ns,i,j,0);
 }
 /** method to calculate the subtraction of two vectors vector1 = vector1 - vector2*/
 void sub(arr3_double vect1, const arr3_double vect2, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -170,6 +180,7 @@ void sum4(arr3_double vect1, double alfa, const arr3_double vect2, double beta, 
 }
 /** method to calculate the scalar-vector product */
 void scale(double *vect, double alfa, int n) {
+  #pragma omp parallel for
   for (int i = 0; i < n; i++)
     vect[i] *= alfa;
 }
@@ -184,6 +195,7 @@ void scale(arr3_double vect, double alfa, int nx, int ny) {
 
 /** method to calculate the scalar-vector product */
 void scale(arr3_double vect, double alfa, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -206,6 +218,7 @@ void scale(arr3_double vect1, const arr3_double vect2, double alfa, int nx, int 
 
 /** method to calculate the scalar-vector product */
 void scale(double *vect1, const double *vect2, double alfa, int n) {
+  #pragma omp parallel for
   for (int i = 0; i < n; i++)
     vect1[i] = vect2[i] * alfa;
 }
@@ -239,6 +252,7 @@ void addscale(double alfa, arr3_double vect1, const arr3_double vect2, int nx, i
 }
 /** method to calculate vector1 = vector1 + alfa*vector2   */
 void addscale(double alfa, double *vect1, const double *vect2, int n) {
+  #pragma omp parallel for
   for (int i = 0; i < n; i++)
     vect1[i] += alfa * vect2[i];
 
@@ -316,6 +330,7 @@ void proddiv(arr3_double vect1, const arr3_double vect2, double alfa, const arr3
 }
 /** method to calculate the opposite of a vector */
 void neg(arr3_double vect, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -402,6 +417,7 @@ void eqValue(double value, arr3_double vect, int nx) {
 }
 /** method to set a vector to a Value */
 void eqValue(double value, double *vect, int n) {
+  #pragma omp parallel for
   for (int i = 0; i < n; i++)
     vect[i] = value;
 }
@@ -413,6 +429,7 @@ void putColumn(double **Matrix, double *vect, int column, int n) {
 }
 /** method to get a column in a matrix 2D */
 void getColumn(double *vect, double **Matrix, int column, int n) {
+  #pragma omp parallel for
   for (int i = 0; i < n; i++)
     vect[i] = Matrix[i][column];
 }

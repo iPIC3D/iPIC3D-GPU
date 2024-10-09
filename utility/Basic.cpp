@@ -389,6 +389,7 @@ void eq(arr4_double vect1, const arr3_double vect2, int nx, int ny, int nz, int 
 
 /** method to set a vector to a Value */
 void eqValue(double value, arr3_double vect, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)

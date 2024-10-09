@@ -230,6 +230,7 @@ void Grid3DCU::gradC2N(arr3_double gradXN, arr3_double gradYN, arr3_double gradZ
 /** calculate gradient on nodes, given a scalar field defined on central points  */
 void Grid3DCU::gradN2C(arr3_double gradXC, arr3_double gradYC, arr3_double gradZC, const_arr3_double scFieldN)const
 {
+  #pragma omp parallel for collapse(2)
   for (int i = 1; i < nxc - 1; i++)
     for (int j = 1; j < nyc - 1; j++)
       for (int k = 1; k < nzc - 1; k++) {
@@ -286,6 +287,7 @@ void Grid3DCU::divC2N(arr3_double divN, const_arr3_double vecFieldXC, const_arr3
   double compX;
   double compY;
   double compZ;
+  #pragma omp parallel for collapse(2)
   for (int i = 1; i < nxn - 1; i++)
     for (int j = 1; j < nyn - 1; j++)
       for (int k = 1; k < nzn - 1; k++) {

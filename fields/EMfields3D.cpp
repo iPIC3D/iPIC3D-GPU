@@ -2459,7 +2459,7 @@ void EMfields3D::MUdot(arr3_double MUdotX, arr3_double MUdotY, arr3_double MUdot
       }
   for (int is = 0; is < ns; is++) {
     beta = .5 * qom[is] * dt / c;
-    #pragma omp parallel for collapse(2)
+    #pragma omp parallel for collapse(2) private(edotb,omcx,omcy,omcz,denom)
     for (int i = 1; i < nxn - 1; i++)
       for (int j = 1; j < nyn - 1; j++)
         for (int k = 1; k < nzn - 1; k++) {

@@ -246,7 +246,7 @@ void Grid3DCU::divN2C(arr3_double divC, const_arr3_double vecFieldXN, const_arr3
   double compX;
   double compY;
   double compZ;
-  #pragma omp parallel for collapse(2)
+  #pragma omp parallel for collapse(2) private(compX,compY,compZ)
   for (int i = 1; i < nxc - 1; i++)
     for (int j = 1; j < nyc - 1; j++)
       for (int k = 1; k < nzc - 1; k++) {
@@ -287,7 +287,7 @@ void Grid3DCU::divC2N(arr3_double divN, const_arr3_double vecFieldXC, const_arr3
   double compX;
   double compY;
   double compZ;
-  #pragma omp parallel for collapse(2)
+  #pragma omp parallel for collapse(2) private(compX,compY,compZ)
   for (int i = 1; i < nxn - 1; i++)
     for (int j = 1; j < nyn - 1; j++)
       for (int k = 1; k < nzn - 1; k++) {

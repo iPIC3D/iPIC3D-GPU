@@ -75,6 +75,8 @@ With this command, you are using 16 MPI processes with the setup `../inputfiles/
 
 **Important:** make sure `number of MPI process = XLEN x YLEN x ZLEN` as specified in the input file.
 
+**Critical:** OpenMP is enabled by default, make sure the number of thread every process is reasonable. Refer to [OpenMP](#openmp) for more details.
+
 If you are on a super-computer, especially a multi-node system, it's likely that you should use `srun` to launch the program. 
 
 #### Multi-node and Multi-GPU
@@ -115,13 +117,16 @@ cmake -DCMAKE_BUILD_TYPE=Default ..
 
 In this iPIC3D-CUDA, the Solver stays on the CPU side, which means the number of MPI process will not only affect the GPU but also the Solver's performance. 
 
-To speedup the CPU part, you can enable OpenMP with:
+To speedup the CPU part, the OpenMP is enabled by default:
 ``` shell
-cmake -DUSE_OPENMP=ON ..
+cmake .. # default
+
+cmake -DUSE_OPENMP=OFF .. # if you'd like to disable OpenMP
+
 # set OpenMP threads for each MPI process
 export OMP_NUM_THREADS=4
 ```
-However, current program won't be benefited from OpenMP.
+The solver on CPU will be benefited from OpenMP now, and this option is ON by default. It's important to control the number of threads per MPI process, make sure it's in a reasonable range.
 
 ## Tool
 

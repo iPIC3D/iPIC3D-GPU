@@ -1,0 +1,62 @@
+CC=/usr/tce/packages/cray-mpich/cray-mpich-8.1.31-rocmcc-6.2.1-magic/bin/mpiamdclang
+CXX=/usr/tce/packages/cray-mpich/cray-mpich-8.1.31-rocmcc-6.2.1-magic/bin/mpiamdclang++
+HIPCC=/usr/tce/packages/cray-mpich/cray-mpich-8.1.31-rocmcc-6.2.1-magic/bin/mpiamdclang++
+HIP_DIR=/usr/tce/packages/rocmcc/rocmcc-6.2.1-magic/lib/cmake/hip
+CALIPER_NO_ROCM_DIR=/usr/workspace/ipic3d/caliper-installs/caliper-no-rocm
+CALIPER_ROCPROFILER_DIR=/usr/workspace/ipic3d/caliper-installs/caliper-w-rocprofiler
+CALIPER_ROCTRACER_DIR=/usr/workspace/ipic3d/caliper-installs/caliper-w-roctracer
+
+BUILD_DIR ?= $(shell pwd)/build
+INSTALL_PREFIX ?= $(shell pwd)/_test_install
+
+BUILD_THREADS=4
+
+.PHONY: build build_release build_rel_w_deb build_debug build_bench build_release_bench build_rel_w_deb_bench build_debug bench instal clean fresh all
+
+all: fresh install
+
+build:
+	mkdir $(BUILD_DIR)
+	cd $(BUILD_DIR); cmake -DHIP_ON=ON -DCMAKE_C_COMPILER=$(CC) -DCMAKE_CXX_COMPILER=$(CXX) -DCMAKE_HIP_COMPILER=$(HIPCC) -DHIP_DIR=$(HIP_DIR) -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX) ..; make -j$(BUILD_THREADS)
+
+build_rel_w_deb:
+	mkdir $(BUILD_DIR)
+	cd $(BUILD_DIR); cmake -DHIP_ON=ON -DCMAKE_C_COMPILER=$(CC) -DCMAKE_CXX_COMPILER=$(CXX) -DCMAKE_HIP_COMPILER=$(HIPCC) -DHIP_DIR=$(HIP_DIR) -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX) -DCMAKE_BUILD_TYPE=RelWithDebInfo ..; make -j$(BUILD_THREADS)
+
+build_debug:
+	mkdir $(BUILD_DIR)
+	cd $(BUILD_DIR); cmake -DHIP_ON=ON -DCMAKE_C_COMPILER=$(CC) -DCMAKE_CXX_COMPILER=$(CXX) -DCMAKE_HIP_COMPILER=$(HIPCC) -DHIP_DIR=$(HIP_DIR) -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX) -DCMAKE_C_FLAGS="-g -O2" -DCMAKE_CXX_FLAGS="-g -O0" -DBUILD_SHARED_LIBS=OFF ..; make -j$(BUILD_THREADS) VERBOSE=1
+
+build_caliper_no_tools_debug:
+	mkdir $(BUILD_DIR)
+	cd $(BUILD_DIR); cmake -DHIP_ON=ON -DCMAKE_C_FLAGS="-g -O0" -DCMAKE_CXX_FLAGS="-g -O0" -DCMAKE_C_COMPILER=$(CC) -DCMAKE_CXX_COMPILER=$(CXX) -DCMAKE_HIP_COMPILER=$(HIPCC) -DHIP_DIR=$(HIP_DIR) -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX) -DUSE_CALIPER=ON -Dcaliper_DIR=$(CALIPER_NO_ROCM_DIR)/share/cmake/caliper ..; make -j$(BUILD_THREADS)
+
+build_caliper_rocprofiler_debug:
+	mkdir $(BUILD_DIR)
+	cd $(BUILD_DIR); cmake -DHIP_ON=ON -DCMAKE_C_FLAGS="-g -O0" -DCMAKE_CXX_FLAGS="-g -O0" -DCMAKE_C_COMPILER=$(CC) -DCMAKE_CXX_COMPILER=$(CXX) -DCMAKE_HIP_COMPILER=$(HIPCC) -DHIP_DIR=$(HIP_DIR) -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX) -DUSE_CALIPER=ON -Dcaliper_DIR=$(CALIPER_ROCPROFILER_DIR)/share/cmake/caliper ..; make -j$(BUILD_THREADS)
+
+build_caliper_roctracer_debug:
+	mkdir $(BUILD_DIR)
+	cd $(BUILD_DIR); cmake -DHIP_ON=ON -DCMAKE_C_FLAGS="-g -O0" -DCMAKE_CXX_FLAGS="-g -O0" -DCMAKE_C_COMPILER=$(CC) -DCMAKE_CXX_COMPILER=$(CXX) -DCMAKE_HIP_COMPILER=$(HIPCC) -DHIP_DIR=$(HIP_DIR) -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX) -DUSE_CALIPER=ON -Dcaliper_DIR=$(CALIPER_ROCTRACER_DIR)/share/cmake/caliper ..; make -j$(BUILD_THREADS)
+
+build_caliper_no_tools:
+	mkdir $(BUILD_DIR)
+	cd $(BUILD_DIR); cmake -DHIP_ON=ON -DCMAKE_C_COMPILER=$(CC) -DCMAKE_CXX_COMPILER=$(CXX) -DCMAKE_HIP_COMPILER=$(HIPCC) -DHIP_DIR=$(HIP_DIR) -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX) -DUSE_CALIPER=ON -Dcaliper_DIR=$(CALIPER_NO_ROCM_DIR)/share/cmake/caliper ..; make -j$(BUILD_THREADS)
+
+build_caliper_rocprofiler:
+	mkdir $(BUILD_DIR)
+	cd $(BUILD_DIR); cmake -DHIP_ON=ON -DCMAKE_C_COMPILER=$(CC) -DCMAKE_CXX_COMPILER=$(CXX) -DCMAKE_HIP_COMPILER=$(HIPCC) -DHIP_DIR=$(HIP_DIR) -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX) -DUSE_CALIPER=ON -Dcaliper_DIR=$(CALIPER_ROCPROFILER_DIR)/share/cmake/caliper ..; make -j$(BUILD_THREADS)
+
+build_caliper_roctracer:
+	mkdir $(BUILD_DIR)
+	cd $(BUILD_DIR); cmake -DHIP_ON=ON -DCMAKE_C_COMPILER=$(CC) -DCMAKE_CXX_COMPILER=$(CXX) -DCMAKE_HIP_COMPILER=$(HIPCC) -DHIP_DIR=$(HIP_DIR) -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX) -DUSE_CALIPER=ON -Dcaliper_DIR=$(CALIPER_ROCTRACER_DIR)/share/cmake/caliper ..; make -j$(BUILD_THREADS)
+
+install:
+	if [ ! -d $(BUILD_DIR)/ ] || [ ! -f $(BUILD_DIR)/Makefile ]; then echo "Cannot install when not built"; exit 1; fi
+	cd $(BUILD_DIR); make install
+
+clean:
+	if [ -d $(BUILD_DIR) ]; then rm -r $(BUILD_DIR); fi
+	if [ -d $(INSTALL_PREFIX)/ ]; then rm -r $(INSTALL_PREFIX); fi
+
+fresh: clean build

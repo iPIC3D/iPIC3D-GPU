@@ -159,13 +159,16 @@ if(CUDA_ON AND HIP_ON)
   message(STATUS "Using HIP environment.")
   set(DEVICE_LANGUAGE HIP)
   set(DEVICE_COMPILER hipcc)
-  target_link_libraries(iPIC3Dlib PRIVATE hip::device)
-  target_link_libraries(iPIC3Dlib PRIVATE hip::host)
+  target_link_libraries(iPIC3Dlib PUBLIC hip::device)
+  target_link_libraries(iPIC3Dlib PUBLIC hip::host)
 
   target_compile_options(iPIC3Dlib PUBLIC -fgpu-rdc)
   target_link_options(iPIC3Dlib PUBLIC  -fgpu-rdc --hip-link)
 
-  set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx90a)
+  # This should be correct for MI250X
+  # set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx90a)
+  # This should be correct for MI300A
+  set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx942)
 elseif(CUDA_ON)
   enable_language(CUDA)
 

@@ -346,17 +346,9 @@ __global__ void reduceSumWarpPostProcess(T* g_idata, T* g_odata, unsigned int n,
     }
 
     if(tid == 0) g_odata[0] = postProcess<T, postProc, U>(sumValue, postProcOprand);
-
 }
 
-
-
 } // namespace cudaReduction
-
-
-
-
-
 
 
 #endif // _CUDA_GMM_REDUCTION_H_

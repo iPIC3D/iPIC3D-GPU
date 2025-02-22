@@ -8,7 +8,6 @@
 #include "VCtopology3D.h"
 
 
-
 namespace dataAnalysis
 {
 class dataAnalysisPipelineImpl;

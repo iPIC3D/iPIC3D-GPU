@@ -10,12 +10,12 @@
 #include <string>
 #include <fstream>
 #include <iostream>
+#include <algorithm>  // required for std::copy
+
 
 
 namespace cudaGMMWeight
 {
-
-
 
 template <typename T, int dataDim, typename U = int>
 class GMM{
@@ -33,6 +33,8 @@ private:
     int sizeNumData = 0; // the size of the buffers below, for space checking, numComponents * numData
 
     // the arrays on device
+    T* meanDataInitCUDA;            // initial mean of the data, used to normalize data - size dataDim
+    T* maxValueCUDA;                // max value in the data weight array, used to filter the weights - size 1
     T* weightCUDA;                  // numComponents, it will be log(weight) during the iteration
     T* meanCUDA;                    // numComponents * dataDim
     T* coVarianceCUDA;              // numComponents * dataDim * dataDim
@@ -48,6 +50,7 @@ private:
 
 
     // the arrays on host, results and init values
+    T* meanAllInit;             // dataDim
     T* weight;                  // numComponents
     T* mean;                    // numComponents * dataDim
     T* coVariance;              // numComponents * dataDim * dataDim
@@ -77,12 +80,15 @@ public:
                 // device
                 cudaErrChk(cudaFree(weightCUDA));
                 cudaErrChk(cudaFree(meanCUDA));
+                cudaErrChk(cudaFree(meanDataInitCUDA));
+                cudaErrChk(cudaFree(maxValueCUDA));
                 cudaErrChk(cudaFree(coVarianceCUDA));
                 cudaErrChk(cudaFree(coVarianceDecomposedCUDA));
                 cudaErrChk(cudaFree(normalizerCUDA));
                 cudaErrChk(cudaFree(PosteriorCUDA));
 
                 // host
+                cudaErrChk(cudaFreeHost(meanAllInit));
                 cudaErrChk(cudaFreeHost(weight));
                 cudaErrChk(cudaFreeHost(mean));
                 cudaErrChk(cudaFreeHost(coVariance));
@@ -97,11 +103,14 @@ public:
             // allocate the new arrays
             cudaErrChk(cudaMalloc(&weightCUDA, sizeof(T)*numCompo));
             cudaErrChk(cudaMalloc(&meanCUDA, sizeof(T)*numCompo*dataDim));
+            cudaErrChk(cudaMalloc(&meanDataInitCUDA, sizeof(T)*dataDim));
+            cudaErrChk(cudaMalloc(&maxValueCUDA, sizeof(U)*1));
             cudaErrChk(cudaMalloc(&coVarianceCUDA, sizeof(T)*numCompo*dataDim*dataDim));
             cudaErrChk(cudaMalloc(&coVarianceDecomposedCUDA, sizeof(T)*numCompo*dataDim*dataDim));
             cudaErrChk(cudaMalloc(&normalizerCUDA, sizeof(T)*numCompo));
             cudaErrChk(cudaMalloc(&PosteriorCUDA, sizeof(T)*numCompo));
 
+            cudaErrChk(cudaMallocHost(&meanAllInit, sizeof(T)*dataDim));
             cudaErrChk(cudaMallocHost(&weight, sizeof(T)*numCompo));
             cudaErrChk(cudaMallocHost(&mean, sizeof(T)*numCompo*dataDim));
             cudaErrChk(cudaMallocHost(&coVariance, sizeof(T)*numCompo*dataDim*dataDim));
@@ -150,15 +159,16 @@ public:
         // replace the param
         paramHostPtr = GMMParam;
         dataHostPtr = data;
-
         cudaErrChk(cudaMemcpyAsync(dataDevicePtr, dataHostPtr, sizeof(GMMDataMultiDim<T, dataDim, U>), cudaMemcpyDefault, GMMStream));
-
+        
+        cudaErrChk(cudaStreamSynchronize(GMMStream));
         { // reset the value for reuse
             logLikelihood = - INFINITY;
             logLikelihoodOld = - INFINITY;
         }
         return 0; // some cuda async operation are not finished yet, but we are using the same stream
     }
+
 
     __host__ GMM(){
         cudaErrChk(cudaStreamCreate(&GMMStream));
@@ -172,17 +182,24 @@ public:
         cudaErrChk(cudaMallocHost(&logResult, sizeof(T)));
     }
 
+
+    __host__ void preProcessDataGMM(const T* meanArray){
+        
+        memcpy(meanAllInit, meanArray, sizeof(T)*dataDim);
+        cudaErrChk(cudaMemcpyAsync(meanDataInitCUDA, meanAllInit, sizeof(T)*dataDim, cudaMemcpyHostToDevice, GMMStream));
+        cudaErrChk(cudaStreamSynchronize(GMMStream));
+
+        if constexpr(FILTER_WEIGHTS_GMM) filterWeightsDataGMM();
+
+        if constexpr(NORMALIZE_DATA_FOR_GMM) normalizePoints();
+    }
+
+
     __host__ int initGMM(){
 
         // do the GMR
         int step = 0;
-        if constexpr(NORMALIZE_DATA_FOR_GMM)
-        {
-            if(paramHostPtr->maxIteration>0)
-            {
-                normalizePoints();
-            }
-        }
+
         while(step < paramHostPtr->maxIteration){
             
             // E
@@ -203,20 +220,42 @@ public:
             updateMean();
             updateWeight();
             updateCoVarianceAndDecomposition();
-
             step++;
         }
-
-        if constexpr(NORMALIZE_DATA_FOR_GMM)
-        {
-            if(step>0)
-            {
-                normalizeDataBack();
-            }
-        }
         return step;
-
     }
+
+
+    __host__ void postProcessDataGMM(){
+        
+        if constexpr(NORMALIZE_DATA_FOR_GMM) normalizeDataBack();        
+    }
+    
+
+    // copy the results to host
+    __host__ int moveBackToHostGMM(GMMParam_output_store<T>& paramHost_last, const int offsetInitDataGMM){
+        
+        auto numComponents = paramHostPtr->numComponents;
+        auto numData = dataHostPtr->getNumData();
+        cudaErrChk(cudaMemcpyAsync(weight, weightCUDA, sizeof(T)*numComponents, cudaMemcpyDefault, GMMStream));
+        cudaErrChk(cudaMemcpyAsync(mean, meanCUDA, sizeof(T)*numComponents*dataDim, cudaMemcpyDefault, GMMStream));
+        cudaErrChk(cudaMemcpyAsync(coVariance, coVarianceCUDA, sizeof(T)*numComponents*dataDim*dataDim, cudaMemcpyDefault, GMMStream));
+        cudaErrChk(cudaMemcpyAsync(coVarianceDecomposed, coVarianceDecomposedCUDA, sizeof(T)*numComponents*dataDim*dataDim, cudaMemcpyDefault, GMMStream));
+        cudaErrChk(cudaMemcpyAsync(normalizer, normalizerCUDA, sizeof(T)*numComponents, cudaMemcpyDefault, GMMStream));
+
+        cudaErrChk(cudaStreamSynchronize(GMMStream));
+
+        for(int i = 0; i < numComponents; i++){
+            weight[i] = exp(weight[i]);
+        }
+        
+        std::copy(weight, weight +  numComponents, paramHost_last.weightVector + offsetInitDataGMM);
+        std::copy(mean, mean + numComponents * dataDim, paramHost_last.meanVector + offsetInitDataGMM);
+        std::copy(coVariance, coVariance + numComponents * dataDim * dataDim, paramHost_last.coVarianceMatrix + offsetInitDataGMM);
+        
+        return 0;
+    }
+
 
     __host__ GMMResult<T, dataDim> getGMMResult(int simuStep, int convergeStep){
         GMMResult<T, dataDim> result(simuStep, paramHostPtr->numComponents);
@@ -242,21 +281,19 @@ public:
         return result;
     }
 
-    __host__ int outputGMM(int convergeStep, std::string outputPath){
+
+    // post process results and dump to disk
+    __host__ int outputGMM(int convergeStep, std::string outputPath, const int moveBackToHost){
+
+        // check if data have been copied back to host
+        if(moveBackToHost != 0)
+        {
+            std::cerr << "[!]GMM output data are not available on the Host - path " << outputPath << std::endl;
+            return 1;
+        }
+
         auto numComponents = paramHostPtr->numComponents;
         auto numData = dataHostPtr->getNumData();
-        // copy the results to host and post process
-        cudaErrChk(cudaMemcpyAsync(weight, weightCUDA, sizeof(T)*numComponents, cudaMemcpyDefault, GMMStream));
-        cudaErrChk(cudaMemcpyAsync(mean, meanCUDA, sizeof(T)*numComponents*dataDim, cudaMemcpyDefault, GMMStream));
-        cudaErrChk(cudaMemcpyAsync(coVariance, coVarianceCUDA, sizeof(T)*numComponents*dataDim*dataDim, cudaMemcpyDefault, GMMStream));
-        cudaErrChk(cudaMemcpyAsync(coVarianceDecomposed, coVarianceDecomposedCUDA, sizeof(T)*numComponents*dataDim*dataDim, cudaMemcpyDefault, GMMStream));
-        cudaErrChk(cudaMemcpyAsync(normalizer, normalizerCUDA, sizeof(T)*numComponents, cudaMemcpyDefault, GMMStream));
-
-        cudaErrChk(cudaStreamSynchronize(GMMStream));
-
-        for(int i = 0; i < numComponents; i++){
-            weight[i] = exp(weight[i]);
-        }
 
         {  // output the GMM to json
             std::ofstream file(outputPath);
@@ -311,8 +348,27 @@ public:
         }
 
         return 0;
-
     }
+
+
+    __host__ int outputWeightsTxtGMM(std::string outputPath){
+        
+        auto numData = dataHostPtr->getNumData();
+
+        // output the weights to txt
+        std::ofstream file(outputPath);
+        if (!file.is_open()) {
+            std::cerr << "[!]Could not open file " << outputPath << std::endl;
+            return -1;
+        }
+        
+        for (int i = 0 ; i< numData; i++){
+            file << dataHostPtr->getWeight()[i] <<std::endl;
+        }
+        file.close();
+        return 0;
+    }
+
 
     __host__ ~GMM(){
         // created in constructor
@@ -368,13 +424,30 @@ private:
         return blockNum;
     }
 
+    __host__ void filterWeightsDataGMM(){
+
+        constexpr int blockSize = 256;
+        auto blockNum = reduceBlockNum(dataHostPtr->getNumData(), blockSize);
+
+       maxValueCUDA[0] = 0.0;
+       cudaGMMWeightKernel::reduceMaxKernel<U,T,blockSize>
+       <<<blockNum, blockSize, blockSize*sizeof(U), GMMStream>>>
+       (dataHostPtr->getWeight(), reductionTempArrayCUDA, dataHostPtr->getNumData());
+       cudaReduction::reduceMaxWarp<T><<<1, WARP_SIZE, 0, GMMStream>>>(reductionTempArrayCUDA, maxValueCUDA, blockNum);
+
+       cudaGMMWeightKernel::filterWeightsKernel<T,U,WEIGHTS_THRESHOLD_GMM,dataDim>
+       <<<getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>
+       (dataDevicePtr,dataHostPtr->getWeight(),maxValueCUDA);
+
+       //std::cout<< "Max in weight: "<< maxValueCUDA[0] <<std::endl;
+    }
 
     void normalizePoints(){
         
         // normalize data such that velocities are in range -1;1
         // launch kernel
         cudaGMMWeightKernel::normalizePointsKernel<T,dataDim,U,false><<<getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>
-                                (dataDevicePtr, dataHostPtr->maxVelocityArray);
+                                (dataDevicePtr,meanDataInitCUDA, dataHostPtr->maxVelocityArray);
     }
 
     void normalizeDataBack(){
@@ -382,28 +455,25 @@ private:
         // normalize data back to the original data range
         // launch kernel
         cudaGMMWeightKernel::normalizePointsKernel<T,dataDim,U,true><<<getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>
-                                (dataDevicePtr, dataHostPtr->maxVelocityArray );
+                                (dataDevicePtr, meanDataInitCUDA, dataHostPtr->maxVelocityArray );
 
         cudaGMMWeightKernel::normalizeMeanAndCovBack<T, dataDim><<<1, paramHostPtr->numComponents, 0, GMMStream>>>
-                            (meanCUDA, coVarianceCUDA, paramHostPtr->numComponents, dataHostPtr->maxVelocityArray);
+                            (meanCUDA, coVarianceCUDA, paramHostPtr->numComponents, meanDataInitCUDA, dataHostPtr->maxVelocityArray);
     }
     
     void calcPxAtMeanAndCoVariance(){
 
         // launch kernel
         cudaGMMWeightKernel::calcLogLikelihoodForPointsKernel<<<getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>
-                                (dataDevicePtr, meanCUDA, coVarianceDecomposedCUDA, posteriorCUDA, paramHostPtr->numComponents);
+                                (dataDevicePtr, weightCUDA, meanCUDA, coVarianceDecomposedCUDA, posteriorCUDA,dataHostPtr->getWeight(), paramHostPtr->numComponents);
         
         // posterior_nk holds log p(x_i|mean,coVariance) for each data point i and each component k, temporary storage
     }
 
-
-
-
     void calcLogLikelihoodPxAndposterior(){
         // launch kernel, the first posterior_nk is the log p(x_i|mean,coVariance)
         cudaGMMWeightKernel::calcLogLikelihoodPxAndposteriorKernel<<<getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>
-                                (dataDevicePtr, weightCUDA, posteriorCUDA, tempArrayCUDA, posteriorCUDA, paramHostPtr->numComponents);
+                                (dataDevicePtr, weightCUDA, posteriorCUDA, tempArrayCUDA, posteriorCUDA, dataHostPtr->getWeight(), paramHostPtr->numComponents);
         
         // now the posterior_nk is the log posterior_nk
         // the tempArrayCUDA is the log Px for each data point 
@@ -480,7 +550,6 @@ private:
                     (reductionTempArrayCUDA, meanCUDA + component*dataHostPtr->getDim() + dim, blockNum, PosteriorCUDA + component);
             }
         }
-
     }
 
     void updateWeight(){
@@ -497,7 +566,7 @@ private:
         // calc the new coVariance for components
         cudaGMMWeightKernel::updateCoVarianceKernel
             <<<getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>
-            (dataDevicePtr, posteriorCUDA, PosteriorCUDA, meanCUDA, tempArrayCUDA, paramHostPtr->numComponents);
+            (dataDevicePtr, posteriorCUDA, PosteriorCUDA, meanCUDA, tempArrayCUDA,dataHostPtr->getWeight(), paramHostPtr->numComponents);
 
         // sum the coVariance with reduction, then divide by the Posterior_k
         for(int component = 0; component < paramHostPtr->numComponents; component++){

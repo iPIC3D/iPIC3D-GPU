@@ -120,18 +120,3 @@ __host__ int velocityHistogram::getRange(velocitySoA* pclArray, const int specie
 
 
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

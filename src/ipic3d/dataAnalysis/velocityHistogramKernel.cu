@@ -1,4 +1,3 @@
-
 #include "cudaTypeDef.cuh"
 #include "velocityHistogram.cuh"
 #include "particleArraySoACUDA.cuh"
@@ -85,10 +84,3 @@ __global__ void resetBinScaleMarkKernel(velocityHistogramCUDA* histogramCUDAPtr)
 
 
 } // namespace velocityHistogram
-
-
-
-
-
-
-

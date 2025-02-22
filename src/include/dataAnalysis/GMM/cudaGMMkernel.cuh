@@ -23,60 +23,70 @@ namespace cudaGMMWeightKernel
  * @param numComponents number of components
  */
 template <typename T, int dataDim, typename U>
-__global__ void calcLogLikelihoodForPointsKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr, const T* meanVector, const T* coVarianceDecomp, T* logLikelihoodForPoints, const int numComponents){
+__global__ void calcLogLikelihoodForPointsKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr, const T* logWeightVector, const T* meanVector, const T* coVarianceDecomp, 
+                                                    T* logLikelihoodForPoints, U* weights, const int numComponents){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     auto numData = dataCUDAPtr->getNumData();
     if(idx >= numData)return;
+    if(weights[idx] > 0.0 )
+    {
+        T xMinusMean[dataDim];  // (x - mean)
+        T coVarianceNeg1TimesXMinusMean[dataDim]; // coVariance^-1 * (x - mean)
 
-    T xMinusMean[dataDim];  // (x - mean)
-    T coVarianceNeg1TimesXMinusMean[dataDim]; // coVariance^-1 * (x - mean)
-
-    for(int component = 0; component < numComponents; component++){
-        auto meanComponent = meanVector + component*dataDim;
-        auto coVarianceDecompComponent = coVarianceDecomp + component*dataDim*dataDim;
-        auto logLikelihoods = logLikelihoodForPoints + component*numData; // p(x_i|mean,coVariance)
-        
-        T sum = 0;
-        for(int dim = 0; dim < dataDim; dim++){
-            // calculate (x - mean), dim
-            xMinusMean[dim] = dataCUDAPtr->getDim(dim)[idx] - meanComponent[dim];           
-        }
-
-        for(int dim = 0; dim < dataDim; dim++){
-            // slove lower triangular matrix
-            sum = 0;
-            // from head to tail
-            if(dim > 0)
-            {
-                for(int j=0; j < dim-1; j++)
-                {
-                    sum += coVarianceDecompComponent[dim*dataDim + j] * coVarianceNeg1TimesXMinusMean[j];
-                }   
+        for(int component = 0; component < numComponents; component++){
+            auto meanComponent = meanVector + component*dataDim;
+            auto coVarianceDecompComponent = coVarianceDecomp + component*dataDim*dataDim;
+            auto logLikelihoods = logLikelihoodForPoints + component*numData; // p(x_i|mean,coVariance)
+            
+            T sum = 0;
+            for(int dim = 0; dim < dataDim; dim++){
+                // calculate (x - mean), dim
+                xMinusMean[dim] = dataCUDAPtr->getDim(dim)[idx] - meanComponent[dim];           
             }
 
-            coVarianceNeg1TimesXMinusMean[dim] = (xMinusMean[dim] - sum) / coVarianceDecompComponent[dim*dataDim + dim];
-        }
+            for(int dim = 0; dim < dataDim; dim++){
+                // slove lower triangular matrix
+                sum = 0;
+                // from head to tail
+                if(dim > 0)
+                {
+                    for(int j=0; j < dim-1; j++)
+                    {
+                        sum += coVarianceDecompComponent[dim*dataDim + j] * coVarianceNeg1TimesXMinusMean[j];
+                    }   
+                }
 
-        // slove the lower triangular matrix, transposed, it can be merged into the previous loop, but ...
-        for(int dim=0; dim < dataDim; dim++){
-            auto upperIndex = dataDim - dim - 1;
+                coVarianceNeg1TimesXMinusMean[dim] = (xMinusMean[dim] - sum) / coVarianceDecompComponent[dim*dataDim + dim];
+            }
+
+            // slove the lower triangular matrix, transposed, it can be merged into the previous loop, but ...
+            for(int dim=0; dim < dataDim; dim++){
+                auto upperIndex = dataDim - dim - 1;
+                sum = 0;
+                // from tail to head
+                for(int j=upperIndex+1; j < dataDim; j++)sum += coVarianceDecompComponent[j*dataDim + upperIndex] * coVarianceNeg1TimesXMinusMean[j];
+
+                coVarianceNeg1TimesXMinusMean[upperIndex] = (coVarianceNeg1TimesXMinusMean[upperIndex] - sum) / coVarianceDecompComponent[upperIndex*dataDim + upperIndex];
+            }
+
+            T determinate = 1.0;
             sum = 0;
-            // from tail to head
-            for(int j=upperIndex+1; j < dataDim; j++)sum += coVarianceDecompComponent[j*dataDim + upperIndex] * coVarianceNeg1TimesXMinusMean[j];
-
-            coVarianceNeg1TimesXMinusMean[upperIndex] = (coVarianceNeg1TimesXMinusMean[upperIndex] - sum) / coVarianceDecompComponent[upperIndex*dataDim + upperIndex];
+            for(int dim = 0; dim < dataDim; dim++){
+                determinate *= coVarianceDecompComponent[dim*dataDim + dim];
+                sum += coVarianceNeg1TimesXMinusMean[dim] * xMinusMean[dim];
+            }
+            determinate *= determinate;
+            
+            // calculate the log likelihood of this data point for this component
+            logLikelihoods[idx] =  - 0.5 * (dataDim * log(2 * M_PI) + log(determinate)) - 0.5 * sum;
         }
-
-        T determinate = 1.0;
-        sum = 0;
-        for(int dim = 0; dim < dataDim; dim++){
-            determinate *= coVarianceDecompComponent[dim*dataDim + dim];
-            sum += coVarianceNeg1TimesXMinusMean[dim] * xMinusMean[dim];
+    }
+    else
+    {
+        for(int component = 0; component < numComponents; component++){
+            auto logLikelihoods = logLikelihoodForPoints + component*numData; // p(x_i|mean,coVariance)
+            logLikelihoods[idx] =  0.0;
         }
-        determinate *= determinate;
-        
-        // calculate the log likelihood of this data point for this component
-        logLikelihoods[idx] =  - 0.5 * (dataDim * log(2 * M_PI) + log(determinate)) - 0.5 * sum;
     }
 
 }
@@ -95,32 +105,43 @@ __global__ void calcLogLikelihoodForPointsKernel(const cudaGMMWeight::GMMDataMul
  */
 template <typename T, int dataDim, typename U>
 __global__ void calcLogLikelihoodPxAndposteriorKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr, const T* logWeightVector, const T* logLikelihoodForPoints, 
-                                                        T* logLikelihood, T* posterior, const int numComponents){
+                                                        T* logLikelihood, T* posterior, U* weights, const int numComponents){
     
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     auto numData = dataCUDAPtr->getNumData();
     if(idx >= numData)return;
 
-    T maxValue = - INFINITY;
-    T sum = 0;
+    if(weights[idx]>0.0)
+    {
+        T maxValue = - INFINITY;
+        T sum = 0;
 
-    for(int component = 0; component < numComponents; component++){
-        T logPxComponent = logWeightVector[component] + logLikelihoodForPoints[component*numData + idx]; // log(weight) + log(p(x_i|mean,coVariance))
-        if(logPxComponent > maxValue)maxValue = logPxComponent;
+        for(int component = 0; component < numComponents; component++){
+            T logPxComponent = logWeightVector[component] + logLikelihoodForPoints[component*numData + idx]; // log(weight) + log(p(x_i|mean,coVariance))
+            if(logPxComponent > maxValue)maxValue = logPxComponent;
+        }
+
+        for(int component = 0; component < numComponents; component++){
+            T logPxComponent = logWeightVector[component] + logLikelihoodForPoints[component*numData + idx]; // log(weight) + log(p(x_i|mean,coVariance))
+            sum += exp(logPxComponent - maxValue);
+        }
+
+        logLikelihood[idx] = maxValue + log(sum);   
+
+        for(int component = 0; component < numComponents; component++){
+            posterior[component*numData + idx] -= logLikelihood[idx];
+        }
     }
-
-    for(int component = 0; component < numComponents; component++){
-        T logPxComponent = logWeightVector[component] + logLikelihoodForPoints[component*numData + idx]; // log(weight) + log(p(x_i|mean,coVariance))
-        sum += exp(logPxComponent - maxValue);
-    }
-
-    logLikelihood[idx] = maxValue + log(sum);   
-
-    for(int component = 0; component < numComponents; component++){
-        posterior[component*numData + idx] -= logLikelihood[idx];
+    else
+    {
+        logLikelihood[idx] = 0.0;
+        for(int component = 0; component < numComponents; component++){
+            posterior[component*numData + idx] = 0.0;
+        }
     }
 
 }
+
 
 
 /**
@@ -145,7 +166,10 @@ __global__ void updateWeightKernel(T* logWeightVector, const T* logPosterior, co
     }
 
     logWeightVector[idx] = sharedLogMeanTimesPosterior[idx] - log(sum);
+
+    if (logWeightVector[idx] < log(1e-6) ) logWeightVector[idx] = log(1e-6); 
 }
+
 
 
 /**
@@ -157,39 +181,58 @@ __global__ void updateWeightKernel(T* logWeightVector, const T* logPosterior, co
  * @param logPosterior_k pointer to the posterior_k(Gamma), number of components
  * @param meanVector pointer to the mean vector, number of components * dataDim, just updated
  * @param tempCoVarianceForDataPoints pointer to the coVariance matrix for each data point, number of components * dataNum * dataDim * dataDim
- * 
  */
 template <typename T, int dataDim, typename U>
 __global__ void updateCoVarianceKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr, const T* logPosterior_nk, 
                                                                 const T* logPosterior_k, const T* meanVector, 
-                                                                T* tempCoVarianceForDataPoints, const int numComponents){
+                                                                T* tempCoVarianceForDataPoints, U* weights, const int numComponents){
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     auto numData = dataCUDAPtr->getNumData();
     if(idx >= numData)return;
+    if(weights[idx] > 0.0 )
+    {
+        // for each component
+        for(int component = 0; component < numComponents; component++){
+            auto logPosterior_nkComponent = logPosterior_nk + component*numData;
+            auto meanComponent = meanVector + component*dataDim;
+            auto coVarianceComponent = tempCoVarianceForDataPoints + component*numData*dataDim*dataDim;
 
-
-    // for each component
-    for(int component = 0; component < numComponents; component++){
-        auto logPosterior_nkComponent = logPosterior_nk + component*numData;
-        auto meanComponent = meanVector + component*dataDim;
-        auto coVarianceComponent = tempCoVarianceForDataPoints + component*numData*dataDim*dataDim;
-
-        // update the coVariance matrix
-        T xMinusMean[dataDim];  // (x - mean^(t+1)) vector
-        for(int dim = 0; dim < dataDim; dim++){
-            xMinusMean[dim] = dataCUDAPtr->getDim(dim)[idx] - meanComponent[dim];
-        }
-
-        for(int i = 0; i < dataDim; i++){
-            for(int j = 0; j < dataDim; j++){
-                const auto elementInMatrix = i * dataDim + j;
-                coVarianceComponent[elementInMatrix * numData + idx] = exp(logPosterior_nkComponent[idx]) * xMinusMean[i] * xMinusMean[j];
+            // update the coVariance matrix
+            T xMinusMean[dataDim];  // (x - mean^(t+1)) vector
+            for(int dim = 0; dim < dataDim; dim++){
+                xMinusMean[dim] = dataCUDAPtr->getDim(dim)[idx] - meanComponent[dim];
             }
+
+            for(int i = 0; i < dataDim; i++){
+                for(int j = 0; j < dataDim; j++){
+                    const auto elementInMatrix = i * dataDim + j;
+                    coVarianceComponent[elementInMatrix * numData + idx] = exp(logPosterior_nkComponent[idx]) * xMinusMean[i] * xMinusMean[j];
+                }
+            }
+
+        }
+    }
+    else
+    {
+        for(int component = 0; component < numComponents; component++){
+            auto logPosterior_nkComponent = logPosterior_nk + component*numData;
+            auto meanComponent = meanVector + component*dataDim;
+            auto coVarianceComponent = tempCoVarianceForDataPoints + component*numData*dataDim*dataDim;
+
+            for(int i = 0; i < dataDim; i++){
+                for(int j = 0; j < dataDim; j++){
+                    const auto elementInMatrix = i * dataDim + j;
+                    coVarianceComponent[elementInMatrix * numData + idx] = 0;
+                }
+            }
+
         }
 
     }
 }
+
+
 
 /**
  * @brief decompose the coVariance matrix for each component
@@ -242,9 +285,7 @@ __global__ void decomposeCoVarianceKernel(const T* coVariance, T* coVarianceDeco
     logDeterminant *= 2;
 
     normalizer[idx] = - 0.5 * (dataDim * log(2.0 * M_PI) + logDeterminant);
-
 }
-
 
 
 
@@ -262,9 +303,6 @@ __global__ void checkAdjustCoVarianceKernel(T* coVariance, const int numComponen
 
     auto coVarianceComponent = coVariance + idx*dataDim*dataDim;
 
-    constexpr T toll = 1e-12;
-    constexpr T eps = 1e-7;
-
     // check NaN values or variance values too small
     // it works for any dataDim
     for(int i = 0; i<dataDim; i++ )
@@ -273,12 +311,12 @@ __global__ void checkAdjustCoVarianceKernel(T* coVariance, const int numComponen
         {
             if(std::isnan(coVarianceComponent[ i*dataDim + j]))
             {
-                coVarianceComponent[ i*dataDim + j] = toll;
+                coVarianceComponent[ i*dataDim + j] = TOLL_COVMATRIX_GMM;
             }
         }
-        if(coVarianceComponent[ i*dataDim + i] < eps )
+        if(coVarianceComponent[ i*dataDim + i] < EPS_COVMATRIX_GMM )
         {
-            coVarianceComponent[ i*dataDim + i] = eps;
+            coVarianceComponent[ i*dataDim + i] = EPS_COVMATRIX_GMM;
         }
     }
 
@@ -289,15 +327,13 @@ __global__ void checkAdjustCoVarianceKernel(T* coVariance, const int numComponen
     coVarianceComponent[1] = coVarianceComponent[2];
 
     // ensure determinate > 0
-    if(coVarianceComponent[0]*coVarianceComponent[3] - coVarianceComponent[2]*coVarianceComponent[2] - toll <=0)
+    if(coVarianceComponent[0]*coVarianceComponent[3] - coVarianceComponent[2]*coVarianceComponent[2] - TOLL_COVMATRIX_GMM <=0)
     {
         const T k = coVarianceComponent[3] / coVarianceComponent[0]; 
-        coVarianceComponent[0] = sqrt( (coVarianceComponent[2]*coVarianceComponent[2] + toll) / k  ) + 10*eps;
+        coVarianceComponent[0] = sqrt( (coVarianceComponent[2]*coVarianceComponent[2] + TOLL_COVMATRIX_GMM) / k  ) + sqrt(TOLL_COVMATRIX_GMM);
         coVarianceComponent[3] = coVarianceComponent[0] * k;
     }
 }
-
-
 
 
 /**
@@ -308,7 +344,7 @@ __global__ void checkAdjustCoVarianceKernel(T* coVariance, const int numComponen
  * @param rescaleFactor pointer to the rescale factor, dataDim
  */
 template <typename T, int dataDim, typename U, bool normalizeBack>
-__global__ void normalizePointsKernel(cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr, const T* rescaleFactor){
+__global__ void normalizePointsKernel(cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr, const T* meanCUDA_all0, const T* rescaleFactor){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     auto numData = dataCUDAPtr->getNumData();
     if(idx >= numData)return;
@@ -318,17 +354,20 @@ __global__ void normalizePointsKernel(cudaGMMWeight::GMMDataMultiDim<T, dataDim,
         for(int dim = 0; dim < dataDim; dim++){
             // normalize data points
             dataCUDAPtr->getDim(dim)[idx] *= rescaleFactor[dim];
+            dataCUDAPtr->getDim(dim)[idx] += meanCUDA_all0[dim];
         }
     }
     else
     {
         for(int dim = 0; dim < dataDim; dim++){
             // normalize data points
+            dataCUDAPtr->getDim(dim)[idx] -= meanCUDA_all0[dim];
             dataCUDAPtr->getDim(dim)[idx] /= rescaleFactor[dim];
         }
-    }
-    
+    } 
 }
+
+
 
 /**
  * @brief normalize mean vector and cov-matrix back such that the range is the original one
@@ -339,7 +378,7 @@ __global__ void normalizePointsKernel(cudaGMMWeight::GMMDataMultiDim<T, dataDim,
  * @param rescaleFactor pointer to the rescale factor, dataDim (here it is assumed that rescaleFactor is homogenues in all dimensions --> to fix later) 
  */
 template <typename T, int dataDim>
-__global__ void normalizeMeanAndCovBack(T* meanVector, T* coVariance, const int numComponents, const T* rescaleFactor){
+__global__ void normalizeMeanAndCovBack(T* meanVector, T* coVariance, const int numComponents, const T* meanCUDA_all0, const T* rescaleFactor){
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= numComponents)return;
 
@@ -349,6 +388,7 @@ __global__ void normalizeMeanAndCovBack(T* meanVector, T* coVariance, const int 
     for(int i=0; i< dataDim; i++)
     {
         meanComponent[i] *= rescaleFactor[i];
+        meanComponent[i] += meanCUDA_all0[i];
     }
 
     // to fix and make it general
@@ -357,7 +397,72 @@ __global__ void normalizeMeanAndCovBack(T* meanVector, T* coVariance, const int 
     {
         coVarianceComponent[i] *= rescalFactorSqrd;
     }
+}
 
+
+
+/**
+ * @brief compute max value in weights array (is the same kernel as the one available in cudaReduction, but it allows to have different datatypes for g_idata and g_outdata) --> to fix later if needed
+ * @details this cuda kernel will be launched once for all data points
+ * 
+ * @param g_idata pointer to the weigth vector, numData
+ * @param g_odata pointer to the output vector with local max for each block in each element, numBlocks
+ * @param n total number of data
+ */
+template <typename T, typename U, unsigned int blockSize>
+__global__ void reduceMaxKernel(T* g_idata, U* g_odata, unsigned int n) {
+    extern __shared__ T sdata[];
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * (blockSize * 2) + tid;
+    unsigned int gridSize = blockSize * 2 * gridDim.x;
+
+    sdata[tid] = g_idata[i];
+
+    while (i < n) {
+        sdata[tid] = max(sdata[tid], g_idata[i]);
+        if (i + blockSize < n)
+            sdata[tid] = max(sdata[tid], g_idata[i + blockSize]);
+        i += gridSize;
+    }
+
+    __syncthreads();
+
+    if constexpr (blockSize >= 512) { if (tid < 256) { sdata[tid] = max(sdata[tid], sdata[tid + 256]); } __syncthreads(); }
+    if constexpr (blockSize >= 256) { if (tid < 128) { sdata[tid] = max(sdata[tid], sdata[tid + 128]); } __syncthreads(); }
+    if constexpr (blockSize >= 128 && WARP_SIZE < 64) { if (tid < 64) { sdata[tid] = max(sdata[tid], sdata[tid + 64]); } __syncthreads(); }
+    if (tid < WARP_SIZE){
+        if constexpr (blockSize >= 128 && WARP_SIZE == 64) sdata[tid] = max(sdata[tid], sdata[tid + 64]);
+        if constexpr (blockSize >= 64) sdata[tid] = max(sdata[tid], sdata[tid + 32]);
+        if constexpr (blockSize >= 32) sdata[tid] = max(sdata[tid], sdata[tid + 16]);
+        if constexpr (blockSize >= 16) sdata[tid] = max(sdata[tid], sdata[tid + 8]);
+        if constexpr (blockSize >= 8) sdata[tid] = max(sdata[tid], sdata[tid + 4]);
+        if constexpr (blockSize >= 4) sdata[tid] = max(sdata[tid], sdata[tid + 2]);
+        if constexpr (blockSize >= 2) sdata[tid] = max(sdata[tid], sdata[tid + 1]);
+    }
+
+    if (tid == 0) g_odata[blockIdx.x] = sdata[0];
+}
+
+
+
+/**
+ * @brief set to zero weights that are lower than a given relative threshold
+ * @details this cuda kernel will be launched once for all data points
+ * 
+ * @param dataCUDAPtr pointer to the data, including numData
+ * @param weights pointer to the weigth vector, numData
+ * @param maxWeight maximum value in weights
+ */
+template <typename T, typename U, int threshold, int dataDim>
+__global__ void filterWeightsKernel(cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr, U* weights, const T* maxWeight){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    auto numData = dataCUDAPtr->getNumData();
+    if(idx >= numData)return;
+
+    if (weights[idx]*threshold < maxWeight[0] )
+    {
+        weights[idx] = 0.0;
+    }
 }
 
 }

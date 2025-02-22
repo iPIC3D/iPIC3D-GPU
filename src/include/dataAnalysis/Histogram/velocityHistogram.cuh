@@ -402,14 +402,12 @@ public:
                 } else if constexpr (sizeof(histogramTypeOut) == 8){
                     if(!bigEndian)*(uint64_t*)(&value) = __builtin_bswap64(*(uint64_t*)(&value));
                 }
-
+                
                 vtkFile.write(reinterpret_cast<char*>(&value), sizeof(histogramTypeOut));
             }
 
             vtkFile.close();
         }
-
-
     }
 
     __host__ histogramTypeOut* getVelocityHistogramHostPtr(const int i){
@@ -435,15 +433,6 @@ public:
 };
 
 
-
-
-
-    
 }
-
-
-
-
-
 
 #endif

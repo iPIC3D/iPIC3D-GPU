@@ -66,10 +66,9 @@ public:
 
 template <typename T>
 struct GMMParam_s{
-    const int numComponents;
-    const int maxIteration;
-    const T threshold; // the threshold for the log likelihood
-
+    int numComponents;
+    int maxIteration;
+    T threshold; // the threshold for the log likelihood
     // these 3 are optional, if not set, they will be initialized with the internal init functions
     T* weightInit;
     T* meanInit;
@@ -79,6 +78,18 @@ struct GMMParam_s{
 
 template <typename T>
 using GMMParam_t = GMMParam_s<T>;
+
+
+template <typename T>
+struct GMMParam_output_store{
+    int numComponents[TOTAL_COMPONENT_GMM];
+    int maxIteration;
+    T threshold; // the threshold for the log likelihood
+    // these 3 are optional, if not set, they will be initialized with the internal init functions
+    T weightVector[TOTAL_COMPONENT_GMM];
+    T meanVector[TOTAL_COMPONENT_GMM * DATA_DIM_GMM];
+    T coVarianceMatrix[TOTAL_COMPONENT_GMM * DATA_DIM_GMM * DATA_DIM_GMM ];
+};
 
 
 // result class. T is output parameter type, this can not be reused

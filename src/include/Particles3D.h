@@ -60,6 +60,8 @@ class Particles3D:public Particles3Dcomm {
     void constantVelocity(double vel, int dim, Field * EMf);
     /** Initial condition: uniform in space and maxwellian in velocity */
     void maxwellian(Field * EMf);
+    void maxwellianOnBuffer(Field * EMf, SpeciesParticle* pclBuffer, int nop);
+    
     /** Initial condition: uniform in space and maxwellian in velocity with velocity from Null Point currents */
     void maxwellianNullPoints(Field * EMf);
     /** Maxellian velocity from currents and uniform spatial distribution */

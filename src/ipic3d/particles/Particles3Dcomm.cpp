@@ -268,22 +268,22 @@ if( !isTestParticle ){
   //
 
   // velocities
-  u.reserve(initial_capacity);
-  v.reserve(initial_capacity);
-  w.reserve(initial_capacity);
-  // charge
-  q.reserve(initial_capacity);
-  // positions
-  x.reserve(initial_capacity);
-  y.reserve(initial_capacity);
-  z.reserve(initial_capacity);
-  // subcycle time
-  t.reserve(initial_capacity);
+  // u.reserve(initial_capacity); // don't reserve space for velocities, AoS or SoA
+  // v.reserve(initial_capacity);
+  // w.reserve(initial_capacity);
+  // // charge
+  // q.reserve(initial_capacity);
+  // // positions
+  // x.reserve(initial_capacity);
+  // y.reserve(initial_capacity);
+  // z.reserve(initial_capacity);
+  // // subcycle time
+  // t.reserve(initial_capacity);
 
   //
   // AoS particle representation
   //
-  _pcls.reserve(initial_capacity);
+  // _pcls.reserve(initial_capacity);
   particleType = ParticleType::AoS; // canonical representation
 
   //

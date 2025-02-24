@@ -8,7 +8,7 @@
 #include "Particles3D.h"
 #include "arrayCUDA.cuh"
 
-class particleArrayCUDA : public arrayCUDA<SpeciesParticle, 32>
+class particleArrayCUDA : public arrayCUDA<SpeciesParticle, 32, true>
 {
 private:
     ParticleType::Type type;
@@ -20,6 +20,10 @@ public:
      * @param stream the stream used for memory operations
      */ 
     __host__ particleArrayCUDA(Particles3D* p3D, cudaStream_t stream = 0): arrayCUDA(p3D->get_pclptr(0), p3D->getNOP(), 1.5), type(p3D->get_particleType()){
+        assignStream(stream);
+    }
+
+    __host__ particleArrayCUDA(int requiredSize, int GPUID, cudaStream_t stream = 0): arrayCUDA(requiredSize, GPUID), type(ParticleType::Type::AoS){
         assignStream(stream);
     }
 

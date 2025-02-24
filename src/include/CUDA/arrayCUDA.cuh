@@ -9,7 +9,7 @@
 
 
 
-template <typename T, int sizeUnit = 64>
+template <typename T, int sizeUnit = 64, bool managed = false>
 class arrayCUDA
 {
 using commonInt = uint32_t;
@@ -34,9 +34,15 @@ public: // con-de-structor
     /**
      * @brief create new empty array on device memory
      */
-    __host__ arrayCUDA(commonInt requiredSize): onHeap(false), numberOfElement(0){
+    __host__ arrayCUDA(commonInt requiredSize, int preFetchDevice = cudaCpuDeviceId): onHeap(false), numberOfElement(0){
         arraySize = roundUpToSizeUnit(requiredSize);
-        cudaErrChk(cudaMalloc((void**)&arrayPtr, arraySize * sizeof(T)));
+        if constexpr(managed) {
+            cudaErrChk(cudaMallocManaged((void**)&arrayPtr, arraySize * sizeof(T)));
+            cudaErrChk(cudaMemPrefetchAsync(arrayPtr, arraySize * sizeof(T), preFetchDevice, stream));
+            cudaErrChk(cudaStreamSynchronize(stream));
+        } else {
+            cudaErrChk(cudaMalloc((void**)&arrayPtr, arraySize * sizeof(T)));
+        }
     }
 
     /**
@@ -44,10 +50,15 @@ public: // con-de-structor
      */
     __host__ arrayCUDA(const T* hostArrayPtr, commonInt size): onHeap(false), numberOfElement(size){
         arraySize = roundUpToSizeUnit(size);
-        cudaErrChk(cudaMalloc(&arrayPtr, arraySize * sizeof(T)));
-        cudaErrChk(cudaMemcpyAsync(arrayPtr, hostArrayPtr, numberOfElement * sizeof(T), cudaMemcpyDefault, stream));
+        if constexpr(managed) {
+            cudaErrChk(cudaMallocManaged((void**)&arrayPtr, arraySize * sizeof(T)));
+        } else {
+            cudaErrChk(cudaMalloc(&arrayPtr, arraySize * sizeof(T)));
+        }
 
-        cudaErrChk(cudaStreamSynchronize(stream));
+        cudaErrChk(cudaMemcpy(arrayPtr, hostArrayPtr, numberOfElement * sizeof(T), cudaMemcpyDefault));
+
+
     }
 
     /**
@@ -56,9 +67,15 @@ public: // con-de-structor
     __host__ arrayCUDA(const T* hostArrayPtr, commonInt size, cudaTypeSingle expandIndex): onHeap(false), numberOfElement(size){
         size = size * expandIndex;
         arraySize = roundUpToSizeUnit(size);
-        cudaErrChk(cudaMalloc((void**)&arrayPtr, arraySize * sizeof(T)));
-        cudaErrChk(cudaMemcpyAsync(arrayPtr, hostArrayPtr, numberOfElement * sizeof(T), cudaMemcpyDefault, stream));
-        cudaErrChk(cudaStreamSynchronize(stream));
+        
+        if constexpr(managed) {
+            cudaErrChk(cudaMallocManaged((void**)&arrayPtr, arraySize * sizeof(T)));
+        } else {
+            cudaErrChk(cudaMalloc(&arrayPtr, arraySize * sizeof(T)));
+        }
+
+        cudaErrChk(cudaMemcpy(arrayPtr, hostArrayPtr, numberOfElement * sizeof(T), cudaMemcpyDefault));
+
     }
 
     __host__ ~arrayCUDA(){
@@ -98,11 +115,15 @@ public: // utilities
 
         arraySize = roundUpToSizeUnit(targetedSize);
         auto oldArray = arrayPtr;
-        cudaErrChk(cudaMalloc(&arrayPtr, arraySize * sizeof(T)));
-        cudaErrChk(cudaMemcpyAsync(arrayPtr, oldArray, numberOfElement * sizeof(T), cudaMemcpyDefault, stream));
-        cudaErrChk(cudaFreeAsync(oldArray, stream));
 
-        cudaErrChk(cudaStreamSynchronize(stream));
+        if constexpr(managed) {
+            cudaErrChk(cudaMallocManaged((void**)&arrayPtr, arraySize * sizeof(T)));
+        } else {
+            cudaErrChk(cudaMalloc(&arrayPtr, arraySize * sizeof(T)));
+        }
+        cudaErrChk(cudaMemcpy(arrayPtr, oldArray, numberOfElement * sizeof(T), cudaMemcpyDefault));
+        cudaErrChk(cudaFree(oldArray));
+
         return arraySize;
     }
     //! @brief expand the array, must be bigger than original size
@@ -111,7 +132,12 @@ public: // utilities
 
         arraySize = roundUpToSizeUnit(targetedSize);
         auto oldArray = arrayPtr;
-        cudaErrChk(cudaMalloc(&arrayPtr, arraySize * sizeof(T)));
+        
+        if constexpr(managed) {
+            cudaErrChk(cudaMallocManaged((void**)&arrayPtr, arraySize * sizeof(T)));
+        } else {
+            cudaErrChk(cudaMalloc(&arrayPtr, arraySize * sizeof(T)));
+        }
         cudaErrChk(cudaMemcpyAsync(arrayPtr, oldArray, numberOfElement * sizeof(T), cudaMemcpyDefault, s));
         cudaErrChk(cudaFreeAsync(oldArray, s));
 
@@ -124,7 +150,12 @@ public: // utilities
 
         arraySize = roundUpToSizeUnit(targetedSize);
         auto oldArray = arrayPtr;
-        cudaErrChk(cudaMalloc(&arrayPtr, arraySize * sizeof(T)));
+        
+        if constexpr(managed) {
+            cudaErrChk(cudaMallocManaged((void**)&arrayPtr, arraySize * sizeof(T)));
+        } else {
+            cudaErrChk(cudaMalloc(&arrayPtr, arraySize * sizeof(T)));
+        }
         cudaErrChk(cudaMemcpyAsync(arrayPtr, oldArray, numberOfElement * sizeof(T), cudaMemcpyDefault, stream));
         cudaErrChk(cudaFreeAsync(oldArray, stream));
 

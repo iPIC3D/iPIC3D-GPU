@@ -70,7 +70,8 @@ namespace iPic3D {
       vct(0),
       grid(0),
       EMf(0),
-      part(0),
+      // part(0),
+      exchangePart(0),
 #ifndef NO_HDF5
       outputWrapperFPP(0),
 #endif
@@ -121,7 +122,10 @@ namespace iPic3D {
     VCtopology3D  *vct; // mpi topology 
     Grid3DCU      *grid; // 3d cartesion grid, local grid
     EMfields3D    *EMf; // 
-    Particles3D   *part;
+
+    // Particles3D   *part;
+    Particles3D   *exchangePart;
+
     Particles3D   *testpart;
     double        *Ke; // kinetic energy of each species, the normal one, added up
     double        *BulkEnergy; // bulk kinetic energy of each species, consider the bulk motion

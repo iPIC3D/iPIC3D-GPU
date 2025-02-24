@@ -1,3 +1,12 @@
+# Updated `scaling` branch for UMA architecture
+
+Date: 2025 April 24
+
+Changes: Based on 138b1 on old scaling, to solve the memory utilization problem on a physical UMA platform. Only the main particle array is updated to UMA style. 
+
+
+-----------------------------------------------
+
 # iPIC3D-GPU
 
 > iPIC3D with GPU acceleration, supporting multi-node multi-GPU.

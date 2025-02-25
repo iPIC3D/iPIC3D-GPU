@@ -4,6 +4,9 @@ Date: 2025 April 24
 
 Changes: Based on 138b1 on old scaling, to solve the memory utilization problem on a physical UMA platform. Only the main particle array is updated to UMA style. 
 
+In this version, the original Particle3D is only used for particle exchange(now named exchanePart), it holds a small buffer, like 0.1*nop. The real particle array is held by particleArrayCUDA, managing its creation, expansion(cudaMallocManaged, hipMalloc). However, the particle initialization, maxwellian is still in the Particle3D. So a method was added to Particle3D, to initialize the buffer held by paricleArrayCUDA.
+
+There's no `part` in the c_Solver now, so some output and helper function were commented out. But the field output is still working, for verification purpose. Just uncomment the `KCode.WriteOutput(i);` in iPic3D.h.
 
 -----------------------------------------------
 

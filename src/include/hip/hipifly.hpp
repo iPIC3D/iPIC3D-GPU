@@ -16,6 +16,8 @@
 #define cudaGetDevice hipGetDevice
 #define cudaGetDeviceCount hipGetDeviceCount
 
+#define cudaCpuDeviceId hipCpuDeviceId
+
 // Memory Management
 #define cudaMalloc hipMalloc
 #define cudaFree hipFree
@@ -66,7 +68,7 @@
 #define cudaTextureDesc hipTextureDesc
 
 // Unified Memory Management
-#define cudaMallocManaged hipMallocManaged
+#define cudaMallocManaged hipMalloc
 #define cudaMemPrefetchAsync hipMemPrefetchAsync
 
 // Cooperative Groups

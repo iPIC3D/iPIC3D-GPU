@@ -256,32 +256,32 @@ int c_Solver::Init(int argc, char **argv) {
 	   }
   }
 
-  // if ( Parameters::get_doWriteOutput()){
-	// 	#ifndef NO_HDF5
-	//   	if(col->getWriteMethod() == "shdf5" || col->getCallFinalize() || restart_cycle>0 ||
-	// 		  (col->getWriteMethod()=="pvtk" && !col->particle_output_is_off()) )
-	// 	{
-	// 		  outputWrapperFPP = new OutputWrapperFPP;
-	// 		  fetch_outputWrapperFPP().init_output_files(col,vct,grid,EMf,part,ns,testpart,nstestpart);
-	// 	}
-	// 	#endif
-	//   if(!col->field_output_is_off()){
-	// 	  if(col->getWriteMethod()=="pvtk"){
-	// 		  if(!(col->getFieldOutputTag()).empty())
-	// 			  fieldwritebuffer = newArr4(float,(grid->getNZN()-3),grid->getNYN()-3,grid->getNXN()-3,3);
-	// 		  if(!(col->getMomentsOutputTag()).empty())
-	// 			  momentwritebuffer=newArr3(float,(grid->getNZN()-3), grid->getNYN()-3, grid->getNXN()-3);
-	// 	  }
-	// 	  else if(col->getWriteMethod()=="nbcvtk"){
-	// 	    momentreqcounter=0;
-	// 	    fieldreqcounter = 0;
-	// 		  if(!(col->getFieldOutputTag()).empty())
-	// 			  fieldwritebuffer = newArr4(float,(grid->getNZN()-3)*4,grid->getNYN()-3,grid->getNXN()-3,3);
-	// 		  if(!(col->getMomentsOutputTag()).empty())
-	// 			  momentwritebuffer=newArr3(float,(grid->getNZN()-3)*14, grid->getNYN()-3, grid->getNXN()-3);
-	// 	  }
-	//   }
-  // }
+  if ( Parameters::get_doWriteOutput()){
+		#ifndef NO_HDF5
+	  	if(col->getWriteMethod() == "shdf5" || col->getCallFinalize() || restart_cycle>0 ||
+			  (col->getWriteMethod()=="pvtk" && !col->particle_output_is_off()) )
+		{
+			  outputWrapperFPP = new OutputWrapperFPP;
+			  fetch_outputWrapperFPP().init_output_files(col,vct,grid,EMf,part,ns,testpart,nstestpart);
+		}
+		#endif
+	  if(!col->field_output_is_off()){
+		  if(col->getWriteMethod()=="pvtk"){
+			  if(!(col->getFieldOutputTag()).empty())
+				  fieldwritebuffer = newArr4(float,(grid->getNZN()-3),grid->getNYN()-3,grid->getNXN()-3,3);
+			  if(!(col->getMomentsOutputTag()).empty())
+				  momentwritebuffer=newArr3(float,(grid->getNZN()-3), grid->getNYN()-3, grid->getNXN()-3);
+		  }
+		  else if(col->getWriteMethod()=="nbcvtk"){
+		    momentreqcounter=0;
+		    fieldreqcounter = 0;
+			  if(!(col->getFieldOutputTag()).empty())
+				  fieldwritebuffer = newArr4(float,(grid->getNZN()-3)*4,grid->getNYN()-3,grid->getNXN()-3,3);
+			  if(!(col->getMomentsOutputTag()).empty())
+				  momentwritebuffer=newArr3(float,(grid->getNZN()-3)*14, grid->getNYN()-3, grid->getNXN()-3);
+		  }
+	  }
+  }
   Ke = new double[ns];
   BulkEnergy = new double[ns];
   momentum = new double[ns];
@@ -936,7 +936,7 @@ bool c_Solver::ParticlesMover()
   return (false);
 }
 
-// void c_Solver::WriteOutput(int cycle) {
+void c_Solver::WriteOutput(int cycle) {
 
 // #ifdef USE_CATALYST
 //   Adaptor::CoProcess(col->getDt()*cycle, cycle, EMf);
@@ -945,7 +945,7 @@ bool c_Solver::ParticlesMover()
 //   WriteConserved(cycle);
 //   WriteRestart(cycle);
 
-//   if(!Parameters::get_doWriteOutput())  return;
+  if(!Parameters::get_doWriteOutput())  return;
 
 
 //   if (col->getWriteMethod() == "nbcvtk"){//Non-blocking collective MPI-IO
@@ -999,15 +999,15 @@ bool c_Solver::ParticlesMover()
 // 	    WriteTestParticles(cycle);
 
 //   }else if (col->getWriteMethod() == "pvtk"){//Blocking collective MPI-IO
-// 	  if(!col->field_output_is_off() && (cycle%(col->getFieldOutputCycle()) == 0 || cycle == first_cycle) ){
-// 		  if(!(col->getFieldOutputTag()).empty()){
-// 			  //WriteFieldsVTK(grid, EMf, col, vct, col->getFieldOutputTag() ,cycle);//B + E + Je + Ji + rho
-// 			  WriteFieldsVTK(grid, EMf, col, vct, col->getFieldOutputTag() ,cycle, fieldwritebuffer);//B + E + Je + Ji + rho
-// 		  }
-// 		  if(!(col->getMomentsOutputTag()).empty()){
-// 			  WriteMomentsVTK(grid, EMf, col, vct, col->getMomentsOutputTag() ,cycle, momentwritebuffer);
-// 		  }
-// 	  }
+	  if(!col->field_output_is_off() && (cycle%(col->getFieldOutputCycle()) == 0 || cycle == first_cycle) ){
+		  if(!(col->getFieldOutputTag()).empty()){
+			  //WriteFieldsVTK(grid, EMf, col, vct, col->getFieldOutputTag() ,cycle);//B + E + Je + Ji + rho
+			  WriteFieldsVTK(grid, EMf, col, vct, col->getFieldOutputTag() ,cycle, fieldwritebuffer);//B + E + Je + Ji + rho
+		  }
+		  if(!(col->getMomentsOutputTag()).empty()){
+			  WriteMomentsVTK(grid, EMf, col, vct, col->getMomentsOutputTag() ,cycle, momentwritebuffer);
+		  }
+	  }
 
 // 	  //Particle information is still in hdf5
 // 	  	WriteParticles(cycle);
@@ -1053,7 +1053,7 @@ bool c_Solver::ParticlesMover()
 // 			}
 // 		#endif
 //   	  }
-// }
+}
 
 // void c_Solver::WriteRestart(int cycle)
 // {

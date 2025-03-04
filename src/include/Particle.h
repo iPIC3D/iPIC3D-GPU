@@ -44,23 +44,23 @@ class Larray;
 // intended to occupy 64 bytes
 //
 // particle for a specific species
-class CUDA_ALIGN(64) SpeciesParticle
+class SpeciesParticle
 {
-  cudaCommonType u[3];
-  cudaCommonType q;
-  cudaCommonType x[3];
-  cudaCommonType t;
+  cudaParticleType u[3];
+  cudaParticleType q;
+  cudaParticleType x[3];
+  cudaParticleType t;
  public:
   SpeciesParticle(){}
   SpeciesParticle(
-    cudaCommonType u_,
-    cudaCommonType v_,
-    cudaCommonType w_,
-    cudaCommonType q_,
-    cudaCommonType x_,
-    cudaCommonType y_,
-    cudaCommonType z_,
-    cudaCommonType t_)
+    cudaParticleType u_,
+    cudaParticleType v_,
+    cudaParticleType w_,
+    cudaParticleType q_,
+    cudaParticleType x_,
+    cudaParticleType y_,
+    cudaParticleType z_,
+    cudaParticleType t_)
   {
     u[0]=u_;
     u[1]=v_;
@@ -72,47 +72,76 @@ class CUDA_ALIGN(64) SpeciesParticle
     t=t_;
   }
   // accessors
-  // cudaCommonType component(int i){ return u[i]; } // a hack
-  __host__ __device__ cudaCommonType get_u(int i)const{ return u[i]; }
-  __host__ __device__ cudaCommonType get_q()const{ return q; }
-  __host__ __device__ cudaCommonType get_x(int i)const{ return x[i]; }
-  __host__ __device__ cudaCommonType get_t()const{ return t; }
-  __host__ __device__ void set_u(cudaCommonType* in, int n=3) { for(int i=0;i<n;i++) u[i] = in[i]; }
-  __host__ __device__ void set_u(int i, cudaCommonType in) { u[i] = in; }
-  __host__ __device__ void set_q(cudaCommonType in) { q = in; }
-  __host__ __device__ void set_x(int i, cudaCommonType in) { x[i] = in; }
-  __host__ __device__ void set_t(cudaCommonType in){ t=in; }
+  // cudaParticleType component(int i){ return u[i]; } // a hack
+  __host__ __device__ cudaParticleType get_u(int i)const{ return u[i]; }
+  __host__ __device__ cudaParticleType get_q()const{ return q; }
+  __host__ __device__ cudaParticleType get_x(int i)const{ return x[i]; }
+  __host__ __device__ cudaParticleType get_t()const{ return t; }
+
+  __host__ __device__ void set_u(cudaTypeSingle* in, int n=3) { for(int i=0;i<n;i++) u[i] = in[i]; }
+  __host__ __device__ void set_u(int i, cudaTypeSingle in) { u[i] = in; }
+  __host__ __device__ void set_q(cudaTypeSingle in) { q = in; }
+  __host__ __device__ void set_x(int i, cudaTypeSingle in) { x[i] = in; }
+  __host__ __device__ void set_t(cudaTypeSingle in){ t=in; }
+
+  __host__ __device__ void set_u(cudaTypeDouble* in, int n=3) { for(int i=0;i<n;i++) u[i] = in[i]; }
+  __host__ __device__ void set_u(int i, cudaTypeDouble in) { u[i] = in; }
+  __host__ __device__ void set_q(cudaTypeDouble in) { q = in; }
+  __host__ __device__ void set_x(int i, cudaTypeDouble in) { x[i] = in; }
+  __host__ __device__ void set_t(cudaTypeDouble in){ t=in; }
+
+  __host__ __device__ void set_x_u(cudaParticleType x, cudaParticleType y, cudaParticleType z, 
+                                    cudaParticleType u, cudaParticleType v, cudaParticleType w){
+    this->u[0] = u;
+    this->u[1] = v;
+    this->u[2] = w;
+
+    this->x[0] = x;
+    this->x[1] = y;
+    this->x[2] = z;
+
+  }
+  
   // tracking particles would actually use q for the ID
   longid get_ID()const{ return longid(t); }
-  void set_ID(longid in){ t = cudaCommonType(in); }
+  void set_ID(longid in){ t = cudaParticleType(in); }
   // alternative accessors
-  __host__ __device__ cudaCommonType get_x()const{ return x[0]; }
-  __host__ __device__ cudaCommonType get_y()const{ return x[1]; }
-  __host__ __device__ cudaCommonType get_z()const{ return x[2]; }
-  __host__ __device__ cudaCommonType get_u()const{ return u[0]; }
-  __host__ __device__ cudaCommonType get_v()const{ return u[1]; }
-  __host__ __device__ cudaCommonType get_w()const{ return u[2]; }
-  __host__ __device__ cudaCommonType& fetch_x(){ return x[0]; }
-  __host__ __device__ cudaCommonType& fetch_y(){ return x[1]; }
-  __host__ __device__ cudaCommonType& fetch_z(){ return x[2]; }
-  __host__ __device__ cudaCommonType& fetch_q(){ return q; }
-  __host__ __device__ cudaCommonType& fetch_u(){ return u[0]; }
-  __host__ __device__ cudaCommonType& fetch_v(){ return u[1]; }
-  __host__ __device__ cudaCommonType& fetch_w(){ return u[2]; }
-  __host__ __device__ cudaCommonType& fetch_t(){ return t; }
-  __host__ __device__ void set_x(cudaCommonType in){ x[0]=in; }
-  __host__ __device__ void set_y(cudaCommonType in){ x[1]=in; }
-  __host__ __device__ void set_z(cudaCommonType in){ x[2]=in; }
-  __host__ __device__ void set_u(cudaCommonType in){ u[0]=in; }
-  __host__ __device__ void set_v(cudaCommonType in){ u[1]=in; }
-  __host__ __device__ void set_w(cudaCommonType in){ u[2]=in; }
+  __host__ __device__ cudaParticleType get_x()const{ return x[0]; }
+  __host__ __device__ cudaParticleType get_y()const{ return x[1]; }
+  __host__ __device__ cudaParticleType get_z()const{ return x[2]; }
+  __host__ __device__ cudaParticleType get_u()const{ return u[0]; }
+  __host__ __device__ cudaParticleType get_v()const{ return u[1]; }
+  __host__ __device__ cudaParticleType get_w()const{ return u[2]; }
+  __host__ __device__ cudaParticleType& fetch_x(){ return x[0]; }
+  __host__ __device__ cudaParticleType& fetch_y(){ return x[1]; }
+  __host__ __device__ cudaParticleType& fetch_z(){ return x[2]; }
+  __host__ __device__ cudaParticleType& fetch_q(){ return q; }
+  __host__ __device__ cudaParticleType& fetch_u(){ return u[0]; }
+  __host__ __device__ cudaParticleType& fetch_v(){ return u[1]; }
+  __host__ __device__ cudaParticleType& fetch_w(){ return u[2]; }
+  __host__ __device__ cudaParticleType& fetch_t(){ return t; }
+
+  __host__ __device__ void set_x(cudaTypeSingle in){ x[0]=in; }
+  __host__ __device__ void set_y(cudaTypeSingle in){ x[1]=in; }
+  __host__ __device__ void set_z(cudaTypeSingle in){ x[2]=in; }
+  __host__ __device__ void set_u(cudaTypeSingle in){ u[0]=in; }
+  __host__ __device__ void set_v(cudaTypeSingle in){ u[1]=in; }
+  __host__ __device__ void set_w(cudaTypeSingle in){ u[2]=in; }
+// double for compatibility
+  __host__ __device__ void set_x(cudaTypeDouble in){ x[0]=in; }
+  __host__ __device__ void set_y(cudaTypeDouble in){ x[1]=in; }
+  __host__ __device__ void set_z(cudaTypeDouble in){ x[2]=in; }
+  __host__ __device__ void set_u(cudaTypeDouble in){ u[0]=in; }
+  __host__ __device__ void set_v(cudaTypeDouble in){ u[1]=in; }
+  __host__ __device__ void set_w(cudaTypeDouble in){ u[2]=in; }
+
   __host__ __device__ void set_to_zero()
   {
     for(int i=0;i<8;i++) u[i]=0;
   }
   __host__ __device__ void set(
-    cudaCommonType _u, cudaCommonType _v, cudaCommonType _w, cudaCommonType _q,
-    cudaCommonType _x, cudaCommonType _y, cudaCommonType _z, cudaCommonType _t
+    cudaParticleType _u, cudaParticleType _v, cudaParticleType _w, cudaParticleType _q,
+    cudaParticleType _x, cudaParticleType _y, cudaParticleType _z, cudaParticleType _t
     )
   {
     u[0] = _u; u[1] = _v; u[2] = _w; q = _q;
@@ -133,7 +162,7 @@ class CUDA_ALIGN(64) SpeciesParticle
 //  FetchPclComponent( Larray<SpeciesParticle>& _list, int _offset)
 //  : list(_list), offset(_offset)
 //  { }
-//  cudaCommonType operator[](int i)
+//  cudaParticleType operator[](int i)
 //  {
 //    return list[i].component(offset);
 //    // return component(offset)[i];

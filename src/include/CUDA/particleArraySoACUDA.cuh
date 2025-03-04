@@ -64,6 +64,10 @@ public:
 
     __host__ particleArraySoACUDA(): allocated(false){}
 
+    __host__ particleArraySoACUDA(int nop, cudaStream_t stream = 0): nop(nop), size(nop), allocated(true){
+        allocateMemory();
+    }
+
     __host__ void updateFromAoS(particleArrayCUDA* pclArray, cudaStream_t stream = 0);
 
 

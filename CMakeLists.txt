@@ -42,10 +42,8 @@ option(BUILD_SHARED_LIBS "Use shared libraries if ON, static if OFF" ON)
 option(USE_CATALYST "Use Catalyst adaptor" OFF)
 option(USE_BATSRUS "Use BATSRUS flag" OFF)
 option(USE_HDF5 "Use HDF5 library" OFF)
-option(CUDA_ON "Enable CUDA" ON) # It should always be ON, even for HIP AMD
-option(MOMENT_CUDA_ON "Run Moment on CUDA" ON)
-option(MOVER_CUDA_ON "Run Mover on CUDA" ON)
-option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA
+
+option(HIP_ON "Use HIP" ON) # Set it to OFF if you want to use CUDA, ON for HIP
 
 
 option(BENCH_MARK "Print tasks time" OFF)
@@ -142,18 +140,18 @@ file(
   processtopology/*.cpp
   )
 # CUDA source files
-if(CUDA_ON)
-  file(GLOB cuda_src_files ${SOURCE_CODE_DIR}/cudaKernel/*.cu ${SOURCE_CODE_DIR}/main/*.cu ${SOURCE_CODE_DIR}/dataAnalysis/*.cu)
-  if(HIP_ON)
-    set_source_files_properties(${cuda_src_files} PROPERTIES LANGUAGE HIP)
-  endif()
-  list(APPEND src_files ${cuda_src_files})
+file(GLOB cuda_src_files ${SOURCE_CODE_DIR}/cudaKernel/*.cu ${SOURCE_CODE_DIR}/main/*.cu ${SOURCE_CODE_DIR}/dataAnalysis/*.cu)
+
+if(HIP_ON)
+  set_source_files_properties(${cuda_src_files} PROPERTIES LANGUAGE HIP)
 endif()
+
+list(APPEND src_files ${cuda_src_files})
 
 add_library( iPIC3Dlib ${src_files} )
 
 
-if(CUDA_ON AND HIP_ON)
+if(HIP_ON)
   find_package(HIP REQUIRED)
   enable_language(HIP)
   message(STATUS "Using HIP environment.")
@@ -169,7 +167,7 @@ if(CUDA_ON AND HIP_ON)
   # set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx90a)
   # This should be correct for MI300A
   set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx942)
-elseif(CUDA_ON)
+else()
   enable_language(CUDA)
 
   set_target_properties(iPIC3Dlib PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
@@ -183,17 +181,16 @@ endif()
 
 set(include_path ${INCLUDE_CODE_DIR})
 # CUDA header files
-if(CUDA_ON)
-  list(APPEND include_path ${INCLUDE_CODE_DIR}/CUDA)
-  list(APPEND include_path ${INCLUDE_CODE_DIR}/dataAnalysis)
-  list(APPEND include_path ${INCLUDE_CODE_DIR}/dataAnalysis/GMM)
-  list(APPEND include_path ${INCLUDE_CODE_DIR}/dataAnalysis/Histogram)
-  if(NOT HIP_ON)
-    list(APPEND include_path ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  else()
-    list(APPEND include_path ${INCLUDE_CODE_DIR}/hip)
-  endif()
+list(APPEND include_path ${INCLUDE_CODE_DIR}/CUDA)
+list(APPEND include_path ${INCLUDE_CODE_DIR}/dataAnalysis)
+list(APPEND include_path ${INCLUDE_CODE_DIR}/dataAnalysis/GMM)
+list(APPEND include_path ${INCLUDE_CODE_DIR}/dataAnalysis/Histogram)
+if(NOT HIP_ON)
+  list(APPEND include_path ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+else()
+  list(APPEND include_path ${INCLUDE_CODE_DIR}/hip)
 endif()
+
 target_include_directories(
   iPIC3Dlib
   PUBLIC ${include_path}
@@ -237,28 +234,11 @@ if (BUILD_SHARED_LIBS)
   install(TARGETS iPIC3Dlib)
 endif()
 
-if (CUDA_ON)
-  target_compile_definitions(iPIC3Dlib PUBLIC CUDA_ON=true)
 
-  if(MOMENT_CUDA_ON)
-    target_compile_definitions(iPIC3Dlib PUBLIC MOMENT_CUDA_ON=true)
-  else()
-    target_compile_definitions(iPIC3Dlib PUBLIC MOMENT_CUDA_ON=false)
-  endif()
-  if(MOVER_CUDA_ON)
-    target_compile_definitions(iPIC3Dlib PUBLIC MOVER_CUDA_ON=true)
-  else()
-    target_compile_definitions(iPIC3Dlib PUBLIC MOVER_CUDA_ON=false)
-  endif()
-
-  if(HIP_ON)
-  target_compile_definitions(iPIC3Dlib PUBLIC HIPIFLY)
-  endif()
-else()
-  target_compile_definitions(iPIC3Dlib PUBLIC CUDA_ON=false)
-  target_compile_definitions(iPIC3Dlib PUBLIC MOMENT_CUDA_ON=false)
-  target_compile_definitions(iPIC3Dlib PUBLIC MOVER_CUDA_ON=false)
+if(HIP_ON)
+target_compile_definitions(iPIC3Dlib PUBLIC HIPIFLY)
 endif()
+
 
 #
 # Executable declaration
@@ -332,4 +312,8 @@ message("HDF5_INCLUDE_DIRS is ${HDF5_INCLUDE_DIRS}")
 message("HDF5_LIBRARIES   is ${HDF5_LIBRARIES}")
 message("HDF5_HL_LIBRARIES is ${HDF5_HL_LIBRARIES}")
 message("MPI_LIBRARIES is ${MPI_LIBRARIES}")
-message("Compiling with CUDA ${CUDA_ON}")
+if(HIP_ON)
+  message("Compiling with HIP")
+else()
+  message("Compiling with CUDA")
+endif()

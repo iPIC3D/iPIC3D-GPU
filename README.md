@@ -1,3 +1,14 @@
+# Update for FP32
+
+Date: 2025 March 4
+
+In this version, FP32 particle array is the default. The precision of particle, field, moment can be set in [cudaTypeDef.cuh](./src/include/CUDA/cudaTypeDef.cuh). For data analysis (DA), it runs every cycle, only histogram, GMM disabled. 
+
+There's no any output, except for the 2 txt files under data.
+
+However, some new developed commits were merged into this branch, too. Foe example, much CPU code was removed. Some unused macros like `CUDA_ON` was removed, as it's always on.
+
+
 # Updated `scaling` branch for UMA architecture
 
 Date: 2025 April 24

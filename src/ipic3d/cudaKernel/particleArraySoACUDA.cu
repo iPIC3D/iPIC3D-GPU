@@ -58,9 +58,9 @@ __host__ void particleArraySoACUDA<T, startElement, stopElement>::updateFromAoS(
 }
 
 
-template class particleArraySoA::particleArraySoACUDA<cudaCommonType>;
-template class particleArraySoA::particleArraySoACUDA<cudaCommonType, 0, 2>;
-template class particleArraySoA::particleArraySoACUDA<cudaCommonType, 0, 3>;
+template class particleArraySoA::particleArraySoACUDA<cudaParticleType>;
+template class particleArraySoA::particleArraySoACUDA<cudaParticleType, 0, 2>;
+template class particleArraySoA::particleArraySoACUDA<cudaParticleType, 0, 3>;
                             
 } // namespace particleArraySoA
 

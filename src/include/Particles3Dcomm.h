@@ -36,6 +36,8 @@ developers: Stefano Markidis, Giovanni Lapenta
 #include "Larray.h"
 #include "IDgenerator.h"
 
+#include "cudaTypeDef.cuh"
+
 namespace BCparticles
 {
     enum Enum
@@ -145,16 +147,16 @@ public:
   }
   // create new particle
   void create_new_particle(
-    double u, double v, double w, double q,
-    double x, double y, double z)
+    cudaParticleType u, cudaParticleType v, cudaParticleType w, cudaParticleType q,
+    cudaParticleType x, cudaParticleType y, cudaParticleType z)
   {
-    const double t = pclIDgenerator.generateID();
+    const cudaParticleType t = pclIDgenerator.generateID();
     _pcls.push_back(SpeciesParticle(u,v,w,q,x,y,z,t));
   }
   // add particle to the list
   void add_new_particle(
-    double u, double v, double w, double q,
-    double x, double y, double z, double t)
+    cudaParticleType u, cudaParticleType v, cudaParticleType w, cudaParticleType q,
+    cudaParticleType x, cudaParticleType y, cudaParticleType z, cudaParticleType t)
   {
     _pcls.push_back(SpeciesParticle(u,v,w,q,x,y,z,t));
   }
@@ -195,32 +197,32 @@ public:
   //
   int getNOP()  const { return _pcls.size(); }
   // set particle components
-  void setU(int i, double in){_pcls[i].set_u(in);}
-  void setV(int i, double in){_pcls[i].set_v(in);}
-  void setW(int i, double in){_pcls[i].set_w(in);}
-  void setQ(int i, double in){_pcls[i].set_q(in);}
-  void setX(int i, double in){_pcls[i].set_x(in);}
-  void setY(int i, double in){_pcls[i].set_y(in);}
-  void setZ(int i, double in){_pcls[i].set_z(in);}
-  void setT(int i, double in){_pcls[i].set_t(in);}
+  void setU(int i, cudaParticleType in){_pcls[i].set_u(in);}
+  void setV(int i, cudaParticleType in){_pcls[i].set_v(in);}
+  void setW(int i, cudaParticleType in){_pcls[i].set_w(in);}
+  void setQ(int i, cudaParticleType in){_pcls[i].set_q(in);}
+  void setX(int i, cudaParticleType in){_pcls[i].set_x(in);}
+  void setY(int i, cudaParticleType in){_pcls[i].set_y(in);}
+  void setZ(int i, cudaParticleType in){_pcls[i].set_z(in);}
+  void setT(int i, cudaParticleType in){_pcls[i].set_t(in);}
   // fetch particle components
-  double& fetchU(int i){return _pcls[i].fetch_u();}
-  double& fetchV(int i){return _pcls[i].fetch_v();}
-  double& fetchW(int i){return _pcls[i].fetch_w();}
-  double& fetchQ(int i){return _pcls[i].fetch_q();}
-  double& fetchX(int i){return _pcls[i].fetch_x();}
-  double& fetchY(int i){return _pcls[i].fetch_y();}
-  double& fetchZ(int i){return _pcls[i].fetch_z();}
-  double& fetchT(int i){return _pcls[i].fetch_t();}
+  cudaParticleType& fetchU(int i){return _pcls[i].fetch_u();}
+  cudaParticleType& fetchV(int i){return _pcls[i].fetch_v();}
+  cudaParticleType& fetchW(int i){return _pcls[i].fetch_w();}
+  cudaParticleType& fetchQ(int i){return _pcls[i].fetch_q();}
+  cudaParticleType& fetchX(int i){return _pcls[i].fetch_x();}
+  cudaParticleType& fetchY(int i){return _pcls[i].fetch_y();}
+  cudaParticleType& fetchZ(int i){return _pcls[i].fetch_z();}
+  cudaParticleType& fetchT(int i){return _pcls[i].fetch_t();}
   // get particle components
-  double getU(int i)const{return _pcls[i].get_u();}
-  double getV(int i)const{return _pcls[i].get_v();}
-  double getW(int i)const{return _pcls[i].get_w();}
-  double getQ(int i)const{return _pcls[i].get_q();}
-  double getX(int i)const{return _pcls[i].get_x();}
-  double getY(int i)const{return _pcls[i].get_y();}
-  double getZ(int i)const{return _pcls[i].get_z();}
-  double getT(int i)const{return _pcls[i].get_t();}
+  cudaParticleType getU(int i)const{return _pcls[i].get_u();}
+  cudaParticleType getV(int i)const{return _pcls[i].get_v();}
+  cudaParticleType getW(int i)const{return _pcls[i].get_w();}
+  cudaParticleType getQ(int i)const{return _pcls[i].get_q();}
+  cudaParticleType getX(int i)const{return _pcls[i].get_x();}
+  cudaParticleType getY(int i)const{return _pcls[i].get_y();}
+  cudaParticleType getZ(int i)const{return _pcls[i].get_z();}
+  cudaParticleType getT(int i)const{return _pcls[i].get_t();}
   //int get_npmax() const {return npmax;}
 
   // computed get access

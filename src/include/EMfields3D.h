@@ -29,6 +29,7 @@
 #include "Basic.h"
 #include "mpi.h"
 
+#include "cudaTypeDef.cuh"
 
 /*! Electromagnetic fields and sources defined for each local grid, and for an implicit maxwell's solver @date May 2008 @par Copyright: (C) 2008 KUL @author Stefano Markidis, Giovanni Lapenta. @version 3.0 */
 
@@ -134,7 +135,7 @@ class EMfields3D                // :public Field
     /*! copy the field data to the array used to move the particles */
     void set_fieldForPcls();
 
-    void set_fieldForPclsToCenter(cudaCommonType *fieldForPclsOnCenter);
+    void set_fieldForPclsToCenter(cudaFieldType *fieldForPclsOnCenter);
 
     /*! communicate ghost for grid -> Particles interpolation */
     void communicateGhostP2G(int ns);

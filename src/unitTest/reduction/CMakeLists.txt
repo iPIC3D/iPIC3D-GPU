@@ -10,7 +10,7 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 
 option(CUDA_ON "Enable CUDA" ON) # It should always be ON, even for HIP AMD
-option(HIP_ON "Use HIP" ON) # Set it to OFF if you want to use CUDA
+option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA
 
 if(NOT HIP_ON) # CUDA
     enable_language(CUDA)

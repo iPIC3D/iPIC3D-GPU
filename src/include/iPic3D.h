@@ -39,7 +39,7 @@ using std::string;
 class OutputWrapperFPP;
 #endif
 
-#if CUDA_ON == true
+
 #include "cudaTypeDef.cuh"
 #include "moverKernel.cuh"
 #include "momentKernel.cuh"
@@ -47,21 +47,21 @@ class OutputWrapperFPP;
 #include "gridCUDA.cuh"
 #include "particleExchange.cuh"
 #include "threadPool.hpp"
-#endif
+
 
 namespace iPic3D {
   class c_Solver;
 }
 
 namespace dataAnalysis {
-  int analysisEntre(iPic3D::c_Solver& KCode, int cycle);
+  class dataAnalysisPipelineImpl;
 }
 
 namespace iPic3D {
 
   class c_Solver {
 
-  friend int dataAnalysis::analysisEntre(c_Solver& KCode, int cycle);
+  friend dataAnalysis::dataAnalysisPipelineImpl;
 
   public:
     ~c_Solver();
@@ -87,10 +87,11 @@ namespace iPic3D {
     int initCUDA();
     int deInitCUDA();
     
-    void CalculateMoments(bool isInit);
+    void CalculateMoments();
+    void CalculateMomentsAwait();
     void CalculateField(int cycle);
     int cudaLauncherAsync(int species);
-    bool ParticlesMover();
+    bool ParticlesMoverMomentAsync();
     void CalculateB();
     //
     // output methods
@@ -133,7 +134,7 @@ namespace iPic3D {
     double        *Qremoved; // array of double, with species length, removed charges from the depopulation area
     Timing        *my_clock;
 
-#if CUDA_ON == true
+
     int cudaDeviceOnNode; // the device this rank should use
     cudaStream_t*       streams;
 
@@ -161,16 +162,16 @@ namespace iPic3D {
 
 	//! simple device buffers
     // [10][nxn][nyn][nzn], a piece of cuda memory to hold the moment
-    cudaTypeArray1<cudaCommonType>* momentsCUDAPtr; // for every species
+    cudaTypeArray1<cudaMomentType>* momentsCUDAPtr; // for every species
     // [nxn][nyn][nzn][2*4], a piece of cuda memory to hold E and B from host
-    cudaTypeArray1<cudaCommonType> fieldForPclCUDAPtr; // for all species
+    cudaTypeArray1<cudaFieldType> fieldForPclCUDAPtr; // for all species
 
-    cudaTypeArray1<cudaCommonType> fieldForPclHostPtr;
+    cudaTypeArray1<cudaFieldType> fieldForPclHostPtr;
     
     ThreadPool *threadPoolPtr;
 
     cudaEvent_t event0;
-#endif
+
 
 
 #ifndef NO_HDF5

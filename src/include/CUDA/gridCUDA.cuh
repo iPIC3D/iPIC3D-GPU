@@ -25,25 +25,25 @@ public:
     /** number of nodes - Z direction, including + 2 extra nodes for guard cells */
     int nzn;
     /** dx = space step - X direction */
-    cudaCommonType dx;
+    cudaParticleType dx;
     /** dy = space step - Y direction */
-    cudaCommonType dy;
+    cudaParticleType dy;
     /** dz = space step - Z direction */
-    cudaCommonType dz;
+    cudaParticleType dz;
     /** invdx = 1/dx */
-    cudaCommonType invdx;
+    cudaParticleType invdx;
     /** invdy = 1/dy */
-    cudaCommonType invdy;
+    cudaParticleType invdy;
     /** invdz = 1/dz */
-    cudaCommonType invdz;
+    cudaParticleType invdz;
     /** volume of mesh cell*/
-    cudaCommonType VOL;
+    cudaParticleType VOL;
     /** invol = inverse of volume*/
-    cudaCommonType invVOL;
+    cudaParticleType invVOL;
 
     /** local grid boundaries coordinate of proper subdomain */
-    cudaCommonType xStart, xEnd, yStart, yEnd, zStart, zEnd;
-    cudaCommonType xStart_g, yStart_g, zStart_g;
+    cudaParticleType xStart, xEnd, yStart, yEnd, zStart, zEnd;
+    cudaParticleType xStart_g, yStart_g, zStart_g;
 
     // calculate them 
     // cudaCommonType *node_xcoord;
@@ -65,9 +65,9 @@ private:
     int cylast; // nyc-1;
     int czlast; // nzc-1;
 
-    __host__ __device__ static void get_weights(cudaCommonType weights[8],
-                            cudaCommonType w0x, cudaCommonType w0y, cudaCommonType w0z,
-                            cudaCommonType w1x, cudaCommonType w1y, cudaCommonType w1z)
+    __host__ __device__ static void get_weights(cudaParticleType weights[8],
+                            cudaParticleType w0x, cudaParticleType w0y, cudaParticleType w0z,
+                            cudaParticleType w1x, cudaParticleType w1y, cudaParticleType w1z)
     {
         weights[0] = w1x*w1y*w1z; // weight111
         weights[1] = w0x*w1y*w1z; // weight011
@@ -79,7 +79,7 @@ private:
         weights[7] = w1x*w0y*w0z; // weight100
     }
 
-    __host__ __device__ void make_grid_position_safe(cudaCommonType& cx_pos, cudaCommonType& cy_pos, cudaCommonType& cz_pos)const
+    __host__ __device__ void make_grid_position_safe(cudaParticleType& cx_pos, cudaParticleType& cy_pos, cudaParticleType& cz_pos)const
     {
         // if the position is outside the domain, then map
         // it to the edge of the guarded subdomain
@@ -163,19 +163,19 @@ public:
     }
 
     __host__ __device__ void get_safe_cell_and_weights(
-    cudaCommonType xpos, cudaCommonType ypos, cudaCommonType zpos,
+    cudaParticleType xpos, cudaParticleType ypos, cudaParticleType zpos,
     int &cx, int& cy, int& cz,
-    cudaCommonType weights[8])const
+    cudaParticleType weights[8])const
     {
     //convert_xpos_to_cxpos(xpos,ypos,zpos,cx_pos,cy_pos,cz_pos);
     // gxStart marks start of guarded domain (including ghosts)
-    const cudaCommonType rel_xpos = xpos - xStart_g;
-    const cudaCommonType rel_ypos = ypos - yStart_g;
-    const cudaCommonType rel_zpos = zpos - zStart_g;
+    const cudaParticleType rel_xpos = xpos - xStart_g;
+    const cudaParticleType rel_ypos = ypos - yStart_g;
+    const cudaParticleType rel_zpos = zpos - zStart_g;
     // cell position (in guarded array)
-    cudaCommonType cx_pos = rel_xpos * invdx;
-    cudaCommonType cy_pos = rel_ypos * invdy;
-    cudaCommonType cz_pos = rel_zpos * invdz;
+    cudaParticleType cx_pos = rel_xpos * invdx;
+    cudaParticleType cy_pos = rel_ypos * invdy;
+    cudaParticleType cz_pos = rel_zpos * invdz;
     //
     if(suppress_runaway_particle_instability)
         make_grid_position_safe(cx_pos,cy_pos,cz_pos);
@@ -189,13 +189,13 @@ public:
     //assert_cell_coordinates_safe(cx,cy,cz); 
 
     // fraction of distance from the left
-    const cudaCommonType w0x = cx_pos - cx;
-    const cudaCommonType w0y = cy_pos - cy;
-    const cudaCommonType w0z = cz_pos - cz;
+    const cudaParticleType w0x = cx_pos - cx;
+    const cudaParticleType w0y = cy_pos - cy;
+    const cudaParticleType w0z = cz_pos - cz;
     // fraction of the distance from the right of the cell
-    const cudaCommonType w1x = 1.-w0x;
-    const cudaCommonType w1y = 1.-w0y;
-    const cudaCommonType w1z = 1.-w0z;
+    const cudaParticleType w1x = 1.f-w0x;
+    const cudaParticleType w1y = 1.f-w0y;
+    const cudaParticleType w1z = 1.f-w0z;
 
     get_weights(weights, w0x, w0y, w0z, w1x, w1y, w1z);
     }

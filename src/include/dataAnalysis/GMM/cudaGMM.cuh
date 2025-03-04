@@ -2,6 +2,7 @@
 #define _CUDA_GMM_H_
 
 #include "cudaTypeDef.cuh"
+#include "cudaGMMUtility.cuh"
 #include "cudaGMMkernel.cuh"
 #include "cudaReduction.cuh"
 
@@ -14,67 +15,6 @@
 namespace cudaGMMWeight
 {
 
-template <typename T, int dataDim, typename U = int>
-class GMMDataMultiDim{
-
-private:
-    int dim = dataDim;
-    int numData;
-    T* data[dataDim]; // pointers to the dimensions of the data points
-    U* weight;
-public:
-
-    // all dim in one array
-    __host__ __device__ GMMDataMultiDim(int numData, T* data, U* weight){ 
-        this->numData = numData;
-        for(int i = 0; i < dataDim; i++){
-            this->data[i] = data + i*numData;
-        }
-        this->weight = weight;
-    }
-
-    // all dim in separate arrays
-    __host__ __device__ GMMDataMultiDim(int numData, T** data, U* weight){
-        this->numData = numData;
-        for(int i = 0; i < dataDim; i++){
-            this->data[i] = data[i];
-        }
-        this->weight = weight;
-    }
-
-    __device__ __host__ T* getDim(int dim)const {
-        return data[dim];
-    }
-
-    __device__ __host__ int getNumData()const {
-        return numData;
-    }
-
-    __device__ __host__ int getDim()const {
-        return dim;
-    }
-
-    __device__ __host__ U* getWeight()const {
-        return weight;
-    }
-
-};
-
-template <typename T>
-struct GMMParam_s{
-    int numComponents;
-    int maxIteration;
-    T threshold; // the threshold for the log likelihood
-    
-    // these 3 are optional, if not set, they will be initialized with the internal init functions
-    T* weightInit;
-    T* meanInit;
-    T* coVarianceInit;
-    
-};
-
-template <typename T>
-using GMMParam_t = GMMParam_s<T>;
 
 
 template <typename T, int dataDim, typename U = int>
@@ -232,10 +172,17 @@ public:
         cudaErrChk(cudaMallocHost(&logResult, sizeof(T)));
     }
 
-    __host__ int initGMM(std::string outputPath){
+    __host__ int initGMM(){
 
         // do the GMR
         int step = 0;
+        if constexpr(NORMALIZE_DATA_FOR_GMM)
+        {
+            if(paramHostPtr->maxIteration>0)
+            {
+                normalizePoints();
+            }
+        }
         while(step < paramHostPtr->maxIteration){
             
             // E
@@ -244,7 +191,7 @@ public:
             logLikelihood = sumLogLikelihood();
 
             // compare the log likelihood increament with the threshold, if the increament is smaller than the threshold, or the log likelihood is smaller than the previous one, output the GMM
-            if(fabs(logLikelihood - logLikelihoodOld) < paramHostPtr->threshold || logLikelihood < logLikelihoodOld){
+            if( std::isnan(logLikelihood) || fabs(logLikelihood - logLikelihoodOld) < paramHostPtr->threshold || logLikelihood < logLikelihoodOld){
                 // std::cout << "Converged at step " << step << std::endl;
                 break;
             }
@@ -260,8 +207,39 @@ public:
             step++;
         }
 
-        return outputGMM(step, outputPath);
+        if constexpr(NORMALIZE_DATA_FOR_GMM)
+        {
+            if(step>0)
+            {
+                normalizeDataBack();
+            }
+        }
+        return step;
 
+    }
+
+    __host__ GMMResult<T, dataDim> getGMMResult(int simuStep, int convergeStep){
+        GMMResult<T, dataDim> result(simuStep, paramHostPtr->numComponents);
+
+        result.convergeStep = convergeStep;
+
+        if (std::isnan(logLikelihood))
+        std::cerr << "[!]GMM: LogLikelihood is NaN!" << " GMM step: "<< convergeStep << std::endl;
+
+        result.logLikelihoodFinal = logLikelihood;
+
+        // copy from device array
+        cudaErrChk(cudaMemcpyAsync(result.weight.get(), weightCUDA, sizeof(T)*paramHostPtr->numComponents, cudaMemcpyDefault, GMMStream));
+        cudaErrChk(cudaMemcpyAsync(result.mean.get(), meanCUDA, sizeof(T)*paramHostPtr->numComponents*dataDim, cudaMemcpyDefault, GMMStream));
+        cudaErrChk(cudaMemcpyAsync(result.coVariance.get(), coVarianceCUDA, sizeof(T)*paramHostPtr->numComponents*dataDim*dataDim, cudaMemcpyDefault, GMMStream));
+        
+        cudaErrChk(cudaStreamSynchronize(GMMStream));
+
+        for(int i = 0; i < paramHostPtr->numComponents; i++){
+            result.weight[i] = exp(result.weight[i]);
+        }
+
+        return result;
     }
 
     __host__ int outputGMM(int convergeStep, std::string outputPath){
@@ -286,6 +264,10 @@ public:
                 std::cerr << "[!]Could not open file " << outputPath << std::endl;
                 return -1;
             }
+
+            if (std::isnan(logLikelihood))
+                std::cerr << "[!]LogLikelihood " <<outputPath<< " is NaN!" << " GMM step: "<< convergeStep << std::endl;
+
 
             file << "{\n";
             file << "\"convergeStep\": " << convergeStep << ",\n";
@@ -387,6 +369,24 @@ private:
     }
 
 
+    void normalizePoints(){
+        
+        // normalize data such that velocities are in range -1;1
+        // launch kernel
+        cudaGMMWeightKernel::normalizePointsKernel<T,dataDim,U,false><<<getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>
+                                (dataDevicePtr, dataHostPtr->maxVelocityArray);
+    }
+
+    void normalizeDataBack(){
+        
+        // normalize data back to the original data range
+        // launch kernel
+        cudaGMMWeightKernel::normalizePointsKernel<T,dataDim,U,true><<<getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>
+                                (dataDevicePtr, dataHostPtr->maxVelocityArray );
+
+        cudaGMMWeightKernel::normalizeMeanAndCovBack<T, dataDim><<<1, paramHostPtr->numComponents, 0, GMMStream>>>
+                            (meanCUDA, coVarianceCUDA, paramHostPtr->numComponents, dataHostPtr->maxVelocityArray);
+    }
     
     void calcPxAtMeanAndCoVariance(){
 
@@ -395,8 +395,6 @@ private:
                                 (dataDevicePtr, meanCUDA, coVarianceDecomposedCUDA, posteriorCUDA, paramHostPtr->numComponents);
         
         // posterior_nk holds log p(x_i|mean,coVariance) for each data point i and each component k, temporary storage
-
-
     }
 
 
@@ -515,7 +513,13 @@ private:
             }
         }
 
-        // decompose the coVariance
+        // check cov-matrix and adjust main diagonal to ensure determinate>0 and cholesky decomposition
+        if constexpr(CHECK_COVMATRIX_GMM)
+        {
+            cudaGMMWeightKernel::checkAdjustCoVarianceKernel<T, dataDim><<<1, paramHostPtr->numComponents, 0, GMMStream>>>(coVarianceCUDA, paramHostPtr->numComponents);
+        }
+
+        // decompose the coVariance with cholesky decomposition -> A = LL^T
         cudaGMMWeightKernel::decomposeCoVarianceKernel<T, dataDim>
             <<<1, paramHostPtr->numComponents, 0, GMMStream>>>
             (coVarianceCUDA, coVarianceDecomposedCUDA, normalizerCUDA, paramHostPtr->numComponents);

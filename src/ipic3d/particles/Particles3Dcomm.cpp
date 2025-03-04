@@ -293,7 +293,7 @@ if( !isTestParticle ){
   numpcls_in_bucket_now = new array3_int(nxc,nyc,nzc);
   bucket_offset = new array3_int(nxc,nyc,nzc);
   
-  assert_eq(sizeof(SpeciesParticle),64);
+  assert_eq(sizeof(SpeciesParticle),(8*sizeof(cudaParticleType)));
 
   // if RESTART is true initialize the particle in allocate method
   restart = col->getRestart_status();
@@ -553,17 +553,17 @@ void Particles3Dcomm::apply_periodic_BC_global(
     SpeciesParticle& pcl = pcl_list[pidx];
     if(vct->getPERIODICX_P())
     {
-      double& x = pcl.fetch_x();
+      cudaParticleType& x = pcl.fetch_x();
       x = modulo(x, Lx, Lxinv);
     }
     if(vct->getPERIODICY_P())
     {
-      double& y = pcl.fetch_y();
+      cudaParticleType& y = pcl.fetch_y();
       y = modulo(y, Ly, Lyinv);
     }
     if(vct->getPERIODICZ_P())
     {
-      double& z = pcl.fetch_z();
+      cudaParticleType& z = pcl.fetch_z();
       z = modulo(z, Lz, Lzinv);
     }
   }
@@ -837,7 +837,7 @@ void Particles3Dcomm::apply_BCs_locally(vector_SpeciesParticle& pcl_list,
         for(int pidx=0;pidx<pcl_list.size();pidx++)
         {
           SpeciesParticle& pcl = pcl_list[pidx];
-          double& x = pcl.fetch_x();
+          cudaParticleType& x = pcl.fetch_x();
           //const double x_old = x;
           x = modulo(x, Lx, Lxinv);
           //dprintf("recved pcl#%g: remapped x=%g outside [0,%g] to x=%g", pcl.get_t(), x_old, Lx, x);
@@ -848,7 +848,7 @@ void Particles3Dcomm::apply_BCs_locally(vector_SpeciesParticle& pcl_list,
       case YUP:
         for(int pidx=0;pidx<pcl_list.size();pidx++)
         {
-          double& y = pcl_list[pidx].fetch_y();
+          cudaParticleType& y = pcl_list[pidx].fetch_y();
           y = modulo(y, Ly, Lyinv);
           // if(direction==YDN) y -= Ly; else y += Ly;
         }
@@ -857,7 +857,7 @@ void Particles3Dcomm::apply_BCs_locally(vector_SpeciesParticle& pcl_list,
       case ZUP:
         for(int pidx=0;pidx<pcl_list.size();pidx++)
         {
-          double& z = pcl_list[pidx].fetch_z();
+          cudaParticleType& z = pcl_list[pidx].fetch_z();
           z = modulo(z, Lz, Lzinv);
           // if(direction==ZDN) z -= Lz; else z += Lz;
         }
@@ -1194,7 +1194,7 @@ void Particles3Dcomm::apply_Xrght_BC(vector_SpeciesParticle& pcls, int start)
     case BCparticles::PERFECT_MIRROR:
       for(int p=start;p<size;p++)
       {
-        double& x = pcls[p].fetch_x();
+        cudaParticleType& x = pcls[p].fetch_x();
         x = 2*Lx - x;
         pcls[p].fetch_u() *= -1;
       }
@@ -1205,7 +1205,7 @@ void Particles3Dcomm::apply_Xrght_BC(vector_SpeciesParticle& pcls, int start)
       for(int p=start;p<size;p++)
       {
         SpeciesParticle& pcl = pcls[p];
-        double& x = pcl.fetch_x();
+        cudaParticleType& x = pcl.fetch_x();
         x = 2*Lx - x;
         double u[3];
         sample_maxwellian(u[0],u[1],u[2], uth,vth,wth);
@@ -1234,7 +1234,7 @@ void Particles3Dcomm::apply_Yrght_BC(vector_SpeciesParticle& pcls, int start)
       for(int p=start;p<size;p++)
       {
         SpeciesParticle& pcl = pcls[p];
-        double& y = pcl.fetch_y();
+        cudaParticleType& y = pcl.fetch_y();
         const double y_old = y;
         const double v_old = pcl.fetch_v();
         y = 2*Ly - y;
@@ -1249,7 +1249,7 @@ void Particles3Dcomm::apply_Yrght_BC(vector_SpeciesParticle& pcls, int start)
       for(int p=start;p<size;p++)
       {
         SpeciesParticle& pcl = pcls[p];
-        double& y = pcl.fetch_y();
+        cudaParticleType& y = pcl.fetch_y();
         y = 2*Ly - y;
         double u[3];
         sample_maxwellian(u[0],u[1],u[2], uth,vth,wth);
@@ -1277,7 +1277,7 @@ void Particles3Dcomm::apply_Zrght_BC(vector_SpeciesParticle& pcls, int start)
     case BCparticles::PERFECT_MIRROR:
       for(int p=start;p<size;p++)
       {
-        double& z = pcls[p].fetch_z();
+        cudaParticleType& z = pcls[p].fetch_z();
         z = 2*Lz - z;
         pcls[p].fetch_w() *= -1;
       }
@@ -1286,7 +1286,7 @@ void Particles3Dcomm::apply_Zrght_BC(vector_SpeciesParticle& pcls, int start)
       for(int p=start;p<size;p++)
       {
         SpeciesParticle& pcl = pcls[p];
-        double& z = pcl.fetch_z();
+        cudaParticleType& z = pcl.fetch_z();
         z = 2*Lz - z;
         double u[3];
         sample_maxwellian(u[0],u[1],u[2], uth,vth,wth);

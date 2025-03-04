@@ -30,11 +30,11 @@ public:
 
 __global__ void momentKernelStayed(momentParameter* momentParam,
                                     grid3DCUDA* grid,
-                                    cudaTypeArray1<cudaCommonType> moments);
+                                    cudaTypeArray1<cudaMomentType> moments);
 
 __global__ void momentKernelNew(momentParameter* momentParam,
                                     grid3DCUDA* grid,
-                                    cudaTypeArray1<cudaCommonType> moments,
+                                    cudaTypeArray1<cudaMomentType> moments,
                                     int stayedParticle);
 
 

@@ -10,6 +10,9 @@
 
 #include <iostream>
 #include <fstream>
+#include <type_traits>
+
+#include "dataAnalysisConfig.cuh"
 
 
 namespace histogram{
@@ -125,6 +128,10 @@ public:
         }
     }
 
+    __host__ __device__ int getSize(int index){
+        return size[index];
+    }
+
     __host__ U getMin(int index){
         return min[index];
     }
@@ -160,7 +167,7 @@ public:
         
         for(int i=dim-1; i>=0; i--){
             // check the range
-            if(data[i] < min[i] || data[i] > max[i]){assert(0); return -1;}
+            if(data[i] < min[i] || data[i] > max[i]){return -1;}
 
             auto tmp = (int)((data[i] - min[i]) / resolution[i]);
             if(tmp == size[i])tmp--; // the max value
@@ -213,7 +220,7 @@ public:
 
 namespace velocityHistogram{
 
-using histogramTypeIn = cudaCommonType;
+using histogramTypeIn = cudaParticleType;
 using histogramTypeOut = cudaTypeSingle;
 
 using velocityHistogramCUDA = histogram::histogramCUDA<histogramTypeIn, 2, histogramTypeOut>;
@@ -232,7 +239,7 @@ private:
 
     velocityHistogramCUDA* histogramCUDAPtr; // one buffer for 3 objects
 
-    int binThisDim[2] = {100, 100};
+    int binThisDim[2] = {VELOCITY_HISTOGRAM_RES, VELOCITY_HISTOGRAM_RES};
 
     int reductionTempArraySize = 0;
     histogramTypeIn* reductionTempArrayCUDA;
@@ -263,7 +270,7 @@ private:
     /**
      * @brief get the Max and Min value of the given value set
      */
-    __host__ int getRange(velocitySoA* pclArray, cudaStream_t stream);
+    __host__ int getRange(velocitySoA* pclArray, const int species, cudaStream_t stream);
 
 public:
 
@@ -272,13 +279,19 @@ public:
      * @param path the path to store the output file, directory
      */
     __host__ velocityHistogram(int initSize) {
-
+        // reduction temporary array
         reductionTempArraySize = 1024;
         cudaErrChk(cudaMalloc(&reductionTempArrayCUDA, sizeof(histogramTypeIn)*reductionTempArraySize * 6));
 
+        // the range of the histogram
         cudaErrChk(cudaMalloc(&reductionMinResultCUDA, sizeof(histogramTypeIn)*6));
         reductionMaxResultCUDA = reductionMinResultCUDA + 3;
 
+        if(initSize < binThisDim[0] * binThisDim[1]) {
+            // throw std::runtime_error("Histogram initial size is too small");
+            std::cerr << "[!]Histogram initial size is too small: " << initSize << " vs " << binThisDim[0] << "x" << binThisDim[1] << std::endl;
+            initSize = binThisDim[0] * binThisDim[1];
+        }
         histogramHostPtr = newHostPinnedObjectArray<velocityHistogramCUDA>(3, initSize);
         cudaErrChk(cudaMalloc(&histogramCUDAPtr, sizeof(velocityHistogramCUDA) * 3));
         cudaErrChk(cudaMemcpy(histogramCUDAPtr, histogramHostPtr, sizeof(velocityHistogramCUDA) * 3, cudaMemcpyDefault));
@@ -298,67 +311,39 @@ public:
      * @brief Initiate the kernels for histograming, launch the kernels
      * @details It can be invoked after Moment in the main loop, for the output and solver are on CPU
      */
-    __host__ void init(velocitySoA* pclArray, int cycleNum, cudaStream_t stream = 0);
-
+    __host__ void init(velocitySoA* pclArray, int cycleNum, const int species, cudaStream_t stream = 0);
 
     /**
-     * @brief Wait for the histogram data to be ready, write the output to file
-     * @details Output the 3 velocity histograms to file, for this species in this subdomain
-     *          It should be invoked after a previous Init, can be after the B, for it's on CPU
+     * @brief Wait for the histogram data to be ready, copy the data to host
+     * @details It should be invoked after a previous Init, after this, can use getVelocityHistogramCUDAArray to get the data
+     *         writeToFile has the same effect
      */
+    __host__ void copyHistogramToHost(cudaStream_t stream = 0){
+        cudaErrChk(cudaStreamSynchronize(stream));
+        
+        for(int i=0; i<3; i++){
+            histogramHostPtr[i].copyHistogramAsync(stream);
+        }
+
+        cudaErrChk(cudaStreamSynchronize(stream));
+    }
+
+
     __host__ void writeToFile(std::string filePath, cudaStream_t stream = 0){
-        cudaErrChk(cudaStreamSynchronize(stream));
-        
-        for(int i=0; i<3; i++){
-            histogramHostPtr[i].copyHistogramAsync(stream);
-        }
-
-        cudaErrChk(cudaStreamSynchronize(stream));
-        
-        std::string items[3] = {"UV", "VW", "UW"};
-
-        for(int i=0; i<3; i++){ // UV, VW, UW
-            std::ostringstream ossFileName;
-            ossFileName << filePath << "/velocityHistogram_" << MPIdata::get_rank() << "_" << items[i] << "_" << cycleNum << ".vtk";
-
-            std::ofstream vtkFile(ossFileName.str(), std::ios::binary);
-
-            vtkFile << "# vtk DataFile Version 3.0\n";
-            vtkFile << "Velocity Histogram\n";
-            vtkFile << "BINARY\n";  
-            vtkFile << "DATASET STRUCTURED_POINTS\n";
-            vtkFile << "DIMENSIONS " << histogramHostPtr[i].size[0] << " " << histogramHostPtr[i].size[1] << " 1\n";
-            vtkFile << "ORIGIN " << histogramHostPtr[i].getMin(0) << " " << histogramHostPtr[i].getMin(1) << " 0\n"; 
-            vtkFile << "SPACING " << histogramHostPtr[i].getResolution(0) << " " << histogramHostPtr[i].getResolution(1) << " 1\n";  
-            vtkFile << "POINT_DATA " << histogramHostPtr[i].getLogicSize() << "\n";  
-            vtkFile << "SCALARS scalars int 1\n";  
-            vtkFile << "LOOKUP_TABLE default\n";  
-
-            auto histogramBuffer = histogramHostPtr[i].getHistogram();
-            for (int j = 0; j < histogramHostPtr[i].getLogicSize(); j++) {
-                int value = histogramBuffer[j];
-                
-                value = __builtin_bswap32(value);
-
-                vtkFile.write(reinterpret_cast<char*>(&value), sizeof(int));
-            }
-
-            vtkFile.close();
-        }
-
-
-    }
-
-    __host__ void writeToFileDouble(std::string filePath, cudaStream_t stream = 0){
-        cudaErrChk(cudaStreamSynchronize(stream));
-        
-        for(int i=0; i<3; i++){
-            histogramHostPtr[i].copyHistogramAsync(stream);
-        }
-
-        cudaErrChk(cudaStreamSynchronize(stream));
+        copyHistogramToHost(stream);
         
         std::string items[3] = {"uv", "vw", "uw"};
+
+        std::string vtkType;
+        if constexpr (std::is_same_v<histogramTypeOut, float>){
+            vtkType = "float";
+        } else if constexpr (std::is_same_v<histogramTypeOut, double>){
+            vtkType = "double";
+        } else if constexpr (std::is_same_v<histogramTypeOut, int>){
+            vtkType = "int";
+        } else {
+            throw std::runtime_error("Unsupported histogramTypeOut");
+        }
 
         for(int i=0; i<3; i++){ // UV, VW, UW
             std::ostringstream ossFileName;
@@ -370,20 +355,55 @@ public:
             vtkFile << "Velocity Histogram\n";
             vtkFile << "BINARY\n";  
             vtkFile << "DATASET STRUCTURED_POINTS\n";
-            vtkFile << "DIMENSIONS " << histogramHostPtr[i].size[0] << " " << histogramHostPtr[i].size[1] << " 1\n";
-            vtkFile << "ORIGIN " << histogramHostPtr[i].getMin(0) << " " << histogramHostPtr[i].getMin(1) << " 0\n"; 
-            vtkFile << "SPACING " << histogramHostPtr[i].getResolution(0) << " " << histogramHostPtr[i].getResolution(1) << " 1\n";  
+
+            if constexpr (HISTOGRAM_OUTPUT_3D == true){
+
+                switch (i)
+                {
+                case 0: // UV
+                    vtkFile << "DIMENSIONS " << histogramHostPtr[i].size[0] << " " << histogramHostPtr[i].size[1] << " 1\n";
+                    vtkFile << "ORIGIN " << histogramHostPtr[i].getMin(0) << " " << histogramHostPtr[i].getMin(1) << " 0\n"; 
+                    vtkFile << "SPACING " << histogramHostPtr[i].getResolution(0) << " " << histogramHostPtr[i].getResolution(1) << " 1\n";  
+                    break;
+
+                case 1: // VW
+                    vtkFile << "DIMENSIONS " << "1 " << histogramHostPtr[i].size[0] << " " << histogramHostPtr[i].size[1] << "\n";
+                    vtkFile << "ORIGIN " << "0 " << histogramHostPtr[i].getMin(0) << " " << histogramHostPtr[i].getMin(1) << "\n";
+                    vtkFile << "SPACING " << "1 " << histogramHostPtr[i].getResolution(0) << " " << histogramHostPtr[i].getResolution(1) << "\n";
+                    break;
+
+                case 2: // UW
+                    vtkFile << "DIMENSIONS " << histogramHostPtr[i].size[0] << " " << "1 " << histogramHostPtr[i].size[1] << "\n";
+                    vtkFile << "ORIGIN " << histogramHostPtr[i].getMin(0) << " " << "0 " << histogramHostPtr[i].getMin(1) << "\n";
+                    vtkFile << "SPACING " << histogramHostPtr[i].getResolution(0) << " " << "1 " << histogramHostPtr[i].getResolution(1) << "\n";
+                    break;
+                
+                default:
+                    break;
+                }
+
+            } else {
+                vtkFile << "DIMENSIONS " << histogramHostPtr[i].size[0] << " " << histogramHostPtr[i].size[1] << " 1\n";
+                vtkFile << "ORIGIN " << histogramHostPtr[i].getMin(0) << " " << histogramHostPtr[i].getMin(1) << " 0\n"; 
+                vtkFile << "SPACING " << histogramHostPtr[i].getResolution(0) << " " << histogramHostPtr[i].getResolution(1) << " 1\n";
+            }
+
+
             vtkFile << "POINT_DATA " << histogramHostPtr[i].getLogicSize() << "\n";  
-            vtkFile << "SCALARS scalars double 1\n";  
+            vtkFile << "SCALARS scalars " << vtkType << " 1\n";  
             vtkFile << "LOOKUP_TABLE default\n";  
 
             auto histogramBuffer = histogramHostPtr[i].getHistogram();
             for (int j = 0; j < histogramHostPtr[i].getLogicSize(); j++) {
-                cudaCommonType value = histogramBuffer[j];
-                
-                *(uint64_t*)(&value) = __builtin_bswap64(*(uint64_t*)(&value));
+                histogramTypeOut value = histogramBuffer[j];
 
-                vtkFile.write(reinterpret_cast<char*>(&value), sizeof(cudaCommonType));
+                if constexpr (sizeof(histogramTypeOut) == 4){
+                    if(!bigEndian)*(uint32_t*)(&value) = __builtin_bswap32(*(uint32_t*)(&value));
+                } else if constexpr (sizeof(histogramTypeOut) == 8){
+                    if(!bigEndian)*(uint64_t*)(&value) = __builtin_bswap64(*(uint64_t*)(&value));
+                }
+
+                vtkFile.write(reinterpret_cast<char*>(&value), sizeof(histogramTypeOut));
             }
 
             vtkFile.close();
@@ -392,47 +412,8 @@ public:
 
     }
 
-    __host__ void writeToFileFloat(std::string filePath, cudaStream_t stream = 0){
-        cudaErrChk(cudaStreamSynchronize(stream));
-        
-        for(int i=0; i<3; i++){
-            histogramHostPtr[i].copyHistogramAsync(stream);
-        }
-
-        cudaErrChk(cudaStreamSynchronize(stream));
-        
-        std::string items[3] = {"uv", "vw", "uw"};
-
-        for(int i=0; i<3; i++){ // UV, VW, UW
-            std::ostringstream ossFileName;
-            ossFileName << filePath << items[i] << "_" << cycleNum << ".vtk";
-
-            std::ofstream vtkFile(ossFileName.str(), std::ios::binary);
-
-            vtkFile << "# vtk DataFile Version 3.0\n";
-            vtkFile << "Velocity Histogram\n";
-            vtkFile << "BINARY\n";  
-            vtkFile << "DATASET STRUCTURED_POINTS\n";
-            vtkFile << "DIMENSIONS " << histogramHostPtr[i].size[0] << " " << histogramHostPtr[i].size[1] << " 1\n";
-            vtkFile << "ORIGIN " << histogramHostPtr[i].getMin(0) << " " << histogramHostPtr[i].getMin(1) << " 0\n"; 
-            vtkFile << "SPACING " << histogramHostPtr[i].getResolution(0) << " " << histogramHostPtr[i].getResolution(1) << " 1\n";  
-            vtkFile << "POINT_DATA " << histogramHostPtr[i].getLogicSize() << "\n";  
-            vtkFile << "SCALARS scalars float 1\n";  
-            vtkFile << "LOOKUP_TABLE default\n";  
-
-            auto histogramBuffer = histogramHostPtr[i].getHistogram();
-            for (int j = 0; j < histogramHostPtr[i].getLogicSize(); j++) {
-                cudaTypeSingle value = histogramBuffer[j];
-                
-                *(uint32_t*)(&value) = __builtin_bswap32(*(uint32_t*)(&value));
-
-                vtkFile.write(reinterpret_cast<char*>(&value), sizeof(cudaTypeSingle));
-            }
-
-            vtkFile.close();
-        }
-
-
+    __host__ histogramTypeOut* getVelocityHistogramHostPtr(const int i){
+        return histogramHostPtr[i].getHistogram();
     }
 
     __host__ histogramTypeOut* getVelocityHistogramCUDAArray(const int i){

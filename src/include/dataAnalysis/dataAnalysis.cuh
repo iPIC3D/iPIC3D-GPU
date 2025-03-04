@@ -2,18 +2,44 @@
 #define _DATA_ANALYSIS_CUH_
 
 #include <thread>
-#include <future>
+#include <memory>
+
 #include "iPic3D.h"
+#include "VCtopology3D.h"
+
+
 
 namespace dataAnalysis
 {
+class dataAnalysisPipelineImpl;
 
+class dataAnalysisPipeline {
 
-std::future<int> startAnalysis(iPic3D::c_Solver& KCode, int cycle);
+private:
+    std::unique_ptr<dataAnalysisPipelineImpl> impl;
 
-int checkAnalysis(std::future<int>& analysisFuture);
+public:
 
-int waitForAnalysis(std::future<int>& analysisFuture);
+    dataAnalysisPipeline(iPic3D::c_Solver& KCode);
+
+    // create the output directory
+    static void createOutputDirectory(int myrank, int ns, VirtualTopology3D* vct);
+
+    // called in the main loop
+    void startAnalysis(int cycle);
+
+    // non-blocking check if the analysis is done
+    int checkAnalysis();
+
+    // blocking wait for the analysis to finish
+    int waitForAnalysis();
+
+    // write the results of GMM, the aggregated method
+    void writeGMMResults();
+
+    ~dataAnalysisPipeline();
+
+};
 
 
     

@@ -39,14 +39,20 @@ __global__ void calcLogLikelihoodForPointsKernel(const cudaGMMWeight::GMMDataMul
         T sum = 0;
         for(int dim = 0; dim < dataDim; dim++){
             // calculate (x - mean), dim
-            xMinusMean[dim] = dataCUDAPtr->getDim(dim)[idx] - meanComponent[dim];
+            xMinusMean[dim] = dataCUDAPtr->getDim(dim)[idx] - meanComponent[dim];           
         }
 
         for(int dim = 0; dim < dataDim; dim++){
             // slove lower triangular matrix
             sum = 0;
             // from head to tail
-            if(dim > 0)for(int j=0; j < dim-1; j++)sum += coVarianceDecompComponent[dim*dataDim + j] * coVarianceNeg1TimesXMinusMean[j];
+            if(dim > 0)
+            {
+                for(int j=0; j < dim-1; j++)
+                {
+                    sum += coVarianceDecompComponent[dim*dataDim + j] * coVarianceNeg1TimesXMinusMean[j];
+                }   
+            }
 
             coVarianceNeg1TimesXMinusMean[dim] = (xMinusMean[dim] - sum) / coVarianceDecompComponent[dim*dataDim + dim];
         }
@@ -68,10 +74,9 @@ __global__ void calcLogLikelihoodForPointsKernel(const cudaGMMWeight::GMMDataMul
             sum += coVarianceNeg1TimesXMinusMean[dim] * xMinusMean[dim];
         }
         determinate *= determinate;
-
+        
         // calculate the log likelihood of this data point for this component
         logLikelihoods[idx] =  - 0.5 * (dataDim * log(2 * M_PI) + log(determinate)) - 0.5 * sum;
-
     }
 
 }
@@ -109,7 +114,7 @@ __global__ void calcLogLikelihoodPxAndposteriorKernel(const cudaGMMWeight::GMMDa
         sum += exp(logPxComponent - maxValue);
     }
 
-    logLikelihood[idx] = maxValue + log(sum);
+    logLikelihood[idx] = maxValue + log(sum);   
 
     for(int component = 0; component < numComponents; component++){
         posterior[component*numData + idx] -= logLikelihood[idx];
@@ -152,6 +157,7 @@ __global__ void updateWeightKernel(T* logWeightVector, const T* logPosterior, co
  * @param logPosterior_k pointer to the posterior_k(Gamma), number of components
  * @param meanVector pointer to the mean vector, number of components * dataDim, just updated
  * @param tempCoVarianceForDataPoints pointer to the coVariance matrix for each data point, number of components * dataNum * dataDim * dataDim
+ * 
  */
 template <typename T, int dataDim, typename U>
 __global__ void updateCoVarianceKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr, const T* logPosterior_nk, 
@@ -199,7 +205,7 @@ __global__ void decomposeCoVarianceKernel(const T* coVariance, T* coVarianceDeco
     if(idx >= numComponents)return;
 
     auto coVarianceComponent = coVariance + idx*dataDim*dataDim;
-    auto coVarianceDecompComponent = coVarianceDecomp + idx*dataDim*dataDim;
+    auto coVarianceDecompComponent = coVarianceDecomp + idx*dataDim*dataDim;  
 
     T logDeterminant = 0;
 
@@ -209,7 +215,7 @@ __global__ void decomposeCoVarianceKernel(const T* coVariance, T* coVarianceDeco
 
     // decompose the coVariance matrix
     for (int row = 0; row < dataDim; ++row) { // matrix row
-        T sum = 0; // sum of left elements
+        T sum = 0; // sum of left squared elements
         for (int j = 0; j < row; j++) {
             const T element = coVarianceDecompComponent[row * dataDim + j];
             sum += element * element;
@@ -223,7 +229,8 @@ __global__ void decomposeCoVarianceKernel(const T* coVariance, T* coVarianceDeco
 
         coVarianceDecompComponent[row * dataDim + row] = sqrt(sum); // diagonal element
         logDeterminant += log(coVarianceDecompComponent[row * dataDim + row]);
-        for (int i = row + 1; i < dataDim; ++i) { // the row below the diagonal element
+        for (int i = row + 1; i < dataDim; ++i) 
+        { // the row below the diagonal element
             T lowerElementSum = 0;
             for (int column = 0; column < row; column++)
                 lowerElementSum += coVarianceDecompComponent[i * dataDim + column] * coVarianceDecompComponent[row * dataDim + column];
@@ -239,6 +246,119 @@ __global__ void decomposeCoVarianceKernel(const T* coVariance, T* coVarianceDeco
 }
 
 
+
+
+/**
+ * @brief check coVariance matrix elements for each component, ensure variance above a threshol eps and ensure coVariance matrix determinate > 0
+ * @details this cuda kernel will be launched once for all components
+ * 
+ * @param coVariance pointer to the coVariance matrix, number of components * dataDim * dataDim
+ * @param numComponents number of GMM components
+ */
+template <typename T, int dataDim>
+__global__ void checkAdjustCoVarianceKernel(T* coVariance, const int numComponents){
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= numComponents)return;
+
+    auto coVarianceComponent = coVariance + idx*dataDim*dataDim;
+
+    constexpr T toll = 1e-12;
+    constexpr T eps = 1e-7;
+
+    // check NaN values or variance values too small
+    // it works for any dataDim
+    for(int i = 0; i<dataDim; i++ )
+    {
+        for(int j = 0; j<dataDim; j++)
+        {
+            if(std::isnan(coVarianceComponent[ i*dataDim + j]))
+            {
+                coVarianceComponent[ i*dataDim + j] = toll;
+            }
+        }
+        if(coVarianceComponent[ i*dataDim + i] < eps )
+        {
+            coVarianceComponent[ i*dataDim + i] = eps;
+        }
+    }
+
+
+    // from here on it works only if dataDim == 2
+
+    // ensure symmetry in the cov-matrix 
+    coVarianceComponent[1] = coVarianceComponent[2];
+
+    // ensure determinate > 0
+    if(coVarianceComponent[0]*coVarianceComponent[3] - coVarianceComponent[2]*coVarianceComponent[2] - toll <=0)
+    {
+        const T k = coVarianceComponent[3] / coVarianceComponent[0]; 
+        coVarianceComponent[0] = sqrt( (coVarianceComponent[2]*coVarianceComponent[2] + toll) / k  ) + 10*eps;
+        coVarianceComponent[3] = coVarianceComponent[0] * k;
+    }
+}
+
+
+
+
+/**
+ * @brief normalize data points such that the range is -1;+1 if normalizeBack == false - normalize data points such that the range is the original one if normalizeBack == true
+ * @details this cuda kernel will be launched once for all data points
+ * 
+ * @param dataCUDAPtr pointer to the data, including numData
+ * @param rescaleFactor pointer to the rescale factor, dataDim
+ */
+template <typename T, int dataDim, typename U, bool normalizeBack>
+__global__ void normalizePointsKernel(cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr, const T* rescaleFactor){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    auto numData = dataCUDAPtr->getNumData();
+    if(idx >= numData)return;
+
+    if constexpr(normalizeBack)
+    {
+        for(int dim = 0; dim < dataDim; dim++){
+            // normalize data points
+            dataCUDAPtr->getDim(dim)[idx] *= rescaleFactor[dim];
+        }
+    }
+    else
+    {
+        for(int dim = 0; dim < dataDim; dim++){
+            // normalize data points
+            dataCUDAPtr->getDim(dim)[idx] /= rescaleFactor[dim];
+        }
+    }
+    
+}
+
+/**
+ * @brief normalize mean vector and cov-matrix back such that the range is the original one
+ * @details this cuda kernel will be launched once for all components
+ * 
+ * @param meanVector pointer to the mean vector, number of components * dataDim
+ * @param coVariance pointer to the coVariance matrix, number of components * dataDim * dataDim
+ * @param rescaleFactor pointer to the rescale factor, dataDim (here it is assumed that rescaleFactor is homogenues in all dimensions --> to fix later) 
+ */
+template <typename T, int dataDim>
+__global__ void normalizeMeanAndCovBack(T* meanVector, T* coVariance, const int numComponents, const T* rescaleFactor){
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= numComponents)return;
+
+    auto meanComponent = meanVector + idx*dataDim;
+    auto coVarianceComponent = coVariance + idx*dataDim*dataDim;
+
+    for(int i=0; i< dataDim; i++)
+    {
+        meanComponent[i] *= rescaleFactor[i];
+    }
+
+    // to fix and make it general
+    const T rescalFactorSqrd = rescaleFactor[0]*rescaleFactor[0]; 
+    for(int i=0; i< dataDim*dataDim; i++)
+    {
+        coVarianceComponent[i] *= rescalFactorSqrd;
+    }
+
+}
 
 }
 

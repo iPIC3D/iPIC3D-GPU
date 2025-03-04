@@ -8,96 +8,62 @@ namespace velocityHistogram
 
 using namespace particleArraySoA;
 
-/**
-/**
- * @brief Kernel function to compute velocity histograms.
- * @details launched for each particle
- *
- * @param nop Number of particles.
- * @param u Pointer to the array of u velocity components.
- * @param v Pointer to the array of v velocity components.
- * @param w Pointer to the array of w velocity components.
- * @param histogramCUDAPtr Pointer to the array of 3 velocityHistogramCUDA objects.
- */
-__global__ void velocityHistogramKernel(int nop, histogramTypeIn* u, histogramTypeIn* v, histogramTypeIn* w,
-                                        velocityHistogramCUDA* histogramCUDAPtr){
 
-    int pidx = threadIdx.x + blockIdx.x * blockDim.x;
-    if(pidx >= nop)return;
-
-    const histogramTypeIn uvw[3] = {u[pidx], v[pidx], w[pidx]};
-    const histogramTypeIn uv[2] = {uvw[0], uvw[1]};
-    const histogramTypeIn vw[2] = {uvw[1], uvw[2]};
-    const histogramTypeIn uw[2] = {uvw[0], uvw[2]};
-
-    histogramCUDAPtr[0].addData(uv, 1);
-    histogramCUDAPtr[1].addData(vw, 1);
-    histogramCUDAPtr[2].addData(uw, 1);
-
-}
-
-__global__ void velocityHistogramKernel(int nop, histogramTypeIn* u, histogramTypeIn* v, histogramTypeIn* w, histogramTypeIn* q,
-                                        velocityHistogramCUDA* histogramCUDAPtr){
-
-    int pidx = threadIdx.x + blockIdx.x * blockDim.x;
-    if(pidx >= nop)return;
-
-    const histogramTypeIn uvw[3] = {u[pidx], v[pidx], w[pidx]};
-    const histogramTypeIn uv[2] = {uvw[0], uvw[1]};
-    const histogramTypeIn vw[2] = {uvw[1], uvw[2]};
-    const histogramTypeIn uw[2] = {uvw[0], uvw[2]};
-
-    const histogramTypeOut qAbs = abs(q[pidx] * 10e5); // float
-    //const int qAbs = 1;
-
-    histogramCUDAPtr[0].addData(uv, qAbs);
-    histogramCUDAPtr[1].addData(vw, qAbs);
-    histogramCUDAPtr[2].addData(uw, qAbs);
-
-}
-
-
-
-__global__ void velocityHistogramKernelOne(int nop, histogramTypeIn* d1, histogramTypeIn* d2, histogramTypeIn* q,
+__global__ void velocityHistogramKernel(const int nop, const histogramTypeIn* d1, const histogramTypeIn* d2, const histogramTypeIn* q,
                                         velocityHistogramCUDA* histogramCUDAPtr){
 
     int pidx = threadIdx.x + blockIdx.x * blockDim.x;
     int gridSize = gridDim.x * blockDim.x;
     
-
+    
     extern __shared__ histogramTypeOut sHistogram[];
-
-    histogramTypeIn d1d2[2];
-    histogramTypeOut qAbs; // float
-
-    // Initialize shared memory to zero
-    for (int i = threadIdx.x; i < histogramCUDAPtr[0].getLogicSize(); i += blockDim.x) {
-        sHistogram[i] = 0.0;
-    }
-    __syncthreads();
-
-    for(int i = pidx; i < nop; i += gridSize){
-        
-        d1d2[0] = d1[i];
-        d1d2[1] = d2[i];
-
-        qAbs = abs(q[i] * 10e5); 
-
-        const auto index = histogramCUDAPtr[0].getIndex(d1d2);
-        atomicAdd(&sHistogram[index], qAbs);
-    }
-
-    __syncthreads();
-
-    // use one warp to update the histogram
-    const auto histogramSize = histogramCUDAPtr[0].getLogicSize();
     auto gHistogram = histogramCUDAPtr[0].getHistogramCUDA();
 
-    if(threadIdx.x < WARP_SIZE){
-        for(int i = threadIdx.x; i < histogramSize; i += WARP_SIZE){
-            atomicAdd(&gHistogram[i], sHistogram[i]);
+    constexpr int tile = VELOCITY_HISTOGRAM_TILE;
+    const auto tileSize = tile * tile;
+    // const int sharedMemSize = tileSize * sizeof(histogramTypeOut);
+
+    histogramTypeIn d1d2[2];
+    histogramTypeOut qAbs;
+
+    // size of this histogram
+    const auto dim0Size = histogramCUDAPtr[0].getSize(0);
+    const auto dim1Size = histogramCUDAPtr[0].getSize(1);
+
+    // the dim sizes are multiply of tile
+    for(int dim0 = 0; dim0 < dim0Size; dim0+=tile)
+    for(int dim1 = 0; dim1 < dim1Size; dim1+=tile){
+        // Initialize shared memory to zero
+        for (int i = threadIdx.x; i < tileSize; i += blockDim.x) {
+            sHistogram[i] = 0.0;
         }
+        __syncthreads();
+        
+        for(int i = pidx; i < nop; i += gridSize){
+            
+            d1d2[0] = d1[i];
+            d1d2[1] = d2[i];
+
+            const auto index = histogramCUDAPtr[0].getIndex(d1d2);
+            if(index < 0)continue; // out of histogram range
+
+            const auto index0 = index % dim0Size;
+            const auto index1 = index / dim0Size;
+            if(index0 < dim0 || index0 >= dim0 + tile || index1 < dim1 || index1 >= dim1 + tile)continue; // not this block
+            const auto sIndex = (index0 - dim0) + (index1 - dim1) * tile;
+
+            qAbs = abs(q[i] * 10e5); 
+            atomicAdd(&sHistogram[sIndex], qAbs);
+        }
+
+        __syncthreads();
+
+        for(int i = threadIdx.x; i < tileSize; i += blockDim.x){
+            atomicAdd(&gHistogram[dim0 + i % tile + (dim1 + i / tile) * dim0Size], sHistogram[i]);
+        }
+        
     }
+
 
 }
 

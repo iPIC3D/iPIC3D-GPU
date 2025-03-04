@@ -28,7 +28,7 @@
 #include "particleArrayCUDA.cuh"
 #include "particleExchange.cuh"
 
-using commonType = cudaCommonType;
+using commonType = cudaTypeDouble; // calculation type
 
 
 /**
@@ -43,7 +43,7 @@ using commonType = cudaCommonType;
  */
 __global__ void momentKernelStayed(momentParameter* momentParam,
                                 grid3DCUDA* grid,
-                                cudaTypeArray1<commonType> moments)
+                                cudaTypeArray1<cudaMomentType> moments)
 {
 
     uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -140,7 +140,7 @@ __global__ void momentKernelStayed(momentParameter* momentParam,
 
 __global__ void momentKernelNew(momentParameter* momentParam,
                                 grid3DCUDA* grid,
-                                cudaTypeArray1<commonType> moments,
+                                cudaTypeArray1<cudaMomentType> moments,
                                 int stayedParticle)
 {
 

@@ -166,7 +166,13 @@ inline void sample_maxwellian(
 //}
 // version of previous method that assumes Linv = 1/L
 // (faster if 1/L is precomputed)
-inline double modulo(double x, double L, double Linv)
+template<typename T>
+inline T modulo(T x, T L, T Linv)
+{
+  return x - floor(x * Linv) * L;
+}
+
+inline cudaParticleType modulo(cudaParticleType x, cudaCommonType L, cudaCommonType Linv)
 {
   return x - floor(x * Linv) * L;
 }

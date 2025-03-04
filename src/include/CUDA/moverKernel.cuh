@@ -24,17 +24,17 @@ public: //particle arrays
 
 public: // common parameter
 
-    cudaCommonType dt;
+    cudaParticleType dt;
 
-    cudaCommonType qom;
+    cudaParticleType qom;
 
-    cudaCommonType c;
+    cudaParticleType c;
 
     int NiterMover;
 
     int DFIELD_3or4;
 
-    cudaCommonType umax, umin, vmax, vmin, wmax, wmin;
+    cudaParticleType umax, umin, vmax, vmin, wmax, wmin;
 
     // moverOutflowParameter outflowParam;
 
@@ -67,7 +67,9 @@ public:
 };
 
 __global__ void moverKernel(moverParameter *moverParam,
-                            cudaTypeArray1<cudaCommonType> fieldForPcls,
+                            cudaTypeArray1<cudaFieldType> fieldForPcls,
                             grid3DCUDA *grid);
+
+// __global__ void castingField(grid3DCUDA *grid, cudaTypeArray1<cudaCommonType> fieldForPcls);
 
 #endif

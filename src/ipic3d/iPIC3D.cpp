@@ -40,8 +40,8 @@ int main(int argc, char **argv) {
       std::cout << "The Software was built for GPU" << std::endl;
 #endif
 
-    iPic3D::c_Solver KCode;
     CALI_MARK_BEGIN("main");
+    iPic3D::c_Solver KCode;
     KCode.Init(argc, argv); //! load param from file, init the grid, fields
 
     timeTasks.resetCycle(); // reset timer

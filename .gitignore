@@ -5,3 +5,5 @@ build/
 Debug*
 .vscode/
 .github/
+build_*/
+install_*/

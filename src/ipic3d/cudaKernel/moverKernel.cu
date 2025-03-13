@@ -176,7 +176,7 @@ __global__ void moverKernel(moverParameter *moverParam,
 
     // prepare the departure array
 
-    prepareDepartureArray(pcl, moverParam->departureArray, grid, moverParam->hashedSumArray, pidx);
+    // prepareDepartureArray(pcl, moverParam->departureArray, grid, moverParam->hashedSumArray, pidx);
     
 }
 

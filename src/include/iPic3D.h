@@ -82,7 +82,7 @@ namespace iPic3D {
       vct(0),
       grid(0),
       EMf(0),
-      part(0),
+      // part(0),
 #ifndef NO_HDF5
       outputWrapperFPP(0),
 #endif
@@ -101,8 +101,8 @@ namespace iPic3D {
     void CalculateMoments();
     void CalculateField(int cycle);
     int cudaLauncherAsync(int species);
-    bool ParticlesMoverMomentAsync();
-    bool MoverAwaitAndPclExchange();
+    bool ParticlesMoverAsync();
+    bool MoverAwait_PclExchange_MomentAsync();
     void CalculateB();
     void MomentsAwait();
 
@@ -137,7 +137,7 @@ namespace iPic3D {
     VCtopology3D  *vct; // mpi topology 
     Grid3DCU      *grid; // 3d cartesion grid, local grid
     EMfields3D    *EMf; // 
-    Particles3D   *part; // only used for particle exchange during the simulation
+    // Particles3D   *part; // only used for particle exchange during the simulation
     Particles3D   *outputPart; // buffers for all particle copy back, registered to the output warpperFPP
     Particles3D   *testpart;
     double        *Ke; // kinetic energy of each species, the normal one, added up

@@ -52,15 +52,14 @@ int main(int argc, char **argv) {
     KCode.CalculateField(i); // E field
     DA.waitForAnalysis();
 
-    KCode.ParticlesMoverMomentAsync(); // launch Mover and Moment kernels
-    // some spare CPU cycles
-    KCode.WriteOutput(i);
+    KCode.ParticlesMoverAsync(); // launch Mover and Moment kernels
 
-    KCode.MoverAwaitAndPclExchange();
+    KCode.MoverAwait_PclExchange_MomentAsync();
+
     KCode.CalculateB(); 
     KCode.MomentsAwait(); 
 
-    KCode.outputCopyAsync(i); // copy output data to host, for next output
+    KCode.WriteOutput(i);
     
     
 #ifdef LOG_TASKS_TOTAL_TIME

@@ -18,7 +18,7 @@ inline constexpr int DATA_ANALYSIS_EVERY_CYCLE = 100; // 0 to disable
 inline constexpr int VELOCITY_HISTOGRAM_RES = 100; // must be multiply of VELOCITY_HISTOGRAM_TILE
 inline constexpr int VELOCITY_HISTOGRAM_TILE = 100;
 
-inline constexpr bool HISTOGRAM_OUTPUT = true;
+inline constexpr bool HISTOGRAM_OUTPUT = false;
 inline const std::string HISTOGRAM_OUTPUT_DIR = DATA_ANALYSIS_OUTPUT_DIR + "velocityHistogram/";
 
 inline constexpr bool HISTOGRAM_FIXED_RANGE = true; // edit the range in velocityHistogram::getRange --> moved here
@@ -30,7 +30,7 @@ inline constexpr cudaCommonType MAX_VELOCITY_HIST_I = 0.09;
 inline constexpr bool HISTOGRAM_OUTPUT_3D = false; // the vtk file format, if false the 3 planes are on the same surface in paraview
 
 // GMM configuration
-inline constexpr bool GMM_OUTPUT = true;
+inline constexpr bool GMM_OUTPUT = false;
 inline const std::string GMM_OUTPUT_DIR = DATA_ANALYSIS_OUTPUT_DIR + "velocityGMM/";
 inline constexpr int GMM_DATA_DIM = 2; // only works with GMM_DATA_DIM = 2 now
 inline constexpr int NUM_COMPONENT_GMM = 8;

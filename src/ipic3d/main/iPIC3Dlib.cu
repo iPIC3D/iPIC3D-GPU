@@ -295,6 +295,14 @@ int c_Solver::Init(int argc, char **argv) {
 		  grid->getDZ());
 #endif
 
+    // Create or open the particle number file csv
+    pclNumCSV = std::ofstream(SaveDirName + "/particleNum" + std::to_string(myrank) + ".csv", std::ios::app); 
+    pclNumCSV << "cycle,";
+    for(int i=0; i<ns-1; i++){
+      pclNumCSV << "species" << i << ",";
+    }
+    pclNumCSV << "species" << ns-1 << std::endl;
+
 
   initCUDA();
 
@@ -760,6 +768,15 @@ void c_Solver::MomentsAwait() {
   EMf->calculateHatFunctions();
 }
 
+void c_Solver::writeParticleNum(int cycle) {
+  pclNumCSV << cycle << ",";
+  for(int i=0; i<ns-1; i++){
+    pclNumCSV << pclsArrayHostPtr[i]->getNOP() << ",";
+  }
+  pclNumCSV << pclsArrayHostPtr[ns-1]->getNOP() << std::endl;
+}
+
+
 void c_Solver::WriteOutput(int cycle) {
 
 #ifdef USE_CATALYST
@@ -1091,6 +1108,9 @@ void c_Solver::WriteTestParticles(int cycle)
 // and methods that save field data
 //
 void c_Solver::Finalize() {
+
+  pclNumCSV.close();
+
   if (col->getCallFinalize() && Parameters::get_doWriteOutput() && col->getRestartOutputCycle() > 0)
   {
     #ifndef NO_HDF5

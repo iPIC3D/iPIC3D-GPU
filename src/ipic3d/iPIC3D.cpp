@@ -59,6 +59,8 @@ int main(int argc, char **argv) {
     KCode.CalculateB(); 
     KCode.MomentsAwait(); 
 
+    KCode.writeParticleNum(i);
+
     KCode.WriteOutput(i);
     
     

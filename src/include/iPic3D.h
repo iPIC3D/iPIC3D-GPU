@@ -48,7 +48,7 @@ class OutputWrapperFPP;
 #include "particleExchange.cuh"
 #include "threadPool.hpp"
 
-
+#include <fstream>
 
 namespace iPic3D {
   class c_Solver;
@@ -109,6 +109,7 @@ namespace iPic3D {
     //
     // output methods
     //
+    void writeParticleNum(int cycle);
     void WriteRestart(int cycle);
     void WriteConserved(int cycle);
     void WriteVelocityDistribution(int cycle);
@@ -145,6 +146,8 @@ namespace iPic3D {
     double        *momentum; // an array of doubles, total momentum of all particle species
     double        *Qremoved; // array of double, with species length, removed charges from the depopulation area
     Timing        *my_clock;
+
+    std::ofstream pclNumCSV;
 
 
     int cudaDeviceOnNode; // the device this rank should use

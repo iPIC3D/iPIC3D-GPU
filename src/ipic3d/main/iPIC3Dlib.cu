@@ -599,7 +599,7 @@ bool c_Solver::ParticlesMoverAsync()
   for (int species = 0; species < ns; species++)
   {
     cudaErrChk(cudaStreamWaitEvent(streams[species], event0, 0));
-    moverKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+    moverSubcyclesKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
     // copy all particle back to host
     cudaErrChk(cudaMemcpyAsync(outputPart[species].get_pcl_array().getList(), pclsArrayHostPtr[species]->getpcls(), 
                                 pclsArrayHostPtr[species]->getNOP()*sizeof(SpeciesParticle), cudaMemcpyDefault, streams[species]));

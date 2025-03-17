@@ -66,10 +66,9 @@ public:
 
 template <typename T>
 struct GMMParam_s{
-    const int numComponents;
-    const int maxIteration;
-    const T threshold; // the threshold for the log likelihood
-
+    int numComponents;
+    int maxIteration;
+    T threshold; // the threshold for the log likelihood
     // these 3 are optional, if not set, they will be initialized with the internal init functions
     T* weightInit;
     T* meanInit;
@@ -79,6 +78,19 @@ struct GMMParam_s{
 
 template <typename T>
 using GMMParam_t = GMMParam_s<T>;
+
+
+// store output GMM data of the previous DA cycle to be used as initial GMM parameters in next DA cycle
+// at each DA cycle data in GMMParam_output_store are overwritten
+template <typename T>
+struct GMMParam_output_store{
+    int numComponents;
+    int maxIteration;
+    T threshold; // the threshold for the log likelihood
+    T weightVector[NUM_COMPONENT_GMM];
+    T meanVector[NUM_COMPONENT_GMM * DATA_DIM_GMM];
+    T coVarianceMatrix[NUM_COMPONENT_GMM * DATA_DIM_GMM * DATA_DIM_GMM ];
+};
 
 
 // result class. T is output parameter type, this can not be reused

@@ -118,7 +118,7 @@ find_package(OpenMP REQUIRED COMPONENTS CXX)
 endif()
 
 if (USE_ADIOS2)
-  set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/thirdparty/adios2")
+  set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/thirdparty/adios2-install")
   find_package(ADIOS2 REQUIRED)
 endif()
 
@@ -168,7 +168,12 @@ if(HIP_ON)
   target_compile_options(iPIC3Dlib PUBLIC -fgpu-rdc)
   target_link_options(iPIC3Dlib PUBLIC  -fgpu-rdc --hip-link)
 
-  set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx90a)
+  #set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx90a)
+  set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx942)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__HIP_PLATFORM_AMD__")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__HIP_PLATFORM_AMD__")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --offload-arch=gfx942")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --offload-arch=gfx942")
 else()
   enable_language(CUDA)
 

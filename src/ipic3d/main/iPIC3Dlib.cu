@@ -170,6 +170,11 @@ int c_Solver::Init(int argc, char **argv) {
     col->Print();
     col->save();
   }
+
+  
+  my_clock = new Timing(myrank);
+
+  
   // Create the local grid
   grid = new Grid3DCU(col, vct);  // Create the local grid
   EMf = new EMfields3D(col, grid, vct);  // Create Electromagnetic Fields Object
@@ -313,8 +318,6 @@ int c_Solver::Init(int argc, char **argv) {
 
 
   initCUDA();
-
-  my_clock = new Timing(myrank);
 
   return 0;
 }

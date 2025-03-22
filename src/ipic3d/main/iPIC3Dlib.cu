@@ -147,13 +147,20 @@ int c_Solver::Init(int argc, char **argv) {
   // Print the initial settings to stdout and a file
   if (myrank == 0) {
     //check and create the output directory, only if it is not a restart run
-    if(restart_status == 0){checkOutputFolder(SaveDirName); if(RestartDirName != SaveDirName)checkOutputFolder(RestartDirName); }
+    if(restart_status == 0){
+      checkOutputFolder(SaveDirName);
+      if(RestartDirName != SaveDirName)
+	checkOutputFolder(RestartDirName);
+    }
     
     MPIdata::instance().Print();
     vct->Print();
     col->Print();
     col->save();
   }
+  
+  my_clock = new Timing(myrank);
+
   // Create the local grid
   grid = new Grid3DCU(col, vct);  // Create the local grid
   EMf = new EMfields3D(col, grid, vct);  // Create Electromagnetic Fields Object
@@ -274,8 +281,6 @@ int c_Solver::Init(int argc, char **argv) {
 #if CUDA_ON == true
   initCUDA();
 #endif
-
-  my_clock = new Timing(myrank);
 
   return 0;
 }
@@ -414,7 +419,7 @@ int c_Solver::initCUDA(){
   threadPoolPtr = new ThreadPool(ns);
   cudaErrChk(cudaEventCreateWithFlags(&event0, cudaEventDisableTiming));
 
-  { // output path for data analysis
+  /*{ // output path for data analysis
     auto GMMSubDomainOutputPath = "./velocityGMM/subDomain" + std::to_string(myrank) + "/";
     for(int i = 0; i < ns; i++){
       auto GMMSpeciesOutputPath = GMMSubDomainOutputPath + "species" + std::to_string(i) + "/";
@@ -430,8 +435,7 @@ int c_Solver::initCUDA(){
         throw std::runtime_error("[!]Error: Can not create output folder for velocity histogram species");
       }
     }
-
-  }
+  }*/
 
   cudaDeviceSynchronize();
 

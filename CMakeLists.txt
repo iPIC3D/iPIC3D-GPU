@@ -165,7 +165,15 @@ if(CUDA_ON AND HIP_ON)
   target_compile_options(iPIC3Dlib PUBLIC -fgpu-rdc)
   target_link_options(iPIC3Dlib PUBLIC  -fgpu-rdc --hip-link)
 
-  set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx90a)
+  # This should be correct for MI250X
+  # set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx90a)
+  # This should be correct for MI300A
+  set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx942)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__HIP_PLATFORM_AMD__")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__HIP_PLATFORM_AMD__")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --offload-arch=gfx942")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --offload-arch=gfx942")
+  
 elseif(CUDA_ON)
   enable_language(CUDA)
 

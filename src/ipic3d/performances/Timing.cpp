@@ -89,13 +89,29 @@ void Timing::stopTiming() {
   // MPE_Finish_log("iPIC3D_LOG");
 }
 
+/** start timing the step */
+void Timing::start_step() {
+  former_MPI_Barrier(MPIdata::get_PicGlobalComm());
+  tstep_start = MPI_Wtime();
+}
+/** stop timing the step */
+void Timing::stop_step() {
+  former_MPI_Barrier(MPIdata::get_PicGlobalComm());
+  texecution = MPI_Wtime() - tstep_start;
+  if (rank_id == 0) printf( "Step: %.6f sec \n", texecution);
+}
 /** start timing the mover */
 void Timing::start_mover() {
   // MPE_Log_event(event1a,0,"start mover");
+  former_MPI_Barrier(MPIdata::get_PicGlobalComm());
+  tmover_start = MPI_Wtime();
 }
 /** stop timing the mover */
 void Timing::stop_mover() {
   // MPE_Log_event(event1b,0,"end mover");
+  former_MPI_Barrier(MPIdata::get_PicGlobalComm());
+  texecution = MPI_Wtime() - tmover_start;
+  if (rank_id == 0) printf( "Mover: %.6f sec \n", texecution);
 }
 /** start timing the field solver */
 void Timing::start_field() {

@@ -47,6 +47,10 @@ public:
   Timing();
   /** default constructor */
   Timing(int my_rank);
+  /** start timing the step */
+  void start_step();
+  /** stop timing the step */
+  void stop_step();
   /** start timing the mover */
   void start_mover();
   /** stop timing the mover */
@@ -74,7 +78,7 @@ private:
   /** rank of the processor */
   int rank_id;
   /** wall-clock time when startTiming method is called */
-  double tstart;
+  double tstart, tstep_start, tmover_start;
   /** wall-clock time when endTiming method is called */
   double tend;
   /** execution time */

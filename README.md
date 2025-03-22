@@ -1,28 +1,3 @@
-# Restart with ADIOS2
-
-Date: 2025 05 13
-
-The restart function is now working with ADIOS2. And this version, data analysis output is disabled, to reduce folder creation. 
-
-In CMakeLists, Change `HIP_ON`, `USE_HDF5`, `USE_ADIOS2` to `ON`. Don't forget to change AMD architecture in CMakeLists, MI250X by default.
-
-The CMake looks for ADIOS2 lib under local path `thirdparty/adios2`, as shown in CMakeLists.txt:
-
-``` cmake 
-if (USE_ADIOS2)
-  set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/thirdparty/adios2")
-  find_package(ADIOS2 REQUIRED)
-endif()
-
-```
-
-To use the restart, 
-
-- Modify the inputfile, set the `RestartOutputCycle`, diabled if 0. `CallFinalize=1` means if the restart is enabled, it will do a restart output at the last cycle, no matter it's a restart cycle or not.
-- Launch a simulation as usual: `mpirun -np 8 ./iPIC3D ../share/inputfiles/magneticReconnection/testGEM3Dsmall.inp`
-- You'll see the restart BP files under output folder, like `restart_0.bp`. One for each process.
-- Restart the simulation with: `mpirun -np 8 ./iPIC3D ../share/inputfiles/magneticReconnection/testGEM3Dsmall.inp restart`. 
-
 # iPIC3D-GPU
 
 > iPIC3D with GPU acceleration, supporting multi-node multi-GPU.
@@ -176,6 +151,28 @@ You can find the corresponding data at [./share/benchmark/GH200_release_baseline
  <!-- and [./benchmark/Dual-A100_release_baseline.csv](./benchmark/Dual-A100_release_baseline.csv).  -->
 
 <!-- Please note that the `Particle` and `Moments` parts are not exactly the time consumption of these two parts, as the kernels are interwaved in this version. The sum of the two parts are precise, though. -->
+
+# Restart with ADIOS2
+
+Date: 2025 05 13
+
+The restart function is now working with ADIOS2. In CMakeLists, Change `HIP_ON`, `USE_HDF5`, `USE_ADIOS2` to `ON`. Data analysis output is disabled to reduce folder creation. 
+The CMake looks for ADIOS2 lib under local path `thirdparty/adios2-install`, as shown in CMakeLists.txt:
+
+``` cmake 
+if (USE_ADIOS2)
+  set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/thirdparty/adios2-install")
+  find_package(ADIOS2 REQUIRED)
+endif()
+
+```
+
+To use the restart, 
+
+- Modify the inputfile, set the `RestartOutputCycle`, diabled if 0. `CallFinalize=1` means if the restart is enabled, it will do a restart output at the last cycle, no matter it's a restart cycle or not.
+- Launch a simulation as usual: `mpirun -np 8 ./iPIC3D ../share/inputfiles/magneticReconnection/testGEM3Dsmall.inp`
+- You'll see the restart BP files under output folder, like `restart_0.bp`. One for each process.
+- Restart the simulation with: `mpirun -np 8 ./iPIC3D ../share/inputfiles/magneticReconnection/testGEM3Dsmall.inp restart`. 
 
 
 ## Contact

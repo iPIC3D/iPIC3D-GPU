@@ -901,13 +901,16 @@ bool c_Solver::ParticlesMover() {
             sizeof(cudaCommonType),
         cudaMemcpyDefault, streams[0]));
     cudaErrChk(cudaEventRecord(event0, streams[0]));
-    CALI_MARK_BEGIN("move_particles_gpu");
+    CALI_MARK_BEGIN("move_particles_on_gpu");
+    CALI_MARK_BEGIN("launch_gpu_launcher_threads");
     std::future<int> results[ns];
     for (int i = 0; i < ns; i++) {
       results[i] =
           threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i);
     }
+    CALI_MARK_END("launch_gpu_launcher_threads");
 
+    CALI_MARK_BEGIN("send_particles");
     for (int i = 0; i < ns; i++) { //  it can be better
       auto x = results[i].get();
       stayedParticle[i] = pclsArrayHostPtr[i]->getNOP() - x;
@@ -915,7 +918,8 @@ bool c_Solver::ParticlesMover() {
       // part[i].openbc_particles_outflow();
       auto a = part[i].separate_and_send_particles();
     }
-    CALI_MARK_END("move_particles_gpu");
+    CALI_MARK_END("send_particles");
+    CALI_MARK_END("move_particles_on_gpu");
 #endif
 
     CALI_MARK_BEGIN("recommunicate_particles");

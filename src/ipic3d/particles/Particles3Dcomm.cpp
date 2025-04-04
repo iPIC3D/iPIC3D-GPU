@@ -46,6 +46,8 @@ developers: Stefano Markidis, Giovanni Lapenta.
 #include "Particles3Dcomm.h"
 #include "Parameters.h"
 
+#include "ipic3d_cali.h"
+
 #include "ipichdf5.h"
 //#include <vector>
 //#include <complex>
@@ -1849,6 +1851,7 @@ void Particles3Dcomm::sort_particles_serial_AoS()
 // This can be called from within an omp parallel block
 void Particles3Dcomm::copyParticlesToSoA()
 {
+  CALI_CXX_MARK_FUNCTION;
   timeTasks_set_task(TimeTasks::TRANSPOSE_PCLS_TO_SOA);
   const int nop = _pcls.size();
   // create memory for SoA representation
@@ -1893,6 +1896,7 @@ void Particles3Dcomm::copyParticlesToSoA()
 // This can be called from within an omp parallel block
 void Particles3Dcomm::copyParticlesToAoS()
 {
+  CALI_CXX_MARK_FUNCTION;
   timeTasks_set_task(TimeTasks::TRANSPOSE_PCLS_TO_AOS);
   const int nop = u.size();
   if(is_output_thread()) dprintf("copying to array of structs");

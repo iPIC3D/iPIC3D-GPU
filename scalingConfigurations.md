@@ -29,7 +29,8 @@ MPI: openmpi/4.1.5
 CPU: 1x 32-cores Intel Xeon 8358 + 8x 64GB 3200MHz DDR4  
 GPU: 4x NVIDIA custom Ampere 64GB HBM2  
 **Software**  
-Compiler:  
-Cuda version:  
-MPI:  
+Compiler: gcc/12.2
+Cuda version: cuda/12.3
+MPI: openmpi/4.1.6
 **Hardware**
+1 MPI rank per GPU, 6 OMP threads per MPI rank

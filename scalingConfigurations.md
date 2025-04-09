@@ -1,5 +1,6 @@
 ## **Configurations for running the scaling tests on different machines**
 
+---
 ### **El Capitan**
 **Architecture per node**  
 APU: AMD300A 
@@ -10,6 +11,7 @@ MPI:
 **Hardware**  
 1 MPI rank per APU, X OMP threads per MPI rank
 
+---
 ### **Tuolumne**
 **Architecture per node**  
 APU: AMD300A 
@@ -20,7 +22,7 @@ MPI:
 **Hardware**  
 1 MPI rank per APU, X OMP threads per MPI rank
 
-
+---
 ### **LUMI-G**
 **Architecture per node**  
 CPU: 1x 64-core AMD EPYC 7A53 "Trento" + 8x 64GB DDR4  

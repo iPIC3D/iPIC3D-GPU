@@ -69,3 +69,6 @@ Cuda version:
 MPI: 
 **Hardware**
 1 MPI rank per GPU, X OMP threads per MPI rank
+
+---
+## **iPIC3D Magnetosphere Simulation Parameters**

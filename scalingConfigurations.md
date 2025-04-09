@@ -57,3 +57,15 @@ Cuda version: cuda/12.3
 MPI: openmpi/4.1.6
 **Hardware**
 1 MPI rank per GPU, 6 OMP threads per MPI rank
+
+---
+### **Lassen**  
+**Architecture per node**  
+CPU:   
+GPU:   
+**Software**  
+Compiler: 
+Cuda version: 
+MPI: 
+**Hardware**
+1 MPI rank per GPU, X OMP threads per MPI rank

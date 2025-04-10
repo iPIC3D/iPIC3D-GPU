@@ -752,6 +752,7 @@ void c_Solver::CalculateField(int cycle) {
 }
 
 int c_Solver::cudaLauncherAsync(const int species) {
+  CALI_CXX_MARK_SCOPE("gpu_particle_mover_launcher");
   cudaSetDevice(cudaDeviceOnNode); // a must on multi-device node
 
   cudaEvent_t event1, event2;

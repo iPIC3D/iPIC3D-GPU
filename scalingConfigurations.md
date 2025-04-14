@@ -71,4 +71,3 @@ MPI: spectrum-mpi/spectrum-mpi-rolling-release-gcc-12.2.1 <br>
 1 MPI rank per GPU, 10 OMP threads per MPI rank
 
 ---
-## **iPIC3D Magnetosphere Simulation Parameters**

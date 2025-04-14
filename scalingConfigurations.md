@@ -4,9 +4,8 @@
 ### **El Capitan**
 **Architecture per node**  
 APU: AMD300A 
-
 **Software**  
-Compiler:  AMD Clang++  
+Compiler:  AMD Clang  
 ROCm version: ROCm~6.3.1  
 MPI: MPICH~8.1.31 
 **Hardware**  

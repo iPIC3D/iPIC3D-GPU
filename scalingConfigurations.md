@@ -2,9 +2,9 @@
 
 ---
 ### **El Capitan**
-**Architecture per node**  
-APU: AMD300A 
-**Software**  
+**Architecture per node**  <br>
+APU: AMD300A <br>
+**Software**  <br>
 Compiler:  AMD Clang  <br>
 ROCm version: ROCm/6.3.1  <br>
 MPI: MPICH~8.1.31 <br>
@@ -13,9 +13,9 @@ MPI: MPICH~8.1.31 <br>
 
 ---
 ### **Tuolumne**
-**Architecture per node**  
-APU: AMD300A 
-**Software**  
+**Architecture per node**  <br>
+APU: AMD300A <br>
+**Software**  <br>
 Compiler: AMD Clang++  <br>
 ROCm version: ROCm/6.3.1  <br>
 MPI: MPICH~8.1.31  <br>
@@ -24,7 +24,7 @@ MPI: MPICH~8.1.31  <br>
 
 ---
 ### **LUMI-G**
-**Architecture per node**  
+**Architecture per node**  <br>
 CPU: 1x 64-core AMD EPYC 7A53 "Trento" + 8x 64GB DDR4  <br>
 GPU: 4x AMD MI250x 128GB  <br>
 **Software**  

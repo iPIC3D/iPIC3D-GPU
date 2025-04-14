@@ -4,23 +4,24 @@
 ### **El Capitan**
 **Architecture per node**  
 APU: AMD300A 
+
 **Software**  
-Compiler:   
-ROCm version:   
-MPI:  
+Compiler:  AMD Clang++  
+ROCm version: ROCm~6.3.1  
+MPI: MPICH~8.1.31 
 **Hardware**  
-1 MPI rank per APU, X OMP threads per MPI rank
+1 MPI rank per APU, 21 OMP threads per MPI rank
 
 ---
 ### **Tuolumne**
 **Architecture per node**  
 APU: AMD300A 
 **Software**  
-Compiler:   
-ROCm version:   
-MPI:  
+Compiler: AMD Clang++  
+ROCm version: ROCm~6.3.1  
+MPI: MPICH~8.1.31  
 **Hardware**  
-1 MPI rank per APU, X OMP threads per MPI rank
+1 MPI rank per APU, 21 OMP threads per MPI rank
 
 ---
 ### **LUMI-G**
@@ -61,14 +62,14 @@ MPI: openmpi/4.1.6
 ---
 ### **Lassen**  
 **Architecture per node**  
-CPU:   
-GPU:   
+CPU: IBM POWER9  
+GPU: Nvidia V100  
 **Software**  
-Compiler: 
-Cuda version: 
-MPI: 
+Compiler: gcc/12.2.1
+Cuda version: cuda/12.2.2, 
+MPI: spectrum-mpi/spectrum-mpi-rolling-release-gcc-12.2.1
 **Hardware**
-1 MPI rank per GPU, X OMP threads per MPI rank
+1 MPI rank per GPU, 10 OMP threads per MPI rank
 
 ---
 ## **iPIC3D Magnetosphere Simulation Parameters**

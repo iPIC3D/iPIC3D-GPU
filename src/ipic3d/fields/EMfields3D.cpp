@@ -4853,7 +4853,7 @@ void EMfields3D::sustensorRightZ(double **susxz, double **susyz, double **suszz)
         omcx = beta * (Bxn[i][j][nzn - 2]+Bx_ext[i][j][nzn - 2]);
         omcy = beta * (Byn[i][j][nzn - 2]+By_ext[i][j][nzn - 2]);
         omcz = beta * (Bzn[i][j][nzn - 2]+Bz_ext[i][j][nzn - 2]);
-        denom = FourPI / 2 * delt * dt / c * qom[is] * rhons[is][i][j][nyn - 2] / (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
+        denom = FourPI / 2 * delt * dt / c * qom[is] * rhons[is][i][j][nzn - 2] / (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
         susxz[i][j] += (-omcy + omcx * omcz) * denom;
         susyz[i][j] += ( omcx + omcy * omcz) * denom;
         suszz[i][j] += (  1.0 + omcz * omcz) * denom;
@@ -4914,7 +4914,7 @@ void EMfields3D::perfectConductorLeft(arr3_double imageX, arr3_double imageY, ar
       for (int i=1; i <  nxn-1;i++)
         for (int j=1; j <  nyn-1;j++){
           imageX[i][j][1] = vectorX.get(i,j,1);
-          imageY[i][j][1] = vectorX.get(i,j,1);
+          imageY[i][j][1] = vectorY.get(i,j,1);
           imageZ[i][j][1] = vectorZ.get(i,j,1) - (Ez[i][j][1] - susxz[i][j]*vectorX.get(i,j,1) - susyz[i][j]*vectorY.get(i,j,1) - Jzh[i][j][1]*dt*th*FourPI)/suszz[i][j];
         }
       delArr2(susxz,nxn);

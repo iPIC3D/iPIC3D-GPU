@@ -14,6 +14,7 @@
 #include "MPIdata.h"
 
 #include <chrono>
+#include <algorithm> 
 
 namespace ADIOS2IO {
 

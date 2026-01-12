@@ -3,6 +3,7 @@
 
 #ifndef HIPIFLY
 #include <cuda.h>
+#include <cuda_runtime.h>
 #include "cuda_fp16.h"
 #define WARP_SIZE (32)
 inline constexpr uint32_t WARP_FULL_MASK = 0xFFFFFFFF;

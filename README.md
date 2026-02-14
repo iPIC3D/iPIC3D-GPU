@@ -136,6 +136,115 @@ export OMP_NUM_THREADS=4
 ```
 The solver on CPU will be benefited from OpenMP now, and this option is ON by default. It's important to control the number of threads per MPI process, make sure it's in a reasonable range.
 
+## Restart
+
+iPIC3D-GPU supports restarting a simulation from checkpoint files. Restart files store the full electromagnetic field state (E, B, rho) and all particle data so that a simulation can be resumed from the exact point where it stopped.
+
+### Launching a restart
+
+Add the `restart` keyword to the command line alongside the input file (order does not matter):
+
+```shell
+mpirun -np 8 ./iPIC3D restart ../share/inputfiles/myInput.inp
+# or equivalently
+mpirun -np 8 ./iPIC3D ../share/inputfiles/myInput.inp restart
+```
+
+Without `restart`, the simulation always starts fresh from the initial conditions.
+
+### Restart files
+
+Restart checkpoints are written as ADIOS2 BP5 files (one per MPI rank) into the `RestartDirName` directory:
+
+```
+data/restart_0.bp
+data/restart_1.bp
+...
+data/restart_N.bp
+```
+
+Each file contains multiple ADIOS2 *steps*, one per checkpoint. On restart, the code reads the **last step** from `restart_0.bp` to determine the cycle number, then loads fields and particles from the corresponding per-rank file.
+
+**Important:** you must restart with the **same number of MPI processes** as the original run, since each rank reads its own file.
+
+### Input file parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `RestartDirName` | `data` | Directory containing the `restart_*.bp` files |
+| `RestartOutputCycle` | `5000` | Write a restart checkpoint every N cycles. Set to `0` to disable periodic checkpoints. |
+| `CallFinalize` | `1` | If `1`, write a final restart checkpoint when the simulation ends (regardless of `RestartOutputCycle`). |
+| `ncycles` | — | Number of **new** cycles to run from the restart point (not an absolute cycle number). |
+
+### How the cycle counter works
+
+The cycle variable `i` in the main loop is a **global/absolute counter** that continues from where the previous run stopped:
+
+```
+first_cycle = last_cycle_in_restart_file + 1
+LastCycle    = first_cycle + ncycles
+loop:  i = first_cycle  ...  LastCycle - 1
+```
+
+**Example:** original run completes 1000 cycles (0–999) and writes a restart at cycle 999. A restart run with `ncycles = 500` will execute cycles 1000–1499. Output file names, restart checkpoint labels, and all diagnostics use this absolute counter, so there is no ambiguity across runs.
+
+For a fresh start (no `restart` keyword), `last_cycle = -1`, so `first_cycle = 0`.
+
+### What happens during restart initialisation
+
+1. **Input file is read** — all simulation parameters (grid, species, BCs, etc.) are taken from the input file, same as a fresh start.
+2. **Fields** — the case-specific field initialiser (`initGEM`, `initDipole`, etc.) runs first, then `read_field_restart()` **overwrites** B, E, and rho with the data from the restart file.
+3. **Particles** — instead of generating particles from a distribution function, `restartLoad()` reads positions, velocities, charges, and IDs from the per-rank restart file.
+4. **Output directory** — the output folder is **not** cleared on restart. ADIOS2 output files are opened in `Append` mode so new data is added to existing files.
+
+### Requirements
+
+- Restart reading requires **ADIOS2** (`USE_ADIOS2=ON` at compile time). Without ADIOS2, attempting a restart will produce a fatal error.
+- The MPI topology (`XLEN × YLEN × ZLEN`) must match between the original and restarted runs.
+
+## Simulation Cases
+
+The simulation case is selected via the `Case` parameter in the input file (e.g. `Case = GEM`). Each case configures specific initial conditions for the electromagnetic fields and particle distributions.
+
+### Supported cases
+
+| `Case` | Description | Example input |
+|--------|-------------|---------------|
+| `GEM` | **GEM magnetic reconnection challenge.** Single Harris current sheet with $B_x = B_{0x} \tanh\!\bigl((y - L_y/2)/\delta\bigr)$ and a localized Gaussian flux perturbation. Density has a $1/\cosh^2$ profile plus a uniform background. Ions carry the initial drift current. | `share/inputfiles/magneticReconnection/testGEM3D*.inp` |
+| `GEMnoPert` | Same Harris equilibrium as GEM but **without** the magnetic perturbation. Useful for stability studies or when perturbations are applied externally. | — |
+| `GEMDoubleHarris` | **Double Harris sheet.** Two oppositely-directed current sheets centred at $L_y/4$ and $3L_y/4$, each with its own drift population. Creates two reconnection sites in a periodic domain. | — |
+| `ForceFree` | **Force-free current sheet.** Harris $B_x$ profile with $B_z = B_0/\cosh\!\bigl((y - L_y/2)/\delta\bigr)$ so that $\mathbf{J}\times\mathbf{B}=0$. Both electrons and ions share the current. Used for studying tearing instabilities without pressure gradients. | `share/inputfiles/magneticReconnection/testForceFree*.inp` |
+| `Dipole` | **3-D planetary magnetosphere.** Magnetic dipole field ($B \propto 1/r^3$) centred in the domain with solar-wind inflow electric field. A spherical planet region is voided of particles. Boundary conditions apply `ConstantChargePlanet` on restarts. | `share/inputfiles/magnetosphere/testMagnetosphere3Dsmall.inp` |
+| `Dipole2D` | **2-D dipole** (in the $xz$-plane). Same physics as `Dipole` but configured for a 2-D simulation with `ConstantChargePlanet2DPlaneXZ` boundary treatment. | — |
+| `NullPoints` | **Magnetic null-point topology.** Periodic field with components like $B_x \propto -\sin x\,\cos y\,\cos z$ creating a network of null points. Electron current is initialised from $\nabla\times\mathbf{B}$; ions are at rest. | — |
+| `TaylorGreen` | **Taylor-Green vortex.** 3-D periodic velocity field ($u_e \propto \sin x\,\cos y$, etc.) combined with a periodic magnetic field. Used for testing decaying MHD turbulence and energy transfer. | `share/inputfiles/turbulence/testTurbulence3D.inp` |
+| `RandomCase` | **Random-perturbation reconnection.** Harris current sheet (like GEM) overlaid with a multi-mode random magnetic perturbation ($k_x$, $k_y$, $k_z$ harmonics with random phases and $1/k$ amplitude scaling). | — |
+| `BATSRUS` | **Coupling with BATS-R-US MHD code.** Reads fluid fields (density, velocity, pressure, B) from an external MHD solution and initialises Maxwellian particle distributions cell-by-cell to match the MHD moments. Requires `#ifdef BATSRUS` at compile time. | — |
+
+Any unrecognised `Case` string falls through to a **default** initialisation: uniform density, constant background $\mathbf{B}$, zero electric field. A warning is printed to standard output.
+
+### Runtime boundary conditions
+
+Some cases apply additional boundary-condition fixes during the time loop:
+
+| `Case` | Runtime BC |
+|--------|------------|
+| `GEM`, `GEMnoPert`, `GEMDoubleHarris` | `fixBnGEM` / `fixBcGEM` — enforce Harris-sheet–consistent normal-B and density at $y$-boundaries |
+| `ForceFree` | `fixBforcefree` — enforce force-free B profile at $y$-boundaries |
+| `Dipole` | `ConstantChargePlanet` — maintain fixed charge inside the planet sphere (on restart) |
+| `Dipole2D` | `ConstantChargePlanet2DPlaneXZ` — 2-D variant of the above |
+| `TaylorGreen` | `ConstantChargeOpenBC` — open-boundary charge fix |
+
+### Setting the case
+
+In the input file, add or modify:
+
+```
+Case = GEM
+```
+
+The `Case` string is **case-sensitive** and must match one of the names in the table above exactly.
+
 ## I/O Backends
 
 iPIC3D-GPU writes three categories of data: **fields** (E, B, J, rho, moments), **particles** (position, velocity, charge, ID), and **restart checkpoints** (fields + particles). Each category can use a different I/O backend, selected through a combination of CMake options and the `WriteMethod` parameter in the input file.

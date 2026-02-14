@@ -118,15 +118,6 @@ if (USE_HDF5)
   endif()
 endif()
 
-# On Cray systems with HIP, prevent the compiler wrapper from injecting
-# OpenMP GPU offloading registration code (we use HIP directly for GPU work).
-# Only add to CMAKE_CXX_FLAGS (language-specific, won't leak into HIP).
-# Linker flags are applied per-target later to avoid breaking HIP compiler tests.
-if(HIP_ON AND DEFINED ENV{CRAYPE_VERSION})
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-cray-gpu")
-  set(CRAY_NO_GPU_LINK_FLAG TRUE)
-  message(STATUS "Cray + HIP detected: adding -fno-cray-gpu to CXX flags")
-endif()
 
 # Find MPI and OpenMP
 find_package(MPI REQUIRED COMPONENTS CXX)
@@ -307,12 +298,6 @@ target_link_libraries(
   iPIC3Dlib
   )
 
-# Apply -fno-cray-gpu linker flag only to the CXX executable (linked by CC).
-# Do NOT apply to iPIC3Dlib — it is linked by amdclang++ (HIP linker) which
-# does not understand this flag.
-if(CRAY_NO_GPU_LINK_FLAG)
-  target_link_options(iPIC3D PRIVATE -fno-cray-gpu)
-endif()
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)

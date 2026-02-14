@@ -123,10 +123,14 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
     }
     if (particleBackend_ == ParticleBackend::SHDF5 ||
         particleBackend_ == ParticleBackend::H5HUT) {
-        eprintf("Selected particle backend requires HDF5 (compile with USE_HDF5=ON)");
+        warning_printf("Selected particle backend requires HDF5 (compile with USE_HDF5=ON). "
+                       "Particle output disabled.");
+        particleBackend_ = ParticleBackend::NONE;
     }
     if (restartBackend_ == RestartBackend::SHDF5) {
-        eprintf("Selected restart backend requires HDF5 (compile with USE_HDF5=ON)");
+        warning_printf("Selected restart backend requires HDF5 (compile with USE_HDF5=ON). "
+                       "Restart output disabled.");
+        restartBackend_ = RestartBackend::NONE;
     }
 #endif
 #ifndef USE_ADIOS2

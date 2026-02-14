@@ -46,6 +46,8 @@ option(USE_ADIOS2 "Use ADIOS2 library" ON)
 
 option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA, ON for HIP
 
+set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for (minimum 75 for double atomicAdd)")
+set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture to compile for (e.g. gfx90a, gfx940, gfx1100)")
 
 option(BENCH_MARK "Print tasks time" OFF)
 option(USE_OPENMP "Use OpenMP in supported loops" ON) # must delete all cmake cache if you change this option
@@ -168,12 +170,16 @@ if(HIP_ON)
   target_compile_options(iPIC3Dlib PUBLIC -fgpu-rdc)
   target_link_options(iPIC3Dlib PUBLIC  -fgpu-rdc --hip-link)
 
-  set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx90a)
+  set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES ${HIP_ARCH})
 else()
   enable_language(CUDA)
 
+  if(CUDA_ARCH LESS 75)
+    message(FATAL_ERROR "CUDA_ARCH=${CUDA_ARCH} is too low. Minimum 75 is required for double-precision atomicAdd.")
+  endif()
+
   set_target_properties(iPIC3Dlib PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-  set_property(TARGET iPIC3Dlib PROPERTY CUDA_ARCHITECTURES 75) # required for double atomicadd
+  set_property(TARGET iPIC3Dlib PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
   set_property(TARGET iPIC3Dlib PROPERTY CUDA_STANDARD 17)
   set_property(TARGET iPIC3Dlib PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
   set_property(TARGET iPIC3Dlib PROPERTY LINK_OPTIONS -fno-lto)
@@ -212,7 +218,7 @@ if (USE_CATALYST)
 endif()
 
 if (USE_ADIOS2)
-    list(APPEND linkLibraries adios2::cxx11_mpi)
+    list(APPEND linkLibraries adios2::cxx_mpi)
 endif()
 
 target_link_libraries(
@@ -323,7 +329,7 @@ message("HDF5_LIBRARIES   is ${HDF5_LIBRARIES}")
 message("HDF5_HL_LIBRARIES is ${HDF5_HL_LIBRARIES}")
 message("MPI_LIBRARIES is ${MPI_LIBRARIES}")
 if(HIP_ON)
-  message("Compiling with HIP")
+  message("Compiling with HIP for architecture ${HIP_ARCH}")
 else()
-  message("Compiling with CUDA")
+  message("Compiling with CUDA for architecture sm_${CUDA_ARCH}")
 endif()

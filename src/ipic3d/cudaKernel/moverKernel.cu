@@ -3,6 +3,7 @@
 #include <iostream>
 #include <math.h>
 #include <limits.h>
+#include <cstdint>
 #include "asserts.h"
 #include "VCtopology3D.h"
 #include "Collective.h"
@@ -239,9 +240,6 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
 
     // evaluate dt_substep and number of sub cycles
 
-    const commonType dto2 = .5 * moverParam->dt;
-    const commonType qdto2mc = moverParam->qom * dto2 / moverParam->c;
-
     commonType dt_sub = M_PI * moverParam->c / (4 * fabs(moverParam->qom) * B_mag);
     const int sub_cycles = (int)(moverParam->dt / dt_sub) + 1;
     dt_sub = moverParam->dt / (commonType)(sub_cycles);
@@ -430,7 +428,7 @@ __device__ uint32_t deleteAppendOpenBCOutflow(SpeciesParticle* pcl, moverParamet
                 if (index >= moverParam->pclsArray->getSize()) {
                     printf("Memory overflow in open boundary outflow\n");
                     //__trap();
-                    return -1;
+                    return UINT32_MAX; // error sentinel (was -1, changed to avoid signed-to-unsigned conversion warning)
                 }
                 memcpy(moverParam->pclsArray->getpcls() + index, &newPcl, sizeof(SpeciesParticle));
                 if(newPcl.get_x() < grid->xStart)

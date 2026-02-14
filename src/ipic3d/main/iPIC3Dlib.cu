@@ -656,7 +656,7 @@ int c_Solver::cudaLauncherAsync(const int species){
   // splitting
   //std::cout << "myrank: "<<MPIdata::get_rank() <<" pclsArrayHostPtr[species]->getInitialNOP(): " << pclsArrayHostPtr[species]->getInitialNOP() <<
   //          " pclsArrayHostPtr[species]->getNOP() " << pclsArrayHostPtr[species]->getNOP() << std::endl;
-  constexpr bool PARTICLE_SPLITTING = true;
+  constexpr bool PARTICLE_SPLITTING = false; // set to true to enable particle splitting
   if constexpr(PARTICLE_SPLITTING)
   {
     if(pclsArrayHostPtr[species]->getNOP() < 0.95 * pclsArrayHostPtr[species]->getInitialNOP()){
@@ -907,7 +907,7 @@ void c_Solver::MomentsAwait() {
   // synchronize
   cudaErrChk(cudaDeviceSynchronize());
 
-  constexpr bool PARTICLE_MERGING = true;
+  constexpr bool PARTICLE_MERGING = false; // set to true to enable particle merging, false to disable. Note that the merging process is not fully optimized yet, so it might cause performance drop if enabled. Use with caution.
   if constexpr(PARTICLE_MERGING)
   {
     // check which one to merge

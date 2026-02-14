@@ -264,6 +264,9 @@ template < class Toa > class OutputAgent:public OutputAgentBase {
     void write(const std::string & objname, const Dimens dimens, const int *i_array) {
       std::cout << "coutPSKOutputAdaptor write int* array: <" << objname << "> : " << "\n";
     }
+    void write(const std::string & objname, const Dimens dimens, const longid *i_array) {
+      std::cout << "coutPSKOutputAdaptor write longid* array: <" << objname << "> : " << "\n";
+    }
     void write(const std::string & objname, const Dimens dimens, const std::vector < int >&i_array) {
       std::cout << "coutPSKOutputAdaptor write vector<int> array: <" << objname << "> : " << "\n";
     }

@@ -8,7 +8,7 @@ namespace DAConfig {
 
 
 // General configuration
-inline constexpr bool DATA_ANALYSIS_ENABLED = true;
+inline constexpr bool DATA_ANALYSIS_ENABLED = false;
 inline constexpr bool VELOCITY_HISTOGRAM_ENABLE = DATA_ANALYSIS_ENABLED && true;
 inline constexpr bool GMM_ENABLE = VELOCITY_HISTOGRAM_ENABLE && true;
 

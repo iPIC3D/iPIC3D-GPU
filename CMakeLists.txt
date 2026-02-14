@@ -42,6 +42,7 @@ option(BUILD_SHARED_LIBS "Use shared libraries if ON, static if OFF" ON)
 option(USE_CATALYST "Use Catalyst adaptor" OFF)
 option(USE_BATSRUS "Use BATSRUS flag" OFF)
 option(USE_HDF5 "Use HDF5 library" ON)
+option(USE_PHDF5 "Enable parallel HDF5 output (requires HDF5 with MPI support)" OFF)
 option(USE_ADIOS2 "Use ADIOS2 library" ON)
 
 option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA, ON for HIP
@@ -240,6 +241,14 @@ endif()
 
 if(NOT USE_HDF5)
   target_compile_definitions(iPIC3Dlib PUBLIC NO_HDF5)
+endif()
+
+if(USE_PHDF5)
+  if(NOT USE_HDF5)
+    message(FATAL_ERROR "USE_PHDF5 requires USE_HDF5=ON")
+  endif()
+  target_compile_definitions(iPIC3Dlib PUBLIC PHDF5)
+  message(STATUS "Parallel HDF5 output enabled")
 endif()
 
 if (BUILD_SHARED_LIBS)

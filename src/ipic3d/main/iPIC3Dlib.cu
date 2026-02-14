@@ -265,9 +265,7 @@ int c_Solver::Init(int argc, char **argv) {
 			  (col->getWriteMethod()=="pvtk" && !col->particle_output_is_off()) )
 		{
 			  outputWrapperFPP = new OutputWrapperFPP;
-#ifndef USE_ADIOS2
 			  fetch_outputWrapperFPP().init_output_files(col,vct,grid,EMf,outputPart,ns,testpart,nstestpart);
-#endif
 		}
 		#endif
 	  if(!col->field_output_is_off()){

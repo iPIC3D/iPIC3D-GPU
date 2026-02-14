@@ -240,6 +240,9 @@ class EMfields3D                // :public Field
     double getRHOns(int X,int Y,int Z,int is)const{return rhons.get(is,X,Y,Z);}
     arr4_double getRHOns(){return rhons;}
     arr4_double getRHOcs(){return rhocs;}
+    // per-species 3D slice accessors for parallel HDF5 output
+    arr3_double getRHOcs(int is){return arr3_double(rhocs.fetch_arr4()[is], nxc, nyc, nzc);}
+    arr3_double getRHOns(int is){return arr3_double(rhons.fetch_arr4()[is], nxn, nyn, nzn);}
 
 
     double getBx_ext(int X, int Y, int Z) const{return Bx_ext.get(X,Y,Z);}
@@ -287,6 +290,10 @@ class EMfields3D                // :public Field
     arr4_double getJxs() { return Jxs; }
     arr4_double getJys() { return Jys; }
     arr4_double getJzs() { return Jzs; }
+    // per-species 3D slice accessors (node grid) for parallel HDF5 output
+    arr3_double getJxs(int is){return arr3_double(Jxs.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getJys(int is){return arr3_double(Jys.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getJzs(int is){return arr3_double(Jzs.fetch_arr4()[is], nxn, nyn, nzn);}
 
     double getJxs(int X,int Y,int Z,int is)const{return Jxs.get(is,X,Y,Z);}
     double getJys(int X,int Y,int Z,int is)const{return Jys.get(is,X,Y,Z);}

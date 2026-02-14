@@ -45,6 +45,10 @@ option(USE_HDF5 "Use HDF5 library" ON)
 option(USE_PHDF5 "Enable parallel HDF5 output (requires HDF5 with MPI support)" ON)
 option(USE_ADIOS2 "Use ADIOS2 library" ON)
 
+if(NOT USE_HDF5)
+  set(USE_PHDF5 OFF CACHE BOOL "Disabled because USE_HDF5=OFF" FORCE)
+endif()
+
 option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA, ON for HIP
 
 set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for (minimum 75 for double atomicAdd)")

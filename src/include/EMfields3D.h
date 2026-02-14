@@ -36,8 +36,6 @@
 // dimension of vectors used in fieldForPcls
 const int DFIELD_3or4=4; // 4 pads with garbage but is needed for alignment
 
-class Particles3Dcomm;
-class Moments10;
 class EMfields3D                // :public Field
 {
   public:
@@ -141,36 +139,6 @@ class EMfields3D                // :public Field
 
     /*! communicate ghost for grid -> Particles interpolation */
     void communicateGhostP2G(int ns);
-    /*! sum moments (interp_P2G) versions */
-    void sumMoments(const Particles3Dcomm* part);
-    void sumMoments_AoS(const Particles3Dcomm* part);
-    void sumMoments_AoS_intr(const Particles3Dcomm* part);
-    void sumMoments_vectorized(const Particles3Dcomm* part);
-    void sumMoments_vectorized_AoS(const Particles3Dcomm* part);
-    void sumMomentsOld(const Particles3Dcomm& pcls);
-    /*! add accumulated moments to the moments for a given species */
-    //void addToSpeciesMoments(const TenMoments & in, int is);
-    /*! add an amount of charge density to charge density field at node X,Y,Z */
-    void addRho(double weight[][2][2], int X, int Y, int Z, int is);
-    /*! add an amount of current density - direction X to current density field at node X,Y,Z */
-    void addJx(double weight[][2][2], int X, int Y, int Z, int is);
-    /*! add an amount of current density - direction Y to current density field at node X,Y,Z */
-    void addJy(double weight[][2][2], int X, int Y, int Z, int is);
-    /*! add an amount of current density - direction Z to current density field at node X,Y,Z */
-    void addJz(double weight[][2][2], int X, int Y, int Z, int is);
-
-    /*! add an amount of pressure density - direction XX to current density field at node X,Y,Z */
-    void addPxx(double weight[][2][2], int X, int Y, int Z, int is);
-    /*! add an amount of pressure density - direction XY to current density field at node X,Y,Z */
-    void addPxy(double weight[][2][2], int X, int Y, int Z, int is);
-    /*! add an amount of pressure density - direction XZ to current density field at node X,Y,Z */
-    void addPxz(double weight[][2][2], int X, int Y, int Z, int is);
-    /*! add an amount of pressure density - direction YY to current density field at node X,Y,Z */
-    void addPyy(double weight[][2][2], int X, int Y, int Z, int is);
-    /*! add an amount of pressure density - direction YZ to current density field at node X,Y,Z */
-    void addPyz(double weight[][2][2], int X, int Y, int Z, int is);
-    /*! add an amount of pressure density - direction ZZ to current density field at node X,Y,Z */
-    void addPzz(double weight[][2][2], int X, int Y, int Z, int is);
 
     /*! adjust densities on boundaries that are not periodic */
     void adjustNonPeriodicDensities(int is);
@@ -305,14 +273,6 @@ class EMfields3D                // :public Field
     double getBenergy();
     /*! get bulk kinetic energy */
     double getBulkEnergy(int is);
-
-    /*! fetch array for summing moments of thread i */
-    Moments10& fetch_moments10Array(int i){
-      assert_le(0,i);
-      assert_lt(i,sizeMomentsArray);
-      return *(moments10Array[i]);
-    }
-    int get_sizeMomentsArray() { return sizeMomentsArray; }
 
     /*! print electromagnetic fields info */
     void print(void) const;
@@ -470,9 +430,6 @@ class EMfields3D                // :public Field
     array3_double vectZ;
     array3_double divC;
     //array3_double arr;
-    /* temporary arrays for summing moments */
-    int sizeMomentsArray;
-    Moments10 **moments10Array;
 
     // *******************************************************************************
     // *********** SOURCES **
@@ -612,118 +569,6 @@ class EMfields3D                // :public Field
       const_arr3_double vectorX, const_arr3_double vectorY, const_arr3_double vectorZ,
       int nx, int ny, int nz);
 };
-
-inline void EMfields3D::addRho(double weight[][2][2], int X, int Y, int Z, int is) {
-  for (int i = 0; i < 2; i++)
-    for (int j = 0; j < 2; j++)
-      for (int k = 0; k < 2; k++)
-        rhons[is][X - i][Y - j][Z - k] += weight[i][j][k] * invVOL;
-}
-/*! add an amount of charge density to current density - direction X to current density field on the node */
-inline void EMfields3D::addJx(double weight[][2][2], int X, int Y, int Z, int is) {
-  for (int i = 0; i < 2; i++)
-    for (int j = 0; j < 2; j++)
-      for (int k = 0; k < 2; k++)
-        Jxs[is][X - i][Y - j][Z - k] += weight[i][j][k] * invVOL;
-}
-/*! add an amount of current density - direction Y to current density field on the node */
-inline void EMfields3D::addJy(double weight[][2][2], int X, int Y, int Z, int is) {
-  for (int i = 0; i < 2; i++)
-    for (int j = 0; j < 2; j++)
-      for (int k = 0; k < 2; k++)
-        Jys[is][X - i][Y - j][Z - k] += weight[i][j][k] * invVOL;
-}
-/*! add an amount of current density - direction Z to current density field on the node */
-inline void EMfields3D::addJz(double weight[][2][2], int X, int Y, int Z, int is) {
-  for (int i = 0; i < 2; i++)
-    for (int j = 0; j < 2; j++)
-      for (int k = 0; k < 2; k++)
-        Jzs[is][X - i][Y - j][Z - k] += weight[i][j][k] * invVOL;
-}
-/*! add an amount of pressure density - direction XX to current density field on the node */
-inline void EMfields3D::addPxx(double weight[][2][2], int X, int Y, int Z, int is) {
-  for (int i = 0; i < 2; i++)
-    for (int j = 0; j < 2; j++)
-      for (int k = 0; k < 2; k++)
-        pXXsn[is][X - i][Y - j][Z - k] += weight[i][j][k] * invVOL;
-}
-/*! add an amount of pressure density - direction XY to current density field on the node */
-inline void EMfields3D::addPxy(double weight[][2][2], int X, int Y, int Z, int is) {
-  for (int i = 0; i < 2; i++)
-    for (int j = 0; j < 2; j++)
-      for (int k = 0; k < 2; k++)
-        pXYsn[is][X - i][Y - j][Z - k] += weight[i][j][k] * invVOL;
-}
-/*! add an amount of pressure density - direction XZ to current density field on the node */
-inline void EMfields3D::addPxz(double weight[][2][2], int X, int Y, int Z, int is) {
-  for (int i = 0; i < 2; i++)
-    for (int j = 0; j < 2; j++)
-      for (int k = 0; k < 2; k++)
-        pXZsn[is][X - i][Y - j][Z - k] += weight[i][j][k] * invVOL;
-}
-/*! add an amount of pressure density - direction YY to current density field on the node */
-inline void EMfields3D::addPyy(double weight[][2][2], int X, int Y, int Z, int is) {
-  for (int i = 0; i < 2; i++)
-    for (int j = 0; j < 2; j++)
-      for (int k = 0; k < 2; k++)
-        pYYsn[is][X - i][Y - j][Z - k] += weight[i][j][k] * invVOL;
-}
-/*! add an amount of pressure density - direction YZ to current density field on the node */
-inline void EMfields3D::addPyz(double weight[][2][2], int X, int Y, int Z, int is) {
-  for (int i = 0; i < 2; i++)
-    for (int j = 0; j < 2; j++)
-      for (int k = 0; k < 2; k++)
-        pYZsn[is][X - i][Y - j][Z - k] += weight[i][j][k] * invVOL;
-}
-/*! add an amount of pressure density - direction ZZ to current density field on the node */
-inline void EMfields3D::addPzz(double weight[][2][2], int X, int Y, int Z, int is) {
-  for (int i = 0; i < 2; i++)
-    for (int j = 0; j < 2; j++)
-      for (int k = 0; k < 2; k++)
-        pZZsn[is][X - i][Y - j][Z - k] += weight[i][j][k] * invVOL;
-}
-
-inline void get_field_components_for_cell(
-  const double* field_components[8],
-  const_arr4_double fieldForPcls,
-  int cx,int cy,int cz)
-{
-  // interface to the right of cell
-  const int ix = cx+1;
-  const int iy = cy+1;
-  const int iz = cz+1;
-
-  // is this faster?
-  //
-  //field_components[0] = fieldForPcls[ix][iy][iz]; // field000
-  //field_components[1] = fieldForPcls[ix][iy][cz]; // field001
-  //field_components[2] = fieldForPcls[ix][cy][iz]; // field010
-  //field_components[3] = fieldForPcls[ix][cy][cz]; // field011
-  //field_components[4] = fieldForPcls[cx][iy][iz]; // field100
-  //field_components[5] = fieldForPcls[cx][iy][cz]; // field101
-  //field_components[6] = fieldForPcls[cx][cy][iz]; // field110
-  //field_components[7] = fieldForPcls[cx][cy][cz]; // field111
-  //
-  // or is this?
-  //
-  // creating these aliases seems to accelerate this method (by about 30%?)
-  // on the Xeon host processor, suggesting deficiency in the optimizer.
-  //
-  arr3_double_get field0 = fieldForPcls[ix];
-  arr3_double_get field1 = fieldForPcls[cx];
-  arr2_double_get field00 = field0[iy];
-  arr2_double_get field01 = field0[cy];
-  arr2_double_get field10 = field1[iy];
-  arr2_double_get field11 = field1[cy];
-  field_components[0] = field00[iz]; // field000 
-  field_components[1] = field00[cz]; // field001 
-  field_components[2] = field01[iz]; // field010 
-  field_components[3] = field01[cz]; // field011 
-  field_components[4] = field10[iz]; // field100 
-  field_components[5] = field10[cz]; // field101 
-  field_components[6] = field11[iz]; // field110 
-  field_components[7] = field11[cz]; // field111 
-}
 
 typedef EMfields3D Field;
 

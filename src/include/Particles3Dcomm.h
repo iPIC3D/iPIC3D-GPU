@@ -71,10 +71,6 @@ public:
   /** destructor */
   ~Particles3Dcomm();
 
-  /** interpolation method GRID->PARTICLE order 1: CIC */
-  // This does not belong in this class and is no longer in use.
-  void interpP2G(Field * EMf);
-
  public: // handle boundary conditions
   // apply boundary conditions to all particles at the
   // end of a list of particles starting with index start
@@ -117,7 +113,6 @@ public:
  public:
   int separate_and_send_particles();
   void recommunicate_particles_until_done(int min_num_iterations=3);
-  void communicate_particles();
   void pad_capacities();
  private:
   void resize_AoS(int nop);
@@ -242,10 +237,6 @@ public:
   long long *getVelocityDistribution(int nBins, double maxVel);
   /** return the momentum */
   double getP();
-  /** Print particles info: positions, velocities */
-  void Print() const;
-  /** Print the number of particles of this subdomain */
-  void PrintNp() const;
 
 public:
   // accessors

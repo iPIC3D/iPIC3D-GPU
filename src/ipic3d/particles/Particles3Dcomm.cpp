@@ -415,102 +415,6 @@ void Particles3Dcomm::resize_SoA(int nop)
   //if(is_output_thread()) dprintf("done resizing to hold %d", nop);
  }
 }
-// A much faster version of this is at EMfields3D::sumMoments
-//
-//void Particles3Dcomm::interpP2G(Field * EMf)
-//{
-//  const double inv_dx = 1.0 / dx;
-//  const double inv_dy = 1.0 / dy;
-//  const double inv_dz = 1.0 / dz;
-//  const double nxn = grid->getNXN();
-//  const double nyn = grid->getNYN();
-//  const double nzn = grid->getNZN();
-//  // assert_le(nop,(long long)INT_MAX); // else would need to use long long
-//  // to make memory use scale to a large number of threads we
-//  // could first apply an efficient parallel sorting algorithm
-//  // to the particles and then accumulate moments in smaller
-//  // subarrays.
-//  {
-//    for (int i = 0; i < nop; i++)
-//    {
-//      const int ix = 2 + int (floor((x[i] - xstart) * inv_dx));
-//      const int iy = 2 + int (floor((y[i] - ystart) * inv_dy));
-//      const int iz = 2 + int (floor((z[i] - zstart) * inv_dz));
-//      double temp[2][2][2];
-//      double xi[2], eta[2], zeta[2];
-//      xi[0] = x[i] - grid->getXN(ix - 1, iy, iz);
-//      eta[0] = y[i] - grid->getYN(ix, iy - 1, iz);
-//      zeta[0] = z[i] - grid->getZN(ix, iy, iz - 1);
-//      xi[1] = grid->getXN(ix, iy, iz) - x[i];
-//      eta[1] = grid->getYN(ix, iy, iz) - y[i];
-//      zeta[1] = grid->getZN(ix, iy, iz) - z[i];
-//      double weight[2][2][2];
-//      for (int ii = 0; ii < 2; ii++)
-//        for (int jj = 0; jj < 2; jj++)
-//          for (int kk = 0; kk < 2; kk++) {
-//            weight[ii][jj][kk] = q[i] * xi[ii] * eta[jj] * zeta[kk] * invVOL;
-//          }
-//      // add charge density
-//      EMf->addRho(weight, ix, iy, iz, ns);
-//      // add current density - X
-//      for (int ii = 0; ii < 2; ii++)
-//        for (int jj = 0; jj < 2; jj++)
-//          for (int kk = 0; kk < 2; kk++)
-//            temp[ii][jj][kk] = u[i] * weight[ii][jj][kk];
-//      EMf->addJx(temp, ix, iy, iz, ns);
-//      // add current density - Y
-//      for (int ii = 0; ii < 2; ii++)
-//        for (int jj = 0; jj < 2; jj++)
-//          for (int kk = 0; kk < 2; kk++)
-//            temp[ii][jj][kk] = v[i] * weight[ii][jj][kk];
-//      EMf->addJy(temp, ix, iy, iz, ns);
-//      // add current density - Z
-//      for (int ii = 0; ii < 2; ii++)
-//        for (int jj = 0; jj < 2; jj++)
-//          for (int kk = 0; kk < 2; kk++)
-//            temp[ii][jj][kk] = w[i] * weight[ii][jj][kk];
-//      EMf->addJz(temp, ix, iy, iz, ns);
-//      // Pxx - add pressure tensor
-//      for (int ii = 0; ii < 2; ii++)
-//        for (int jj = 0; jj < 2; jj++)
-//          for (int kk = 0; kk < 2; kk++)
-//            temp[ii][jj][kk] = u[i] * u[i] * weight[ii][jj][kk];
-//      EMf->addPxx(temp, ix, iy, iz, ns);
-//      // Pxy - add pressure tensor
-//      for (int ii = 0; ii < 2; ii++)
-//        for (int jj = 0; jj < 2; jj++)
-//          for (int kk = 0; kk < 2; kk++)
-//            temp[ii][jj][kk] = u[i] * v[i] * weight[ii][jj][kk];
-//      EMf->addPxy(temp, ix, iy, iz, ns);
-//      // Pxz - add pressure tensor
-//      for (int ii = 0; ii < 2; ii++)
-//        for (int jj = 0; jj < 2; jj++)
-//          for (int kk = 0; kk < 2; kk++)
-//            temp[ii][jj][kk] = u[i] * w[i] * weight[ii][jj][kk];
-//      EMf->addPxz(temp, ix, iy, iz, ns);
-//      // Pyy - add pressure tensor
-//      for (int ii = 0; ii < 2; ii++)
-//        for (int jj = 0; jj < 2; jj++)
-//          for (int kk = 0; kk < 2; kk++)
-//            temp[ii][jj][kk] = v[i] * v[i] * weight[ii][jj][kk];
-//      EMf->addPyy(temp, ix, iy, iz, ns);
-//      // Pyz - add pressure tensor
-//      for (int ii = 0; ii < 2; ii++)
-//        for (int jj = 0; jj < 2; jj++)
-//          for (int kk = 0; kk < 2; kk++)
-//            temp[ii][jj][kk] = v[i] * w[i] * weight[ii][jj][kk];
-//      EMf->addPyz(temp, ix, iy, iz, ns);
-//      // Pzz - add pressure tensor
-//      for (int ii = 0; ii < 2; ii++)
-//        for (int jj = 0; jj < 2; jj++)
-//          for (int kk = 0; kk < 2; kk++)
-//            temp[ii][jj][kk] = w[i] * w[i] * weight[ii][jj][kk];
-//      EMf->addPzz(temp, ix, iy, iz, ns);
-//    }
-//  }
-//  // communicate contribution from ghost cells 
-//  EMf->communicateGhostP2G(ns, vct);
-//}
 
 // returns true if particle was sent
 //
@@ -1511,21 +1415,6 @@ void Particles3Dcomm::recommunicate_particles_until_done(int min_num_iterations)
   }
 }
 
-// exchange particles with neighboring processors
-//
-// sent particles are deleted from _pcls.
-// holes are filled with particles from end.
-// then received particles are appended to end.
-//
-void Particles3Dcomm::communicate_particles()
-{
-  timeTasks_set_communicating(); // communicating until end of scope
-
-  separate_and_send_particles();
-
-  recommunicate_particles_until_done(1);
-}
-
 /** return the Kinetic energy */
 double Particles3Dcomm::getKe() {
   double localKe = 0.0;
@@ -1609,41 +1498,6 @@ long long *Particles3Dcomm::getVelocityDistribution(int nBins, double maxVel) {
   return f;
 }
 
-
-/** print particles info */
-void Particles3Dcomm::Print() const
-{
-  cout << endl;
-  cout << "Number of Particles: " << _pcls.size() << endl;
-  cout << "Subgrid (" << vct->getCoordinates(0) << "," << vct->getCoordinates(1) << "," << vct->getCoordinates(2) << ")" << endl;
-  cout << "Xin = " << xstart << "; Xfin = " << xend << endl;
-  cout << "Yin = " << ystart << "; Yfin = " << yend << endl;
-  cout << "Zin = " << zstart << "; Zfin = " << zend << endl;
-  cout << "Number of species = " << get_species_num() << endl;
-  for (int i = 0; i < _pcls.size(); i++)
-  {
-    const SpeciesParticle& pcl = _pcls[i];
-    cout << "Particle #" << i << ":"
-      << " x=" << pcl.get_x()
-      << " y=" << pcl.get_y()
-      << " z=" << pcl.get_z()
-      << " u=" << pcl.get_u()
-      << " v=" << pcl.get_v()
-      << " w=" << pcl.get_w()
-      << endl;
-  }
-  cout << endl;
-}
-/** print just the number of particles */
-void Particles3Dcomm::PrintNp()  const
-{
-  cout << endl;
-  cout << "Number of Particles of species " << get_species_num() << ": " << getNOP() << endl;
-  cout << "Subgrid (" << vct->getCoordinates(0) << "," << vct->getCoordinates(1) << "," << vct->getCoordinates(2) << ")" << endl;
-  cout << endl;
-}
-
-/***** particle sorting routines *****/
 
 void Particles3Dcomm::sort_particles_serial()
 {

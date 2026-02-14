@@ -112,6 +112,9 @@ namespace iPic3D {
     void convertParticlesToAoS();
     void convertOutputParticlesToSynched();
     void sortParticles();
+    void copyMomentsD2H(int species, cudaStream_t stream);
+    void registerMomentsPinnedMemory(int species);
+    void unregisterMomentsPinnedMemory(int species);
 
   private:
     //static MPIdata * mpi;
@@ -198,16 +201,6 @@ namespace iPic3D {
     double TOTmomentum;
     int mergeIdx = -1;
     int* toBeMerged;
-
-    //the below used for IO (test-particle VTK, virtual satellites, etc.)
-    MPI_Request *headerReq;
-    MPI_Request *dataReq;
-    MPI_Request *footReq;
-    float *testpclPos;
-    int    pclbuffersize;
-    float *testpclVel;
-    MPI_File fh;
-  	MPI_Status*  status;
 
   };
 

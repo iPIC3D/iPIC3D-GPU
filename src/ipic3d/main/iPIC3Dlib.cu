@@ -35,6 +35,7 @@
 #include "Timing.h"
 #include "ParallelIO.h"
 #include "outputPrepare.h"
+#include "IOManager.h"
 //
 #ifndef NO_HDF5
 #include "WriteOutputParallel.h"
@@ -74,13 +75,7 @@ c_Solver::~c_Solver()
   delete vct; // process topology
   delete grid; // grid
   delete EMf; // field
-#ifndef NO_HDF5
-  delete outputWrapperFPP;
-#endif
-
-#ifdef USE_ADIOS2
-  delete adiosManager;
-#endif
+  delete ioManager; // I/O backends (HDF5, ADIOS2, VTK buffers)
 
   // delete particles
   //
@@ -227,11 +222,6 @@ int c_Solver::Init(int argc, char **argv) {
     }
   }
 
-#ifdef USE_ADIOS2
-  adiosManager = new ADIOS2IO::ADIOS2Manager();
-  adiosManager->initOutputFiles(""s, col->getParticlesOutputCycle()? col->getPclOutputTag() : ""s, 0, *this);
-#endif
-
   // Initial Condition for PARTICLES if you are not starting from RESTART
   if (restart_status == 0) {
     for (int i = 0; i < ns; i++)
@@ -259,32 +249,12 @@ int c_Solver::Init(int argc, char **argv) {
 	   }
   }
 
-  if ( Parameters::get_doWriteOutput()){
-		#ifndef NO_HDF5
-	  	if(col->getWriteMethod() == "shdf5" || col->getCallFinalize() || restart_cycle>0 ||
-			  (col->getWriteMethod()=="pvtk" && !col->particle_output_is_off()) )
-		{
-			  outputWrapperFPP = new OutputWrapperFPP;
-			  fetch_outputWrapperFPP().init_output_files(col,vct,grid,EMf,outputPart,ns,testpart,nstestpart);
-		}
-		#endif
-	  if(!col->field_output_is_off()){
-		  if(col->getWriteMethod()=="pvtk"){
-			  if(!(col->getFieldOutputTag()).empty())
-				  fieldwritebuffer = newArr4(float,(grid->getNZN()-3),grid->getNYN()-3,grid->getNXN()-3,3);
-			  if(!(col->getMomentsOutputTag()).empty())
-				  momentwritebuffer=newArr3(float,(grid->getNZN()-3), grid->getNYN()-3, grid->getNXN()-3);
-		  }
-		  else if(col->getWriteMethod()=="nbcvtk"){
-		    momentreqcounter=0;
-		    fieldreqcounter = 0;
-			  if(!(col->getFieldOutputTag()).empty())
-				  fieldwritebuffer = newArr4(float,(grid->getNZN()-3)*4,grid->getNYN()-3,grid->getNXN()-3,3);
-			  if(!(col->getMomentsOutputTag()).empty())
-				  momentwritebuffer=newArr3(float,(grid->getNZN()-3)*14, grid->getNYN()-3, grid->getNXN()-3);
-		  }
-	  }
+  // ---- Initialise modular I/O manager ----
+  ioManager = new IOManager;
+  if (Parameters::get_doWriteOutput() || restart_cycle > 0 || col->getCallFinalize()) {
+      ioManager->init(col, vct, grid, EMf, outputPart, ns, testpart, nstestpart, first_cycle);
   }
+
   Ke = new double[ns];
   BulkEnergy = new double[ns];
   momentum = new double[ns];
@@ -982,158 +952,56 @@ void c_Solver::WriteOutput(int cycle) {
 #endif
 
   WriteConserved(cycle);
-  WriteRestart(cycle);
 
+  // ---- Restart checkpoint ----
+  if (restart_cycle > 0 && cycle % restart_cycle == 0) {
+    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    convertOutputParticlesToSynched();
+    ioManager->writeRestart(cycle);
+  }
 
-  if(!Parameters::get_doWriteOutput())  return;
+  if (!Parameters::get_doWriteOutput()) return;
 
-  // TODO later add adios2 as a method
+  // ---- Field output ----
+  if (!col->field_output_is_off() &&
+      (cycle % col->getFieldOutputCycle() == 0 || cycle == first_cycle)) {
+    ioManager->writeFields(cycle);
+  }
 
-  if (col->getWriteMethod() == "nbcvtk"){//Non-blocking collective MPI-IO
+  // ---- Particle output ----
+  if (!col->particle_output_is_off() &&
+      cycle % col->getParticlesOutputCycle() == 0) {
+    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    for (int i = 0; i < ns; i++) {
+      outputPart[i].set_particleType(ParticleType::Type::AoS);
+      outputPart[i].convertParticlesToSynched();
+    }
+    ioManager->writeParticles(cycle);
+  }
 
-	  if(!col->field_output_is_off() && (cycle%(col->getFieldOutputCycle()) == 0 || cycle == first_cycle) ){
-		  if(!(col->getFieldOutputTag()).empty()){
-
-			  if(fieldreqcounter>0){
-			          
-			          //MPI_Waitall(fieldreqcounter,&fieldreqArr[0],&fieldstsArr[0]);
-				  for(int si=0;si< fieldreqcounter;si++){
-				    int error_code = MPI_File_write_all_end(fieldfhArr[si],&fieldwritebuffer[si][0][0][0],&fieldstsArr[si]);//fieldstsArr[si].MPI_ERROR;
-					  if (error_code != MPI_SUCCESS) {
-						  char error_string[100];
-						  int length_of_error_string, error_class;
-						  MPI_Error_class(error_code, &error_class);
-						  MPI_Error_string(error_class, error_string, &length_of_error_string);
-						  dprintf("MPI_Waitall error at field output cycle %d  %d  %s\n",cycle, si, error_string);
-					  }else{
-						  MPI_File_close(&(fieldfhArr[si]));
-					  }
-				  }
-			  }
-			  fieldreqcounter = WriteFieldsVTKNonblk(grid, EMf, col, vct,cycle,fieldwritebuffer,fieldreqArr,fieldfhArr);
-		  }
-
-		  if(!(col->getMomentsOutputTag()).empty()){
-
-			  if(momentreqcounter>0){
-			    //MPI_Waitall(momentreqcounter,&momentreqArr[0],&momentstsArr[0]);
-				  for(int si=0;si< momentreqcounter;si++){
-				    int error_code = MPI_File_write_all_end(momentfhArr[si],&momentwritebuffer[si][0][0],&momentstsArr[si]);//momentstsArr[si].MPI_ERROR;
-					  if (error_code != MPI_SUCCESS) {
-						  char error_string[100];
-						  int length_of_error_string, error_class;
-						  MPI_Error_class(error_code, &error_class);
-						  MPI_Error_string(error_class, error_string, &length_of_error_string);
-						  dprintf("MPI_Waitall error at moments output cycle %d  %d %s\n",cycle, si, error_string);
-					  }else{
-						  MPI_File_close(&(momentfhArr[si]));
-					  }
-				  }
-			  }
-			  momentreqcounter = WriteMomentsVTKNonblk(grid, EMf, col, vct,cycle,momentwritebuffer,momentreqArr,momentfhArr);
-		  }
-	  }
-
-	  //Particle information is still in hdf5
-	  	WriteParticles(cycle);
-	  //Test Particle information is still in hdf5
-	    WriteTestParticles(cycle);
-
-  }else if (col->getWriteMethod() == "pvtk"){//Blocking collective MPI-IO
-	  if(!col->field_output_is_off() && (cycle%(col->getFieldOutputCycle()) == 0 || cycle == first_cycle) ){
-		  if(!(col->getFieldOutputTag()).empty()){
-			  //WriteFieldsVTK(grid, EMf, col, vct, col->getFieldOutputTag() ,cycle);//B + E + Je + Ji + rho
-			  WriteFieldsVTK(grid, EMf, col, vct, col->getFieldOutputTag() ,cycle, fieldwritebuffer);//B + E + Je + Ji + rho
-		  }
-		  if(!(col->getMomentsOutputTag()).empty()){
-			  WriteMomentsVTK(grid, EMf, col, vct, col->getMomentsOutputTag() ,cycle, momentwritebuffer);
-		  }
-	  }
-
-	  //Particle information is still in hdf5
-      WriteParticles(cycle);
-	  //Test Particle information is still in hdf5
-	    WriteTestParticles(cycle);
-
-  } else if (col->getWriteMethod() == "adios2"){
-
-
-
-  }else{
-
-		#ifdef NO_HDF5
-			eprintf("The selected output option must be compiled with HDF5");
-
-		#else
-			if (col->getWriteMethod() == "H5hut"){
-
-			  if (!col->field_output_is_off() && cycle%(col->getFieldOutputCycle())==0)
-				WriteFieldsH5hut(ns, grid, EMf, col, vct, cycle);
-			  if (!col->particle_output_is_off() && cycle%(col->getParticlesOutputCycle())==0)
-				WritePartclH5hut(ns, grid, outputPart, col, vct, cycle);
-
-			}else if (col->getWriteMethod() == "phdf5"){
-
-			  if (!col->field_output_is_off() && cycle%(col->getFieldOutputCycle())==0)
-				WriteOutputParallel(grid, EMf, outputPart, col, vct, cycle);
-
-			  if (!col->particle_output_is_off() && cycle%(col->getParticlesOutputCycle())==0)
-			  {
-				if(MPIdata::get_rank()==0)
-				  warning_printf("WriteParticlesParallel() is not yet implemented.");
-			  }
-
-			}else if (col->getWriteMethod() == "shdf5"){
-
-					WriteFields(cycle);
-
-					WriteParticles(cycle);
-
-					WriteTestParticles(cycle);
-
-			}else{
-			  warning_printf(
-				"Invalid output option. Options are: H5hut, phdf5, shdf5, pvtk");
-			  invalid_value_error(col->getWriteMethod().c_str());
-			}
-		#endif
-  	  }
+  // ---- Test-particle output ----
+  if (nstestpart > 0 && !col->testparticle_output_is_off() &&
+      cycle % col->getTestParticlesOutputCycle() == 0) {
+    ioManager->writeTestParticles(cycle);
+  }
 }
 
-void c_Solver::outputCopyAsync(int cycle){ // -1 to enable
-  const auto ifNextCycleRestart = restart_cycle>0 && (cycle+1)%restart_cycle==0;
-  const auto ifNextCycleParticle = !col->particle_output_is_off() && (cycle+1)%(col->getParticlesOutputCycle())==0;
-  if (ifNextCycleRestart || ifNextCycleParticle){ // for next cycle
-    for(int i=0; i<ns; i++){
-      if(outputPart[i].get_pcl_array().capacity() < pclsArrayHostPtr[i]->getNOP()){
-        // expand the host array
+void c_Solver::outputCopyAsync(int cycle) { // -1 to enable
+  if (ioManager->needsParticleSync(cycle + 1)) {
+    for (int i = 0; i < ns; i++) {
+      if (outputPart[i].get_pcl_array().capacity() < pclsArrayHostPtr[i]->getNOP()) {
         auto pclArray = outputPart[i].get_pcl_arrayPtr();
         pclArray->reserve(pclsArrayHostPtr[i]->getNOP() * 1.2);
       }
-      cudaErrChk(cudaMemcpyAsync(outputPart[i].get_pcl_array().getList(), pclsArrayHostPtr[i]->getpcls(), 
-                                pclsArrayHostPtr[i]->getNOP()*sizeof(SpeciesParticle), cudaMemcpyDefault, streams[0]));
-      outputPart[i].get_pcl_array().setSize(pclsArrayHostPtr[i]->getNOP()); 
+      cudaErrChk(cudaMemcpyAsync(
+          outputPart[i].get_pcl_array().getList(),
+          pclsArrayHostPtr[i]->getpcls(),
+          pclsArrayHostPtr[i]->getNOP() * sizeof(SpeciesParticle),
+          cudaMemcpyDefault, streams[0]));
+      outputPart[i].get_pcl_array().setSize(pclsArrayHostPtr[i]->getNOP());
     }
     cudaErrChk(cudaEventRecord(eventOutputCopy, streams[0]));
   }
-}
-
-void c_Solver::WriteRestart(int cycle)
-{
-#ifndef NO_HDF5
-  if (restart_cycle>0 && cycle%restart_cycle==0){
-
-    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
-
-	  convertOutputParticlesToSynched();
-
-#ifdef USE_ADIOS2
-    adiosManager->appendRestartOutput(cycle);
-#else
-	  fetch_outputWrapperFPP().append_restart(cycle);
-#endif
-  }
-#endif
 }
 
 // write the conserved quantities
@@ -1247,83 +1115,19 @@ void c_Solver::WriteVirtualSatelliteTraces()
   my_file.close();
 }
 
-void c_Solver::WriteFields(int cycle) {
-
-#ifndef NO_HDF5
-  if(col->field_output_is_off())   return;
-
-  if(cycle % (col->getFieldOutputCycle()) == 0 || cycle == first_cycle)
-  {
-	  if(!(col->getFieldOutputTag()).empty())
-		  	  fetch_outputWrapperFPP().append_output((col->getFieldOutputTag()).c_str(), cycle);//E+B+Js
-	  if(!(col->getMomentsOutputTag()).empty())
-		  	  fetch_outputWrapperFPP().append_output((col->getMomentsOutputTag()).c_str(), cycle);//rhos+pressure
-  }
-#endif
-}
-
-void c_Solver::WriteParticles(int cycle)
-{
-#ifndef NO_HDF5
-  if(col->particle_output_is_off() || cycle%(col->getParticlesOutputCycle())!=0) return;
-
-  cudaErrChk(cudaEventSynchronize(eventOutputCopy));
-
-  // this is a hack
-  for (int i = 0; i < ns; i++){
-    outputPart[i].set_particleType(ParticleType::Type::AoS); // this is a even more hack
-    outputPart[i].convertParticlesToSynched();
-  }
-
-#ifdef USE_ADIOS2
-  adiosManager->appendParticleOutput(cycle);
-#else
-  fetch_outputWrapperFPP().append_output((col->getPclOutputTag()).c_str(), cycle, 0);//"position + velocity + q "
-#endif
-
-#endif
-}
-
-void c_Solver::WriteTestParticles(int cycle)
-{
-#ifndef NO_HDF5
-  if(nstestpart == 0 || col->testparticle_output_is_off() || cycle%(col->getTestParticlesOutputCycle())!=0) return;
-
-  // this is a hack
-  for (int i = 0; i < nstestpart; i++){
-    testpart[i].set_particleType(ParticleType::Type::AoS); // this is a even more hack
-    testpart[i].convertParticlesToSynched();
-  }
-
-  fetch_outputWrapperFPP().append_output("testpartpos + testpartvel+ testparttag", cycle, 0); // + testpartcharge
-#endif
-}
-
-// This needs to be separated into methods that save particles
-// and methods that save field data
-//
 void c_Solver::Finalize() {
 
   pclNumCSV.close();
-  
+
   if (col->getCallFinalize() && Parameters::get_doWriteOutput() && col->getRestartOutputCycle() > 0)
   {
-    #ifndef NO_HDF5
     outputCopyAsync(-1);
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
-
     convertOutputParticlesToSynched();
-#ifdef USE_ADIOS2
-    adiosManager->appendRestartOutput((col->getNcycles() + first_cycle) - 1);
-#else
-    fetch_outputWrapperFPP().append_restart((col->getNcycles() + first_cycle) - 1);
-#endif
-    #endif
+    ioManager->writeRestart((col->getNcycles() + first_cycle) - 1);
   }
 
-#ifdef USE_ADIOS2
-  adiosManager->closeOutputFiles();
-#endif
+  ioManager->finalize();
 
   deInitCUDA();
 

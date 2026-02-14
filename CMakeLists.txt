@@ -42,7 +42,7 @@ option(BUILD_SHARED_LIBS "Use shared libraries if ON, static if OFF" ON)
 option(USE_CATALYST "Use Catalyst adaptor" OFF)
 option(USE_BATSRUS "Use BATSRUS flag" OFF)
 option(USE_HDF5 "Use HDF5 library" ON)
-option(USE_PHDF5 "Enable parallel HDF5 output (requires HDF5 with MPI support)" OFF)
+option(USE_PHDF5 "Enable parallel HDF5 output (requires HDF5 with MPI support)" ON)
 option(USE_ADIOS2 "Use ADIOS2 library" ON)
 
 option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA, ON for HIP

@@ -35,10 +35,6 @@ class Timing;
 #include "assert.h"
 #include <string>
 using std::string;
-#ifndef NO_HDF5
-class OutputWrapperFPP;
-#endif
-
 
 #include "cudaTypeDef.cuh"
 #include "moverKernel.cuh"
@@ -50,6 +46,7 @@ class OutputWrapperFPP;
 
 #include <fstream>
 
+class IOManager;   // modular I/O manager (see IOManager.h)
 
 namespace iPic3D {
   class c_Solver;
@@ -59,22 +56,11 @@ namespace dataAnalysis {
   class dataAnalysisPipelineImpl;
 }
 
-#ifdef USE_ADIOS2
-#include "ADIOS2IO.hpp"
-namespace ADIOS2IO {
-  class ADIOS2Manager;
-}
-#endif
-
 namespace iPic3D {
 
   class c_Solver {
 
   friend dataAnalysis::dataAnalysisPipelineImpl;
-
-#ifdef USE_ADIOS2
-  friend ADIOS2IO::ADIOS2Manager;
-#endif
 
   public:
     ~c_Solver();
@@ -84,9 +70,7 @@ namespace iPic3D {
       grid(0),
       EMf(0),
       part(0),
-#ifndef NO_HDF5
-      outputWrapperFPP(0),
-#endif
+      ioManager(0),
       Ke(0),
       BulkEnergy(0),
       momentum(0),
@@ -111,13 +95,9 @@ namespace iPic3D {
     // output methods
     //
     void writeParticleNum(int cycle);
-    void WriteRestart(int cycle);
     void WriteConserved(int cycle);
     void WriteVelocityDistribution(int cycle);
     void WriteVirtualSatelliteTraces();
-    void WriteFields(int cycle);
-    void WriteParticles(int cycle);
-    void WriteTestParticles(int cycle);
     void outputCopyAsync(int cycle);
     void WriteOutput(int cycle);
     void Finalize();
@@ -140,7 +120,7 @@ namespace iPic3D {
     Grid3DCU      *grid; // 3d cartesion grid, local grid
     EMfields3D    *EMf; // 
     Particles3D   *part; // only used for particle exchange during the simulation
-    Particles3D   *outputPart; // buffers for all particle copy back, registered to the output warpperFPP
+    Particles3D   *outputPart; // buffers for all particle copy back, registered to IOManager
     Particles3D   *testpart;
     double        *Ke; // kinetic energy of each species, the normal one, added up
     double        *BulkEnergy; // bulk kinetic energy of each species, consider the bulk motion
@@ -148,6 +128,8 @@ namespace iPic3D {
     double        *Qremoved; // array of double, with species length, removed charges from the depopulation area
     Timing        *my_clock;
     std::ofstream pclNumCSV;
+
+    IOManager     *ioManager; // modular I/O manager (owns backends)
 
 
     int cudaDeviceOnNode; // the device this rank should use
@@ -194,17 +176,6 @@ namespace iPic3D {
 
     cudaEvent_t event0, eventOutputCopy;
 
-#ifdef USE_ADIOS2
-    ADIOS2IO::ADIOS2Manager* adiosManager;
-#endif
-
-#ifndef NO_HDF5
-    OutputWrapperFPP& fetch_outputWrapperFPP(){
-      assert(outputWrapperFPP);
-      return *outputWrapperFPP;}
-    OutputWrapperFPP *outputWrapperFPP;
-#endif
-
     //bool verbose;
     string SaveDirName;
     string RestartDirName;
@@ -228,7 +199,7 @@ namespace iPic3D {
     int mergeIdx = -1;
     int* toBeMerged;
 
-    //the below used for IO
+    //the below used for IO (test-particle VTK, virtual satellites, etc.)
     MPI_Request *headerReq;
     MPI_Request *dataReq;
     MPI_Request *footReq;
@@ -237,17 +208,6 @@ namespace iPic3D {
     float *testpclVel;
     MPI_File fh;
   	MPI_Status*  status;
-  	float**** fieldwritebuffer;
-	MPI_Request fieldreqArr[4];//E+B+Je+Ji
-	MPI_File    fieldfhArr[4];
-	MPI_Status  fieldstsArr[4];
-	int fieldreqcounter;
-
-  	float*** momentwritebuffer;
-	MPI_Request momentreqArr[14];//rho+PXX+PXY+PXZ++PYY+PYZ+PZZ for species0,1
-	MPI_File    momentfhArr[14];
-	MPI_Status  momentstsArr[14];
-	int momentreqcounter;
 
   };
 

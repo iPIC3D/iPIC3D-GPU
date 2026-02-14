@@ -1,7 +1,6 @@
 #ifdef USE_ADIOS2
 
 #include "ADIOS2IO.hpp"
-#include "iPic3D.h"
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
@@ -21,30 +20,33 @@ namespace ADIOS2IO {
 using namespace std;
 
 
-void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag, int sample, iPic3D::c_Solver& KCode) {
+void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag, int sample,
+                                    Collective* col_in, VCtopology3D* vct_in, Grid3DCU* grid_in,
+                                    EMfields3D* EMf_in, Particles3D* outputPart_in, int ns_in,
+                                    Particles3D* testpart_in, int nstestpart_in) {
 
     if (open) {
         closeOutputFiles();
     }
 
-    this->cartisianRank = KCode.vct->getCartesian_rank();
-    this->saveDirName = KCode.col->getSaveDirName();
-    this->restartDirName = KCode.col->getRestartDirName();
-    this->restartTag = KCode.col->getRestartOutputCycle()? "proc_topology+E+B+rhos+Js+pressure+position+velocity+q+ID"s : ""s;
+    this->cartisianRank = vct_in->getCartesian_rank();
+    this->saveDirName = col_in->getSaveDirName();
+    this->restartDirName = col_in->getRestartDirName();
+    this->restartTag = col_in->getRestartOutputCycle()? "proc_topology+E+B+rhos+Js+pressure+position+velocity+q+ID"s : ""s;
 
     this->fieldTag = fieldTag;
     this->particleTag = particleTag;
     this->sample = sample;
 
-    this->col = KCode.col;
-    this->vct = KCode.vct;
-    this->grid = KCode.grid;
-    this->EMf = KCode.EMf;
+    this->col = col_in;
+    this->vct = vct_in;
+    this->grid = grid_in;
+    this->EMf = EMf_in;
 
-    this->part = KCode.outputPart;
-    this->ns = KCode.col->getNs();
-    this->testpart = KCode.testpart;
-    this->nstestpart = KCode.col->getNsTestPart();
+    this->part = outputPart_in;
+    this->ns = ns_in;
+    this->testpart = testpart_in;
+    this->nstestpart = nstestpart_in;
 
 
     // ADIOS2

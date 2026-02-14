@@ -136,6 +136,76 @@ export OMP_NUM_THREADS=4
 ```
 The solver on CPU will be benefited from OpenMP now, and this option is ON by default. It's important to control the number of threads per MPI process, make sure it's in a reasonable range.
 
+## I/O Backends
+
+iPIC3D-GPU writes three categories of data: **fields** (E, B, J, rho, moments), **particles** (position, velocity, charge, ID), and **restart checkpoints** (fields + particles). Each category can use a different I/O backend, selected through a combination of CMake options and the `WriteMethod` parameter in the input file.
+
+### CMake options
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `USE_HDF5` | `ON` | Compile HDF5-based backends (serial HDF5, parallel HDF5, H5hut) |
+| `USE_PHDF5` | `ON` | Enable the parallel HDF5 field backend (requires `USE_HDF5=ON` and an MPI-enabled HDF5 library) |
+| `USE_ADIOS2` | `ON` | Compile the ADIOS2 backend for particles and restarts |
+
+Example:
+```shell
+cmake -DUSE_HDF5=ON -DUSE_PHDF5=ON -DUSE_ADIOS2=ON ..
+```
+
+### Input file: `WriteMethod`
+
+The `WriteMethod` parameter in the input file controls the **field output** backend:
+
+| `WriteMethod` | Field backend | Description |
+|---------------|---------------|-------------|
+| `shdf5` | Serial HDF5 | One HDF5 file per MPI rank (file-per-process) |
+| `phdf5` | Parallel HDF5 | All ranks write collectively into a single HDF5 file (requires `USE_PHDF5=ON`) |
+| `pvtk` | Blocking VTK | Collective MPI-IO into VTK files |
+| `nbcvtk` | Non-blocking VTK | Non-blocking collective MPI-IO into VTK files; writes overlap with computation of the next cycle |
+| `H5hut` | H5hut | Collective I/O through the H5hut library |
+| `adios2` | ADIOS2 | **Not implemented yet** — will throw a runtime error |
+
+### Particle and restart backend selection
+
+Particle and restart backends are **not** controlled by `WriteMethod`. They are selected at **compile time** based on the CMake flags:
+
+| | `USE_ADIOS2=ON` | `USE_ADIOS2=OFF`, `WriteMethod=H5hut` | `USE_ADIOS2=OFF` (other) |
+|---|---|---|---|
+| **Particles** | ADIOS2 (file-per-process, BP5) | H5hut (collective) | Serial HDF5 (file-per-process) |
+| **Restarts** | ADIOS2 (file-per-process, BP5) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |
+
+When `USE_ADIOS2=ON`, ADIOS2 always takes priority for particles and restarts, regardless of `WriteMethod`.
+
+### Available combinations summary
+
+With the default CMake settings (`USE_HDF5=ON`, `USE_PHDF5=ON`, `USE_ADIOS2=ON`):
+
+| `WriteMethod` | Fields | Particles | Restarts |
+|---------------|--------|-----------|----------|
+| `pvtk` | Blocking VTK (collective) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
+| `nbcvtk` | Non-blocking VTK (collective, overlapped) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
+| `shdf5` | Serial HDF5 (file-per-process) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
+| `phdf5` | Parallel HDF5 (collective, single file) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
+| `H5hut` | H5hut (collective) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
+
+With `USE_ADIOS2=OFF` and `USE_HDF5=ON`:
+
+| `WriteMethod` | Fields | Particles | Restarts |
+|---------------|--------|-----------|----------|
+| `pvtk` | Blocking VTK (collective) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |
+| `nbcvtk` | Non-blocking VTK (collective, overlapped) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |
+| `shdf5` | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |
+| `phdf5` | Parallel HDF5 (collective, single file) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |
+| `H5hut` | H5hut (collective) | H5hut (collective) | Serial HDF5 (file-per-process) |
+
+### Notes
+
+- **`nbcvtk`** is the only field backend that overlaps I/O with computation. It starts a non-blocking MPI write and completes it at the next output cycle.
+- **Parallel HDF5 (`phdf5`)** writes fields only — parallel particle output is not implemented for this backend.
+- **ADIOS2** uses the BP5 engine with `MPI_COMM_SELF`, producing one `.bp` directory per MPI rank. ADIOS2 field output is declared in the code but not yet implemented.
+- All backends perform **synchronous blocking** writes from the main thread, except `nbcvtk` for fields.
+
 ## Tool
 
 ### Benchmark

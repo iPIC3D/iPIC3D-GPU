@@ -9,14 +9,15 @@
 #include "ipicfwd.h"
 #include "cudaTypeDef.cuh"
 #include "particleArrayCUDA.cuh"
-#include "iPic3D.h"
 #include "VCtopology3D.h"
+#include "Grid3DCU.h"
+#include "EMfields3D.h"
+#include "Collective.h"
+#include "Particles3D.h"
 
 #include "adios2.h"
 
-namespace iPic3D {
-    class c_Solver;
-}
+using std::string;
 
 namespace ADIOS2IO {
 
@@ -98,7 +99,10 @@ public:
  * 
  * @details create or open the output files, register the pointers, configure the output routine
  */
-void initOutputFiles(string fieldTag, string particleTag, int sample, iPic3D::c_Solver& KCode);
+void initOutputFiles(string fieldTag, string particleTag, int sample,
+                     Collective* col, VCtopology3D* vct, Grid3DCU* grid,
+                     EMfields3D* EMf, Particles3D* outputPart, int ns,
+                     Particles3D* testpart, int nstestpart);
 
 /**
  * @brief Append the output data to the output files, the interface 

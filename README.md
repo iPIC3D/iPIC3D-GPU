@@ -173,7 +173,7 @@ Each file contains multiple ADIOS2 *steps*, one per checkpoint. On restart, the 
 |-----------|---------|-------------|
 | `RestartDirName` | `data` | Directory containing the `restart_*.bp` files |
 | `RestartOutputCycle` | `5000` | Write a restart checkpoint every N cycles. Set to `0` to disable periodic checkpoints. |
-| `CallFinalize` | `1` | If `1`, write a final restart checkpoint when the simulation ends (regardless of `RestartOutputCycle`). |
+| `CallFinalize` | `1` | If `1`, write a final restart checkpoint when the simulation ends. Requires `RestartOutputCycle > 0` — if `RestartOutputCycle` is `0`, no final restart is written even with `CallFinalize = 1`. |
 | `ncycles` | — | Number of **new** cycles to run from the restart point (not an absolute cycle number). |
 
 ### How the cycle counter works
@@ -231,9 +231,8 @@ Some cases apply additional boundary-condition fixes during the time loop:
 |--------|------------|
 | `GEM`, `GEMnoPert`, `GEMDoubleHarris` | `fixBnGEM` / `fixBcGEM` — enforce Harris-sheet–consistent normal-B and density at $y$-boundaries |
 | `ForceFree` | `fixBforcefree` — enforce force-free B profile at $y$-boundaries |
-| `Dipole` | `ConstantChargePlanet` — maintain fixed charge inside the planet sphere (on restart) |
-| `Dipole2D` | `ConstantChargePlanet2DPlaneXZ` — 2-D variant of the above |
-| `TaylorGreen` | `ConstantChargeOpenBC` — open-boundary charge fix |
+| `Dipole` | `ConstantChargePlanet` — maintain fixed charge inside the planet sphere (every cycle) |
+| `Dipole2D` | `ConstantChargePlanet2DPlaneXZ` — 2-D variant of the above (every cycle) |
 
 ### Setting the case
 

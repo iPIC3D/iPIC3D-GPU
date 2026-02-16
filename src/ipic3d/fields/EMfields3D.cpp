@@ -1881,9 +1881,6 @@ void EMfields3D::init()
       grid->interpN2C(rhocs, is, rhons);
   }
   else {                        // READING FROM RESTART
-  #ifdef NO_HDF5
-    eprintf("restart requires compiling with HDF5");
-  #else
     col->read_field_restart(vct,grid,Bxn,Byn,Bzn,Ex,Ey,Ez,&rhons,ns);
 
     // communicate species densities to ghost nodes
@@ -1928,7 +1925,6 @@ void EMfields3D::init()
 
     for (int is = 0; is < ns; is++)
       grid->interpN2C(rhocs, is, rhons);
-  #endif // NO_HDF5
   }
 }
 

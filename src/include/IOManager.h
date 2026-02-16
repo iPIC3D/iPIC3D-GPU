@@ -18,6 +18,8 @@
 #define IO_MANAGER_H
 
 #include "ipicfwd.h"
+#include "arraysfwd.h"        // arr3_double, array4_double
+#include "aligned_vector.h"   // vector_double
 #include <string>
 
 #ifndef NO_MPI
@@ -70,6 +72,33 @@ public:
 
     /** Write restart checkpoint (fields + particles). */
     void writeRestart(int cycle);
+
+    // ---- restart READ methods (dispatch to RestartReader) ----
+
+    /**
+     * @brief Read EM fields and species densities from a restart checkpoint.
+     *
+     * Delegates to RestartReader::readFields using the restart directory
+     * and last cycle stored in the Collective configuration.
+     */
+    void readFieldRestart(
+        const VCtopology3D* vct, const Grid3DCU* grid,
+        arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
+        arr3_double Ex,  arr3_double Ey,  arr3_double Ez,
+        array4_double* rhons, int ns);
+
+    /**
+     * @brief Read particle data from a restart checkpoint.
+     *
+     * Delegates to RestartReader::readParticles using the restart directory
+     * and last cycle stored in the Collective configuration.
+     */
+    void readParticlesRestart(
+        const VCtopology3D* vct, int species_number,
+        vector_double& u, vector_double& v, vector_double& w,
+        vector_double& q,
+        vector_double& x, vector_double& y, vector_double& z,
+        vector_double& t);
 
     /**
      * @brief Close output files and release backend resources.

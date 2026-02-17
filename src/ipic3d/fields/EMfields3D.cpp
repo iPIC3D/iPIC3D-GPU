@@ -94,6 +94,9 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
   x_center(col->getx_center()),
   y_center(col->gety_center()),
   z_center(col->getz_center()),
+  x_center_p(col->getx_center_p()),
+  y_center_p(col->gety_center_p()),
+  z_center_p(col->getz_center_p()),
   L_square(col->getL_square()),
   delt (c*th*dt), // declared after these
   //
@@ -2871,6 +2874,9 @@ void EMfields3D::initDipole()
       cout << "Center dipole - X                = " << x_center << endl;
       cout << "Center dipole - Y                = " << y_center << endl;
       cout << "Center dipole - Z                = " << z_center << endl;
+      cout << "Center planet - X                = " << x_center_p << endl;
+      cout << "Center planet - Y                = " << y_center_p << endl;
+      cout << "Center planet - Z                = " << z_center_p << endl;
       cout << "Solar Wind drift velocity        = " << ue0 << endl;
   }
 
@@ -2896,23 +2902,22 @@ void EMfields3D::initDipole()
         // radius of the planet
         double a=L_square;
 
-        double xc=x_center;
-        double yc=y_center;
-        double zc=z_center;
-
         double x = grid->getXN(i,j,k);
         double y = grid->getYN(i,j,k);
         double z = grid->getZN(i,j,k);
 
-        double r2 = ((x-xc)*(x-xc)) + ((y-yc)*(y-yc)) + ((z-zc)*(z-zc));
+	//Distance from planet center
+        double r2 = ((x-x_center_p)*(x-x_center_p)) + ((y-y_center_p)*(y-y_center_p)) + ((z-z_center_p)*(z-z_center_p));
+	//Distance from dipole center
+        double r2d = ((x-x_center)*(x-x_center)) + ((y-y_center)*(y-y_center)) + ((z-z_center)*(z-z_center));
 
         // Compute dipolar field B_ext
 
         if (r2 > a*a) {
-            x_displ = x - xc;
-            y_displ = y - yc;
-            z_displ = z - zc;
-            fac1 =  -B1z*a*a*a/pow(r2,2.5);
+            x_displ = x - x_center; //position from the dipole center
+            y_displ = y - y_center;
+            z_displ = z - z_center;
+            fac1 =  -B1z*a*a*a/pow(r2d,2.5);
 	    Bx_ext[i][j][k] = 3*x_displ*z_displ*fac1;
 	    By_ext[i][j][k] = 3*y_displ*z_displ*fac1;
 	    Bz_ext[i][j][k] = (2*z_displ*z_displ -x_displ*x_displ -y_displ*y_displ)*fac1;

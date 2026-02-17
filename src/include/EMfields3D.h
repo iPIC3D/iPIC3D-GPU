@@ -365,6 +365,12 @@ class EMfields3D                // :public Field
     double y_center;
     /** source center - Z direction   */
     double z_center;
+    /** planet center - X direction   */
+    double x_center_p;
+    /** planet center - Y direction   */
+    double y_center_p;
+    /** planet center - Z direction   */
+    double z_center_p;
     /** Characteristic length */
     double L_square;
 

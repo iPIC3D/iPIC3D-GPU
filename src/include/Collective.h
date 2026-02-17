@@ -86,6 +86,9 @@ class Collective
     double getx_center()const{ return (x_center); }
     double gety_center()const{ return (y_center); }
     double getz_center()const{ return (z_center); }
+    double getx_center_p()const{ return (x_center_p); }
+    double gety_center_p()const{ return (y_center_p); }
+    double getz_center_p()const{ return (z_center_p); }
     double getL_square()const{ return (L_square); }
     int getNxc()const{ return (nxc); }
     int getNyc()const{ return (nyc); }
@@ -232,13 +235,19 @@ class Collective
     double Ly;
     /*! simulation box length - Z direction */
     double Lz;
-    /*! object center - X direction */
+    /*! dipole center - X direction */
     double x_center;
-    /*! object center - Y direction */
+    /*! dipole center - Y direction */
     double y_center;
-    /*! object center - Z direction */
+    /*! dipole center - Z direction */
     double z_center;
-    /*! object size - assuming a cubic box */
+    /*! object center - X direction */
+    double x_center_p;
+    /*! object center - Y direction */
+    double y_center_p;
+    /*! object center - Z direction */
+    double z_center_p;
+   /*! object size - assuming a cubic box */
     double L_square;
     // number of cells per direction of problem domain
     int nxc;

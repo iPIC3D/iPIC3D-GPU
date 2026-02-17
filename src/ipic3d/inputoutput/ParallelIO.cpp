@@ -374,9 +374,13 @@ int size(T(&)[sz])
 
 void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & outputTag ,int cycle){
 
-	//All VTK output at grid cells excluding ghost cells
-	const int nxn  =grid->getNXN(),nyn  = grid->getNYN(),nzn =grid->getNZN();
-	const int dimX =col->getNxc() ,dimY = col->getNyc(), dimZ=col->getNzc();
+	//All VTK output at grid nodes excluding ghost nodes
+	// Upper-boundary processes include the last physical boundary node
+	const int nxn  =grid->getNXN() + (vct->isXupper() ? 1 : 0);
+	const int nyn  =grid->getNYN() + (vct->isYupper() ? 1 : 0);
+	const int nzn  =grid->getNZN() + (vct->isZupper() ? 1 : 0);
+	// Global dimensions = total node count = global cells + 1
+	const int dimX =col->getNxc()+1 ,dimY = col->getNyc()+1, dimZ=col->getNzc()+1;
 	const double spaceX = dimX>1 ?col->getLx()/(dimX-1) :col->getLx();
 	const double spaceY = dimY>1 ?col->getLy()/(dimY-1) :col->getLy();
 	const double spaceZ = dimZ>1 ?col->getLz()/(dimZ-1) :col->getLz();
@@ -681,9 +685,13 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 
 void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & outputTag ,int cycle,float**** fieldwritebuffer){
 
-	//All VTK output at grid cells excluding ghost cells
-	const int nxn  =grid->getNXN(),nyn  = grid->getNYN(),nzn =grid->getNZN();
-	const int dimX =col->getNxc() ,dimY = col->getNyc(), dimZ=col->getNzc();
+	//All VTK output at grid nodes excluding ghost nodes
+	// Upper-boundary processes include the last physical boundary node
+	const int nxn  =grid->getNXN() + (vct->isXupper() ? 1 : 0);
+	const int nyn  =grid->getNYN() + (vct->isYupper() ? 1 : 0);
+	const int nzn  =grid->getNZN() + (vct->isZupper() ? 1 : 0);
+	// Global dimensions = total node count = global cells + 1
+	const int dimX =col->getNxc()+1 ,dimY = col->getNyc()+1, dimZ=col->getNzc()+1;
 	const double spaceX = dimX>1 ?col->getLx()/(dimX-1) :col->getLx();
 	const double spaceY = dimY>1 ?col->getLy()/(dimY-1) :col->getLy();
 	const double spaceZ = dimZ>1 ?col->getLz()/(dimZ-1) :col->getLz();
@@ -867,9 +875,13 @@ void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopolo
 
 void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & outputTag ,int cycle, float*** momentswritebuffer){
 
-	//All VTK output at grid cells excluding ghost cells
-	const int nxn  =grid->getNXN(),nyn  = grid->getNYN(),nzn =grid->getNZN();
-	const int dimX =col->getNxc() ,dimY = col->getNyc(), dimZ=col->getNzc();
+	//All VTK output at grid nodes excluding ghost nodes
+	// Upper-boundary processes include the last physical boundary node
+	const int nxn  =grid->getNXN() + (vct->isXupper() ? 1 : 0);
+	const int nyn  =grid->getNYN() + (vct->isYupper() ? 1 : 0);
+	const int nzn  =grid->getNZN() + (vct->isZupper() ? 1 : 0);
+	// Global dimensions = total node count = global cells + 1
+	const int dimX =col->getNxc()+1 ,dimY = col->getNyc()+1, dimZ=col->getNzc()+1;
 	const double spaceX = dimX>1 ?col->getLx()/(dimX-1) :col->getLx();
 	const double spaceY = dimY>1 ?col->getLy()/(dimY-1) :col->getLy();
 	const double spaceZ = dimZ>1 ?col->getLz()/(dimZ-1) :col->getLz();
@@ -1060,9 +1072,13 @@ void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopol
 int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,int cycle,
 		float**** fieldwritebuffer,MPI_Request requestArr[4],MPI_File fhArr[4]){
 
-	//All VTK output at grid cells excluding ghost cells
-	const int nxn  =grid->getNXN(),nyn  = grid->getNYN(),nzn =grid->getNZN();
-	const int dimX =col->getNxc() ,dimY = col->getNyc(), dimZ=col->getNzc();
+	//All VTK output at grid nodes excluding ghost nodes
+	// Upper-boundary processes include the last physical boundary node
+	const int nxn  =grid->getNXN() + (vct->isXupper() ? 1 : 0);
+	const int nyn  =grid->getNYN() + (vct->isYupper() ? 1 : 0);
+	const int nzn  =grid->getNZN() + (vct->isZupper() ? 1 : 0);
+	// Global dimensions = total node count = global cells + 1
+	const int dimX =col->getNxc()+1 ,dimY = col->getNyc()+1, dimZ=col->getNzc()+1;
 	const double spaceX = dimX>1 ?col->getLx()/(dimX-1) :col->getLx();
 	const double spaceY = dimY>1 ?col->getLy()/(dimY-1) :col->getLy();
 	const double spaceZ = dimZ>1 ?col->getLz()/(dimZ-1) :col->getLz();
@@ -1208,9 +1224,13 @@ int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
 int  WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,int cycle,
 		float*** momentswritebuffer,MPI_Request requestArr[14],MPI_File fhArr[14]){
 
-	//All VTK output at grid cells excluding ghost cells
-	const int nxn  =grid->getNXN(),nyn  = grid->getNYN(),nzn =grid->getNZN();
-	const int dimX =col->getNxc() ,dimY = col->getNyc(), dimZ=col->getNzc();
+	//All VTK output at grid nodes excluding ghost nodes
+	// Upper-boundary processes include the last physical boundary node
+	const int nxn  =grid->getNXN() + (vct->isXupper() ? 1 : 0);
+	const int nyn  =grid->getNYN() + (vct->isYupper() ? 1 : 0);
+	const int nzn  =grid->getNZN() + (vct->isZupper() ? 1 : 0);
+	// Global dimensions = total node count = global cells + 1
+	const int dimX =col->getNxc()+1 ,dimY = col->getNyc()+1, dimZ=col->getNzc()+1;
 	const double spaceX = dimX>1 ?col->getLx()/(dimX-1) :col->getLx();
 	const double spaceY = dimY>1 ?col->getLy()/(dimY-1) :col->getLy();
 	const double spaceZ = dimZ>1 ?col->getLz()/(dimZ-1) :col->getLz();

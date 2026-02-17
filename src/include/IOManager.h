@@ -140,6 +140,11 @@ private:
     float**** fieldwritebuffer_  = nullptr;
     float***  momentwritebuffer_ = nullptr;
 
+    // Local write sizes (interior nodes + boundary node for upper processes)
+    int localWriteNx_ = 0;
+    int localWriteNy_ = 0;
+    int localWriteNz_ = 0;
+
     // NBCVTK non-blocking state
     MPI_Request fieldreqArr_[4]   = {};
     MPI_File    fieldfhArr_[4]    = {};

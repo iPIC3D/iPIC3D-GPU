@@ -47,17 +47,17 @@ IOManager::~IOManager() {
 #endif
     // Free VTK write buffers (delArr needs the first two dimensions). 
     // Note: the original code never freed these — this fixes that leak.
-    if (fieldwritebuffer_ && grid_) {
+    if (fieldwritebuffer_ && localWriteNz_ > 0) {
         int dim0 = (fieldBackend_ == FieldBackend::NBCVTK)
-                       ? (grid_->getNZN() - 3) * 4
-                       : (grid_->getNZN() - 3);
-        delArr4(fieldwritebuffer_, dim0, grid_->getNYN() - 3, grid_->getNXN() - 3);
+                       ? localWriteNz_ * 4
+                       : localWriteNz_;
+        delArr4(fieldwritebuffer_, dim0, localWriteNy_, localWriteNx_);
     }
-    if (momentwritebuffer_ && grid_) {
+    if (momentwritebuffer_ && localWriteNz_ > 0) {
         int dim0 = (fieldBackend_ == FieldBackend::NBCVTK)
-                       ? (grid_->getNZN() - 3) * 14
-                       : (grid_->getNZN() - 3);
-        delArr3(momentwritebuffer_, dim0, grid_->getNYN() - 3);
+                       ? localWriteNz_ * 14
+                       : localWriteNz_;
+        delArr3(momentwritebuffer_, dim0, localWriteNy_);
     }
 }
 
@@ -181,24 +181,29 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
 #endif
 
     // ---- 7. Allocate VTK write buffers if needed ----
+    // Compute local write sizes: interior nodes + boundary node for upper processes
+    localWriteNx_ = grid->getNXN() - 3 + (vct->isXupper() ? 1 : 0);
+    localWriteNy_ = grid->getNYN() - 3 + (vct->isYupper() ? 1 : 0);
+    localWriteNz_ = grid->getNZN() - 3 + (vct->isZupper() ? 1 : 0);
+
     if (!col->field_output_is_off()) {
         if (fieldBackend_ == FieldBackend::PVTK) {
             if (!col->getFieldOutputTag().empty())
                 fieldwritebuffer_ = newArr4(float,
-                    grid->getNZN()-3, grid->getNYN()-3, grid->getNXN()-3, 3);
+                    localWriteNz_, localWriteNy_, localWriteNx_, 3);
             if (!col->getMomentsOutputTag().empty())
                 momentwritebuffer_ = newArr3(float,
-                    grid->getNZN()-3, grid->getNYN()-3, grid->getNXN()-3);
+                    localWriteNz_, localWriteNy_, localWriteNx_);
         }
         else if (fieldBackend_ == FieldBackend::NBCVTK) {
             fieldreqcounter_  = 0;
             momentreqcounter_ = 0;
             if (!col->getFieldOutputTag().empty())
                 fieldwritebuffer_ = newArr4(float,
-                    (grid->getNZN()-3)*4, grid->getNYN()-3, grid->getNXN()-3, 3);
+                    localWriteNz_*4, localWriteNy_, localWriteNx_, 3);
             if (!col->getMomentsOutputTag().empty())
                 momentwritebuffer_ = newArr3(float,
-                    (grid->getNZN()-3)*14, grid->getNYN()-3, grid->getNXN()-3);
+                    localWriteNz_*14, localWriteNy_, localWriteNx_);
         }
     }
 }

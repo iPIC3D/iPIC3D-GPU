@@ -328,11 +328,22 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
 		  int  size[3], subsize[3], start[3];
 
 		  //3D subarray - reverse X, Z
-		  subsize[0] = nzc-2; subsize[1] = nyc-2; subsize[2] = nxc-2;
-		  size[0] = (nzc-2)*vct->getZLEN();size[1] = (nyc-2)*vct->getYLEN();size[2] = (nxc-2)*vct->getXLEN();
-		  start[0]= vct->getCoordinates(2)*subsize[0];
-		  start[1]= vct->getCoordinates(1)*subsize[1];
-		  start[2]= vct->getCoordinates(0)*subsize[2];
+		  // Each process writes its interior nodes; upper-boundary processes
+		  // also write the last physical boundary node (+1 in that direction).
+		  subsize[0] = (nzc-2) + (vct->isZupper() ? 1 : 0);
+		  subsize[1] = (nyc-2) + (vct->isYupper() ? 1 : 0);
+		  subsize[2] = (nxc-2) + (vct->isXupper() ? 1 : 0);
+		  // Global node count = global cell count + 1
+		  size[0] = col->getNzc() + 1;
+		  size[1] = col->getNyc() + 1;
+		  size[2] = col->getNxc() + 1;
+		  // Start offset: use the regular (untruncated) block size
+		  const int nxc_rr = (col->getNxc() + col->getXLEN() - 1) / col->getXLEN();
+		  const int nyc_rr = (col->getNyc() + col->getYLEN() - 1) / col->getYLEN();
+		  const int nzc_rr = (col->getNzc() + col->getZLEN() - 1) / col->getZLEN();
+		  start[0] = vct->getCoordinates(2) * nzc_rr;
+		  start[1] = vct->getCoordinates(1) * nyc_rr;
+		  start[2] = vct->getCoordinates(0) * nxc_rr;
 
 		  MPI_Type_contiguous(3,MPI_FLOAT, &xyzcomp);
 		  MPI_Type_commit(&xyzcomp);

@@ -41,26 +41,26 @@ namespace ParticleType
 
 template <class T>
 class Larray;
-// intended to occupy 64 bytes
+// intended to occupy 64 bytes (8 doubles x 8 bytes = 64 bytes)
 //
-// particle for a specific species
+// particle for a specific species in a PIC simulation
 class SpeciesParticle
 {
-  cudaParticleType u[3];
-  cudaParticleType q;
-  cudaParticleType x[3];
-  cudaParticleType t;
+  cudaParticleType u[3]; // velocity components (u, v, w) [normalized to speed of light c]
+  cudaParticleType q;    // charge of the macroparticle [simulation units]
+  cudaParticleType x[3]; // position components (x, y, z) [in cell-length units]
+  cudaParticleType t;    // subcycle time remaining; also reused as particle ID for tracking
  public:
   __host__ __device__ SpeciesParticle(){}
   __host__ __device__ SpeciesParticle(
-    cudaParticleType u_,
-    cudaParticleType v_,
-    cudaParticleType w_,
-    cudaParticleType q_,
-    cudaParticleType x_,
-    cudaParticleType y_,
-    cudaParticleType z_,
-    cudaParticleType t_)
+    cudaParticleType u_,  // x-component of velocity
+    cudaParticleType v_,  // y-component of velocity
+    cudaParticleType w_,  // z-component of velocity
+    cudaParticleType q_,  // macroparticle charge
+    cudaParticleType x_,  // x-position
+    cudaParticleType y_,  // y-position
+    cudaParticleType z_,  // z-position
+    cudaParticleType t_)  // subcycle time / particle ID
   {
     u[0]=u_;
     u[1]=v_;

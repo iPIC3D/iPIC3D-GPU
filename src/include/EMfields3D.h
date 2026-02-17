@@ -360,17 +360,17 @@ class EMfields3D                // :public Field
     /*! simulation box length - Z direction */
     double Lz;
     /** source center - X direction   */
-    double x_center;
+    double x_center_dipole;
     /** source center - Y direction   */
-    double y_center;
+    double y_center_dipole;
     /** source center - Z direction   */
-    double z_center;
+    double z_center_dipole;
     /** planet center - X direction   */
-    double x_center_p;
+    double x_center_planet;
     /** planet center - Y direction   */
-    double y_center_p;
+    double y_center_planet;
     /** planet center - Z direction   */
-    double z_center_p;
+    double z_center_planet;
     /** Characteristic length */
     double L_square;
 

@@ -226,12 +226,12 @@ void Collective::ReadInput(string inputfile) {
   PERIODICY_P = config.read < bool >("PERIODICY_P",PERIODICY);
   PERIODICZ_P = config.read < bool >("PERIODICZ_P",PERIODICZ);
 
-  x_center = config.read < double >("x_center",5.0);
-  y_center = config.read < double >("y_center",5.0);
-  z_center = config.read < double >("z_center",5.0);
-  x_center_p = config.read < double >("x_center_p",5.0);
-  y_center_p = config.read < double >("y_center_p",5.0);
-  z_center_p = config.read < double >("z_center_p",5.0);
+  x_center_dipole = config.read < double >("x_center_dipole",5.0);
+  y_center_dipole = config.read < double >("y_center_dipole",5.0);
+  z_center_dipole = config.read < double >("z_center_dipole",5.0);
+  x_center_planet = config.read < double >("x_center_planet",5.0);
+  y_center_planet = config.read < double >("y_center_planet",5.0);
+  z_center_planet = config.read < double >("z_center_planet",5.0);
   L_square = config.read < double >("L_square",5.0);
 
 

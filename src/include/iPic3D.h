@@ -42,6 +42,7 @@ using std::string;
 #include "particleArrayCUDA.cuh"
 #include "gridCUDA.cuh"
 #include "particleExchange.cuh"
+#include "planetKernel.cuh"
 #include "threadPool.hpp"
 
 #include <fstream>
@@ -88,6 +89,7 @@ namespace iPic3D {
     int cudaLauncherAsync(int species);
     bool ParticlesMoverMomentAsync();
     bool MoverAwaitAndPclExchange();
+    void processPlanetParticles();
     void CalculateB();
     void MomentsAwait();
 
@@ -137,6 +139,7 @@ namespace iPic3D {
 
     int cudaDeviceOnNode; // the device this rank should use
     cudaStream_t*       streams;
+    cudaStream_t        planetStream;  // dedicated stream for planet BC processing
 
     std::future<int>* exitingResults;
     int* stayedParticle; // stayed particles for each species
@@ -201,6 +204,30 @@ namespace iPic3D {
     double TOTmomentum;
     int mergeIdx = -1;
     int* toBeMerged;
+
+    //! Planet quasi-neutral BC data structures
+    planetArray**       planetArrayHostPtr;      // per species, host-pinned metadata
+    planetArray**       planetArrayCUDAPtr;      // per species, device metadata
+    int*                planetPclCount;           // per species, planet particle count this cycle
+
+    // Cross-species planet processing buffers (device)
+    cudaParticleType*   planetEnergyBuf;          // merged electron energies
+    uint32_t*           planetGlobalIdxBuf;       // encodes species + local index
+    cudaParticleType*   planetIonChargeDevice;    // single-element device buffer for reduction output
+    int*                planetCutoffDevice;       // single-element device buffer for cutoff index output
+    planetArray**       planetArrayCUDAPtrDevice; // device array of device pointers (for chargeCutoffKernel)
+    int*                planetElecOffsetsDevice;  // device array of per-electron-species offsets
+    int                 planetBufCapacity;        // current allocation size of merged buffers
+    int                 planetElecSpeciesCount;   // number of electron species
+    int*                planetElecSpeciesMap;     // maps electron index [0..nElec-1] → species index
+
+    // Persistent host buffers for processPlanetParticles (avoid per-call allocation)
+    int*                planetElecOffsets;         // [planetElecSpeciesCount] species offsets into merged buffers
+    planetArray**       planetTmpPtrs;             // [planetElecSpeciesCount] temp pointer array
+    int*                planetSurvivorCount;       // [planetElecSpeciesCount] survivor counts per electron species (host)
+    int*                planetSurvivorCountDevice; // [planetElecSpeciesCount] per-species atomic counters (device)
+    SpeciesParticle*    planetReflectedBuf;        // device buffer for compact reflected particles
+    int                 planetReflectedBufCapacity;// capacity (in particles) of planetReflectedBuf
 
   };
 

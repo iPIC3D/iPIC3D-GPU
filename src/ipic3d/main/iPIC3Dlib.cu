@@ -330,6 +330,7 @@ int c_Solver::initCUDA(){
 	// init the streams according to the species
   streams = new cudaStream_t[ns*2]; stayedParticle = new int[ns]; exitingResults = new std::future<int>[ns];
   for(int i=0; i<ns; i++){ cudaErrChk(cudaStreamCreate(streams+i)); cudaErrChk(cudaStreamCreate(streams+i+ns)); stayedParticle[i] = 0; }
+  cudaErrChk(cudaStreamCreate(&planetStream));
 	{ 
     // init arrays on device, pointers are device pointer, copied
     pclsArrayHostPtr = new particleArrayCUDA*[ns];
@@ -392,15 +393,15 @@ int c_Solver::initCUDA(){
 
     if (col->getCase()=="Dipole") {
       moverParamHostPtr[i]->doSphere = 1;
-      moverParamHostPtr[i]->sphereOrigin[0] = col->getx_center();
-      moverParamHostPtr[i]->sphereOrigin[1] = col->gety_center();
-      moverParamHostPtr[i]->sphereOrigin[2] = col->getz_center();
+      moverParamHostPtr[i]->sphereOrigin[0] = col->getx_center_planet();
+      moverParamHostPtr[i]->sphereOrigin[1] = col->gety_center_planet();
+      moverParamHostPtr[i]->sphereOrigin[2] = col->getz_center_planet();
       moverParamHostPtr[i]->sphereRadius = col->getL_square();
     } else if (col->getCase()=="Dipole2D") {
       moverParamHostPtr[i]->doSphere = 2;
-      moverParamHostPtr[i]->sphereOrigin[0] = col->getx_center();
+      moverParamHostPtr[i]->sphereOrigin[0] = col->getx_center_planet();
       moverParamHostPtr[i]->sphereOrigin[1] = 0.0;
-      moverParamHostPtr[i]->sphereOrigin[2] = col->getz_center();
+      moverParamHostPtr[i]->sphereOrigin[2] = col->getz_center_planet();
       moverParamHostPtr[i]->sphereRadius = col->getL_square();
     } else {
       moverParamHostPtr[i]->doSphere = 0;
@@ -457,6 +458,80 @@ int c_Solver::initCUDA(){
 
 
   dataAnalysis::dataAnalysisPipeline::createOutputDirectory(myrank, ns, vct);
+
+  // ── Planet quasi-neutral BC allocations ──
+  {
+    const bool doPlanet = (col->getCase() == "Dipole" || col->getCase() == "Dipole2D");
+
+    planetArrayHostPtr = new planetArray*[ns];
+    planetArrayCUDAPtr = new planetArray*[ns];
+    planetPclCount     = new int[ns];
+
+    for (int i = 0; i < ns; i++) {
+      if (doPlanet) {
+        planetArrayHostPtr[i] = newHostPinnedObject<planetArray>((uint32_t)(0.05 * pclsArrayHostPtr[i]->getNOP()));
+        planetArrayCUDAPtr[i] = planetArrayHostPtr[i]->copyToDevice();
+      } else {
+        planetArrayHostPtr[i] = nullptr;
+        planetArrayCUDAPtr[i] = nullptr;
+      }
+      planetPclCount[i] = 0;
+    }
+
+    // Build electron species map
+    planetElecSpeciesCount = 0;
+    for (int i = 0; i < ns; i++)
+      if (col->getQOM(i) < 0) planetElecSpeciesCount++;
+
+    planetElecSpeciesMap = new int[planetElecSpeciesCount];
+    {
+      int idx = 0;
+      for (int i = 0; i < ns; i++)
+        if (col->getQOM(i) < 0) planetElecSpeciesMap[idx++] = i;
+    }
+
+    // Cross-species device buffers
+    planetBufCapacity = doPlanet ? 1024 : 0;
+    if (doPlanet) {
+      cudaErrChk(cudaMalloc(&planetEnergyBuf,    planetBufCapacity * sizeof(cudaParticleType)));
+      cudaErrChk(cudaMalloc(&planetGlobalIdxBuf,  planetBufCapacity * sizeof(uint32_t)));
+      cudaErrChk(cudaMalloc(&planetIonChargeDevice, sizeof(cudaParticleType)));
+      cudaErrChk(cudaMalloc(&planetCutoffDevice,    sizeof(int)));
+
+      // Device array of device pointers to per-electron-species planetArrays
+      cudaErrChk(cudaMalloc(&planetArrayCUDAPtrDevice, planetElecSpeciesCount * sizeof(planetArray*)));
+      planetArray** tmpPtrs = new planetArray*[planetElecSpeciesCount];
+      for (int e = 0; e < planetElecSpeciesCount; e++)
+        tmpPtrs[e] = planetArrayCUDAPtr[planetElecSpeciesMap[e]];
+      cudaErrChk(cudaMemcpy(planetArrayCUDAPtrDevice, tmpPtrs, planetElecSpeciesCount * sizeof(planetArray*), cudaMemcpyHostToDevice));
+      delete[] tmpPtrs;
+
+      cudaErrChk(cudaMalloc(&planetElecOffsetsDevice, planetElecSpeciesCount * sizeof(int)));
+    } else {
+      planetEnergyBuf = nullptr;
+      planetGlobalIdxBuf = nullptr;
+      planetIonChargeDevice = nullptr;
+      planetCutoffDevice = nullptr;
+      planetArrayCUDAPtrDevice = nullptr;
+      planetElecOffsetsDevice = nullptr;
+    }
+
+    // Persistent host/device buffers for processPlanetParticles
+    const int elecCount = planetElecSpeciesCount > 0 ? planetElecSpeciesCount : 1;
+    planetElecOffsets = new int[elecCount];
+    planetTmpPtrs = new planetArray*[elecCount];
+    planetSurvivorCount = new int[elecCount];
+
+    if (doPlanet) {
+      cudaErrChk(cudaMalloc(&planetSurvivorCountDevice, elecCount * sizeof(int)));
+      planetReflectedBufCapacity = 1024;
+      cudaErrChk(cudaMalloc(&planetReflectedBuf, planetReflectedBufCapacity * sizeof(SpeciesParticle)));
+    } else {
+      planetSurvivorCountDevice = nullptr;
+      planetReflectedBuf = nullptr;
+      planetReflectedBufCapacity = 0;
+    }
+  }
 
   cudaErrChk(cudaDeviceSynchronize());
 
@@ -529,9 +604,31 @@ int c_Solver::deInitCUDA(){
   delete[] momentsCUDAPtr;
   delete[] toBeMerged;
 
+  // ── Planet quasi-neutral BC cleanup ──
+  for (int i = 0; i < ns; i++) {
+    if (planetArrayHostPtr[i]) deleteHostPinnedObject(planetArrayHostPtr[i]);
+    if (planetArrayCUDAPtr[i]) cudaFree(planetArrayCUDAPtr[i]);
+  }
+  delete[] planetArrayHostPtr;
+  delete[] planetArrayCUDAPtr;
+  delete[] planetPclCount;
+  delete[] planetElecSpeciesMap;
+  if (planetEnergyBuf)          cudaFree(planetEnergyBuf);
+  if (planetGlobalIdxBuf)       cudaFree(planetGlobalIdxBuf);
+  if (planetIonChargeDevice)    cudaFree(planetIonChargeDevice);
+  if (planetCutoffDevice)       cudaFree(planetCutoffDevice);
+  if (planetArrayCUDAPtrDevice) cudaFree(planetArrayCUDAPtrDevice);
+  if (planetElecOffsetsDevice)  cudaFree(planetElecOffsetsDevice);
+  delete[] planetElecOffsets;
+  delete[] planetTmpPtrs;
+  delete[] planetSurvivorCount;
+  if (planetSurvivorCountDevice) cudaFree(planetSurvivorCountDevice);
+  if (planetReflectedBuf)        cudaFree(planetReflectedBuf);
+
 
   // delete streams
   for(int i=0; i<ns*2; i++)cudaStreamDestroy(streams[i]);
+  cudaStreamDestroy(planetStream);
   delete[] streams;
   delete[] stayedParticle;
   delete[] exitingResults;
@@ -684,10 +781,10 @@ int c_Solver::cudaLauncherAsync(const int species){
   momentKernelStayed<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species] >>>
                           (&(moverParamCUDAPtr[species]->appendCountAtomic), momentParamCUDAPtr[species], grid3DCUDACUDAPtr, momentsCUDAPtr[species]);
 
-  // Copy 7 exiting hashedSum to host
+  // Copy 8 hashedSums to host: 6 directions + delete + planet (XLOW..PLANET)
   cudaErrChk(cudaStreamWaitEvent(streams[species+ns], event1, 0));
   cudaErrChk(cudaMemcpyAsync(hashedSumArrayHostPtr[species], hashedSumArrayCUDAPtr[species], 
-    departureArrayElementType::DELETE*sizeof(hashedSum), cudaMemcpyDefault, streams[species+ns]));
+    departureArrayElementType::PLANET*sizeof(hashedSum), cudaMemcpyDefault, streams[species+ns]));
 
   // Copy OpenBC appended particle number to host
   if (moverParamHostPtr[species]->doOpenBC) {
@@ -705,16 +802,18 @@ int c_Solver::cudaLauncherAsync(const int species){
   // After Mover
   cudaErrChk(cudaStreamSynchronize(streams[species+ns]));
   //cudaErrChk(cudaStreamSynchronize(streams[species]));
-  int x = 0; // exiting particle number
-  for(int i=0; i<departureArrayElementType::DELETE_HASHEDSUM_INDEX; i++)x += hashedSumArrayHostPtr[species][i].getSum();
-  const int y = hashedSumArrayHostPtr[species][departureArrayElementType::DELETE_HASHEDSUM_INDEX].getSum(); // deleted particle number
-  const int hole = x + y;
-  //if (y > 0){
-  //  std::cout << " Particle holes myrank: "<< MPIdata::get_rank() << " species: " << species<< " hole: " << hole << " deleted: "<< y << std::endl;
+  int count_exiting = 0; // exiting particle number
+  for(int i=0; i<departureArrayElementType::DELETE_HASHEDSUM_INDEX; i++)count_exiting += hashedSumArrayHostPtr[species][i].getSum();
+  const int count_deleted = hashedSumArrayHostPtr[species][departureArrayElementType::DELETE_HASHEDSUM_INDEX].getSum(); // deleted particle number
+  const int count_removed_planet = hashedSumArrayHostPtr[species][departureArrayElementType::PLANET_HASHEDSUM_INDEX].getSum(); // planet particle number
+  planetPclCount[species] = count_removed_planet;
+  const int hole = count_exiting + count_deleted + count_removed_planet;
+  //if (count_deleted > 0){
+  //  std::cout << " Particle holes myrank: "<< MPIdata::get_rank() << " species: " << species<< " hole: " << hole << " deleted: "<< count_deleted << std::endl;
   //}
-  if(x > exitingArrayHostPtr[species]->getSize()){ 
+  if(count_exiting > exitingArrayHostPtr[species]->getSize()){ 
     // prepare the exitingArray
-    exitingArrayHostPtr[species]->expand(x * 1.5, streams[species+ns]);
+    exitingArrayHostPtr[species]->expand(count_exiting * 1.5, streams[species+ns]);
     cudaErrChk(cudaMemcpyAsync(exitingArrayCUDAPtr[species], exitingArrayHostPtr[species], 
                                 sizeof(exitingArray), cudaMemcpyDefault, streams[species+ns]));
   }
@@ -726,19 +825,34 @@ int c_Solver::cudaLauncherAsync(const int species){
                                 sizeof(fillerBuffer), cudaMemcpyDefault, streams[species+ns]));
   }
 
-  if(x > part[species].get_pcl_list().capacity()){
+  if(count_exiting > part[species].get_pcl_list().capacity()){
     // expand the host array
     auto pclArray = part[species].get_pcl_arrayPtr();
-    pclArray->reserve(x * 1.5);
+    pclArray->reserve(count_exiting * 1.5);
+  }
+
+  // Planet extraction — MUST run before exitingKernel, which overwrites
+  // departureArray[].hashedId with HOLE hashes for front-region particles.
+  // planetExtractionKernel needs the original PLANET hashedId to scatter correctly.
+  if (count_removed_planet > 0) {
+    if ((uint32_t)count_removed_planet > planetArrayHostPtr[species]->getSize()) {
+      planetArrayHostPtr[species]->expand(count_removed_planet * 1.5, streams[species+ns]);
+      cudaErrChk(cudaMemcpyAsync(planetArrayCUDAPtr[species], planetArrayHostPtr[species],
+                                  sizeof(planetArray), cudaMemcpyDefault, streams[species+ns]));
+    }
+    planetExtractionKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species+ns]>>>(
+        pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species],
+        planetArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
   }
 
   exitingKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species], 
                 departureArrayCUDAPtr[species], exitingArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
+
   cudaErrChk(cudaEventRecord(event2, streams[species+ns]));
-  // Copy exiting particle to host
+  // Copy exiting particle to host (after event2 — D2H doesn't touch pclsArray)
   cudaErrChk(cudaMemcpyAsync(part[species].get_pcl_array().getList(), exitingArrayHostPtr[species]->getArray(), 
-                              x*sizeof(SpeciesParticle), cudaMemcpyDefault, streams[species+ns]));
-  part[species].get_pcl_array().setSize(x);
+                              count_exiting*sizeof(SpeciesParticle), cudaMemcpyDefault, streams[species+ns]));
+  part[species].get_pcl_array().setSize(count_exiting);
 
   // Sorting, the first cycle, x might be 0
   cudaErrChk(cudaStreamWaitEvent(streams[species], event2, 0));
@@ -751,7 +865,7 @@ int c_Solver::cudaLauncherAsync(const int species){
   cudaErrChk(cudaEventDestroy(event1));
   cudaErrChk(cudaEventDestroy(event2));
   cudaErrChk(cudaStreamSynchronize(streams[species+ns])); // exiting particle copied
-  return hole; // Number of exiting + deleted particles
+  return hole; // Number of exiting + deleted + planet particles
 }
 
 bool c_Solver::ParticlesMoverMomentAsync()
@@ -805,6 +919,156 @@ bool c_Solver::ParticlesMoverMomentAsync()
   return (false);
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  Planet quasi-neutral BC: cross-species processing on planetStream
+//  Single host sync at the end; all intermediate results stay on device.
+// ═══════════════════════════════════════════════════════════════════════
+void c_Solver::processPlanetParticles()
+{
+  // ── Step 1: Check if any planet particles exist ──
+  int totalIonPlanet  = 0;
+  int totalElecPlanet = 0;
+  for (int i = 0; i < ns; i++) {
+    if (planetPclCount[i] == 0) continue;
+    if (col->getQOM(i) > 0)
+      totalIonPlanet += planetPclCount[i];
+    else
+      totalElecPlanet += planetPclCount[i];
+  }
+  if (totalElecPlanet == 0) return; // no electrons to reflect; ions already removed as holes
+
+  // ── Step 2: Reduce ion charge on GPU (result stays on device) ──
+  cudaErrChk(cudaMemsetAsync(planetIonChargeDevice, 0, sizeof(cudaParticleType), planetStream));
+  for (int i = 0; i < ns; i++) {
+    if (col->getQOM(i) <= 0 || planetPclCount[i] == 0) continue;
+    const int blockSize = 256;
+    const int gridSz = getGridSize(planetPclCount[i], blockSize);
+    planetChargeReductionKernel<<<gridSz, blockSize, blockSize * sizeof(cudaParticleType), planetStream>>>(
+        planetArrayCUDAPtr[i], planetPclCount[i], planetIonChargeDevice);
+  }
+  // No host sync — ionChargeDevice is read by chargeCutoffKernel via device pointer
+
+  // ── Step 3: Expand cross-species buffers if needed ──
+  // Round up to next power of 2 for bitonic sort
+  int nPad = 1;
+  while (nPad < totalElecPlanet) nPad <<= 1;
+
+  if (nPad > planetBufCapacity) {
+    if (planetEnergyBuf)    cudaFree(planetEnergyBuf);
+    if (planetGlobalIdxBuf) cudaFree(planetGlobalIdxBuf);
+    planetBufCapacity = nPad;
+    cudaErrChk(cudaMalloc(&planetEnergyBuf,    planetBufCapacity * sizeof(cudaParticleType)));
+    cudaErrChk(cudaMalloc(&planetGlobalIdxBuf,  planetBufCapacity * sizeof(uint32_t)));
+  }
+
+  // Expand reflected output buffer if needed (upper bound = totalElecPlanet)
+  if (totalElecPlanet > planetReflectedBufCapacity) {
+    if (planetReflectedBuf) cudaFree(planetReflectedBuf);
+    planetReflectedBufCapacity = totalElecPlanet * 2;
+    cudaErrChk(cudaMalloc(&planetReflectedBuf, planetReflectedBufCapacity * sizeof(SpeciesParticle)));
+  }
+
+  // ── Step 4: Compute energy per electron planet particle ──
+  int offset = 0;
+  for (int e = 0; e < planetElecSpeciesCount; e++) {
+    int specIdx = planetElecSpeciesMap[e];
+    planetElecOffsets[e] = offset;
+    if (planetPclCount[specIdx] > 0) {
+      planetEnergyKernel<<<getGridSize(planetPclCount[specIdx], 256), 256, 0, planetStream>>>(
+          planetArrayCUDAPtr[specIdx], planetPclCount[specIdx],
+          (cudaParticleType)col->getQOM(specIdx),
+          planetEnergyBuf, planetGlobalIdxBuf,
+          offset);
+    }
+    offset += planetPclCount[specIdx];
+  }
+
+  // Copy offsets to device (used by chargeCutoffKernel and planetReflectCompactKernel)
+  if (planetElecSpeciesCount > 0) {
+    cudaErrChk(cudaMemcpyAsync(planetElecOffsetsDevice, planetElecOffsets,
+                                planetElecSpeciesCount * sizeof(int), cudaMemcpyHostToDevice, planetStream));
+  }
+
+  // Update device array of planetArray device pointers (in case pointers changed due to expand)
+  {
+    for (int e = 0; e < planetElecSpeciesCount; e++)
+      planetTmpPtrs[e] = planetArrayCUDAPtr[planetElecSpeciesMap[e]];
+    cudaErrChk(cudaMemcpyAsync(planetArrayCUDAPtrDevice, planetTmpPtrs,
+                                planetElecSpeciesCount * sizeof(planetArray*), cudaMemcpyHostToDevice, planetStream));
+  }
+
+  // ── Step 5: Bitonic sort (descending by energy) ──
+  if (nPad > totalElecPlanet) {
+    bitonicPadKernel<<<getGridSize(nPad - totalElecPlanet, 256), 256, 0, planetStream>>>(
+        planetEnergyBuf, planetGlobalIdxBuf, totalElecPlanet, nPad);
+  }
+  for (int k = 2; k <= nPad; k <<= 1) {
+    for (int j = k >> 1; j > 0; j >>= 1) {
+      bitonicSortStepKernel<<<getGridSize(nPad, 256), 256, 0, planetStream>>>(
+          planetEnergyBuf, planetGlobalIdxBuf, j, k, nPad);
+    }
+  }
+
+  // ── Step 6: Find cutoff (result stays on device) ──
+  cudaErrChk(cudaMemsetAsync(planetCutoffDevice, 0, sizeof(int), planetStream));
+  chargeCutoffKernel<<<1, 1, 0, planetStream>>>(
+      planetArrayCUDAPtrDevice, planetElecSpeciesCount, planetElecOffsetsDevice,
+      planetGlobalIdxBuf, totalElecPlanet,
+      planetIonChargeDevice, planetCutoffDevice);
+  // No host sync — cutoffDevice is read by planetReflectCompactKernel via device pointer
+
+  // ── Step 7: Fused reflect + compact (all electron species in one kernel launch) ──
+  const int doSphere = moverParamHostPtr[0]->doSphere;
+  const cudaCommonType originX = moverParamHostPtr[0]->sphereOrigin[0];
+  const cudaCommonType originY = moverParamHostPtr[0]->sphereOrigin[1];
+  const cudaCommonType originZ = moverParamHostPtr[0]->sphereOrigin[2];
+  const cudaCommonType radius  = moverParamHostPtr[0]->sphereRadius;
+
+  // Zero per-species atomic counters
+  cudaErrChk(cudaMemsetAsync(planetSurvivorCountDevice, 0,
+                              planetElecSpeciesCount * sizeof(int), planetStream));
+
+  // Launch: totalElecPlanet threads; each checks if it is a survivor via device cutoff
+  planetReflectCompactKernel<<<getGridSize(totalElecPlanet, 256), 256, 0, planetStream>>>(
+      planetArrayCUDAPtrDevice, planetElecSpeciesCount,
+      planetElecOffsetsDevice,
+      planetGlobalIdxBuf,
+      planetCutoffDevice,
+      totalElecPlanet,
+      planetReflectedBuf,
+      planetSurvivorCountDevice,
+      originX, originY, originZ, radius, doSphere);
+
+  // ── Step 8: D2H survivor counts (one small transfer) ──
+  cudaErrChk(cudaMemcpyAsync(planetSurvivorCount, planetSurvivorCountDevice,
+                              planetElecSpeciesCount * sizeof(int), cudaMemcpyDeviceToHost, planetStream));
+  cudaErrChk(cudaStreamSynchronize(planetStream)); // ONLY sync: need counts on host for resize + D2H
+
+  // ── Step 9: D2H reflected particles into part[i] for MPI exchange ──
+  for (int e = 0; e < planetElecSpeciesCount; e++) {
+    if (planetSurvivorCount[e] == 0) continue;
+    int specIdx = planetElecSpeciesMap[e];
+
+    // Ensure host buffer has enough space for exiting + reflected
+    const int currentSize = part[specIdx].getNOP();  // = count_exiting from mover
+    const int newSize = currentSize + planetSurvivorCount[e];
+    if (newSize > (int)part[specIdx].get_pcl_list().capacity()) {
+      part[specIdx].get_pcl_arrayPtr()->reserve(newSize * 2);
+    }
+
+    // D2H: compact reflected particles → host particle list (after exiting particles)
+    cudaErrChk(cudaMemcpyAsync(
+        part[specIdx].get_pcl_array().getList() + currentSize,
+        planetReflectedBuf + planetElecOffsets[e],
+        planetSurvivorCount[e] * sizeof(SpeciesParticle),
+        cudaMemcpyDeviceToHost, planetStream));
+    part[specIdx].get_pcl_array().setSize(newSize);
+  }
+
+  // Sync to ensure all D2H into part[] are complete before MPI exchange
+  cudaErrChk(cudaStreamSynchronize(planetStream));
+}
+
 bool c_Solver::MoverAwaitAndPclExchange()
 {
 
@@ -814,6 +1078,24 @@ bool c_Solver::MoverAwaitAndPclExchange()
   }
   // exiting particles are copied back
 
+  // ── Planet processing on planetStream (blocks internally, completes before returning) ──
+  const bool doPlanet = (col->getCase() == "Dipole" || col->getCase() == "Dipole2D");
+  if (doPlanet)
+    processPlanetParticles();
+  // processPlanetParticles now handles D2H of reflected particles into part[i]
+  // and syncs planetStream internally. stayedParticle is unchanged.
+
+  // ── Update host NOP (stayed particles only) and sync device metadata ──
+  for (int i = 0; i < ns; i++) {
+    pclsArrayHostPtr[i]->setNOE(stayedParticle[i]);
+    cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
+                                sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
+  }
+
+  // ── MPI exchange on CPU ──
+  // part[i] now contains exiting particles (from mover) + reflected planet electrons.
+  // separate_and_send routes out-of-bounds particles to the correct neighbor;
+  // in-bounds reflected electrons stay as incoming for this rank.
   for (int i = 0; i < ns; i++)  // communicate each species
   {
     auto a = part[i].separate_and_send_particles();
@@ -828,8 +1110,6 @@ bool c_Solver::MoverAwaitAndPclExchange()
   for(int i=0; i<ns; i++){
 
     // Copy repopulate particle and the incoming particles to device
-    const auto oldPclNum = pclsArrayHostPtr[i]->getNOP();
-    pclsArrayHostPtr[i]->setNOE(stayedParticle[i]); // After the Sorting
     auto newPclNum = stayedParticle[i] + part[i].getNOP();
 
     // now the host array contains the entering particles
@@ -847,10 +1127,11 @@ bool c_Solver::MoverAwaitAndPclExchange()
               
     pclsArrayHostPtr[i]->setNOE(newPclNum); 
     cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i], sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));    
-    // moment for new particles, incoming, repopulate
-    if(pclsArrayHostPtr[i]->getNOP() - stayedParticle[i] > 0)
-    momentKernelNew<<<getGridSize(pclsArrayHostPtr[i]->getNOP() - stayedParticle[i], 128u), 128, 0, streams[i] >>>
-                      (momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
+    // moment for new particles: incoming MPI particles (including in-bounds reflected)
+    const int momentOffset = stayedParticle[i];
+    if(pclsArrayHostPtr[i]->getNOP() - momentOffset > 0)
+    momentKernelNew<<<getGridSize(pclsArrayHostPtr[i]->getNOP() - momentOffset, 128u), 128, 0, streams[i] >>>
+                      (momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], momentOffset);
 
     // reset the hashedSum, no need for departureArray it will be cleared in Mover
     for(int j=0; j<departureArrayElementType::HASHED_SUM_NUM; j++)hashedSumArrayHostPtr[i][j].resetBucket();
@@ -931,9 +1212,9 @@ void c_Solver::MomentsAwait() {
   EMf->sumOverSpecies();
   // Fill with constant charge the planet
   if (col->getCase()=="Dipole") {
-    EMf->ConstantChargePlanet(col->getL_square(),col->getx_center(),col->gety_center(),col->getz_center());
+    EMf->ConstantChargePlanet(col->getL_square(),col->getx_center_planet(),col->gety_center_planet(),col->getz_center_planet());
   }else if(col->getCase()=="Dipole2D") {
-	EMf->ConstantChargePlanet2DPlaneXZ(col->getL_square(),col->getx_center(),col->getz_center());
+	EMf->ConstantChargePlanet2DPlaneXZ(col->getL_square(),col->getx_center_planet(),col->getz_center_planet());
   }
   // Set a constant charge in the OpenBC boundaries
   //EMf->ConstantChargeOpenBC();

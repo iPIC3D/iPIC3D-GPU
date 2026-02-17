@@ -83,12 +83,12 @@ class Collective
     double getLx()const{ return (Lx); }
     double getLy()const{ return (Ly); }
     double getLz()const{ return (Lz); }
-    double getx_center()const{ return (x_center); }
-    double gety_center()const{ return (y_center); }
-    double getz_center()const{ return (z_center); }
-    double getx_center_p()const{ return (x_center_p); }
-    double gety_center_p()const{ return (y_center_p); }
-    double getz_center_p()const{ return (z_center_p); }
+    double getx_center_dipole()const{ return (x_center_dipole); }
+    double gety_center_dipole()const{ return (y_center_dipole); }
+    double getz_center_dipole()const{ return (z_center_dipole); }
+    double getx_center_planet()const{ return (x_center_planet); }
+    double gety_center_planet()const{ return (y_center_planet); }
+    double getz_center_planet()const{ return (z_center_planet); }
     double getL_square()const{ return (L_square); }
     int getNxc()const{ return (nxc); }
     int getNyc()const{ return (nyc); }
@@ -236,17 +236,17 @@ class Collective
     /*! simulation box length - Z direction */
     double Lz;
     /*! dipole center - X direction */
-    double x_center;
+    double x_center_dipole;
     /*! dipole center - Y direction */
-    double y_center;
+    double y_center_dipole;
     /*! dipole center - Z direction */
-    double z_center;
+    double z_center_dipole;
     /*! object center - X direction */
-    double x_center_p;
+    double x_center_planet;
     /*! object center - Y direction */
-    double y_center_p;
+    double y_center_planet;
     /*! object center - Z direction */
-    double z_center_p;
+    double z_center_planet;
    /*! object size - assuming a cubic box */
     double L_square;
     // number of cells per direction of problem domain

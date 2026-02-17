@@ -507,7 +507,7 @@ __device__ uint32_t deleteInsideSphere(SpeciesParticle* pcl, moverParameter *mov
         const auto dz = pcl->get_z() - sphereOrigin[2];
 
         if (dx*dx + dy*dy + dz*dz < sphereRadius*sphereRadius) {
-            return departureArrayElementType::DELETE;
+            return departureArrayElementType::PLANET;
         }
     } else if(moverParam->doSphere == 2){ // 2D sphere
         const auto& sphereOrigin = moverParam->sphereOrigin;
@@ -517,7 +517,7 @@ __device__ uint32_t deleteInsideSphere(SpeciesParticle* pcl, moverParameter *mov
         const auto dz = pcl->get_z() - sphereOrigin[2];
 
         if (dx*dx + dz*dz < sphereRadius*sphereRadius) {
-            return departureArrayElementType::DELETE;
+            return departureArrayElementType::PLANET;
         }
     }
 

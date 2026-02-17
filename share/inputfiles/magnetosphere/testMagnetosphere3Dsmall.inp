@@ -50,11 +50,13 @@ Lx =   10.0                  # Lx = simulation box length - x direction
 Ly =   10.0                  # Ly = simulation box length - y direction
 Lz =   10.0                  # Lz = simulation box length - z direction   
 
-x_center =   6.0             # center of the dipole - X
-y_center =   5.0             # center of the dipole - Y
-z_center =   5.0             # center of the dipole - Z  
+x_center_dipole =   6.0       # center of the dipole - X
+y_center_dipole =   5.0       # center of the dipole - Y
+z_center_dipole =   5.0       # center of the dipole - Z  
+x_center_planet =   6.0       # center of the planet - X
+y_center_planet =   5.0       # center of the planet - Y
+z_center_planet =   5.0       # center of the planet - Z  
 L_square =   0.5             # radius of the planet
-delta    =   0.5             # diameter of the coil to generate the dipole
 
 nxc =  30                  # nxc = number of cells - x direction        
 nyc =  30                  # nyc = number of cells - y direction

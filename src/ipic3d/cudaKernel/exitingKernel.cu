@@ -28,10 +28,10 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
     uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
     if(pidx >= pclsArray->getNOP())return;
 
-    __shared__ int x; // y, the number of holes (eixitng + deleted)
+    __shared__ int x; // y, the number of holes (eixitng + deleted + planet)
     if(threadIdx.x == 0){ 
         x = 0; 
-        for(int i=0; i <= departureArrayElementType::DELETE_HASHEDSUM_INDEX ; i++)x += hashedSumArray[i].getSum(); 
+        for(int i=0; i <= departureArrayElementType::PLANET_HASHEDSUM_INDEX ; i++)x += hashedSumArray[i].getSum(); 
     }
     __syncthreads();
     

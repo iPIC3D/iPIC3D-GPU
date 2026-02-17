@@ -17,7 +17,8 @@ typedef struct departureArrayElement_s{
         ZLOW,
         ZHIGH,
 
-        DELETE = 7
+        DELETE = 7,
+        PLANET = 8
     };
 
     enum hashedSumIndex{
@@ -28,10 +29,11 @@ typedef struct departureArrayElement_s{
         ZLOW_HASHEDSUM_INDEX,
         ZHIGH_HASHEDSUM_INDEX,
         DELETE_HASHEDSUM_INDEX = 6,
+        PLANET_HASHEDSUM_INDEX = 7,
         HOLE_HASHEDSUM_INDEX,
         FILLER_HASHEDSUM_INDEX,
 
-        HASHED_SUM_NUM = 9
+        HASHED_SUM_NUM = 10
     };
 
     uint32_t dest;          // destination of the particle exchange
@@ -43,11 +45,16 @@ using departureArrayType = arrayCUDA<departureArrayElementType>;
 
 using exitingArray = arrayCUDA<SpeciesParticle>;
 
+using planetArray = arrayCUDA<SpeciesParticle>;
+
 using fillerBuffer = arrayCUDA<int>;
 
 
 __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
                                 exitingArray* exitingArray, hashedSum* hashedSumArray);
+
+__global__ void planetExtractionKernel(particleArrayCUDA* pclsArray, departureArrayType* departureArray,
+                                planetArray* planetArr, hashedSum* hashedSumArray);
 
 __global__ void sortingKernel1(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
 								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int x);

@@ -91,12 +91,12 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
   ue0(col->getU0(0)),
   ve0(col->getV0(0)),
   we0(col->getW0(0)),
-  x_center(col->getx_center()),
-  y_center(col->gety_center()),
-  z_center(col->getz_center()),
-  x_center_p(col->getx_center_p()),
-  y_center_p(col->gety_center_p()),
-  z_center_p(col->getz_center_p()),
+  x_center_dipole(col->getx_center_dipole()),
+  y_center_dipole(col->gety_center_dipole()),
+  z_center_dipole(col->getz_center_dipole()),
+  x_center_planet(col->getx_center_planet()),
+  y_center_planet(col->gety_center_planet()),
+  z_center_planet(col->getz_center_planet()),
   L_square(col->getL_square()),
   delt (c*th*dt), // declared after these
   //
@@ -1894,11 +1894,11 @@ void EMfields3D::init()
 
     if (col->getCase()=="Dipole") 
     {
-      ConstantChargePlanet(col->getL_square(),col->getx_center(),col->gety_center(),col->getz_center());
+      ConstantChargePlanet(col->getL_square(),col->getx_center_planet(),col->gety_center_planet(),col->getz_center_planet());
     }
     else if (col->getCase()=="Dipole2D") 
     {
-      ConstantChargePlanet2DPlaneXZ(col->getL_square(),col->getx_center(),col->getz_center());
+      ConstantChargePlanet2DPlaneXZ(col->getL_square(),col->getx_center_planet(),col->getz_center_planet());
     }
     // I am not sure what this open BC does, but perhaps it is responsible for energy losses in the restart? Jan 2017, Slavik.
     else if ((col->getCase().find("TaylorGreen") != std::string::npos) && (col->getCase() != "NullPoints"))
@@ -2871,12 +2871,12 @@ void EMfields3D::initDipole()
       cout << "B1y                              = " << B1y << endl;
       cout << "B1z                              = " << B1z << endl;
       cout << "L_square - no magnetic field inside a sphere with radius L_square  = " << L_square << endl;
-      cout << "Center dipole - X                = " << x_center << endl;
-      cout << "Center dipole - Y                = " << y_center << endl;
-      cout << "Center dipole - Z                = " << z_center << endl;
-      cout << "Center planet - X                = " << x_center_p << endl;
-      cout << "Center planet - Y                = " << y_center_p << endl;
-      cout << "Center planet - Z                = " << z_center_p << endl;
+      cout << "Center dipole - X                = " << x_center_dipole << endl;
+      cout << "Center dipole - Y                = " << y_center_dipole << endl;
+      cout << "Center dipole - Z                = " << z_center_dipole << endl;
+      cout << "Center planet - X                = " << x_center_planet << endl;
+      cout << "Center planet - Y                = " << y_center_planet << endl;
+      cout << "Center planet - Z                = " << z_center_planet << endl;
       cout << "Solar Wind drift velocity        = " << ue0 << endl;
   }
 
@@ -2907,16 +2907,16 @@ void EMfields3D::initDipole()
         double z = grid->getZN(i,j,k);
 
 	//Distance from planet center
-        double r2 = ((x-x_center_p)*(x-x_center_p)) + ((y-y_center_p)*(y-y_center_p)) + ((z-z_center_p)*(z-z_center_p));
+        double r2 = ((x-x_center_planet)*(x-x_center_planet)) + ((y-y_center_planet)*(y-y_center_planet)) + ((z-z_center_planet)*(z-z_center_planet));
 	//Distance from dipole center
-        double r2d = ((x-x_center)*(x-x_center)) + ((y-y_center)*(y-y_center)) + ((z-z_center)*(z-z_center));
+        double r2d = ((x-x_center_dipole)*(x-x_center_dipole)) + ((y-y_center_dipole)*(y-y_center_dipole)) + ((z-z_center_dipole)*(z-z_center_dipole));
 
         // Compute dipolar field B_ext
 
         if (r2 > a*a) {
-            x_displ = x - x_center; //position from the dipole center
-            y_displ = y - y_center;
-            z_displ = z - z_center;
+            x_displ = x - x_center_dipole; //position from the dipole center
+            y_displ = y - y_center_dipole;
+            z_displ = z - z_center_dipole;
             fac1 =  -B1z*a*a*a/pow(r2d,2.5);
 	    Bx_ext[i][j][k] = 3*x_displ*z_displ*fac1;
 	    By_ext[i][j][k] = 3*y_displ*z_displ*fac1;
@@ -2971,9 +2971,12 @@ void EMfields3D::initDipole2D()
       cout << "B1y                              = " << B1y << endl;
       cout << "B1z                              = " << B1z << endl;
       cout << "L_square - no magnetic field inside a sphere with radius L_square  = " << L_square << endl;
-      cout << "Center dipole - X                = " << x_center << endl;
-      cout << "Center dipole - Y                = " << y_center << endl;
-      cout << "Center dipole - Z                = " << z_center << endl;
+      cout << "Center dipole - X                = " << x_center_dipole << endl;
+      cout << "Center dipole - Y                = " << y_center_dipole << endl;
+      cout << "Center dipole - Z                = " << z_center_dipole << endl;
+      cout << "Center planet - X                = " << x_center_planet << endl;
+      cout << "Center planet - Y                = " << y_center_planet << endl;
+      cout << "Center planet - Z                = " << z_center_planet << endl;
       cout << "Solar Wind drift velocity        = " << ue0 << endl;
       cout << "2D Smoothing Factor              = " << Smooth << endl;
       cout << "Smooth Iteration                 = " << SmoothNiter << endl;
@@ -3000,13 +3003,16 @@ void EMfields3D::initDipole2D()
         double blp[3];
         double a=L_square;
 
-        double xc=x_center;
-        double zc=z_center;
+        double xc=x_center_dipole;
+        double zc=z_center_dipole;
 
         double x = grid->getXN(i,j,k);
         double z = grid->getZN(i,j,k);
 
-        double r2 = ((x-xc)*(x-xc)) + ((z-zc)*(z-zc));
+        // Distance from planet center (for interior mask)
+        double r2 = ((x-x_center_planet)*(x-x_center_planet)) + ((z-z_center_planet)*(z-z_center_planet));
+        // Distance from dipole center (for field formula)
+        double r2d = ((x-xc)*(x-xc)) + ((z-zc)*(z-zc));
 
         // Compute dipolar field B_ext
 
@@ -3014,7 +3020,7 @@ void EMfields3D::initDipole2D()
             x_displ = x - xc;
             z_displ = z - zc;
 
-            fac1 =  -B1z*a*a/(r2*r2);//fac1 = D/4?
+            fac1 =  -B1z*a*a/(r2d*r2d);//fac1 = D/4?
 
 			Bx_ext[i][j][k] = 2*x_displ*z_displ*fac1;
 			By_ext[i][j][k] = 0.0;

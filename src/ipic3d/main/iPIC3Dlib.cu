@@ -181,6 +181,7 @@ int c_Solver::Init(int argc, char **argv) {
   else if (col->getCase()=="Dipole2D")  		EMf->initDipole2D();
   else if (col->getCase()=="NullPoints")             	EMf->initNullPoints();
   else if (col->getCase()=="TaylorGreen")               EMf->initTaylorGreen();
+  else if (col->getCase()=="HumpPert")                  EMf->initHumpPerturbation();
   else if (col->getCase()=="RandomCase") {
     EMf->initRandomField();
     if (myrank==0) {
@@ -233,6 +234,7 @@ int c_Solver::Init(int argc, char **argv) {
       else if (col->getCase()=="NullPoints")    	outputPart[i].maxwellianNullPoints(EMf);
       else if (col->getCase()=="TaylorGreen")           outputPart[i].maxwellianNullPoints(EMf); // Flow is initiated from the current prescribed on the grid.
       else if (col->getCase()=="GEMDoubleHarris")  	outputPart[i].maxwellianDoubleHarris(EMf);
+      else if (col->getCase()=="HumpPert")      	outputPart[i].maxwellianHumpPerturbation(EMf);
       else                                  		outputPart[i].maxwellian(EMf);
       outputPart[i].reserve_remaining_particle_IDs();
     }
@@ -1150,10 +1152,10 @@ bool c_Solver::MoverAwaitAndPclExchange()
 }
 
 //! MAXWELL SOLVER for Bfield (assuming Efield has already been calculated)
-void c_Solver::CalculateB() {
+void c_Solver::CalculateB(int cycle) {
   timeTasks_set_main_task(TimeTasks::FIELDS);
   // calculate the B field
-  EMf->calculateB();
+  EMf->calculateB(cycle);
 }
 
 void c_Solver::MomentsAwait() {

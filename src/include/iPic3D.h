@@ -90,7 +90,7 @@ namespace iPic3D {
     bool ParticlesMoverMomentAsync();
     bool MoverAwaitAndPclExchange();
     void processPlanetParticles();
-    void CalculateB();
+    void CalculateB(int cycle);
     void MomentsAwait();
 
     //

@@ -53,6 +53,7 @@ class EMfields3D                // :public Field
     void initOriginalGEM();
     void initGEMDoubleHarris();
     void initDoublePeriodicHarrisWithGaussianHumpPerturbation();
+    void initHumpPerturbation();
     /*! initialize GEM challenge with dipole-like tail without perturbation */
     void initGEMDipoleLikeTailNoPert();
     /*! initialize GEM challenge with no Perturbation */
@@ -96,7 +97,7 @@ class EMfields3D                // :public Field
     /*! Impose a constant charge in the OpenBC boundaries */
     void ConstantChargeOpenBCv2();
     /*! Calculate Magnetic field with the implicit solver: calculate B defined on nodes With E(n+ theta) computed, the magnetic field is evaluated from Faraday's law */
-    void calculateB();
+    void calculateB(int cycle);
     /*! fix B on the boundary for gem challange */
     void fixBcGEM();
     void fixBnGEM();
@@ -374,6 +375,9 @@ class EMfields3D                // :public Field
     /** Characteristic length */
     double L_square;
 
+    /*! PSI: magnetic potential (indexX, indexY, indexZ), defined on central points between nodes */
+    array3_double PSI;
+
     /*! PHI: electric potential (indexX, indexY, indexZ), defined on central points between nodes */
     array3_double PHI;
 
@@ -532,6 +536,8 @@ class EMfields3D                // :public Field
     /*! boolean for divergence cleaning */
     bool PoissonCorrection;
     int PoissonCorrectionCycle;
+    bool divBCorrection;
+    int divBCorrectionCycle;
     /*! RESTART BOOLEAN */
     int restart1;
 

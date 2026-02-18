@@ -136,6 +136,7 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
 
   // array allocation: central points 
   //
+  PSI  (nxc, nyc, nzc),
   PHI  (nxc, nyc, nzc),
   Bxc  (nxc, nyc, nzc),
   Byc  (nxc, nyc, nzc),
@@ -201,6 +202,11 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
   if (col->getPoissonCorrection()=="yes"){
 	  PoissonCorrection = true;
 	  PoissonCorrectionCycle = col->getPoissonCorrectionCycle();
+  }
+  divBCorrection = false;
+  if (col->getdivBCorrection()=="yes"){
+	  divBCorrection = true;
+	  divBCorrectionCycle = col->getdivBCorrectionCycle();
   }
   CGtol = col->getCGtol();
   GMREStol = col->getGMREStol();
@@ -1532,7 +1538,7 @@ void EMfields3D::set_fieldForPclsToCenter(cudaFieldType *fieldForPclsOnCenter)
 }
 
 /*! Calculate Magnetic field with the implicit solver: calculate B defined on nodes With E(n+ theta) computed, the magnetic field is evaluated from Faraday's law */
-void EMfields3D::calculateB()
+void EMfields3D::calculateB(int cycle)
 {
   const Collective *col = &get_col();
   const VirtualTopology3D *vct = &get_vct();
@@ -1575,6 +1581,115 @@ void EMfields3D::calculateB()
   if (get_col().getCase()=="GEMnoPert") 		fixBnGEM();
   if (get_col().getCase()=="GEMDoubleHarris") 	        fixBnGEM();
 
+  // Adjust B after BC by applying divergence cleaning, laplacian(PSI) = div(B), B = B - grad(PSI)
+  // START
+ 
+  if (divBCorrection &&  cycle%divBCorrectionCycle == 0) {
+
+  array3_double divB     (nxc, nyc, nzc);
+  array3_double gradPSIX (nxn, nyn, nzn);
+  array3_double gradPSIY (nxn, nyn, nzn);
+  array3_double gradPSIZ (nxn, nyn, nzn);
+
+  double *xkrylovPoisson = new double[(nxc - 2) * (nyc - 2) * (nzc - 2)];
+  double *bkrylovPoisson = new double[(nxc - 2) * (nyc - 2) * (nzc - 2)];
+  
+  eqValue(0.0, divB, nxc, nyc, nzc);
+  eqValue(0.0, gradPSIX, nxn, nyn, nzn);
+  eqValue(0.0, gradPSIY, nxn, nyn, nzn);
+  eqValue(0.0, gradPSIZ, nxn, nyn, nzn);
+  eqValue(0.0, xkrylovPoisson, (nxc - 2) * (nyc - 2) * (nzc - 2));
+
+  // compute divB
+  grid->divN2C(divB, Bxn, Byn, Bzn);
+  // move to krylov space the RHS
+  phys2solver(bkrylovPoisson, divB, nxc, nyc, nzc);
+  // compute solution poisson lapl(PSI)=0 using GMRES
+  //if (col->getVerbose() and vct->getCartesian_rank() == 0) cout << "*** DIVERGENCE CLEANING div(B)=0 using GMRes***" << endl;
+  if (vct->getCartesian_rank() == 0) cout << "*** DIVERGENCE CLEANING div(B)=0 using GMRes***" << endl;
+  GMRES(&Field::PoissonImage, xkrylovPoisson, (nxc - 2) * (nyc - 2) * (nzc - 2), bkrylovPoisson, 20, 200, GMREStol, this);
+  // solution back to physical space 
+  solver2phys(PSI, xkrylovPoisson, nxc, nyc, nzc);
+  communicateCenterBC(nxc, nyc, nzc, PSI, 2, 2, 2, 2, 2, 2, vct,this);
+  // calculate the gradient
+  grid->gradC2N(gradPSIX, gradPSIY, gradPSIZ, PSI);
+  // correct B on nodes, only ABC layer
+  // X=0 boundary
+  if(vct->getXleft_neighbor()==MPI_PROC_NULL && bcEMfaceXleft ==2) {
+    for (int i_sal=0; i_sal<n_layers_sal; i_sal++)
+      for (int j=0; j < nyn; j++)
+        for (int k=0; k < nzn; k++){
+          Bxn.fetch(i_sal,j,k) -= gradPSIX.get(i_sal,j,k);
+          Byn.fetch(i_sal,j,k) -= gradPSIY.get(i_sal,j,k);
+          Bzn.fetch(i_sal,j,k) -= gradPSIZ.get(i_sal,j,k);
+        }
+  }
+  // X=Lx boundary
+  if(vct->getXright_neighbor()==MPI_PROC_NULL && bcEMfaceXright ==2) {
+    for (int i_sal=0; i_sal<3; i_sal++)
+      for (int j=0; j < nyn; j++)
+        for (int k=0; k < nzn; k++){
+          Bxn.fetch(nxn-1-i_sal,j,k) -= gradPSIX.get(nxn-1-i_sal,j,k);
+          Byn.fetch(nxn-1-i_sal,j,k) -= gradPSIY.get(nxn-1-i_sal,j,k);
+          Bzn.fetch(nxn-1-i_sal,j,k) -= gradPSIZ.get(nxn-1-i_sal,j,k);
+        }
+  }
+  // Y=0 boundary
+  if(vct->getYleft_neighbor()==MPI_PROC_NULL && bcEMfaceXleft ==2) {
+    for (int i=0; i < nxn; i++)
+      for (int j_sal=0; j_sal < n_layers_sal; j_sal++)
+        for (int k=0; k < nzn; k++){
+          Bxn.fetch(i,j_sal,k) -= gradPSIX.get(i,j_sal,k);
+          Byn.fetch(i,j_sal,k) -= gradPSIY.get(i,j_sal,k);
+          Bzn.fetch(i,j_sal,k) -= gradPSIZ.get(i,j_sal,k);
+        }
+  }
+  // Y=Ly boundary
+  if(vct->getYright_neighbor()==MPI_PROC_NULL && bcEMfaceXleft ==2) {
+    for (int i=0; i < nxn; i++)
+      for (int j_sal=0; j_sal < n_layers_sal; j_sal++)
+        for (int k=0; k < nzn; k++){
+          Bxn.fetch(i,nyn-1-j_sal,k) -= gradPSIX.get(i,nyn-1-j_sal,k);
+          Byn.fetch(i,nyn-1-j_sal,k) -= gradPSIY.get(i,nyn-1-j_sal,k);
+          Bzn.fetch(i,nyn-1-j_sal,k) -= gradPSIZ.get(i,nyn-1-j_sal,k);
+        }
+  }
+  // Z=0 boundary
+  if(vct->getZleft_neighbor()==MPI_PROC_NULL && bcEMfaceXleft ==2) {
+    for (int i=0; i < nxn; i++)
+      for (int j=0; j < nyn; j++)
+        for (int k_sal=0; k_sal < n_layers_sal; k_sal++){
+          Bxn.fetch(i,j,k_sal) -= gradPSIX.get(i,j,k_sal);
+          Byn.fetch(i,j,k_sal) -= gradPSIY.get(i,j,k_sal);
+          Bzn.fetch(i,j,k_sal) -= gradPSIZ.get(i,j,k_sal);
+        }
+  }
+  // Z=Lz boundary
+  if(vct->getZright_neighbor()==MPI_PROC_NULL && bcEMfaceXleft ==2) {
+    for (int i=0; i < nxn; i++)
+      for (int j=0; j < nyn; j++)
+        for (int k_sal=0; k_sal < n_layers_sal; k_sal++){
+          Bxn.fetch(i,j,nzn-1-k_sal) -= gradPSIX.get(i,j,nzn-1-k_sal);
+          Byn.fetch(i,j,nzn-1-k_sal) -= gradPSIY.get(i,j,nzn-1-k_sal);
+          Bzn.fetch(i,j,nzn-1-k_sal) -= gradPSIZ.get(i,j,nzn-1-k_sal);
+        }
+  }
+
+  // communicate ghost
+  communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct, this);
+  communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct, this);
+  communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct, this);
+  
+  // correct B on centers
+  grid->interpN2C(Bxc, Bxn);
+  grid->interpN2C(Byc, Byn);
+  grid->interpN2C(Bzc, Bzn);
+
+  // communicate ghost
+  communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct,this);
+  communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct,this);
+  communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct,this);
+  } //end of divB correction
 }
 
 /*! initialize EM field with transverse electric waves 1D and rotate anticlockwise (theta degrees) */
@@ -2464,6 +2579,94 @@ void EMfields3D::initDoublePeriodicHarrisWithGaussianHumpPerturbation()
     init(); // use the fields from restart file
   }
 }
+
+void EMfields3D::initHumpPerturbation()
+{
+  const Collective *col = &get_col();
+  const VirtualTopology3D *vct = &get_vct();
+  const Grid *grid = &get_grid();
+  // perturbation localized in X
+  const double pertX = 0.4;
+  const double deltax = 8. * delta;
+  const double deltay = 4. * delta;
+  if (restart1 == 0) {
+    // initialize
+    if (get_vct().getCartesian_rank() == 0) {
+      cout << "------------------------------------------" << endl;
+      cout << "Initialize with Hump Pertubation" << endl;
+      cout << "------------------------------------------" << endl;
+      cout << "B0x                              = " << B0x << endl;
+      cout << "B0y                              = " << B0y << endl;
+      cout << "B0z                              = " << B0z << endl;
+      cout << "Delta                            = " << delta << endl;
+      for (int i = 0; i < ns; i++) {
+        cout << "rho species " << i << " = " << rhoINIT[i];
+        if (DriftSpecies[i])
+          cout << " DRIFTING " << endl;
+        else
+          cout << " BACKGROUND " << endl;
+      }
+      cout << "-------------------------" << endl;
+    }
+    for (int i = 0; i < nxn; i++)
+      for (int j = 0; j < nyn; j++)
+        for (int k = 0; k < nzn; k++) {
+          const double xM = grid->getXN(i, j, k) - .5 * Lx;
+          const double yM = grid->getYN(i, j, k) - .5 * Ly;
+          const double zM = grid->getZN(i, j, k) - .5 * Lz;
+          const double xMd = xM/delta;
+          const double yMd = yM/delta;
+          const double zMd = zM/delta;
+          // initialize the density for species
+          for (int is = 0; is < ns; is++) {
+              rhons[is][i][j][k] = rhoINIT[is] /FourPI;
+          }
+          const double sech_xMd = 1. / cosh(xMd);
+          const double sech_yMd = 1. / cosh(yMd);
+          const double sech_zMd = 1. / cosh(zMd);
+          // electric field
+          Ex[i][j][k] = 0.0;
+          Ey[i][j][k] = 0.0;
+          Ez[i][j][k] = 0.0;
+          // Magnetic field
+          Bxn[i][j][k] = B0x * (0.5 * sech_yMd * sech_yMd  * sech_zMd * sech_zMd + 1.0);
+          Byn[i][j][k] = B0y * (0.5 * sech_xMd * sech_xMd  * sech_zMd * sech_zMd + 1.0);
+          Bzn[i][j][k] = B0z * (0.5 * sech_xMd * sech_xMd  * sech_yMd * sech_yMd + 1.0);
+        }
+    // communicate ghost
+    communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct, this);
+    communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct, this);
+    communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct, this);
+
+    // initialize B on centers
+    for (int i = 0; i < nxc; i++)
+      for (int j = 0; j < nyc; j++)
+        for (int k = 0; k < nzc; k++) {
+          const double xM = grid->getXC(i, j, k) - .5 * Lx;
+          const double yM = grid->getYC(i, j, k) - .5 * Ly;
+          const double zM = grid->getZC(i, j, k) - .5 * Lz;
+          const double xMd = xM/delta;
+          const double yMd = yM/delta;
+          const double zMd = zM/delta;
+          const double sech_xMd = 1. / cosh(xMd);
+          const double sech_yMd = 1. / cosh(yMd);
+          const double sech_zMd = 1. / cosh(zMd);
+          Bxc[i][j][k] = B0x * (0.5 * sech_yMd * sech_yMd  * sech_zMd * sech_zMd + 1.0);
+          Byc[i][j][k] = B0y * (0.5 * sech_xMd * sech_xMd  * sech_zMd * sech_zMd + 1.0);
+          Bzc[i][j][k] = B0z * (0.5 * sech_xMd * sech_xMd  * sech_yMd * sech_yMd + 1.0);
+        }
+    // communicate ghost
+    communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct,this);
+    communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct,this);
+    communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct,this);
+    for (int is = 0; is < ns; is++)
+      grid->interpN2C(rhocs, is, rhons);
+  }
+  else {
+    init(); // use the fields from restart file
+  }
+}
+
 
 
 /*! initialize GEM challenge with no Perturbation with dipole-like tail topology */
@@ -3469,7 +3672,6 @@ void EMfields3D::OpenBoundaryInflowEImage(arr3_double imageX, arr3_double imageY
 
       }
   }
-
   if(vct->getYleft_neighbor()==MPI_PROC_NULL && bcEMfaceYleft ==2) {
     for (int i=1; i < nx-1;i++)
       for (int k=1; k < nz-1;k++){

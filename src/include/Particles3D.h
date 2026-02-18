@@ -55,6 +55,8 @@ class Particles3D:public Particles3Dcomm {
     void maxwellianNullPoints(Field * EMf);
     /** Maxellian velocity from currents and uniform spatial distribution */
     void maxwellianDoubleHarris(Field * EMf);
+    /** Maxellian velocity from currents and uniform spatial distribution */
+    void maxwellianHumpPerturbation(Field * EMf);
     /** pitch_angle_energy initialization (Assume B on z only) for test particles */
     void pitch_angle_energy(Field * EMf);
     /** Force Free initialization (JxB=0) for particles */

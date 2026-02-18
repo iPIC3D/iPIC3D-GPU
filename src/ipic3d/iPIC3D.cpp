@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
     KCode.WriteOutput(i);
 
     KCode.MoverAwaitAndPclExchange();
-    KCode.CalculateB(); 
+    KCode.CalculateB(i); 
     KCode.MomentsAwait(); 
 
     KCode.outputCopyAsync(i); // copy output data to host, for next output

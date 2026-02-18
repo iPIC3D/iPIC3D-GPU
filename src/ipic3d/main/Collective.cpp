@@ -143,6 +143,8 @@ void Collective::ReadInput(string inputfile) {
     SimName           = config.read<string>("SimulationName");
     PoissonCorrection = config.read<string>("PoissonCorrection");
     PoissonCorrectionCycle = config.read<int>("PoissonCorrectionCycle",10);
+    divBCorrection = config.read<string>("divBCorrection");
+    divBCorrectionCycle = config.read<int>("divBCorrectionCycle",10);
 
     rhoINIT = std::make_unique<double[]>(ns);
     array_double rhoINIT0 = config.read < array_double > ("rhoINIT");

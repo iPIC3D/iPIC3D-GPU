@@ -2465,6 +2465,94 @@ void EMfields3D::initDoublePeriodicHarrisWithGaussianHumpPerturbation()
   }
 }
 
+void EMfields3D::initHumpPerturbation()
+{
+  const Collective *col = &get_col();
+  const VirtualTopology3D *vct = &get_vct();
+  const Grid *grid = &get_grid();
+  // perturbation localized in X
+  const double pertX = 0.4;
+  const double deltax = 8. * delta;
+  const double deltay = 4. * delta;
+  if (restart1 == 0) {
+    // initialize
+    if (get_vct().getCartesian_rank() == 0) {
+      cout << "------------------------------------------" << endl;
+      cout << "Initialize with Hump Pertubation" << endl;
+      cout << "------------------------------------------" << endl;
+      cout << "B0x                              = " << B0x << endl;
+      cout << "B0y                              = " << B0y << endl;
+      cout << "B0z                              = " << B0z << endl;
+      cout << "Delta                            = " << delta << endl;
+      for (int i = 0; i < ns; i++) {
+        cout << "rho species " << i << " = " << rhoINIT[i];
+        if (DriftSpecies[i])
+          cout << " DRIFTING " << endl;
+        else
+          cout << " BACKGROUND " << endl;
+      }
+      cout << "-------------------------" << endl;
+    }
+    for (int i = 0; i < nxn; i++)
+      for (int j = 0; j < nyn; j++)
+        for (int k = 0; k < nzn; k++) {
+          const double xM = grid->getXN(i, j, k) - .5 * Lx;
+          const double yM = grid->getYN(i, j, k) - .5 * Ly;
+          const double zM = grid->getZN(i, j, k) - .5 * Lz;
+          const double xMd = xM/delta;
+          const double yMd = yM/delta;
+          const double zMd = zM/delta;
+          // initialize the density for species
+          for (int is = 0; is < ns; is++) {
+              rhons[is][i][j][k] = rhoINIT[is] /FourPI;
+          }
+          const double sech_xMd = 1. / cosh(xMd);
+          const double sech_yMd = 1. / cosh(yMd);
+          const double sech_zMd = 1. / cosh(zMd);
+          // electric field
+          Ex[i][j][k] = 0.0;
+          Ey[i][j][k] = 0.0;
+          Ez[i][j][k] = 0.0;
+          // Magnetic field
+          Bxn[i][j][k] = B0x * (0.5 * sech_yMd * sech_yMd  * sech_zMd * sech_zMd + 1.0);
+          Byn[i][j][k] = B0y * (0.5 * sech_xMd * sech_xMd  * sech_zMd * sech_zMd + 1.0);
+          Bzn[i][j][k] = B0z * (0.5 * sech_xMd * sech_xMd  * sech_yMd * sech_yMd + 1.0);
+        }
+    // communicate ghost
+    communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct, this);
+    communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct, this);
+    communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct, this);
+
+    // initialize B on centers
+    for (int i = 0; i < nxc; i++)
+      for (int j = 0; j < nyc; j++)
+        for (int k = 0; k < nzc; k++) {
+          const double xM = grid->getXC(i, j, k) - .5 * Lx;
+          const double yM = grid->getYC(i, j, k) - .5 * Ly;
+          const double zM = grid->getZC(i, j, k) - .5 * Lz;
+          const double xMd = xM/delta;
+          const double yMd = yM/delta;
+          const double zMd = zM/delta;
+          const double sech_xMd = 1. / cosh(xMd);
+          const double sech_yMd = 1. / cosh(yMd);
+          const double sech_zMd = 1. / cosh(zMd);
+          Bxc[i][j][k] = B0x * (0.5 * sech_yMd * sech_yMd  * sech_zMd * sech_zMd + 1.0);
+          Byc[i][j][k] = B0y * (0.5 * sech_xMd * sech_xMd  * sech_zMd * sech_zMd + 1.0);
+          Bzc[i][j][k] = B0z * (0.5 * sech_xMd * sech_xMd  * sech_yMd * sech_yMd + 1.0);
+        }
+    // communicate ghost
+    communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct,this);
+    communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct,this);
+    communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct,this);
+    for (int is = 0; is < ns; is++)
+      grid->interpN2C(rhocs, is, rhons);
+  }
+  else {
+    init(); // use the fields from restart file
+  }
+}
+
+
 
 /*! initialize GEM challenge with no Perturbation with dipole-like tail topology */
 void EMfields3D::initGEMDipoleLikeTailNoPert()

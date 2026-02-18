@@ -256,6 +256,44 @@ void Particles3D::maxwellianDoubleHarris(Field * EMf)
   }
 }
 
+/** Maxellian random velocity and uniform spatial distribution */
+void Particles3D::maxwellianHumpPerturbation(Field * EMf)
+{
+  /* initialize random generator with different seed on different processor */
+  srand(vct->getCartesian_rank() + 2);
+
+  assert_eq(_pcls.size(),0);
+
+  const double q_sgn = (qom / fabs(qom));
+  // multipled by charge density gives charge per particle
+  const double q_factor =  q_sgn * grid->getVOL() / npcel;
+
+  for (int i = 1; i < grid->getNXC() - 1; i++)
+  {
+  for (int j = 1; j < grid->getNYC() - 1; j++)
+  for (int k = 1; k < grid->getNZC() - 1; k++)
+  {
+    const double q = q_factor * EMf->getRHOcs(i, j, k, ns);
+    for (int ii = 0; ii < npcelx; ii++)
+    for (int jj = 0; jj < npcely; jj++)
+    for (int kk = 0; kk < npcelz; kk++)
+    {
+
+      // could also sample positions randomly as in repopulate_particles();
+      const double x = (ii + .5) * (dx / npcelx) + grid->getXN(i, j, k);
+      const double y = (jj + .5) * (dy / npcely) + grid->getYN(i, j, k);
+      const double z = (kk + .5) * (dz / npcelz) + grid->getZN(i, j, k);
+
+      double u,v,w;
+      sample_maxwellian(u,v,w,uth, vth, wth,u0, v0, w0);
+
+      create_new_particle(u,v,w,q,x,y,z);
+    }
+  }
+  }
+}
+
+
 
 /** pitch_angle_energy initialization (Assume B on z only) for test particles */
 void Particles3D::pitch_angle_energy(Field * EMf) {

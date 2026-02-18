@@ -53,6 +53,7 @@ class EMfields3D                // :public Field
     void initOriginalGEM();
     void initGEMDoubleHarris();
     void initDoublePeriodicHarrisWithGaussianHumpPerturbation();
+    void initHumpPerturbation();
     /*! initialize GEM challenge with dipole-like tail without perturbation */
     void initGEMDipoleLikeTailNoPert();
     /*! initialize GEM challenge with no Perturbation */

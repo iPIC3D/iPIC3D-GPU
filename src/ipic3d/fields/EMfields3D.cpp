@@ -221,6 +221,9 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
   bcEMfaceYleft = col->getBcEMfaceYleft();
   bcEMfaceZright = col->getBcEMfaceZright();
   bcEMfaceZleft = col->getBcEMfaceZleft();
+  // absorbing boundary
+  yes_sal = col->getYes_sal();
+  n_layers = col->getN_layers();
   // GEM challenge parameters
   B0x = col->getB0x();
   B0y = col->getB0y();
@@ -3510,139 +3513,127 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY, a
   int nx, int ny, int nz)
 {
   const VirtualTopology3D *vct = &get_vct();
+  
+  // parameters for SAL (simple absorbing layer) method
+  double sal;
 
   if(vct->getXleft_neighbor()==MPI_PROC_NULL && bcEMfaceXleft ==2 && nx>10) {
-    for (int j=0; j < ny;j++)
-      for (int k=0; k < nz;k++){
+    for (int i=0; i<=n_layers; i++){
+      sal = (double)i/n_layers;
+      for (int j=0; j<ny; j++)
+        for (int k=0; k<nz; k++){
           
-	vectorX[0][j][k] = B0x;
-        vectorY[0][j][k] = B0y;
-        vectorZ[0][j][k] = B0z;
-
-	vectorX[1][j][k] = B0x;
-	vectorY[1][j][k] = B0y;
-	vectorZ[1][j][k] = B0z;
-		
-	vectorX[2][j][k] = B0x;
-	vectorY[2][j][k] = B0y;
-	vectorZ[2][j][k] = B0z;
-
-	vectorX[3][j][k] = B0x;
-	vectorY[3][j][k] = B0y;
-	vectorZ[3][j][k] = B0z;
-
-      }
+          if(yes_sal){
+  	    vectorX[i][j][k] = vectorX[i][j][k]*sal + B0x*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + B0y*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
+          }
+          else{
+            vectorX[i][j][k] = B0x;
+            vectorY[i][j][k] = B0y;
+            vectorZ[i][j][k] = B0z;
+          }
+	  
+        }
+    }
   }
 
   if(vct->getXright_neighbor()==MPI_PROC_NULL && bcEMfaceXright ==2 && nx>10 ) {
-    for (int j=0; j < ny;j++)
-      for (int k=0; k < nz;k++){
-
-        vectorX[nx-4][j][k] = vectorX[nx-5][j][k];
-        vectorY[nx-4][j][k] = vectorY[nx-5][j][k];
-        vectorZ[nx-4][j][k] = vectorZ[nx-5][j][k];
-
-        vectorX[nx-3][j][k] = vectorX[nx-5][j][k];
-        vectorY[nx-3][j][k] = vectorY[nx-5][j][k];
-        vectorZ[nx-3][j][k] = vectorZ[nx-5][j][k];
-
-        vectorX[nx-2][j][k] = vectorX[nx-5][j][k];
-        vectorY[nx-2][j][k] = vectorY[nx-5][j][k];
-        vectorZ[nx-2][j][k] = vectorZ[nx-5][j][k];
-
-        vectorX[nx-1][j][k] = vectorX[nx-5][j][k];
-        vectorY[nx-1][j][k] = vectorY[nx-5][j][k];
-        vectorZ[nx-1][j][k] = vectorZ[nx-5][j][k];
-      }
+    // force not to apply sal in Xright
+    for (int i=nx-n_layers-1; i<nx; i++){
+      /*sal = (double)(nx-1-i)/n_layers;*/
+      for (int j=0; j<ny; j++)
+        for (int k=0; k<nz; k++){
+         /*if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + B0x*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + B0y*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
+          }
+          else{*/
+            vectorX[i][j][k] = vectorX[nx-2-n_layers][j][k];
+            vectorY[i][j][k] = vectorY[nx-2-n_layers][j][k];
+            vectorZ[i][j][k] = vectorZ[nx-2-n_layers][j][k];
+         // }
+        }
+    }
   }
 
   if(vct->getYleft_neighbor()==MPI_PROC_NULL && bcEMfaceYleft ==2 && ny> 10)  {
-    for (int i=0; i < nx;i++)
-      for (int k=0; k < nz;k++){
+    for (int j=0; j<=n_layers; j++){
+      sal = (double)j/n_layers;
+        for (int i=0; i < nx;i++)
+         for (int k=0; k < nz;k++){
 
-    	  vectorX[i][0][k] = vectorX[i][4][k];
-    	  vectorY[i][0][k] = vectorY[i][4][k];
-    	  vectorZ[i][0][k] = vectorZ[i][4][k];
-
-    	  vectorX[i][1][k] = vectorX[i][4][k];
-    	  vectorY[i][1][k] = vectorY[i][4][k];
-    	  vectorZ[i][1][k] = vectorZ[i][4][k];
-
-    	  vectorX[i][2][k] = vectorX[i][4][k];
-    	  vectorY[i][2][k] = vectorY[i][4][k];
-    	  vectorZ[i][2][k] = vectorZ[i][4][k];
-
-    	  vectorX[i][3][k] = vectorX[i][4][k];
-    	  vectorY[i][3][k] = vectorY[i][4][k];
-    	  vectorZ[i][3][k] = vectorZ[i][4][k];
-      } 
+          if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + B0x*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + B0y*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
+          }
+          else{
+            vectorX[i][j][k] = vectorX[i][n_layers+1][k];
+            vectorY[i][j][k] = vectorY[i][n_layers+1][k];
+            vectorZ[i][j][k] = vectorZ[i][n_layers+1][k];
+          }
+        }
+    } 
   }
 
   if(vct->getYright_neighbor()==MPI_PROC_NULL && bcEMfaceYright==2 && ny>10)  {
-    for (int i=0; i < nx;i++)
-      for (int k=0; k< nz;k++){
-
-    	vectorX[i][ny-4][k] = vectorX[i][ny-5][k];
-        vectorY[i][ny-4][k] = vectorY[i][ny-5][k];
-        vectorZ[i][ny-4][k] = vectorZ[i][ny-5][k];
-
-        vectorX[i][ny-3][k] = vectorX[i][ny-5][k];
-        vectorY[i][ny-3][k] = vectorY[i][ny-5][k];
-        vectorZ[i][ny-3][k] = vectorZ[i][ny-5][k];
-
-        vectorX[i][ny-2][k] = vectorX[i][ny-5][k];
-        vectorY[i][ny-2][k] = vectorY[i][ny-5][k];
-        vectorZ[i][ny-2][k] = vectorZ[i][ny-5][k];
-
-        vectorX[i][ny-1][k] = vectorX[i][ny-5][k];
-        vectorY[i][ny-1][k] = vectorY[i][ny-5][k];
-        vectorZ[i][ny-1][k] = vectorZ[i][ny-5][k];
-      }
+    for (int j=ny-n_layers-1; j<ny; j++){
+      sal = (double)(ny-1-j)/n_layers;
+      for (int i=0; i < nx;i++)
+        for (int k=0; k< nz;k++){
+          if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + B0x*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + B0y*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
+          }
+          else{
+            vectorX[i][j][k] = vectorX[i][ny-2-n_layers][k];
+            vectorY[i][j][k] = vectorY[i][ny-2-n_layers][k];
+            vectorZ[i][j][k] = vectorZ[i][ny-2-n_layers][k];
+          }
+  	}
   }
+ }
 
   if(vct->getZleft_neighbor()==MPI_PROC_NULL && bcEMfaceZleft ==2 && nz > 10)  {
-    for (int i=0; i < nx;i++)
-      for (int j=0; j < ny;j++){
+    for (int k=0; k<=n_layers; k++){
+      sal = (double)k/n_layers;
+      for (int i=0; i < nx;i++)
+        for (int j=0; j < ny;j++){
 
-    	  vectorX[i][j][0] = vectorX[i][j][4];
-    	  vectorY[i][j][0] = vectorY[i][j][4];
-    	  vectorZ[i][j][0] = vectorZ[i][j][4];
-
-    	  vectorX[i][j][1] = vectorX[i][j][4];
-    	  vectorY[i][j][1] = vectorY[i][j][4];
-    	  vectorZ[i][j][1] = vectorZ[i][j][4];
-
-    	  vectorX[i][j][2] = vectorX[i][j][4];
-    	  vectorY[i][j][2] = vectorY[i][j][4];
-    	  vectorZ[i][j][2] = vectorZ[i][j][4];
-
-    	  vectorX[i][j][3] = vectorX[i][j][4];
-    	  vectorY[i][j][3] = vectorY[i][j][4];
-    	  vectorZ[i][j][3] = vectorZ[i][j][4];
-
-      } 
+          if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + B0x*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + B0y*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
+          }
+          else{
+            vectorX[i][j][k] = vectorX[i][j][n_layers+1];
+            vectorY[i][j][k] = vectorY[i][j][n_layers+1];
+            vectorZ[i][j][k] = vectorZ[i][j][n_layers+1];
+          }
+        }
+    }
   }
 
   if(vct->getZright_neighbor()==MPI_PROC_NULL && bcEMfaceZright ==2 && nz>10)  {
-    for (int i=0; i < nx;i++)
-      for (int j=0; j < ny;j++){
-
-    	vectorX[i][j][nz-4] = vectorX[i][j][nz-5];
-        vectorY[i][j][nz-4] = vectorY[i][j][nz-5];
-        vectorZ[i][j][nz-4] = vectorZ[i][j][nz-5];
-
-        vectorX[i][j][nz-3] = vectorX[i][j][nz-5];
-        vectorY[i][j][nz-3] = vectorY[i][j][nz-5];
-        vectorZ[i][j][nz-3] = vectorZ[i][j][nz-5];
-
-        vectorX[i][j][nz-2] = vectorX[i][j][nz-5];
-        vectorY[i][j][nz-2] = vectorY[i][j][nz-5];
-        vectorZ[i][j][nz-2] = vectorZ[i][j][nz-5];
-
-        vectorX[i][j][nz-1] = vectorX[i][j][nz-5];
-        vectorY[i][j][nz-1] = vectorY[i][j][nz-5];
-        vectorZ[i][j][nz-1] = vectorZ[i][j][nz-5];
-      }
+    for (int k=nz-n_layers-1; k<nz; k++){
+     sal = (double)(nz-1-k)/n_layers;
+     for (int i=0; i < nx;i++)
+       for (int j=0; j < ny;j++){ 
+          if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + B0x*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + B0y*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
+          }
+          else{
+            vectorX[i][j][k] = vectorX[i][j][nz-2-n_layers];
+            vectorY[i][j][k] = vectorY[i][j][nz-2-n_layers];
+            vectorZ[i][j][k] = vectorZ[i][j][nz-2-n_layers];
+          }
+        }
+       }
   }
 
   /*
@@ -3723,28 +3714,127 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
   cross_product(ue0,ve0,we0,B0x,B0y,B0z,injE);
   scale(injE,-1.0,3);
 
+  // parameters for SAL (simple absorbing layer) method
+  double sal;
+
   if(vct->getXleft_neighbor()==MPI_PROC_NULL && bcEMfaceXleft ==2) {
-    for (int j=0; j < ny;j++)
-      for (int k=0; k < nz;k++){
-	//vectorX[0][j][k] = injE[0];
-	//vectorY[0][j][k] = injE[1];
-	//vectorZ[0][j][k] = injE[2];
+    for (int i=0; i<=n_layers; i++){
+      sal = (double)i/n_layers;
+      for (int j=0; j < ny;j++)
+        for (int k=0; k < nz;k++){
+          if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + injE[0]*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + injE[1]*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
+          }
+          else{
+            vectorX[i][j][k] = injE[0];
+            vectorY[i][j][k] = injE[1];
+            vectorZ[i][j][k] = injE[2];
+          } 
+       }
+     }
+    }   
 
-        vectorX[1][j][k] = injE[0];
-        vectorY[1][j][k] = injE[1];
-        vectorZ[1][j][k] = injE[2];
-
-
-        vectorX[2][j][k] = injE[0];
-        vectorY[2][j][k] = injE[1];
-        vectorZ[2][j][k] = injE[2];
-
-
-        vectorX[3][j][k] = injE[0];
-        vectorY[3][j][k] = injE[1];
-        vectorZ[3][j][k] = injE[2];
-      } 
+  if(vct->getXright_neighbor()==MPI_PROC_NULL && bcEMfaceXright ==2) {
+    for (int i=nx-n_layers-1; i<nx; i++){
+      sal = (double)(nx-1.-i)/n_layers;
+      for (int j=0; j<ny;j++)
+        for (int k=0; k<nz;k++){
+        /*if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + injE[0]*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + injE[1]*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
+          }
+          else{*/
+            vectorX[i][j][k] = vectorX[nx-2-n_layers][j][k];
+            vectorY[i][j][k] = vectorY[nx-2-n_layers][j][k];
+            vectorZ[i][j][k] = vectorZ[nx-2-n_layers][j][k];
+          //}
+        } 
+    }  
   }
+
+  if(vct->getYleft_neighbor()==MPI_PROC_NULL && bcEMfaceYleft==2)  {
+    for (int j=0; j<=n_layers; j++){
+      sal = (double)j/n_layers;
+      for (int i=0; i<nx; i++)
+        for (int k=0; k<nz; k++){
+
+          if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + injE[0]*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + injE[1]*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
+          }
+          else{
+            vectorX[i][j][k] = vectorX[i][n_layers+1][k];
+            vectorY[i][j][k] = vectorY[i][n_layers+1][k];
+            vectorZ[i][j][k] = vectorZ[i][n_layers+1][k];
+          }
+        }
+    } 
+  }
+  
+  if(vct->getYright_neighbor()==MPI_PROC_NULL && bcEMfaceYright==2)  {
+    for (int j=ny-n_layers-1; j<ny; j++){
+      sal = (double)(ny-1-j)/n_layers;
+      for (int i=0; i<nx; i++)
+        for (int k=0; k<nz; k++){
+        
+          if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + injE[0]*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + injE[1]*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
+          }
+          else{
+            vectorX[i][j][k] = vectorX[i][ny-2-n_layers][k];
+            vectorY[i][j][k] = vectorY[i][ny-2-n_layers][k];
+            vectorZ[i][j][k] = vectorZ[i][ny-2-n_layers][k];
+          }
+        }
+    }
+  }
+
+  if(vct->getZleft_neighbor()==MPI_PROC_NULL && bcEMfaceZleft==2)  {
+    for (int k=0; k<=n_layers; k++){
+      sal = (double)k/n_layers;
+      for (int i=0; i<nx; i++)
+        for (int j=0; j<ny; j++){
+
+          if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + injE[0]*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + injE[1]*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
+          }
+          else{
+            vectorX[i][j][k] = vectorX[i][j][n_layers+1];
+            vectorY[i][j][k] = vectorY[i][j][n_layers+1];
+            vectorZ[i][j][k] = vectorZ[i][j][n_layers+1];
+          }
+        }
+    }
+  }
+
+  if(vct->getZright_neighbor()==MPI_PROC_NULL && bcEMfaceZright==2)  {
+    for (int k=nz-n_layers-1; k<nz; k++){
+      sal = (double)(nz-1-k)/n_layers;
+      for (int i=0; i<nx; i++)
+        for (int j=0; j<ny; j++){
+
+          if(yes_sal){
+            vectorX[i][j][k] = vectorX[i][j][k]*sal + injE[0]*(1.-sal);
+            vectorY[i][j][k] = vectorY[i][j][k]*sal + injE[1]*(1.-sal);
+            vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
+          }
+          else{
+            vectorX[i][j][k] = vectorX[i][j][nz-2-n_layers];
+            vectorY[i][j][k] = vectorY[i][j][nz-2-n_layers];
+            vectorZ[i][j][k] = vectorZ[i][j][nz-2-n_layers];
+          }
+        }
+    }
+  }
+
   /*
   if(vct->getXright_neighbor()==MPI_PROC_NULL && bcEMfaceXright ==2) {
     for (int j=0; j < ny;j++)

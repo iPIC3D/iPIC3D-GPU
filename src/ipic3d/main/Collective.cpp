@@ -436,6 +436,11 @@ void Collective::ReadInput(string inputfile) {
   bcEMfaceZright = config.read < int >("bcEMfaceZright");
   bcEMfaceZleft  = config.read < int >("bcEMfaceZleft");
 
+  // EM field absorbing boundary condition parameters
+  yes_sal  = config.read < int >("yes_sal",0);
+  n_layers  = config.read < int >("n_layers",3);
+
+
   /*  ---------------------------------------------------------- */
   /*  Electric and Magnetic field boundary conditions for BCface */
   /*  ---------------------------------------------------------- */

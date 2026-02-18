@@ -520,7 +520,10 @@ class EMfields3D                // :public Field
     int bcEMfaceZright;
     int bcEMfaceZleft;
 
-
+    // Absorbing boundary parameters
+    int yes_sal;
+    int n_layers;     
+    
     /*! GEM Challenge background ion */
     double *rhoINIT;
     /*! Drift of the species */

@@ -438,7 +438,7 @@ void Collective::ReadInput(string inputfile) {
 
   // EM field absorbing boundary condition parameters
   yes_sal  = config.read < int >("yes_sal",0);
-  n_layers  = config.read < int >("n_layers",3);
+  n_layers_sal  = config.read < int >("n_layers_sal",3);
 
 
   /*  ---------------------------------------------------------- */

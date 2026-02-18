@@ -522,7 +522,7 @@ class EMfields3D                // :public Field
 
     // Absorbing boundary parameters
     int yes_sal;
-    int n_layers;     
+    int n_layers_sal;     
     
     /*! GEM Challenge background ion */
     double *rhoINIT;

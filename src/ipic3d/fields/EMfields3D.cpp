@@ -223,7 +223,7 @@ EMfields3D::EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct) :
   bcEMfaceZleft = col->getBcEMfaceZleft();
   // absorbing boundary
   yes_sal = col->getYes_sal();
-  n_layers = col->getN_layers();
+  n_layers_sal = col->getN_layers_sal();
   // GEM challenge parameters
   B0x = col->getB0x();
   B0y = col->getB0y();
@@ -3518,8 +3518,8 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY, a
   double sal;
 
   if(vct->getXleft_neighbor()==MPI_PROC_NULL && bcEMfaceXleft ==2 && nx>10) {
-    for (int i=0; i<=n_layers; i++){
-      sal = (double)i/n_layers;
+    for (int i=0; i<=n_layers_sal; i++){
+      sal = (double)i/n_layers_sal;
       for (int j=0; j<ny; j++)
         for (int k=0; k<nz; k++){
           
@@ -3540,8 +3540,8 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY, a
 
   if(vct->getXright_neighbor()==MPI_PROC_NULL && bcEMfaceXright ==2 && nx>10 ) {
     // force not to apply sal in Xright
-    for (int i=nx-n_layers-1; i<nx; i++){
-      /*sal = (double)(nx-1-i)/n_layers;*/
+    for (int i=nx-n_layers_sal-1; i<nx; i++){
+      /*sal = (double)(nx-1-i)/n_layers_sal;*/
       for (int j=0; j<ny; j++)
         for (int k=0; k<nz; k++){
          /*if(yes_sal){
@@ -3550,17 +3550,17 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
           }
           else{*/
-            vectorX[i][j][k] = vectorX[nx-2-n_layers][j][k];
-            vectorY[i][j][k] = vectorY[nx-2-n_layers][j][k];
-            vectorZ[i][j][k] = vectorZ[nx-2-n_layers][j][k];
+            vectorX[i][j][k] = vectorX[nx-2-n_layers_sal][j][k];
+            vectorY[i][j][k] = vectorY[nx-2-n_layers_sal][j][k];
+            vectorZ[i][j][k] = vectorZ[nx-2-n_layers_sal][j][k];
          // }
         }
     }
   }
 
   if(vct->getYleft_neighbor()==MPI_PROC_NULL && bcEMfaceYleft ==2 && ny> 10)  {
-    for (int j=0; j<=n_layers; j++){
-      sal = (double)j/n_layers;
+    for (int j=0; j<=n_layers_sal; j++){
+      sal = (double)j/n_layers_sal;
         for (int i=0; i < nx;i++)
          for (int k=0; k < nz;k++){
 
@@ -3570,17 +3570,17 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
           }
           else{
-            vectorX[i][j][k] = vectorX[i][n_layers+1][k];
-            vectorY[i][j][k] = vectorY[i][n_layers+1][k];
-            vectorZ[i][j][k] = vectorZ[i][n_layers+1][k];
+            vectorX[i][j][k] = vectorX[i][n_layers_sal+1][k];
+            vectorY[i][j][k] = vectorY[i][n_layers_sal+1][k];
+            vectorZ[i][j][k] = vectorZ[i][n_layers_sal+1][k];
           }
         }
     } 
   }
 
   if(vct->getYright_neighbor()==MPI_PROC_NULL && bcEMfaceYright==2 && ny>10)  {
-    for (int j=ny-n_layers-1; j<ny; j++){
-      sal = (double)(ny-1-j)/n_layers;
+    for (int j=ny-n_layers_sal-1; j<ny; j++){
+      sal = (double)(ny-1-j)/n_layers_sal;
       for (int i=0; i < nx;i++)
         for (int k=0; k< nz;k++){
           if(yes_sal){
@@ -3589,17 +3589,17 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
           }
           else{
-            vectorX[i][j][k] = vectorX[i][ny-2-n_layers][k];
-            vectorY[i][j][k] = vectorY[i][ny-2-n_layers][k];
-            vectorZ[i][j][k] = vectorZ[i][ny-2-n_layers][k];
+            vectorX[i][j][k] = vectorX[i][ny-2-n_layers_sal][k];
+            vectorY[i][j][k] = vectorY[i][ny-2-n_layers_sal][k];
+            vectorZ[i][j][k] = vectorZ[i][ny-2-n_layers_sal][k];
           }
   	}
   }
  }
 
   if(vct->getZleft_neighbor()==MPI_PROC_NULL && bcEMfaceZleft ==2 && nz > 10)  {
-    for (int k=0; k<=n_layers; k++){
-      sal = (double)k/n_layers;
+    for (int k=0; k<=n_layers_sal; k++){
+      sal = (double)k/n_layers_sal;
       for (int i=0; i < nx;i++)
         for (int j=0; j < ny;j++){
 
@@ -3609,17 +3609,17 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
           }
           else{
-            vectorX[i][j][k] = vectorX[i][j][n_layers+1];
-            vectorY[i][j][k] = vectorY[i][j][n_layers+1];
-            vectorZ[i][j][k] = vectorZ[i][j][n_layers+1];
+            vectorX[i][j][k] = vectorX[i][j][n_layers_sal+1];
+            vectorY[i][j][k] = vectorY[i][j][n_layers_sal+1];
+            vectorZ[i][j][k] = vectorZ[i][j][n_layers_sal+1];
           }
         }
     }
   }
 
   if(vct->getZright_neighbor()==MPI_PROC_NULL && bcEMfaceZright ==2 && nz>10)  {
-    for (int k=nz-n_layers-1; k<nz; k++){
-     sal = (double)(nz-1-k)/n_layers;
+    for (int k=nz-n_layers_sal-1; k<nz; k++){
+     sal = (double)(nz-1-k)/n_layers_sal;
      for (int i=0; i < nx;i++)
        for (int j=0; j < ny;j++){ 
           if(yes_sal){
@@ -3628,9 +3628,9 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = vectorZ[i][j][k]*sal + B0z*(1.-sal);
           }
           else{
-            vectorX[i][j][k] = vectorX[i][j][nz-2-n_layers];
-            vectorY[i][j][k] = vectorY[i][j][nz-2-n_layers];
-            vectorZ[i][j][k] = vectorZ[i][j][nz-2-n_layers];
+            vectorX[i][j][k] = vectorX[i][j][nz-2-n_layers_sal];
+            vectorY[i][j][k] = vectorY[i][j][nz-2-n_layers_sal];
+            vectorZ[i][j][k] = vectorZ[i][j][nz-2-n_layers_sal];
           }
         }
        }
@@ -3718,8 +3718,8 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
   double sal;
 
   if(vct->getXleft_neighbor()==MPI_PROC_NULL && bcEMfaceXleft ==2) {
-    for (int i=0; i<=n_layers; i++){
-      sal = (double)i/n_layers;
+    for (int i=0; i<=n_layers_sal; i++){
+      sal = (double)i/n_layers_sal;
       for (int j=0; j < ny;j++)
         for (int k=0; k < nz;k++){
           if(yes_sal){
@@ -3737,8 +3737,8 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
     }   
 
   if(vct->getXright_neighbor()==MPI_PROC_NULL && bcEMfaceXright ==2) {
-    for (int i=nx-n_layers-1; i<nx; i++){
-      sal = (double)(nx-1.-i)/n_layers;
+    for (int i=nx-n_layers_sal-1; i<nx; i++){
+      sal = (double)(nx-1.-i)/n_layers_sal;
       for (int j=0; j<ny;j++)
         for (int k=0; k<nz;k++){
         /*if(yes_sal){
@@ -3747,17 +3747,17 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
           }
           else{*/
-            vectorX[i][j][k] = vectorX[nx-2-n_layers][j][k];
-            vectorY[i][j][k] = vectorY[nx-2-n_layers][j][k];
-            vectorZ[i][j][k] = vectorZ[nx-2-n_layers][j][k];
+            vectorX[i][j][k] = vectorX[nx-2-n_layers_sal][j][k];
+            vectorY[i][j][k] = vectorY[nx-2-n_layers_sal][j][k];
+            vectorZ[i][j][k] = vectorZ[nx-2-n_layers_sal][j][k];
           //}
         } 
     }  
   }
 
   if(vct->getYleft_neighbor()==MPI_PROC_NULL && bcEMfaceYleft==2)  {
-    for (int j=0; j<=n_layers; j++){
-      sal = (double)j/n_layers;
+    for (int j=0; j<=n_layers_sal; j++){
+      sal = (double)j/n_layers_sal;
       for (int i=0; i<nx; i++)
         for (int k=0; k<nz; k++){
 
@@ -3767,17 +3767,17 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
           }
           else{
-            vectorX[i][j][k] = vectorX[i][n_layers+1][k];
-            vectorY[i][j][k] = vectorY[i][n_layers+1][k];
-            vectorZ[i][j][k] = vectorZ[i][n_layers+1][k];
+            vectorX[i][j][k] = vectorX[i][n_layers_sal+1][k];
+            vectorY[i][j][k] = vectorY[i][n_layers_sal+1][k];
+            vectorZ[i][j][k] = vectorZ[i][n_layers_sal+1][k];
           }
         }
     } 
   }
   
   if(vct->getYright_neighbor()==MPI_PROC_NULL && bcEMfaceYright==2)  {
-    for (int j=ny-n_layers-1; j<ny; j++){
-      sal = (double)(ny-1-j)/n_layers;
+    for (int j=ny-n_layers_sal-1; j<ny; j++){
+      sal = (double)(ny-1-j)/n_layers_sal;
       for (int i=0; i<nx; i++)
         for (int k=0; k<nz; k++){
         
@@ -3787,17 +3787,17 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
           }
           else{
-            vectorX[i][j][k] = vectorX[i][ny-2-n_layers][k];
-            vectorY[i][j][k] = vectorY[i][ny-2-n_layers][k];
-            vectorZ[i][j][k] = vectorZ[i][ny-2-n_layers][k];
+            vectorX[i][j][k] = vectorX[i][ny-2-n_layers_sal][k];
+            vectorY[i][j][k] = vectorY[i][ny-2-n_layers_sal][k];
+            vectorZ[i][j][k] = vectorZ[i][ny-2-n_layers_sal][k];
           }
         }
     }
   }
 
   if(vct->getZleft_neighbor()==MPI_PROC_NULL && bcEMfaceZleft==2)  {
-    for (int k=0; k<=n_layers; k++){
-      sal = (double)k/n_layers;
+    for (int k=0; k<=n_layers_sal; k++){
+      sal = (double)k/n_layers_sal;
       for (int i=0; i<nx; i++)
         for (int j=0; j<ny; j++){
 
@@ -3807,17 +3807,17 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
           }
           else{
-            vectorX[i][j][k] = vectorX[i][j][n_layers+1];
-            vectorY[i][j][k] = vectorY[i][j][n_layers+1];
-            vectorZ[i][j][k] = vectorZ[i][j][n_layers+1];
+            vectorX[i][j][k] = vectorX[i][j][n_layers_sal+1];
+            vectorY[i][j][k] = vectorY[i][j][n_layers_sal+1];
+            vectorZ[i][j][k] = vectorZ[i][j][n_layers_sal+1];
           }
         }
     }
   }
 
   if(vct->getZright_neighbor()==MPI_PROC_NULL && bcEMfaceZright==2)  {
-    for (int k=nz-n_layers-1; k<nz; k++){
-      sal = (double)(nz-1-k)/n_layers;
+    for (int k=nz-n_layers_sal-1; k<nz; k++){
+      sal = (double)(nz-1-k)/n_layers_sal;
       for (int i=0; i<nx; i++)
         for (int j=0; j<ny; j++){
 
@@ -3827,9 +3827,9 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = vectorZ[i][j][k]*sal + injE[2]*(1.-sal);
           }
           else{
-            vectorX[i][j][k] = vectorX[i][j][nz-2-n_layers];
-            vectorY[i][j][k] = vectorY[i][j][nz-2-n_layers];
-            vectorZ[i][j][k] = vectorZ[i][j][nz-2-n_layers];
+            vectorX[i][j][k] = vectorX[i][j][nz-2-n_layers_sal];
+            vectorY[i][j][k] = vectorY[i][j][nz-2-n_layers_sal];
+            vectorZ[i][j][k] = vectorZ[i][j][nz-2-n_layers_sal];
           }
         }
     }

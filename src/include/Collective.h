@@ -157,7 +157,7 @@ class Collective
     int getBcEMfaceZright()const{ return (bcEMfaceZright); }
     int getBcEMfaceZleft()const{ return (bcEMfaceZleft); }
     int getYes_sal()const{ return (yes_sal); }
-    int getN_layers()const{ return (n_layers); }
+    int getN_layers_sal()const{ return (n_layers_sal); }
     double getDelta()const{ return (delta); }
     double getB0x()const{ return (B0x); }
     double getB0y()const{ return (B0y); }
@@ -381,7 +381,7 @@ class Collective
     /*! Absorbing Boundary Condition EM Field: yes or no */
     int yes_sal;
     /*! Absorbing Boundary Condition EM Field: number of layers */
-    int n_layers;
+    int n_layers_sal;
 
     /*! GEM Challenge parameters */
     /*! current sheet thickness */

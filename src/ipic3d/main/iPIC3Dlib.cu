@@ -1152,10 +1152,10 @@ bool c_Solver::MoverAwaitAndPclExchange()
 }
 
 //! MAXWELL SOLVER for Bfield (assuming Efield has already been calculated)
-void c_Solver::CalculateB() {
+void c_Solver::CalculateB(int cycle) {
   timeTasks_set_main_task(TimeTasks::FIELDS);
   // calculate the B field
-  EMf->calculateB();
+  EMf->calculateB(cycle);
 }
 
 void c_Solver::MomentsAwait() {

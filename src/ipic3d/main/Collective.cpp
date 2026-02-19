@@ -141,9 +141,9 @@ void Collective::ReadInput(string inputfile) {
     Case              = config.read<string>("Case");
     wmethod           = config.read<string>("WriteMethod");
     SimName           = config.read<string>("SimulationName");
-    PoissonCorrection = config.read<string>("PoissonCorrection");
+    PoissonCorrection = config.read<string>("PoissonCorrection","no");
     PoissonCorrectionCycle = config.read<int>("PoissonCorrectionCycle",10);
-    divBCorrection = config.read<string>("divBCorrection");
+    divBCorrection = config.read<string>("divBCorrection","no");
     divBCorrectionCycle = config.read<int>("divBCorrectionCycle",10);
 
     rhoINIT = std::make_unique<double[]>(ns);
@@ -667,7 +667,37 @@ void Collective::Print() {
   cout << "Results saved in  : " << SaveDirName << endl;
   cout << "Case type         : " << Case << endl;
   cout << "Simulation name   : " << SimName << endl;
-  cout << "Poisson correction: " << PoissonCorrection << endl;
+  cout << "Smoothing         : " << (Smooth == 1.0 ? "off" : "on") << " (alpha=" << Smooth << ", Niter=" << SmoothNiter << ")" << endl;
+  cout << "---------------------" << endl;
+  cout << "EM Field Boundary Conditions" << endl;
+  cout << "---------------------" << endl;
+  // helper lambda to decode bcEMface codes: 0=perfect conductor, 2=open/inflow
+  auto bcName = [](int code) -> const char* {
+    switch(code) {
+      case 0: return "perfect conductor";
+      case 1: return "Dirichlet (first order)";
+      case 2: return "open/inflow (Neumann)";
+      default: return "unknown";
+    }
+  };
+  cout << "Xleft  : " << bcEMfaceXleft  << " (" << bcName(bcEMfaceXleft)  << ")" << endl;
+  cout << "Xright : " << bcEMfaceXright << " (" << bcName(bcEMfaceXright) << ")" << endl;
+  cout << "Yleft  : " << bcEMfaceYleft  << " (" << bcName(bcEMfaceYleft)  << ")" << endl;
+  cout << "Yright : " << bcEMfaceYright << " (" << bcName(bcEMfaceYright) << ")" << endl;
+  cout << "Zleft  : " << bcEMfaceZleft  << " (" << bcName(bcEMfaceZleft)  << ")" << endl;
+  cout << "Zright : " << bcEMfaceZright << " (" << bcName(bcEMfaceZright) << ")" << endl;
+  cout << "SAL (absorbing layer): " << (yes_sal ? "yes" : "no");
+  if (yes_sal) cout << ", n_layers=" << n_layers_sal;
+  cout << endl;
+  cout << "---------------------" << endl;
+  cout << "Field Corrections" << endl;
+  cout << "---------------------" << endl;
+  cout << "Poisson div(E) correction  : " << PoissonCorrection;
+  if (PoissonCorrection == "yes") cout << ", every " << PoissonCorrectionCycle << " cycles (in calculateE)";
+  cout << endl;
+  cout << "div(B) cleaning            : " << divBCorrection;
+  if (divBCorrection == "yes") cout << ", every " << divBCorrectionCycle << " cycles (in calculateB)";
+  cout << endl;
   cout << "---------------------" << endl;
   cout << "Check Simulation Constraints" << endl;
   cout << "---------------------" << endl;

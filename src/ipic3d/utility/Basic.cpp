@@ -125,6 +125,7 @@ void sum(double *vect1, const double *vect2, int n) {
 }
 /** method to calculate the sum of two vectors vector1 = vector1 + vector2*/
 void sum(arr3_double vect1, const arr3_double vect2, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -140,6 +141,7 @@ void sum(arr3_double vect1, const arr3_double vect2, int nx, int ny) {
 
 /** method to calculate the sum of two vectors vector1 = vector1 + vector2*/
 void sum(arr3_double vect1, const arr4_double vect2, int nx, int ny, int nz, int ns) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -172,6 +174,7 @@ void sub(arr3_double vect1, const arr3_double vect2, int nx, int ny) {
 
 /** method to sum 4 vectors vector1 = alfa*vector1 + beta*vector2 + gamma*vector3 + delta*vector4 */
 void sum4(arr3_double vect1, double alfa, const arr3_double vect2, double beta, const arr3_double vect3, double gamma, const arr3_double vect4, double delta, const arr3_double vect5, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -187,6 +190,7 @@ void scale(double *vect, double alfa, int n) {
 
 /** method to calculate the scalar-vector product */
 void scale(arr3_double vect, double alfa, int nx, int ny) {
+  #pragma omp parallel for
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       vect.fetch(i,j,0) *= alfa;
@@ -203,6 +207,7 @@ void scale(arr3_double vect, double alfa, int nx, int ny, int nz) {
 }
 /** method to calculate the scalar-vector product */
 void scale(arr3_double vect1, const arr3_double vect2, double alfa, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -225,12 +230,14 @@ void scale(double *vect1, const double *vect2, double alfa, int n) {
 
 /** method to calculate vector1 = vector1 + alfa*vector2   */
 void addscale(double alfa, arr3_double vect1, arr3_double vect2, const arr3_double vect3, int nx, int ny, int nz){
+	  #pragma omp parallel for collapse(2)
 	  for (int i = 0; i < nx; i++)
 	    for (int j = 0; j < ny; j++)
 	      for (int k = 0; k < nz; k++)
 	        vect3.fetch(i,j,k) = vect1.get(i,j,k) + alfa * vect2.get(i,j,k);
 }
 void addscale(double alfa, arr3_double vect1, const arr3_double vect2, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -266,6 +273,7 @@ void addscale(double alfa, double beta, double *vect1, const double *vect2, int 
 /** method to calculate vector1 = beta*vector1 + alfa*vector2 */
 void addscale(double alfa, double beta, arr3_double vect1, const arr3_double vect2, int nx, int ny, int nz) {
 
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++) {
@@ -284,6 +292,7 @@ void addscale(double alfa, double beta, arr3_double vect1, const arr3_double vec
 
 /** method to calculate vector1 = alfa*vector2 + beta*vector3 */
 void scaleandsum(arr3_double vect1, double alfa, double beta, const arr3_double vect2, const arr3_double vect3, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -291,6 +300,7 @@ void scaleandsum(arr3_double vect1, double alfa, double beta, const arr3_double 
 }
 /** method to calculate vector1 = alfa*vector2 + beta*vector3 with vector2 depending on species*/
 void scaleandsum(arr3_double vect1, double alfa, double beta, const arr4_double vect2, const arr3_double vect3, int ns, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -298,6 +308,7 @@ void scaleandsum(arr3_double vect1, double alfa, double beta, const arr4_double 
 }
 /** method to calculate vector1 = alfa*vector2*vector3 with vector2 depending on species*/
 void prod(arr3_double vect1, double alfa, const arr4_double vect2, int ns, const arr3_double vect3, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -306,6 +317,7 @@ void prod(arr3_double vect1, double alfa, const arr4_double vect2, int ns, const
 }
 /** method to calculate vect1 = vect2/alfa */
 void div(arr3_double vect1, double alfa, const arr3_double vect2, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -313,6 +325,7 @@ void div(arr3_double vect1, double alfa, const arr3_double vect2, int nx, int ny
 
 }
 void prod6(arr3_double vect1, const arr3_double vect2, const arr3_double vect3, const arr3_double vect4, const arr3_double vect5, const arr3_double vect6, const arr3_double vect7, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
@@ -320,6 +333,7 @@ void prod6(arr3_double vect1, const arr3_double vect2, const arr3_double vect3, 
 }
 /** method used for calculating PI */
 void proddiv(arr3_double vect1, const arr3_double vect2, double alfa, const arr3_double vect3, const arr3_double vect4, const arr3_double vect5, const arr3_double vect6, double beta, const arr3_double vect7, const arr3_double vect8, double gamma, const arr3_double vect9, int nx, int ny, int nz) {
+  #pragma omp parallel for collapse(2)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)

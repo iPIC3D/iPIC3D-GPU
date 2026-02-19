@@ -304,6 +304,7 @@ void Grid3DCU::curlC2N(arr3_double curlXN, arr3_double curlYN, arr3_double curlZ
   double compZDY, compYDZ;
   double compXDZ, compZDX;
   double compYDX, compXDY;
+  #pragma omp parallel for collapse(2) private(compZDY,compYDZ,compXDZ,compZDX,compYDX,compXDY)
   for (int i = 1; i < nxn - 1; i++)
     for (int j = 1; j < nyn - 1; j++)
       for (int k = 1; k < nzn - 1; k++) {
@@ -330,6 +331,7 @@ void Grid3DCU::curlN2C(arr3_double curlXC, arr3_double curlYC, arr3_double curlZ
   double compZDY, compYDZ;
   double compXDZ, compZDX;
   double compYDX, compXDY;
+  #pragma omp parallel for collapse(2) private(compZDY,compYDZ,compXDZ,compZDX,compYDX,compXDY)
   for (int i = 1; i < nxc - 1; i++)
     for (int j = 1; j < nyc - 1; j++)
       for (int k = 1; k < nzc - 1; k++) {
@@ -549,6 +551,7 @@ void Grid3DCU::derBC(arr3_double derBC, const_arr3_double vector, int leftActive
 /** interpolate on nodes from central points: do this for the magnetic field*/
 void Grid3DCU::interpC2N(arr3_double vecFieldN, const_arr3_double vecFieldC)const
 {
+  #pragma omp parallel for collapse(2)
   for (int i = 1; i < nxn - 1; i++)
     for (int j = 1; j < nyn - 1; j++)
       for (int k = 1; k < nzn - 1; k++)
@@ -558,6 +561,7 @@ void Grid3DCU::interpC2N(arr3_double vecFieldN, const_arr3_double vecFieldC)cons
 /** interpolate on central points from nodes */
 void Grid3DCU::interpN2C(arr3_double vecFieldC, const_arr3_double vecFieldN)const
 {
+  #pragma omp parallel for collapse(2)
   for (int i = 1; i < nxc - 1; i++)
     for (int j = 1; j < nyc - 1; j++)
       for (int k = 1; k < nzc - 1; k++)
@@ -567,6 +571,7 @@ void Grid3DCU::interpN2C(arr3_double vecFieldC, const_arr3_double vecFieldN)cons
 /** interpolate on central points from nodes */
 void Grid3DCU::interpN2C(arr4_double vecFieldC, int ns, const_arr4_double vecFieldN)const
 {
+  #pragma omp parallel for collapse(2)
   for (int i = 1; i < nxc - 1; i++)
     for (int j = 1; j < nyc - 1; j++)
       for (int k = 1; k < nzc - 1; k++)

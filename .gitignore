@@ -5,5 +5,7 @@ build/
 Debug*
 .vscode/
 .github/
+*.old*
+doctmp/
 
 thirdparty/

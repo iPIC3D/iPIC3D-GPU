@@ -98,6 +98,8 @@ class EMfields3D                // :public Field
     void ConstantChargeOpenBCv2();
     /*! Calculate Magnetic field with the implicit solver: calculate B defined on nodes With E(n+ theta) computed, the magnetic field is evaluated from Faraday's law */
     void calculateB(int cycle);
+    /*! Apply divergence cleaning: solve laplacian(PSI) = div(B), then B = B - grad(PSI) on boundary layers */
+    void applyDivBCleaning();
     /*! fix B on the boundary for gem challange */
     void fixBcGEM();
     void fixBnGEM();
@@ -538,6 +540,32 @@ class EMfields3D                // :public Field
     int PoissonCorrectionCycle;
     bool divBCorrection;
     int divBCorrectionCycle;
+
+    // persistent arrays for divB cleaning (avoid per-cycle allocation)
+    array3_double divBwork;
+    array3_double gradPSIX;
+    array3_double gradPSIY;
+    array3_double gradPSIZ;
+    double *xkrylovPoisson_B;
+    double *bkrylovPoisson_B;
+
+    // Persistent arrays for calculateE (avoid per-cycle allocation)
+    double *xkrylovMaxwell;
+    double *bkrylovMaxwell;
+    double *xkrylovPoisson_E;
+    double *bkrylovPoisson_E;
+    array3_double divE_work;
+    array3_double gradPHIX_work;
+    array3_double gradPHIY_work;
+    array3_double gradPHIZ_work;
+
+    // Persistent arrays for PoissonImage (avoid per-GMRES-iteration allocation)
+    array3_double poissonTemp;
+    array3_double poissonIm;
+
+    // Persistent temp buffer for smooth (avoid per-call allocation)
+    array3_double smoothTemp;
+
     /*! RESTART BOOLEAN */
     int restart1;
 
@@ -582,6 +610,8 @@ class EMfields3D                // :public Field
       int nx, int ny, int nz);
     void OpenBoundaryInflowEImage(arr3_double imageX, arr3_double imageY, arr3_double imageZ,
       const_arr3_double vectorX, const_arr3_double vectorY, const_arr3_double vectorZ,
+      int nx, int ny, int nz);
+    void OpenBoundaryInflowESource(arr3_double vectorX, arr3_double vectorY, arr3_double vectorZ,
       int nx, int ny, int nz);
 };
 

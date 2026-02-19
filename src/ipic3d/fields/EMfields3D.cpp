@@ -51,7 +51,9 @@ using std::cout;
 using std::endl;
 using namespace iPic3D;
 
-constexpr bool APPLY_INFLOW_BCS_E_EVERYWHERE = false; // if false, only apply to Xleft face; if true, also apply to Xright face
+constexpr bool APPLY_INFLOW_BCS_E_IMAGE = false; // if false does not apply inflow BCs to the image of E in GMRes iteration ; if true, applies inflow BCs to the image of E
+constexpr bool APPLY_INFLOW_BCS_E_IMAGE_EVERYWHERE = false; // if false, only apply to Xleft face; if true apply to other faces except xright face
+constexpr bool APPLY_INFLOW_BCS_E_POST_EVERYWHERE = true; // if false, only apply to Xleft face; if true, also apply everywhere
 
 /*! constructor */
 //
@@ -833,8 +835,9 @@ void EMfields3D::MaxwellImage(double *im, double *vector)
     perfectConductorRight(imageX, imageY, imageZ, vectX, vectY, vectZ, 2);
 
   // OpenBC
-  OpenBoundaryInflowEImage(imageX, imageY, imageZ, vectX, vectY, vectZ, nxn, nyn, nzn);
-
+  if constexpr (APPLY_INFLOW_BCS_E_IMAGE){
+    OpenBoundaryInflowEImage(imageX, imageY, imageZ, vectX, vectY, vectZ, nxn, nyn, nzn);
+  }
   // move from physical space to krylov space
   phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn);
 }
@@ -912,8 +915,9 @@ void EMfields3D::MaxwellImageLocal(double *im, double *vector)
     perfectConductorRight(imageX, imageY, imageZ, vectX, vectY, vectZ, 2);
 
   // OpenBC
-  OpenBoundaryInflowEImage(imageX, imageY, imageZ, vectX, vectY, vectZ, nxn, nyn, nzn);
-
+  if constexpr (APPLY_INFLOW_BCS_E_IMAGE){
+    OpenBoundaryInflowEImage(imageX, imageY, imageZ, vectX, vectY, vectZ, nxn, nyn, nzn);
+  }
   // move from physical space to krylov space
   phys2solver(im, imageX, imageY, imageZ, nxn, nyn, nzn);
 }
@@ -2538,48 +2542,49 @@ void EMfields3D::OpenBoundaryInflowEImage(arr3_double imageX, arr3_double imageY
    *  Fixes applied (vs original): indices changed from ghost (0, nx-1, etc.)
    *  to boundary (1, nx-2, etc.), and Zleft/Zright face condition swap corrected.
    */
-  /*
-  if(vct->getXright_neighbor()==MPI_PROC_NULL && bcEMfaceXright == 2) {
-    for (int j=1; j < ny-1;j++)
-      for (int k=1; k < nz-1;k++){
-        imageX[nx-2][j][k] = vectorX[nx-2][j][k] - injE[0];
-        imageY[nx-2][j][k] = vectorY[nx-2][j][k] - injE[1];
-        imageZ[nx-2][j][k] = vectorZ[nx-2][j][k] - injE[2];
-      }
+  if constexpr (APPLY_INFLOW_BCS_E_IMAGE_EVERYWHERE) {
+    /*if(vct->getXright_neighbor()==MPI_PROC_NULL && bcEMfaceXright == 2) {
+      for (int j=1; j < ny-1;j++)
+        for (int k=1; k < nz-1;k++){
+          imageX[nx-2][j][k] = vectorX[nx-2][j][k] - injE[0];
+          imageY[nx-2][j][k] = vectorY[nx-2][j][k] - injE[1];
+          imageZ[nx-2][j][k] = vectorZ[nx-2][j][k] - injE[2];
+        }
+    }
+    */
+    if(vct->getYleft_neighbor()==MPI_PROC_NULL && bcEMfaceYleft == 2) {
+      for (int i=1; i < nx-1;i++)
+        for (int k=1; k < nz-1;k++){
+          imageX[i][1][k] = vectorX[i][1][k] - injE[0];
+          imageY[i][1][k] = vectorY[i][1][k] - injE[1];
+          imageZ[i][1][k] = vectorZ[i][1][k] - injE[2];
+        }
+    }
+    if(vct->getYright_neighbor()==MPI_PROC_NULL && bcEMfaceYright == 2) {
+      for (int i=1; i < nx-1;i++)
+        for (int k=1; k < nz-1;k++){
+          imageX[i][ny-2][k] = vectorX[i][ny-2][k] - injE[0];
+          imageY[i][ny-2][k] = vectorY[i][ny-2][k] - injE[1];
+          imageZ[i][ny-2][k] = vectorZ[i][ny-2][k] - injE[2];
+        }
+    }
+    if(vct->getZleft_neighbor()==MPI_PROC_NULL && bcEMfaceZleft == 2) {
+      for (int i=1; i < nx-1;i++)
+        for (int j=1; j < ny-1;j++){
+          imageX[i][j][1] = vectorX[i][j][1] - injE[0];
+          imageY[i][j][1] = vectorY[i][j][1] - injE[1];
+          imageZ[i][j][1] = vectorZ[i][j][1] - injE[2];
+        }
+    }
+    if(vct->getZright_neighbor()==MPI_PROC_NULL && bcEMfaceZright == 2) {
+      for (int i=1; i < nx-1;i++)
+        for (int j=1; j < ny-1;j++){
+          imageX[i][j][nz-2] = vectorX[i][j][nz-2] - injE[0];
+          imageY[i][j][nz-2] = vectorY[i][j][nz-2] - injE[1];
+          imageZ[i][j][nz-2] = vectorZ[i][j][nz-2] - injE[2];
+        }
+    }
   }
-  if(vct->getYleft_neighbor()==MPI_PROC_NULL && bcEMfaceYleft == 2) {
-    for (int i=1; i < nx-1;i++)
-      for (int k=1; k < nz-1;k++){
-        imageX[i][1][k] = vectorX[i][1][k] - injE[0];
-        imageY[i][1][k] = vectorY[i][1][k] - injE[1];
-        imageZ[i][1][k] = vectorZ[i][1][k] - injE[2];
-      }
-  }
-  if(vct->getYright_neighbor()==MPI_PROC_NULL && bcEMfaceYright == 2) {
-    for (int i=1; i < nx-1;i++)
-      for (int k=1; k < nz-1;k++){
-        imageX[i][ny-2][k] = vectorX[i][ny-2][k] - injE[0];
-        imageY[i][ny-2][k] = vectorY[i][ny-2][k] - injE[1];
-        imageZ[i][ny-2][k] = vectorZ[i][ny-2][k] - injE[2];
-      }
-  }
-  if(vct->getZleft_neighbor()==MPI_PROC_NULL && bcEMfaceZleft == 2) {
-    for (int i=1; i < nx-1;i++)
-      for (int j=1; j < ny-1;j++){
-        imageX[i][j][1] = vectorX[i][j][1] - injE[0];
-        imageY[i][j][1] = vectorY[i][j][1] - injE[1];
-        imageZ[i][j][1] = vectorZ[i][j][1] - injE[2];
-      }
-  }
-  if(vct->getZright_neighbor()==MPI_PROC_NULL && bcEMfaceZright == 2) {
-    for (int i=1; i < nx-1;i++)
-      for (int j=1; j < ny-1;j++){
-        imageX[i][j][nz-2] = vectorX[i][j][nz-2] - injE[0];
-        imageY[i][j][nz-2] = vectorY[i][j][nz-2] - injE[1];
-        imageZ[i][j][nz-2] = vectorZ[i][j][nz-2] - injE[2];
-      }
-  }
-  */
 }
 
 void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY, arr3_double vectorZ,
@@ -2771,7 +2776,7 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
           }
       }
     }
-    if constexpr (APPLY_INFLOW_BCS_E_EVERYWHERE)
+    if constexpr (APPLY_INFLOW_BCS_E_POST_EVERYWHERE)
     {
       if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2)
       {
@@ -2860,7 +2865,7 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY, a
             vectorZ[i][j][k] = injE[2];
           }
     }
-    if constexpr (APPLY_INFLOW_BCS_E_EVERYWHERE)
+    if constexpr (APPLY_INFLOW_BCS_E_POST_EVERYWHERE)
     {
       if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2)
       {

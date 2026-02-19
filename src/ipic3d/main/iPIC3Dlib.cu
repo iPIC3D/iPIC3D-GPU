@@ -48,6 +48,8 @@
 
 #include "Moments.h" // for debugging
 
+#include "ExosphereIonization.h"
+#include <cstring>  // std::memcpy
 
 #include "cudaTypeDef.cuh"
 #include "momentKernel.cuh"
@@ -105,6 +107,7 @@ c_Solver::~c_Solver()
   delete [] Ke;
   delete [] momentum;
   delete [] Qremoved;
+  delete exosphereIonization;
   delete my_clock;
 }
 
@@ -268,6 +271,16 @@ int c_Solver::Init(int argc, char **argv) {
   
 
   Qremoved = new double[ns];
+
+  // ── Exosphere ionization source ──
+  numSolarWindSpecies = col->getNumSolarWindSpecies();
+  numPlanetarySpecies = ns - numSolarWindSpecies;
+  if (col->getEnableExosphereInjection() && numPlanetarySpecies > 0) {
+    exosphereIonization = new ExosphereIonization(col, grid, vct);
+    exosphereTaskFutures.reserve(numPlanetarySpecies);
+  } else {
+    exosphereIonization = nullptr;
+  }
 
 #ifdef USE_CATALYST
   Adaptor::Initialize(col, \
@@ -1108,10 +1121,16 @@ bool c_Solver::MoverAwaitAndPclExchange()
     }
   }
 
+  // ── Exosphere ionization: inject photoionized particles into host buffers ──
+  // After this call, part[i].getNOP() includes MPI-incoming + repopulated + exosphere particles.
+  // The H2D copy loop below uses part[i].getNOP() to compute the device-side total (newPclNum),
+  // copy particle data, update pclsArrayHostPtr metadata (setNOE), sync to device, and launch
+  // momentKernelNew for all new particles — so exosphere particles are handled automatically.
+  injectExosphereParticles();
 
   for(int i=0; i<ns; i++){
 
-    // Copy repopulate particle and the incoming particles to device
+    // Total particles on device = stayed (from mover) + new (MPI + repopulated + exosphere)
     auto newPclNum = stayedParticle[i] + part[i].getNOP();
 
     // now the host array contains the entering particles
@@ -1127,9 +1146,9 @@ bool c_Solver::MoverAwaitAndPclExchange()
               cudaMemcpyDefault, streams[i]));
 
               
-    pclsArrayHostPtr[i]->setNOE(newPclNum); 
-    cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i], sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));    
-    // moment for new particles: incoming MPI particles (including in-bounds reflected)
+    pclsArrayHostPtr[i]->setNOE(newPclNum);  // host metadata: total particles on device
+    cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i], sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));  // sync metadata to device  
+    // Compute moments for all new particles (MPI-incoming + repopulated + exosphere)
     const int momentOffset = stayedParticle[i];
     if(pclsArrayHostPtr[i]->getNOP() - momentOffset > 0)
     momentKernelNew<<<getGridSize(pclsArrayHostPtr[i]->getNOP() - momentOffset, 128u), 128, 0, streams[i] >>>
@@ -1438,4 +1457,68 @@ void c_Solver::convertOutputParticlesToSynched()
 
 int c_Solver::LastCycle() {
     return (col->getNcycles() + first_cycle);
+}
+
+/**
+ * @brief Inject photoionized exosphere particles into host particle buffers.
+ *
+ * For each planetary species (index >= numSolarWindSpecies), this method samples
+ * new macro-particles from the Chamberlain neutral density profile via
+ * ExosphereIonization, then appends them to the host exchange buffer part[i].
+ * The particles will be copied to the GPU by the subsequent H2D transfer.
+ *
+ * Task-based parallelism: each planetary species is submitted as an independent
+ * task to the thread pool (same pool used by the mover). Each task uses its own
+ * RNG, particle buffer, and part[i] — no cross-species contention. All futures
+ * are collected before returning, so part[i].getNOP() is finalized for the
+ * subsequent H2D copy loop.
+ */
+void c_Solver::injectExosphereParticles()
+{
+  if (exosphereIonization == nullptr) return;
+
+  // Enqueue one task per planetary species.
+  // Each task: (1) samples particles via thread-safe RNG, (2) appends to part[i].
+  // No shared mutable state between tasks — safe for concurrent execution.
+  // numSolarWindSpecies, numPlanetarySpecies, and exosphereTaskFutures are persistent
+  // class members initialized once in Init() — no per-call recomputation or allocation.
+  exosphereTaskFutures.clear();
+
+  for (int i = numSolarWindSpecies; i < ns; i++) {
+    exosphereTaskFutures.push_back(
+      threadPoolPtr->enqueue([this, i]() {
+        // sampleIonizedParticles is thread-safe for different species indices:
+        // each species uses its own std::mt19937_64 RNG, particle buffer, and
+        // charge accumulator (no global rand() or shared mutable state).
+        const std::vector<SpeciesParticle>& exosphereParticles =
+            exosphereIonization->sampleIonizedParticles(i);
+
+        if (exosphereParticles.empty()) return;
+
+        const int numNewParticles      = static_cast<int>(exosphereParticles.size());
+        const int currentParticleCount = part[i].getNOP();
+        const int totalAfterInjection  = currentParticleCount + numNewParticles;
+
+        // Ensure host buffer has enough capacity (grow by 1.5x if needed).
+        // Each task operates on its own part[i] — no cross-species contention.
+        if (totalAfterInjection > static_cast<int>(part[i].get_pcl_list().capacity())) {
+          part[i].get_pcl_arrayPtr()->reserve(totalAfterInjection * 1.5);
+        }
+
+        // Append exosphere particles after the MPI-incoming + repopulated particles.
+        std::memcpy(part[i].get_pcl_array().getList() + currentParticleCount,
+                    exosphereParticles.data(),
+                    numNewParticles * sizeof(SpeciesParticle));
+        part[i].get_pcl_array().setSize(totalAfterInjection);
+
+        assert(part[i].getNOP() == totalAfterInjection
+               && "Host particle count mismatch after exosphere injection");
+      })
+    );
+  }
+
+  // Wait for all species to complete before the H2D copy loop runs.
+  for (auto& future : exosphereTaskFutures) {
+    future.get();
+  }
 }

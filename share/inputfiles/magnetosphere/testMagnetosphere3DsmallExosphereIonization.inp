@@ -1,0 +1,200 @@
+ # Publications that use results from iPIC3D need to properly cite  
+ # 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
+ # plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ #
+ #        Copyright 2015 KTH Royal Institute of Technology
+ # Licensed under the Apache License, Version 2.0 (the "License");
+ # you may not use this file except in compliance with the License.
+ # You may obtain a copy of the License at 
+ #
+ #         http://www.apache.org/licenses/LICENSE-2.0
+ #
+ # Unless required by applicable law or agreed to in writing, software
+ # distributed under the License is distributed on an "AS IS" BASIS,
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+
+# Directories
+SaveDirName = data
+RestartDirName = data
+
+Case              = Dipole 
+PoissonCorrection = no         # Poisson correction
+WriteMethod       = pvtk       # Output method [ shdf5 || pvtk ||nbcvtk]
+SimulationName    = Dipole3D_Exosphere   # Simulation name for the output
+
+#  %%%%%%%%%%%%%%%%%%% INITIAL MAGNETIC FIELD %%%%%%%%%%%%%%%%%%
+B0x = 0.0
+B0y = 0.0
+B0z = 0.0001
+
+# External magnetic field parameters: DIPOLE - Magnetic Moment in Z direction
+B1x = 0.0
+B1y = 0.0
+B1z = 2.0
+
+#  %%%%%%%%%%%%%%%%%%% TIME %%%%%%%%%%%%%%%%%%
+dt = 0.15                   # dt = time step  
+ncycles = 42		 #!!!    # cycles
+th = 1.0                     # th = decentering parameter
+c = 1.0                      # c = light speed 
+
+#  %%%%%%%%%%%%%%%%%%% SMOOTH %%%%%%%%%%%%%%%%%%
+Smooth = 0.5                  # Smoothing value (5-points stencil)
+SmoothNiter = 6               # Number of smoothing iterations (default 6)
+
+#  %%%%%%%%%%%%%%%%%%% DIV(B) CLEANING %%%%%%%%%%%%%%%%%%
+divBCorrection = yes           # Enable divergence-of-B cleaning (default no)
+divBCorrectionCycle = 10       # Apply div(B) correction every N cycles (default 10)
+
+# %%%%%%%%%%%%%%%%%% BOX SIZE %%%%%%%%%%%%%%%
+Lx =   10.0                  # Lx = simulation box length - x direction   
+Ly =   10.0                  # Ly = simulation box length - y direction
+Lz =   10.0                  # Lz = simulation box length - z direction   
+
+x_center_dipole =   6.0       # center of the dipole - X
+y_center_dipole =   5.0       # center of the dipole - Y
+z_center_dipole =   5.0       # center of the dipole - Z  
+x_center_planet =   6.0       # center of the planet - X
+y_center_planet =   5.0       # center of the planet - Y
+z_center_planet =   5.0       # center of the planet - Z  
+L_square =   0.5             # radius of the planet
+
+nxc =  30                  # nxc = number of cells - x direction        
+nyc =  30                  # nyc = number of cells - y direction
+nzc =  30                   # nzc = number of cells - z direction        
+
+# %%%%%%%%%%%%%% MPI TOPOLOGY %%%%%%%%%%%%%%
+# number of MPI subdomains in each direction
+XLEN = 2
+YLEN = 2
+ZLEN = 2
+# topology (1=true, 0=false): USE PERIODIC IN ALL DIRECTIONS
+PERIODICX = 0
+PERIODICY = 0
+PERIODICZ = 0
+
+# %%%%%%%%%%%%%% PARTICLES %%%%%%%%%%%%%%%%%
+#    ns = total number of species (solar wind + planetary)
+#    0 = SW electrons
+#    1 = SW protons
+#    2 = planetary electrons
+#    3 = planetary ions
+#    4 = planetary electrons (2nd neutral species)
+#    5 = planetary ions      (2nd neutral species)
+ns = 6
+
+# Solar wind / planetary species split
+ns_solar_wind = 2              # number of solar wind species (first ns_solar_wind in arrays)
+ns_planetary  = 4              # number of planetary species  (remaining ns - ns_solar_wind)
+
+# Initial density (for SW species; planetary species set to 0 since they are injected)
+rhoINIT =  1.0  1.0  0.0  0.0  0.0  0.0
+# Injection density (for SW boundary injection)
+rhoINJECT =  1.0  1.0  0.0  0.0  0.0  0.0
+
+# npcelx = number of particles per cell - Direction X 
+npcelx =  3  3  0  0  0  0
+# npcely = number of particles per cell - Direction Y 
+npcely =  3  3  0  0  0  0
+# npcelz = number of particles per cell - Direction Z 
+npcelz =  3  3  0  0  0  0
+
+# qom = charge to mass ratio for different species
+#        SW_e    SW_i    PL_e1   PL_i1   PL_e2   PL_i2
+qom =  -25.0    1.0    -25.0    1.0    -25.0    1.0
+
+# uth = thermal velocity for different species - Direction X
+uth  = 0.045  0.0063  0.045  0.0005  0.045  0.0005
+# vth = thermal velocity for different species - Direction Y
+vth  = 0.045  0.0063  0.045  0.0005  0.045  0.0005
+# wth = thermal velocity for different species - Direction Z
+wth  = 0.045  0.0063  0.045  0.0005  0.045  0.0005
+
+# u0 = drift velocity   - Direction X
+u0 = 0.02  0.02  0.0  0.0  0.0  0.0
+# v0 = drift velocity   - Direction Y
+v0 = 0.0   0.0   0.0  0.0  0.0  0.0
+# w0 = drift velocity   - Direction Z
+w0 = 0.0   0.0   0.0  0.0  0.0  0.0
+
+
+# %%%%%%%%%%%%%% EXOSPHERE IONIZATION %%%%%%%%%%%%%%%%%
+# Photoionization of Chamberlain neutral exosphere
+AddExosphereInjection = 1               # 1=enable exosphere injection, 0=disable (default 0)
+RmaxExosphereInjection = 3.0            # max radial distance for injection in d_i (default 3.0)
+
+# Neutral species parameters (one value per planetary species pair)
+#   Quasi-neutrality: paired electron/ion species share identical parameters
+#   so the same integer particle count is injected per cell for each.
+#                            PL_e1     PL_i1     PL_e2     PL_i2
+NeutralSurfaceDensity =      1e7       1e7       1e7       1e7       # neutral surface density [n_sw units]
+ExosphericScaleHeight =      0.25      0.25      0.25      0.25      # exospheric scale height [d_i units]
+PhotoionizationFrequency =   5e-11     5e-11     0.0       0.0       # photoionization frequency [1/wci]
+MacroParticleWeightRatio =   1.0       1.0       1.0       1.0       # macro-particle weight ratio planet/SW
+
+
+# &&&&&&&&&&&& boundary conditions &&&&&&&&&&&&&&&
+# PHI Electrostatic Potential     
+# 0,1 = Dirichilet boundary condition ;     
+# 2   = Neumann boundary condition
+#    Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
+    bcPHIfaceXright = 1
+    bcPHIfaceXleft  = 1
+    bcPHIfaceYright = 1
+    bcPHIfaceYleft  = 1
+    bcPHIfaceZright = 1
+    bcPHIfaceZleft  = 1
+    
+#    EM field boundary condition
+#    0 = perfect conductor
+#    1 = magnetic mirror
+#    2 = open (inflow/outflow)
+#    Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
+    bcEMfaceXright = 2
+    bcEMfaceXleft =  2
+    bcEMfaceYright = 2
+    bcEMfaceYleft =  2
+    bcEMfaceZright = 2
+    bcEMfaceZleft =  2
+
+#  %%%%%%%%%%%%%%%%%%% SAL ABSORBING LAYER %%%%%%%%%%%%%%%%%%
+# Smoothly Absorbing Layer at the EM boundaries (reduces reflections)
+    yes_sal = 1                 # 1=enable SAL, 0=disable (default 0)
+    n_layers_sal = 3            # number of absorbing layers at boundaries (default 3)
+
+#    Particles Boundary condition
+#    0 = exit
+#    1 = perfect mirror
+#    2 = riemission
+#    3 = open boundary
+#    Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
+    bcPfaceXright = 3
+    bcPfaceXleft =  2
+    bcPfaceYright = 3
+    bcPfaceYleft =  3
+    bcPfaceZright = 3
+    bcPfaceZleft =  3
+
+#  print to video results 
+    verbose = 1
+# velocity of the injection from the wall
+    Vinj= 0.02
+
+# CG solver stopping criterium tolerance
+    CGtol = 1E-3
+# GMRES solver stopping criterium tolerance
+    GMREStol = 1E-5
+# mover predictor corrector iteration
+    NiterMover = 8
+# Output for field
+   FieldOutputCycle = 10
+   FieldOutputTag   = B+E+Je+Ji
+   MomentsOutputTag = rho+PXX+PXY+PXZ+PYY+PYZ+PZZ
+# Output for particles if 0 it doesnt save particles data
+   ParticlesOutputCycle = 15
+   ParticlesOutputTag = position+velocity+q 
+# restart cycle
+   RestartOutputCycle = 0
+   CallFinalize=1

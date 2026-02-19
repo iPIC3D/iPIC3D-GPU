@@ -44,6 +44,7 @@ using std::string;
 #include "particleExchange.cuh"
 #include "planetKernel.cuh"
 #include "threadPool.hpp"
+#include "ExosphereIonization.h"
 
 #include <fstream>
 
@@ -90,6 +91,7 @@ namespace iPic3D {
     bool ParticlesMoverMomentAsync();
     bool MoverAwaitAndPclExchange();
     void processPlanetParticles();
+    void injectExosphereParticles();
     void CalculateB(int cycle);
     void MomentsAwait();
 
@@ -127,6 +129,10 @@ namespace iPic3D {
     Particles3D   *part; // only used for particle exchange during the simulation
     Particles3D   *outputPart; // buffers for all particle copy back, registered to IOManager
     Particles3D   *testpart;
+    ExosphereIonization *exosphereIonization; // exosphere photoionization source (CPU sampling)
+    int numSolarWindSpecies;                     // cached: col->getNumSolarWindSpecies()
+    int numPlanetarySpecies;                     // cached: ns - numSolarWindSpecies
+    std::vector<std::future<void>> exosphereTaskFutures; // persistent future buffer (avoids per-call allocation)
     double        *Ke; // kinetic energy of each species, the normal one, added up
     double        *BulkEnergy; // bulk kinetic energy of each species, consider the bulk motion
     double        *momentum; // an array of doubles, total momentum of all particle species

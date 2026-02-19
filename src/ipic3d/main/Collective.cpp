@@ -236,6 +236,40 @@ void Collective::ReadInput(string inputfile) {
   z_center_planet = config.read < double >("z_center_planet",5.0);
   L_square = config.read < double >("L_square",5.0);
 
+  // ── Exosphere / planet species parameters ──
+  numSolarWindSpecies       = config.read<int>("ns_solar_wind", ns);       // default: all species are SW
+  numPlanetarySpecies       = config.read<int>("ns_planetary", 0);        // default: no planetary species
+  enableExosphereInjection  = config.read<int>("AddExosphereInjection", 0); // 0=off, 1=on
+  maxInjectionRadius        = config.read<double>("RmaxExosphereInjection", 3.0);
+
+  // Allocate arrays for planetary neutral species parameters (at least 1 to avoid null)
+  const int numNeutralSpecies = std::max(numPlanetarySpecies, 1);
+  neutralSurfaceDensity     = std::make_unique<double[]>(numNeutralSpecies);
+  exosphericScaleHeight     = std::make_unique<double[]>(numNeutralSpecies);
+  photoionizationFrequency  = std::make_unique<double[]>(numNeutralSpecies);
+  macroParticleWeightRatio  = std::make_unique<double[]>(numNeutralSpecies);
+
+  // Initialize to safe defaults
+  for (int i = 0; i < numNeutralSpecies; i++) {
+    neutralSurfaceDensity[i]    = 0.0;
+    exosphericScaleHeight[i]    = 1.0;
+    photoionizationFrequency[i] = 0.0;
+    macroParticleWeightRatio[i] = 1.0;
+  }
+
+  if (numPlanetarySpecies > 0) {
+    array_double NeutralSurfaceDensity0    = config.read<array_double>("NeutralSurfaceDensity");
+    array_double ExosphericScaleHeight0    = config.read<array_double>("ExosphericScaleHeight");
+    array_double PhotoionizationFrequency0 = config.read<array_double>("PhotoionizationFrequency");
+    array_double MacroParticleWeightRatio0 = config.read<array_double>("MacroParticleWeightRatio");
+    neutralSurfaceDensity[0] = NeutralSurfaceDensity0.a;  exosphericScaleHeight[0] = ExosphericScaleHeight0.a;  photoionizationFrequency[0] = PhotoionizationFrequency0.a;  macroParticleWeightRatio[0] = MacroParticleWeightRatio0.a;
+    if (numPlanetarySpecies > 1) { neutralSurfaceDensity[1] = NeutralSurfaceDensity0.b; exosphericScaleHeight[1] = ExosphericScaleHeight0.b; photoionizationFrequency[1] = PhotoionizationFrequency0.b; macroParticleWeightRatio[1] = MacroParticleWeightRatio0.b; }
+    if (numPlanetarySpecies > 2) { neutralSurfaceDensity[2] = NeutralSurfaceDensity0.c; exosphericScaleHeight[2] = ExosphericScaleHeight0.c; photoionizationFrequency[2] = PhotoionizationFrequency0.c; macroParticleWeightRatio[2] = MacroParticleWeightRatio0.c; }
+    if (numPlanetarySpecies > 3) { neutralSurfaceDensity[3] = NeutralSurfaceDensity0.d; exosphericScaleHeight[3] = ExosphericScaleHeight0.d; photoionizationFrequency[3] = PhotoionizationFrequency0.d; macroParticleWeightRatio[3] = MacroParticleWeightRatio0.d; }
+    if (numPlanetarySpecies > 4) { neutralSurfaceDensity[4] = NeutralSurfaceDensity0.e; exosphericScaleHeight[4] = ExosphericScaleHeight0.e; photoionizationFrequency[4] = PhotoionizationFrequency0.e; macroParticleWeightRatio[4] = MacroParticleWeightRatio0.e; }
+    if (numPlanetarySpecies > 5) { neutralSurfaceDensity[5] = NeutralSurfaceDensity0.f; exosphericScaleHeight[5] = ExosphericScaleHeight0.f; photoionizationFrequency[5] = PhotoionizationFrequency0.f; macroParticleWeightRatio[5] = MacroParticleWeightRatio0.f; }
+  }
+
 
   uth = std::make_unique<double[]>(ns);
   vth = std::make_unique<double[]>(ns);
@@ -443,33 +477,46 @@ void Collective::ReadInput(string inputfile) {
   n_layers_sal  = config.read < int >("n_layers_sal",3);
 
 
-  /*  ---------------------------------------------------------- */
-  /*  Electric and Magnetic field boundary conditions for BCface */
-  /*  ---------------------------------------------------------- */
-  // if bcEM* is 0: perfect conductor, if bcEM* is not 0: perfect mirror
-  // perfect conductor: normal = free, perpendicular = 0
-  // perfect mirror   : normal = 0,    perpendicular = free
-  /*  ---------------------------------------------------------- */
+  /*  ------------------------------------------------------------------- */
+  /*  Electric and Magnetic field boundary conditions for BCface          */
+  /*  ------------------------------------------------------------------- */
+  /*  bcEM* == 0 : Perfect Electric Conductor (PEC)                       */
+  /*    - E_tangential = 0   (Dirichlet, bc=1)                            */
+  /*    - E_normal     = free (Neumann,  bc=2)                            */
+  /*    - B_tangential = free (Neumann,  bc=2)                            */
+  /*    - B_normal     = 0   (Dirichlet, bc=1)                            */
+  /*  bcEM* != 0 : Perfect Magnetic Conductor (PMC, "perfect mirror")     */
+  /*    - E_tangential = free (Neumann,  bc=2)                            */
+  /*    - E_normal     = 0   (Dirichlet, bc=1)                            */
+  /*    - B_tangential = 0   (Dirichlet, bc=1)                            */
+  /*    - B_normal     = free (Neumann,  bc=2)                            */
+  /*                                                                      */
+  /*  Convention: bc=1 -> Dirichlet (value fixed to 0)                    */
+  /*             bc=2 -> Neumann   (derivative fixed, value free)         */
+  /*                                                                      */
+  /*  Note: E and B always get complementary bc values on every face.     */
+  /*  Face indices: 0=Xright, 1=Xleft, 2=Yright, 3=Yleft, 4=Zright, 5=Zleft */
+  /*  ------------------------------------------------------------------- */
 
-  /* X component in faces Xright, Xleft, Yright, Yleft, Zright and Zleft (0, 1, 2, 3, 4, 5) */
+  /* Ex Bx component: normal on X-faces (bc=2 for PEC), tangential on Y/Z-faces (bc=1 for PEC) */
   bcEx[0] = bcEMfaceXright == 0 ? 2 : 1;   bcBx[0] = bcEMfaceXright == 0 ? 1 : 2;
   bcEx[1] = bcEMfaceXleft  == 0 ? 2 : 1;   bcBx[1] = bcEMfaceXleft  == 0 ? 1 : 2;
   bcEx[2] = bcEMfaceYright == 0 ? 1 : 2;   bcBx[2] = bcEMfaceYright == 0 ? 2 : 1;
   bcEx[3] = bcEMfaceYleft  == 0 ? 1 : 2;   bcBx[3] = bcEMfaceYleft  == 0 ? 2 : 1;
   bcEx[4] = bcEMfaceZright == 0 ? 1 : 2;   bcBx[4] = bcEMfaceZright == 0 ? 2 : 1;
   bcEx[5] = bcEMfaceZleft  == 0 ? 1 : 2;   bcBx[5] = bcEMfaceZleft  == 0 ? 2 : 1;
-  /* Y component */
+  /* Ey By component: tangential on X-faces (bc=1 for PEC), normal on Y-faces (bc=2 for PEC), tangential on Z-faces */
   bcEy[0] = bcEMfaceXright == 0 ? 1 : 2;   bcBy[0] = bcEMfaceXright == 0 ? 2 : 1;
   bcEy[1] = bcEMfaceXleft  == 0 ? 1 : 2;   bcBy[1] = bcEMfaceXleft  == 0 ? 2 : 1;
   bcEy[2] = bcEMfaceYright == 0 ? 2 : 1;   bcBy[2] = bcEMfaceYright == 0 ? 1 : 2;
   bcEy[3] = bcEMfaceYleft  == 0 ? 2 : 1;   bcBy[3] = bcEMfaceYleft  == 0 ? 1 : 2;
   bcEy[4] = bcEMfaceZright == 0 ? 1 : 2;   bcBy[4] = bcEMfaceZright == 0 ? 2 : 1;
   bcEy[5] = bcEMfaceZleft  == 0 ? 1 : 2;   bcBy[5] = bcEMfaceZleft  == 0 ? 2 : 1;
-  /* Z component */
+  /* Ez Bz component: tangential on X/Y-faces (bc=1 for PEC), normal on Z-faces (bc=2 for PEC) */
   bcEz[0] = bcEMfaceXright == 0 ? 1 : 2;   bcBz[0] = bcEMfaceXright == 0 ? 2 : 1;
   bcEz[1] = bcEMfaceXleft  == 0 ? 1 : 2;   bcBz[1] = bcEMfaceXleft  == 0 ? 2 : 1;
-  bcEz[2] = bcEMfaceYright == 0 ? 1 : 1;   bcBz[2] = bcEMfaceYright == 0 ? 2 : 1;
-  bcEz[3] = bcEMfaceYleft  == 0 ? 1 : 1;   bcBz[3] = bcEMfaceYleft  == 0 ? 2 : 1;
+  bcEz[2] = bcEMfaceYright == 0 ? 1 : 2;   bcBz[2] = bcEMfaceYright == 0 ? 2 : 1;
+  bcEz[3] = bcEMfaceYleft  == 0 ? 1 : 2;   bcBz[3] = bcEMfaceYleft  == 0 ? 2 : 1;
   bcEz[4] = bcEMfaceZright == 0 ? 2 : 1;   bcBz[4] = bcEMfaceZright == 0 ? 1 : 2;
   bcEz[5] = bcEMfaceZleft  == 0 ? 2 : 1;   bcBz[5] = bcEMfaceZleft  == 0 ? 1 : 2;
 
@@ -698,6 +745,28 @@ void Collective::Print() {
   cout << "div(B) cleaning            : " << divBCorrection;
   if (divBCorrection == "yes") cout << ", every " << divBCorrectionCycle << " cycles (in calculateB)";
   cout << endl;
+  cout << "---------------------" << endl;
+  cout << "Exosphere Ionization" << endl;
+  cout << "---------------------" << endl;
+  if (enableExosphereInjection && numPlanetarySpecies > 0) {
+    cout << "Status                     : enabled" << endl;
+    cout << "Solar wind species         : " << numSolarWindSpecies << " (indices 0.." << numSolarWindSpecies-1 << ")" << endl;
+    cout << "Planetary species          : " << numPlanetarySpecies << " (indices " << numSolarWindSpecies << ".." << ns-1 << ")" << endl;
+    cout << "Max injection radius       : " << maxInjectionRadius << " d_i" << endl;
+    cout << "Planet radius (L_square)   : " << L_square << " d_i" << endl;
+    for (int i = 0; i < numPlanetarySpecies; i++) {
+      int globalIdx = numSolarWindSpecies + i;
+      cout << "  Species " << globalIdx << " (neutral " << i << "):" << endl;
+      cout << "    NeutralSurfaceDensity    = " << neutralSurfaceDensity[i] << " n_sw" << endl;
+      cout << "    ExosphericScaleHeight    = " << exosphericScaleHeight[i] << " d_i" << endl;
+      cout << "    PhotoionizationFrequency = " << photoionizationFrequency[i] << " wci" << endl;
+      cout << "    MacroParticleWeightRatio = " << macroParticleWeightRatio[i] << endl;
+      cout << "    qom                      = " << qom[globalIdx] << endl;
+      cout << "    uth/vth/wth              = " << uth[globalIdx] << " / " << vth[globalIdx] << " / " << wth[globalIdx] << endl;
+    }
+  } else {
+    cout << "Status                     : disabled" << endl;
+  }
   cout << "---------------------" << endl;
   cout << "Check Simulation Constraints" << endl;
   cout << "---------------------" << endl;

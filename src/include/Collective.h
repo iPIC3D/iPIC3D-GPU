@@ -90,6 +90,17 @@ class Collective
     double gety_center_planet()const{ return (y_center_planet); }
     double getz_center_planet()const{ return (z_center_planet); }
     double getL_square()const{ return (L_square); }
+
+    // ── Exosphere / planet species parameters ──
+    int    getNumSolarWindSpecies()const{ return (numSolarWindSpecies); }
+    int    getNumPlanetarySpecies()const{ return (numPlanetarySpecies); }
+    int    getEnableExosphereInjection()const{ return (enableExosphereInjection); }
+    double getMaxInjectionRadius()const{ return (maxInjectionRadius); }
+    double getNeutralSurfaceDensity(int neutralSpecies)const{ return (neutralSurfaceDensity[neutralSpecies]); }
+    double getExosphericScaleHeight(int neutralSpecies)const{ return (exosphericScaleHeight[neutralSpecies]); }
+    double getPhotoionizationFrequency(int neutralSpecies)const{ return (photoionizationFrequency[neutralSpecies]); }
+    double getMacroParticleWeightRatio(int neutralSpecies)const{ return (macroParticleWeightRatio[neutralSpecies]); }
+
     int getNxc()const{ return (nxc); }
     int getNyc()const{ return (nyc); }
     int getNzc()const{ return (nzc); }
@@ -253,6 +264,24 @@ class Collective
     double z_center_planet;
    /*! object size - assuming a cubic box */
     double L_square;
+
+    // ── Exosphere / planet species parameters ──
+    /*! number of solar wind species */
+    int numSolarWindSpecies;
+    /*! number of planetary species (exosphere) */
+    int numPlanetarySpecies;
+    /*! flag to enable exosphere ionization injection (0=off, 1=on) */
+    int enableExosphereInjection;
+    /*! maximum radial distance from planet for exosphere injection */
+    double maxInjectionRadius;
+    /*! neutral surface density per planetary neutral species [n_sw] */
+    std::unique_ptr<double[]> neutralSurfaceDensity;
+    /*! exospheric scale height per neutral species [d_i] */
+    std::unique_ptr<double[]> exosphericScaleHeight;
+    /*! photoionization frequency per neutral species [wpi] */
+    std::unique_ptr<double[]> photoionizationFrequency;
+    /*! weight factor (planet-to-SW macro-particle weight ratio) per neutral species */
+    std::unique_ptr<double[]> macroParticleWeightRatio;
     // number of cells per direction of problem domain
     int nxc;
     int nyc;

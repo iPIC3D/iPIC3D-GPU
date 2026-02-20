@@ -51,9 +51,12 @@ using std::cout;
 using std::endl;
 using namespace iPic3D;
 
+// Note:
+// open BCS inflow on E field shold be applied only on domain boundary faces
+// where particle BCS are set to reemission, otherwise instabilities are triggered
 constexpr bool APPLY_INFLOW_BCS_E_IMAGE = true; // if false does not apply inflow BCs to the image of E in GMRes iteration ; if true, applies inflow BCs to the image of E
-constexpr bool APPLY_INFLOW_BCS_E_IMAGE_EVERYWHERE = false; // if false, only apply to Xleft face; if true apply to other faces except xright face
-constexpr bool APPLY_INFLOW_BCS_E_POST_EVERYWHERE = false; // if false, only apply to Xleft face; if true, also apply everywhere
+constexpr bool APPLY_INFLOW_BCS_E_IMAGE_EVERYWHERE = true; // if false, only apply to Xleft face; if true apply to other faces except xright face
+constexpr bool APPLY_INFLOW_BCS_E_POST_EVERYWHERE = true; // if false, only apply to Xleft face; if true, also apply everywhere
 
 /*! constructor */
 //

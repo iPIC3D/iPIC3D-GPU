@@ -401,13 +401,13 @@ inline void Particles3D::populate_cell_with_particles(
   for (int kk=0; kk < npcelz; kk++)
   {
     double u,v,w,q,x,y,z;
-    sample_maxwellian(
-      u,v,w,
-      uth, vth, wth,
-      u0, v0, w0);
-    x = (ii + sample_u_double())*dx_per_pcl + cell_low_x;
-    y = (jj + sample_u_double())*dy_per_pcl + cell_low_y;
-    z = (kk + sample_u_double())*dz_per_pcl + cell_low_z;
+    do {
+      sample_maxwellian(u,v,w, uth,vth,wth, u0,v0,w0);
+      x = (ii + sample_u_double())*dx_per_pcl + cell_low_x;
+      y = (jj + sample_u_double())*dy_per_pcl + cell_low_y;
+      z = (kk + sample_u_double())*dz_per_pcl + cell_low_z;
+    } while ((x > Lx) || (y > Ly) || (z > Lz) || (x*y*z) < 0
+             || sqrt(u*u + v*v + w*w) > c);
     create_new_particle(u,v,w,q_per_particle,x,y,z);
   }
 }

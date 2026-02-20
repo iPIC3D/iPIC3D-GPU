@@ -737,6 +737,25 @@ void Collective::Print() {
   if (yes_sal) cout << ", n_layers=" << n_layers_sal;
   cout << endl;
   cout << "---------------------" << endl;
+  cout << "Particle Boundary Conditions" << endl;
+  cout << "---------------------" << endl;
+  auto bcPName = [](int code) -> const char* {
+    switch(code) {
+      case 0: return "exit";
+      case 1: return "perfect mirror";
+      case 2: return "reemission";
+      case 3: return "open BC outflow";
+      case 4: return "open BC inflow";
+      default: return "unknown";
+    }
+  };
+  cout << "Xleft  : " << bcPfaceXleft  << " (" << bcPName(bcPfaceXleft)  << ")" << endl;
+  cout << "Xright : " << bcPfaceXright << " (" << bcPName(bcPfaceXright) << ")" << endl;
+  cout << "Yleft  : " << bcPfaceYleft  << " (" << bcPName(bcPfaceYleft)  << ")" << endl;
+  cout << "Yright : " << bcPfaceYright << " (" << bcPName(bcPfaceYright) << ")" << endl;
+  cout << "Zleft  : " << bcPfaceZleft  << " (" << bcPName(bcPfaceZleft)  << ")" << endl;
+  cout << "Zright : " << bcPfaceZright << " (" << bcPName(bcPfaceZright) << ")" << endl;
+  cout << "---------------------" << endl;
   cout << "Field Corrections" << endl;
   cout << "---------------------" << endl;
   cout << "Poisson div(E) correction  : " << PoissonCorrection;

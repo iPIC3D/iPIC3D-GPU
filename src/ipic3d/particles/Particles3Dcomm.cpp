@@ -1184,7 +1184,7 @@ void Particles3Dcomm::apply_Yrght_BC(vector_SpeciesParticle& pcls, int start)
         y = 2*Ly - y;
         double u[3];
         sample_maxwellian(u[0],u[1],u[2], uth,vth,wth);
-        v[0] = -fabs(v[0]);
+        u[1] = -fabs(u[1]);
         pcl.set_u(u);
       }
       break;
@@ -1221,7 +1221,7 @@ void Particles3Dcomm::apply_Zrght_BC(vector_SpeciesParticle& pcls, int start)
         z = 2*Lz - z;
         double u[3];
         sample_maxwellian(u[0],u[1],u[2], uth,vth,wth);
-        w[0] = -fabs(w[0]);
+        u[2] = -fabs(u[2]);
         pcl.set_u(u);
       }
       break;

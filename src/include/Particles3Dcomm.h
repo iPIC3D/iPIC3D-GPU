@@ -237,6 +237,8 @@ public:
   long long *getVelocityDistribution(int nBins, double maxVel);
   /** return the momentum */
   double getP();
+  /** return the total charge (sum of particle weights q) */
+  double getTotalQ();
 
 public:
   // accessors

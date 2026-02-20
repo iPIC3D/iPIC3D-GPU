@@ -76,6 +76,7 @@ namespace iPic3D {
       Ke(0),
       BulkEnergy(0),
       momentum(0),
+      Qtot(0),
       Qremoved(0),
       my_clock(0)
     {}
@@ -136,6 +137,7 @@ namespace iPic3D {
     double        *Ke; // kinetic energy of each species, the normal one, added up
     double        *BulkEnergy; // bulk kinetic energy of each species, consider the bulk motion
     double        *momentum; // an array of doubles, total momentum of all particle species
+    double        *Qtot; // total charge per species (sum of particle weights)
     double        *Qremoved; // array of double, with species length, removed charges from the depopulation area
     Timing        *my_clock;
     std::ofstream pclNumCSV;

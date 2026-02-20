@@ -190,7 +190,7 @@ MacroParticleWeightRatio =   1.0       1.0       1.0       1.0       # macro-par
     NiterMover = 8
 # Output for field
    FieldOutputCycle = 10
-   FieldOutputTag   = B+E+Je+Ji
+   FieldOutputTag   = B+E+Je+Ji+rho
    MomentsOutputTag = rho+PXX+PXY+PXZ+PYY+PYZ+PZZ
 # Output for particles if 0 it doesnt save particles data
    ParticlesOutputCycle = 15

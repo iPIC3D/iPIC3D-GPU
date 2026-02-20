@@ -1415,13 +1415,30 @@ void Particles3Dcomm::recommunicate_particles_until_done(int min_num_iterations)
   }
 }
 
+/** return the total charge (sum of particle weights q) */
+double Particles3Dcomm::getTotalQ() {
+  double localQ = 0.0;
+  double totalQ = 0.0;
+  const int nop = _pcls.size();
+  #pragma omp parallel for reduction(+:localQ)
+  for (int i = 0; i < nop; i++)
+  {
+    const SpeciesParticle& pcl = _pcls[i];
+    localQ += pcl.get_q();
+  }
+  MPI_Allreduce(&localQ, &totalQ, 1, MPI_DOUBLE, MPI_SUM, mpi_comm);
+  return (totalQ);
+}
+
 /** return the Kinetic energy */
 double Particles3Dcomm::getKe() {
   double localKe = 0.0;
   double totalKe = 0.0;
-  for (int i = 0; i < _pcls.size(); i++)
+  const int nop = _pcls.size();
+  #pragma omp parallel for reduction(+:localKe)
+  for (int i = 0; i < nop; i++)
   {
-    SpeciesParticle& pcl = _pcls[i];
+    const SpeciesParticle& pcl = _pcls[i];
     const double u = pcl.get_u();
     const double v = pcl.get_v();
     const double w = pcl.get_w();
@@ -1441,9 +1458,11 @@ double Particles3Dcomm::getKe() {
 double Particles3Dcomm::getP() {
   double localP = 0.0;
   double totalP = 0.0;
-  for (int i = 0; i < _pcls.size(); i++)
+  const int nop = _pcls.size();
+  #pragma omp parallel for reduction(+:localP)
+  for (int i = 0; i < nop; i++)
   {
-    SpeciesParticle& pcl = _pcls[i];
+    const SpeciesParticle& pcl = _pcls[i];
     const double u = pcl.get_u();
     const double v = pcl.get_v();
     const double w = pcl.get_w();
@@ -1458,9 +1477,11 @@ double Particles3Dcomm::getP() {
 double Particles3Dcomm::getMaxVelocity() {
   double localVel = 0.0;
   double maxVel = 0.0;
-  for (int i = 0; i < _pcls.size(); i++)
+  const int nop = _pcls.size();
+  #pragma omp parallel for reduction(max:localVel)
+  for (int i = 0; i < nop; i++)
   {
-    SpeciesParticle& pcl = _pcls[i];
+    const SpeciesParticle& pcl = _pcls[i];
     const double u = pcl.get_u();
     const double v = pcl.get_v();
     const double w = pcl.get_w();
@@ -1479,20 +1500,32 @@ long long *Particles3Dcomm::getVelocityDistribution(int nBins, double maxVel) {
   long long *f = new long long[nBins];
   for (int i = 0; i < nBins; i++)
     f[i] = 0;
-  double Vel = 0.0;
-  double dv = maxVel / nBins;
-  int bin = 0;
-  for (int i = 0; i < _pcls.size(); i++) {
-    SpeciesParticle& pcl = _pcls[i];
-    const double u = pcl.get_u();
-    const double v = pcl.get_v();
-    const double w = pcl.get_w();
-    Vel = sqrt(u*u + v*v + w*w);
-    bin = int (floor(Vel / dv));
-    if (bin >= nBins)
-      f[nBins - 1] += 1;
-    else
-      f[bin] += 1;
+  const double dv = maxVel / nBins;
+  const int nop = _pcls.size();
+  #pragma omp parallel
+  {
+    // thread-local histogram to avoid atomic race conditions
+    long long *f_local = new long long[nBins]();
+    #pragma omp for nowait
+    for (int i = 0; i < nop; i++) {
+      const SpeciesParticle& pcl = _pcls[i];
+      const double u = pcl.get_u();
+      const double v = pcl.get_v();
+      const double w = pcl.get_w();
+      const double Vel = sqrt(u*u + v*v + w*w);
+      int bin = int(floor(Vel / dv));
+      if (bin >= nBins)
+        f_local[nBins - 1] += 1;
+      else
+        f_local[bin] += 1;
+    }
+    // merge thread-local histograms
+    #pragma omp critical
+    {
+      for (int j = 0; j < nBins; j++)
+        f[j] += f_local[j];
+    }
+    delete[] f_local;
   }
   MPI_Allreduce(MPI_IN_PLACE, f, nBins, MPI_LONG_LONG, MPI_SUM, mpi_comm);
   return f;

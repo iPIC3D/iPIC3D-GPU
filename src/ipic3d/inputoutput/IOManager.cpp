@@ -187,11 +187,14 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
     localWriteNz_ = grid->getNZN() - 3 + (vct->isZupper() ? 1 : 0);
 
     if (!col->field_output_is_off()) {
+        // Check whether FieldOutputTag requests total charge density
+        bool fieldTagHasRho = (col->getFieldOutputTag().find("rho") != string::npos);
+
         if (fieldBackend_ == FieldBackend::PVTK) {
             if (!col->getFieldOutputTag().empty())
                 fieldwritebuffer_ = newArr4(float,
                     localWriteNz_, localWriteNy_, localWriteNx_, 3);
-            if (!col->getMomentsOutputTag().empty())
+            if (!col->getMomentsOutputTag().empty() || fieldTagHasRho)
                 momentwritebuffer_ = newArr3(float,
                     localWriteNz_, localWriteNy_, localWriteNx_);
         }
@@ -213,6 +216,14 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
 // ---------------------------------------------------------------------------
 
 void IOManager::writeFields(int cycle) {
+
+    // Check whether FieldOutputTag requests total charge density ("rho")
+    const bool fieldTagHasRho =
+        (col_->getFieldOutputTag().find("rho") != string::npos);
+
+    // Print backend warning only once (first output cycle)
+    static bool rhoWarningPrinted = false;
+
     switch (fieldBackend_) {
 
     // -- Serial HDF5 (one file per process) --
@@ -225,6 +236,11 @@ void IOManager::writeFields(int cycle) {
             outputWrapperFPP_->append_output(
                 col_->getMomentsOutputTag().c_str(), cycle);
 #endif
+        if (fieldTagHasRho && !rhoWarningPrinted && vct_->getCartesian_rank() == 0) {
+            printf("WARNING: total rho output (FieldOutputTag=rho) "
+                   "is not implemented for SHDF5 backend.\n");
+            rhoWarningPrinted = true;
+        }
         break;
 
     // -- Blocking collective MPI-IO VTK --
@@ -235,6 +251,9 @@ void IOManager::writeFields(int cycle) {
         if (!col_->getMomentsOutputTag().empty())
             WriteMomentsVTK(grid_, EMf_, col_, vct_,
                             col_->getMomentsOutputTag(), cycle, momentwritebuffer_);
+        // Write total charge density if requested via FieldOutputTag
+        if (fieldTagHasRho && momentwritebuffer_)
+            WriteRhoTotalVTK(grid_, EMf_, col_, vct_, cycle, momentwritebuffer_);
         break;
 
     // -- Non-blocking collective MPI-IO VTK --
@@ -285,6 +304,11 @@ void IOManager::writeFields(int cycle) {
                 grid_, EMf_, col_, vct_, cycle,
                 momentwritebuffer_, momentreqArr_, momentfhArr_);
         }
+        if (fieldTagHasRho && !rhoWarningPrinted && vct_->getCartesian_rank() == 0) {
+            printf("WARNING: total rho output (FieldOutputTag=rho) "
+                   "is not implemented for NBCVTK backend.\n");
+            rhoWarningPrinted = true;
+        }
         break;
 
     // -- Parallel HDF5 --
@@ -292,6 +316,11 @@ void IOManager::writeFields(int cycle) {
 #ifndef NO_HDF5
         WriteOutputParallel(grid_, EMf_, outputPart_, col_, vct_, cycle);
 #endif
+        if (fieldTagHasRho && !rhoWarningPrinted && vct_->getCartesian_rank() == 0) {
+            printf("WARNING: total rho output (FieldOutputTag=rho) "
+                   "is not implemented for PARALLEL_HDF5 backend.\n");
+            rhoWarningPrinted = true;
+        }
         break;
 
     // -- H5hut --
@@ -299,6 +328,11 @@ void IOManager::writeFields(int cycle) {
 #ifndef NO_HDF5
         WriteFieldsH5hut(ns_, grid_, EMf_, col_, vct_, cycle);
 #endif
+        if (fieldTagHasRho && !rhoWarningPrinted && vct_->getCartesian_rank() == 0) {
+            printf("WARNING: total rho output (FieldOutputTag=rho) "
+                   "is not implemented for H5HUT backend.\n");
+            rhoWarningPrinted = true;
+        }
         break;
 
     // -- ADIOS2 field output --
@@ -306,6 +340,11 @@ void IOManager::writeFields(int cycle) {
 #ifdef USE_ADIOS2
         adiosManager_->appendFieldOutput(cycle);
 #endif
+        if (fieldTagHasRho && !rhoWarningPrinted && vct_->getCartesian_rank() == 0) {
+            printf("WARNING: total rho output (FieldOutputTag=rho) "
+                   "is not implemented for ADIOS2 backend.\n");
+            rhoWarningPrinted = true;
+        }
         break;
 
     case FieldBackend::NONE:
@@ -438,6 +477,10 @@ bool IOManager::needsParticleSync(int cycle) const {
         return true;
     if (!col_->particle_output_is_off() &&
         cycle % col_->getParticlesOutputCycle() == 0)
+        return true;
+    // Also sync particles when diagnostics (ConservedQuantities) are due
+    if (col_->getDiagnosticsOutputCycle() > 0 &&
+        cycle % col_->getDiagnosticsOutputCycle() == 0)
         return true;
     return false;
 }

@@ -200,10 +200,10 @@ class EMfields3D                // :public Field
     arr3_double getBzc(){return Bzc;};
 
 
-    //arr3_double getRHOc() { return rhoc; }
-    //arr3_double getRHOn() { return rhon; }
-    //double getRHOc(int X, int Y, int Z) const { return rhoc.get(X,Y,Z);}
-    //double getRHOn(int X, int Y, int Z) const { return rhon.get(X,Y,Z);}
+    arr3_double getRHOc() { return rhoc; }
+    arr3_double getRHOn() { return rhon; }
+    double getRHOc(int X, int Y, int Z) const { return rhoc.get(X,Y,Z);}
+    double getRHOn(int X, int Y, int Z) const { return rhon.get(X,Y,Z);}
 
     // densities per species:
     //

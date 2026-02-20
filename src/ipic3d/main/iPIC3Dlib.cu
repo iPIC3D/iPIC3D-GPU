@@ -23,6 +23,7 @@
 #include "MPIdata.h"
 #include "iPic3D.h"
 #include "TimeTasks.h"
+#include <iomanip>
 #include "ipicdefs.h"
 #include "debug.h"
 #include "Parameters.h"
@@ -106,6 +107,7 @@ c_Solver::~c_Solver()
 #endif
   delete [] Ke;
   delete [] momentum;
+  delete [] Qtot;
   delete [] Qremoved;
   delete exosphereIonization;
   delete my_clock;
@@ -263,6 +265,7 @@ int c_Solver::Init(int argc, char **argv) {
   Ke = new double[ns];
   BulkEnergy = new double[ns];
   momentum = new double[ns];
+  Qtot = new double[ns];
   cq = SaveDirName + "/ConservedQuantities.txt";
   if (myrank == 0) {
     ofstream my_file(cq.c_str());
@@ -1321,19 +1324,46 @@ void c_Solver::WriteConserved(int cycle) {
     Benergy = EMf->getBenergy();
     TOTenergy = 0.0;
     TOTmomentum = 0.0;
+    double TOTcharge = 0.0;
     for (int is = 0; is < ns; is++) {
       Ke[is] = outputPart[is].getKe();
       BulkEnergy[is] = EMf->getBulkEnergy(is);
       TOTenergy += Ke[is];
       momentum[is] = outputPart[is].getP();
       TOTmomentum += momentum[is];
+      Qtot[is] = outputPart[is].getTotalQ();
+      TOTcharge += Qtot[is];
     }
     if (myrank == (nprocs-1)) {
+      const int cw = 16; // column width
       ofstream my_file(cq.c_str(), fstream::app);
-      if(cycle == 0)my_file << "\t" << "\t" << "\t" << "Total_Energy" << "\t" << "Momentum" << "\t" << "Eenergy" << "\t" << "Benergy" << "\t" << "Kenergy" << "\t" << "Kenergy(species)" << "\t" << "BulkEnergy(species)" << endl;
-      my_file << cycle << "\t" << "\t" << (Eenergy + Benergy + TOTenergy) << "\t" << TOTmomentum << "\t" << Eenergy << "\t" << Benergy << "\t" << TOTenergy;
-      for (int is = 0; is < ns; is++) my_file << "\t" << Ke[is];
-      for (int is = 0; is < ns; is++) my_file << "\t" << BulkEnergy[is];
+      my_file << std::scientific << std::setprecision(6);
+      if(cycle == 0) {
+        my_file << std::left
+                << std::setw(8)  << "Cycle"
+                << std::setw(cw) << "Total_Energy"
+                << std::setw(cw) << "Momentum"
+                << std::setw(cw) << "Eenergy"
+                << std::setw(cw) << "Benergy"
+                << std::setw(cw) << "Kenergy"
+                << std::setw(cw) << "Total_Charge";
+        for (int is = 0; is < ns; is++) my_file << std::setw(cw) << ("Ke[" + std::to_string(is) + "]");
+        for (int is = 0; is < ns; is++) my_file << std::setw(cw) << ("BulkE[" + std::to_string(is) + "]");
+        for (int is = 0; is < ns; is++) my_file << std::setw(cw) << ("Mom[" + std::to_string(is) + "]");
+        for (int is = 0; is < ns; is++) my_file << std::setw(cw) << ("Q[" + std::to_string(is) + "]");
+        my_file << endl;
+      }
+      my_file << std::left << std::setw(8) << cycle
+              << std::setw(cw) << (Eenergy + Benergy + TOTenergy)
+              << std::setw(cw) << TOTmomentum
+              << std::setw(cw) << Eenergy
+              << std::setw(cw) << Benergy
+              << std::setw(cw) << TOTenergy
+              << std::setw(cw) << TOTcharge;
+      for (int is = 0; is < ns; is++) my_file << std::setw(cw) << Ke[is];
+      for (int is = 0; is < ns; is++) my_file << std::setw(cw) << BulkEnergy[is];
+      for (int is = 0; is < ns; is++) my_file << std::setw(cw) << momentum[is];
+      for (int is = 0; is < ns; is++) my_file << std::setw(cw) << Qtot[is];
       my_file << endl;
       my_file.close();
     }

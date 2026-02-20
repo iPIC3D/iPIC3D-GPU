@@ -1069,6 +1069,107 @@ void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopol
 }
 
 
+// ─── Total charge density (scalar) VTK output ─────────────────
+//
+// Writes the total charge density rhon (sum over all species)
+// as a scalar VTK file.  rhon is already computed by
+// EMfields3D::sumOverSpecies() which is called in MomentsAwait().
+//
+void WriteRhoTotalVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col,
+                      VCtopology3D *vct, int cycle,
+                      float*** momentswritebuffer)
+{
+	// Node grid excluding ghost nodes; upper-boundary procs include last physical node
+	const int nxn  = grid->getNXN() + (vct->isXupper() ? 1 : 0);
+	const int nyn  = grid->getNYN() + (vct->isYupper() ? 1 : 0);
+	const int nzn  = grid->getNZN() + (vct->isZupper() ? 1 : 0);
+	// Global dimensions = total node count = global cells + 1
+	const int dimX = col->getNxc() + 1;
+	const int dimY = col->getNyc() + 1;
+	const int dimZ = col->getNzc() + 1;
+	const double spaceX = dimX > 1 ? col->getLx() / (dimX - 1) : col->getLx();
+	const double spaceY = dimY > 1 ? col->getLy() / (dimY - 1) : col->getLy();
+	const double spaceZ = dimZ > 1 ? col->getLz() / (dimZ - 1) : col->getLz();
+	const int nPoints = dimX * dimY * dimZ;
+
+	// Fill buffer with total charge density (rhon) multiplied by 4*pi
+	for (int iz = 0; iz < nzn - 3; iz++)
+		for (int iy = 0; iy < nyn - 3; iy++)
+			for (int ix = 0; ix < nxn - 3; ix++)
+				momentswritebuffer[iz][iy][ix] =
+					(float)(EMf->getRHOn(ix + 1, iy + 1, iz + 1) * 4.0 * 3.1415926535897);
+
+	// Byte-swap for big-endian VTK binary format on little-endian machines
+	if (EMf->isLittleEndian()) {
+		for (int iz = 0; iz < nzn - 3; iz++)
+			for (int iy = 0; iy < nyn - 3; iy++)
+				for (int ix = 0; ix < nxn - 3; ix++)
+					ByteSwap((unsigned char*)&momentswritebuffer[iz][iy][ix], 4);
+	}
+
+	// VTK header (scalar field)
+	char header[1024];
+	sprintf(header, "# vtk DataFile Version 2.0\n"
+	                "Total charge density from iPIC3D\n"
+	                "BINARY\n"
+	                "DATASET STRUCTURED_POINTS\n"
+	                "DIMENSIONS %d %d %d\n"
+	                "ORIGIN 0 0 0\n"
+	                "SPACING %f %f %f\n"
+	                "POINT_DATA %d\n"
+	                "SCALARS rho_total float\n"
+	                "LOOKUP_TABLE default\n",
+	                dimX, dimY, dimZ,
+	                spaceX, spaceY, spaceZ,
+	                nPoints);
+
+	int nelem = strlen(header);
+	int charsize = sizeof(char);
+	MPI_Offset disp = nelem * charsize;
+
+	MPI_File   fh;
+	MPI_Status status;
+
+	ostringstream filename;
+	filename << col->getSaveDirName() << "/" << col->getSimName()
+	         << "_rho_total_" << cycle << ".vtk";
+
+	MPI_File_open(vct->getFieldComm(), filename.str().c_str(),
+	              MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+
+	if (vct->getCartesian_rank() == 0) {
+		MPI_File_write(fh, header, nelem, MPI_BYTE, &status);
+	}
+
+	int error_code = MPI_File_set_view(fh, disp, MPI_FLOAT,
+	                                    EMf->getProcview(),
+	                                    "native", MPI_INFO_NULL);
+	if (error_code != MPI_SUCCESS) {
+		char error_string[100];
+		int length_of_error_string, error_class;
+		MPI_Error_class(error_code, &error_class);
+		MPI_Error_string(error_class, error_string, &length_of_error_string);
+		dprintf("Error in MPI_File_set_view: %s\n", error_string);
+	}
+
+	error_code = MPI_File_write_all(fh, momentswritebuffer[0][0],
+	                                (nxn - 3) * (nyn - 3) * (nzn - 3),
+	                                MPI_FLOAT, &status);
+	if (error_code != MPI_SUCCESS) {
+		int tcount = 0;
+		MPI_Get_count(&status, MPI_FLOAT, &tcount);
+		char error_string[100];
+		int length_of_error_string, error_class;
+		MPI_Error_class(error_code, &error_class);
+		MPI_Error_string(error_class, error_string, &length_of_error_string);
+		dprintf("Error in MPI_File_write_all: %s, wrote %d MPI_FLOAT\n",
+		        error_string, tcount);
+	}
+
+	MPI_File_close(&fh);
+}
+
+
 int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,int cycle,
 		float**** fieldwritebuffer,MPI_Request requestArr[4],MPI_File fhArr[4]){
 

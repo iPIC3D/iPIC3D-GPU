@@ -265,7 +265,16 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         commonType wavg_old = worig;
 
         assert( (uorig*uorig + vorig*vorig + worig*worig) < 1 );
-        const commonType gamma0 = 1.0 / (sqrt(1.0 - uorig*uorig - vorig*vorig - worig*worig));
+        // Safety: if velocity is already superluminal (e.g. from numerical noise
+        // in a previous cycle), mark for deletion instead of producing NaN.
+        const commonType vorig_sq = uorig*uorig + vorig*vorig + worig*worig;
+        if (vorig_sq >= 1.0) {
+            moverParam->departureArray->getArray()[pidx].dest = departureArrayElementType::DELETE;
+            moverParam->departureArray->getArray()[pidx].hashedId =
+                moverParam->hashedSumArray[departureArrayElementType::DELETE_HASHEDSUM_INDEX].add(pidx);
+            return;
+        }
+        const commonType gamma0 = 1.0 / (sqrt(1.0 - vorig_sq));
         commonType gamma1;
 
         int innter = 0;
@@ -369,6 +378,23 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
             const commonType gamma1 = ( -cfb + sqrt(delta_rel)) / 2.0 / cfa;
             pcl->set_x_u(   xorig + uavg * dt_sub,  yorig + vavg * dt_sub,  zorig + wavg * dt_sub,
                 (1.0 + gamma0/gamma1)*uavg - ut/gamma1, (1.0 + gamma0/gamma1)*vavg - vt/gamma1, (1.0 + gamma0/gamma1)*wavg - wt/gamma1);
+        }
+
+        // Cap velocity to prevent superluminal particles.
+        // If |v|² >= 1 (in units of c), the next subcycle's gamma0 = 1/sqrt(1-v²)
+        // would produce NaN, which bypasses grid safety clamps and causes OOB access.
+        {
+            const commonType unew = pcl->get_u();
+            const commonType vnew = pcl->get_v();
+            const commonType wnew = pcl->get_w();
+            const commonType v2 = unew * unew + vnew * vnew + wnew * wnew;
+            constexpr commonType v2max = 0.9999 * 0.9999; // max allowed |v/c|²
+            if (v2 >= v2max) {
+                const commonType scale = sqrt(v2max / v2);
+                pcl->set_u(unew * scale);
+                pcl->set_v(vnew * scale);
+                pcl->set_w(wnew * scale);
+            }
         }
 
     } // end iteration over subcycles

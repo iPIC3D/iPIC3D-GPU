@@ -93,9 +93,14 @@ __global__ void momentKernelStayed(const uint32_t* appendCount, momentParameter*
         //
         // compute the weights to distribute the moments
         //
-        const int ix = 2 + int(floor((pcl.get_x() - xstart) * inv_dx));
-        const int iy = 2 + int(floor((pcl.get_y() - ystart) * inv_dy));
-        const int iz = 2 + int(floor((pcl.get_z() - zstart) * inv_dz));
+        int ix = 2 + int(floor((pcl.get_x() - xstart) * inv_dx));
+        int iy = 2 + int(floor((pcl.get_y() - ystart) * inv_dy));
+        int iz = 2 + int(floor((pcl.get_z() - zstart) * inv_dz));
+        // Safety clamp: prevent negative indices (would wrap to huge uint32_t in toOneDimIndex)
+        // and cap at nxn-1/nyn-1/nzn-1 to avoid OOB on the moments array.
+        if (ix < 1) ix = 1; if (ix > nxn - 1) ix = nxn - 1;
+        if (iy < 1) iy = 1; if (iy > nyn - 1) iy = nyn - 1;
+        if (iz < 1) iz = 1; if (iz > nzn - 1) iz = nzn - 1;
         const commonType xi0 = pcl.get_x() - grid->getXN(ix-1); // calculate here
         const commonType eta0 = pcl.get_y() - grid->getYN(iy - 1);
         const commonType zeta0 = pcl.get_z() - grid->getZN(iz - 1);
@@ -189,9 +194,14 @@ __global__ void momentKernelNew(momentParameter* momentParam,
     //
     // compute the weights to distribute the moments
     //
-    const int ix = 2 + int(floor((pcl.get_x() - xstart) * inv_dx));
-    const int iy = 2 + int(floor((pcl.get_y() - ystart) * inv_dy));
-    const int iz = 2 + int(floor((pcl.get_z() - zstart) * inv_dz));
+    int ix = 2 + int(floor((pcl.get_x() - xstart) * inv_dx));
+    int iy = 2 + int(floor((pcl.get_y() - ystart) * inv_dy));
+    int iz = 2 + int(floor((pcl.get_z() - zstart) * inv_dz));
+    // Safety clamp: prevent negative indices (would wrap to huge uint32_t in toOneDimIndex)
+    // and cap at nxn-1/nyn-1/nzn-1 to avoid OOB on the moments array.
+    if (ix < 1) ix = 1; if (ix > nxn - 1) ix = nxn - 1;
+    if (iy < 1) iy = 1; if (iy > nyn - 1) iy = nyn - 1;
+    if (iz < 1) iz = 1; if (iz > nzn - 1) iz = nzn - 1;
     const commonType xi0 = pcl.get_x() - grid->getXN(ix-1); // calculate here
     const commonType eta0 = pcl.get_y() - grid->getYN(iy - 1);
     const commonType zeta0 = pcl.get_z() - grid->getZN(iz - 1);

@@ -270,9 +270,27 @@ ExosphereIonization::sampleIonizedParticles(int speciesIndex)
                 for (int ip = 0; ip < numParticlesToInject; ip++) {
 
                     // Uniform random position within the cell (using thread-safe RNG)
-                    const double positionX = cellCenterX + (uniformDist(rng) - 0.5) * cellSpacingX;
-                    const double positionY = cellCenterY + (uniformDist(rng) - 0.5) * cellSpacingY;
-                    const double positionZ = cellCenterZ + (uniformDist(rng) - 0.5) * cellSpacingZ;
+                    // Clamp to [node(1) + eps, node(nxn-2) - eps] to guarantee the
+                    // moment kernel's ix/iy/iz stay within [2, nxc-1] and ix-1 >= 1.
+                    const double eps = 1e-12;
+                    const double xLo = grid->getXstart() + eps;
+                    const double xHi = grid->getXend()   - eps;
+                    const double yLo = grid->getYstart() + eps;
+                    const double yHi = grid->getYend()   - eps;
+                    const double zLo = grid->getZstart() + eps;
+                    const double zHi = grid->getZend()   - eps;
+
+                    double positionX = cellCenterX + (uniformDist(rng) - 0.5) * cellSpacingX;
+                    double positionY = cellCenterY + (uniformDist(rng) - 0.5) * cellSpacingY;
+                    double positionZ = cellCenterZ + (uniformDist(rng) - 0.5) * cellSpacingZ;
+
+                    // Safety: clamp to physical domain (guards against FP edge cases)
+                    if (positionX < xLo) positionX = xLo;
+                    if (positionX > xHi) positionX = xHi;
+                    if (positionY < yLo) positionY = yLo;
+                    if (positionY > yHi) positionY = yHi;
+                    if (positionZ < zLo) positionZ = zLo;
+                    if (positionZ > zHi) positionZ = zHi;
 
                     // Maxwellian velocity sampling (thread-safe Box-Muller)
                     double velocityX, velocityY, velocityZ;

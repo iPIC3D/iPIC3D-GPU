@@ -405,6 +405,16 @@ int c_Solver::initCUDA(){
     outputPart[i].openbc_particles_outflowInfo(&moverParamHostPtr[i]->doOpenBC, moverParamHostPtr[i]->applyOpenBC, moverParamHostPtr[i]->deleteBoundary, moverParamHostPtr[i]->openBoundary);
     moverParamHostPtr[i]->appendCountAtomic = 0;
 
+    // GPU-side EXIT BC: particles exiting via an EXIT face are marked DELETE
+    // on the GPU to avoid sending them through MPI exchange at all.
+    // Only applies on boundary ranks (where the neighbor is MPI_PROC_NULL).
+    moverParamHostPtr[i]->isExitBC[0] = (outputPart[i].bcPfaceXleft  == 0) && vct->noXleftNeighbor_P();
+    moverParamHostPtr[i]->isExitBC[1] = (outputPart[i].bcPfaceXright == 0) && vct->noXrghtNeighbor_P();
+    moverParamHostPtr[i]->isExitBC[2] = (outputPart[i].bcPfaceYleft  == 0) && vct->noYleftNeighbor_P();
+    moverParamHostPtr[i]->isExitBC[3] = (outputPart[i].bcPfaceYright == 0) && vct->noYrghtNeighbor_P();
+    moverParamHostPtr[i]->isExitBC[4] = (outputPart[i].bcPfaceZleft  == 0) && vct->noZleftNeighbor_P();
+    moverParamHostPtr[i]->isExitBC[5] = (outputPart[i].bcPfaceZright == 0) && vct->noZrghtNeighbor_P();
+
     if(col->getRHOinject(i)>0.0)
     outputPart[i].repopulate_particlesInfo(&moverParamHostPtr[i]->doRepopulateInjection, moverParamHostPtr[i]->doRepopulateInjectionSide, moverParamHostPtr[i]->repopulateBoundary);
     else moverParamHostPtr[i]->doRepopulateInjection = false;
@@ -802,7 +812,7 @@ int c_Solver::cudaLauncherAsync(const int species){
   // Copy 8 hashedSums to host: 6 directions + delete + planet (XLOW..PLANET)
   cudaErrChk(cudaStreamWaitEvent(streams[species+ns], event1, 0));
   cudaErrChk(cudaMemcpyAsync(hashedSumArrayHostPtr[species], hashedSumArrayCUDAPtr[species], 
-    departureArrayElementType::PLANET*sizeof(hashedSum), cudaMemcpyDefault, streams[species+ns]));
+    (departureArrayElementType::PLANET_HASHEDSUM_INDEX + 1)*sizeof(hashedSum), cudaMemcpyDefault, streams[species+ns]));
 
   // Copy OpenBC appended particle number to host
   if (moverParamHostPtr[species]->doOpenBC) {

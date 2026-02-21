@@ -129,6 +129,7 @@ public: // utilities
         cudaErrChk(cudaStreamSynchronize(stream));
         cudaErrChk(cudaFree(oldArray));
 
+        return arraySize;
     }
 
     __host__ virtual arrayCUDA* copyToDevice(){

@@ -84,9 +84,12 @@ private:
         // if the position is outside the domain, then map
         // it to the edge of the guarded subdomain
         //
-        if (cx_pos < epsilon) cx_pos = epsilon;
-        if (cy_pos < epsilon) cy_pos = epsilon;
-        if (cz_pos < epsilon) cz_pos = epsilon;
+        // Use !( >= ) form instead of ( < ) to also clamp NaN values.
+        // IEEE 754: NaN < x is false, so (cx_pos < epsilon) would miss NaN.
+        // !(cx_pos >= epsilon) is true when cx_pos is NaN, so NaN gets clamped.
+        if (!(cx_pos >= epsilon)) cx_pos = epsilon;
+        if (!(cy_pos >= epsilon)) cy_pos = epsilon;
+        if (!(cz_pos >= epsilon)) cz_pos = epsilon;
         if (cx_pos > nxc_minus_epsilon) cx_pos = nxc_minus_epsilon;
         if (cy_pos > nyc_minus_epsilon) cy_pos = nyc_minus_epsilon;
         if (cz_pos > nzc_minus_epsilon) cz_pos = nzc_minus_epsilon;

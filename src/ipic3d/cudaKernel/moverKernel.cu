@@ -265,10 +265,12 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         commonType wavg_old = worig;
 
         assert( (uorig*uorig + vorig*vorig + worig*worig) < 1 );
-        // Safety: if velocity is already superluminal (e.g. from numerical noise
+        // Safety: if velocity is already superluminal or NaN (e.g. from numerical noise
         // in a previous cycle), mark for deletion instead of producing NaN.
+        // NOTE: NaN comparisons always return false, so check with !(< 1.0)
+        // instead of (>= 1.0) to also catch NaN velocities.
         const commonType vorig_sq = uorig*uorig + vorig*vorig + worig*worig;
-        if (vorig_sq >= 1.0) {
+        if (!(vorig_sq < 1.0)) {
             moverParam->departureArray->getArray()[pidx].dest = departureArrayElementType::DELETE;
             moverParam->departureArray->getArray()[pidx].hashedId =
                 moverParam->hashedSumArray[departureArrayElementType::DELETE_HASHEDSUM_INDEX].add(pidx);
@@ -383,17 +385,28 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         // Cap velocity to prevent superluminal particles.
         // If |v|² >= 1 (in units of c), the next subcycle's gamma0 = 1/sqrt(1-v²)
         // would produce NaN, which bypasses grid safety clamps and causes OOB access.
+        // Use !(v2 < v2max) form: NaN < x is always false in IEEE 754,
+        // so !(NaN < v2max) is true — this catches NaN as well as v2 >= v2max.
         {
             const commonType unew = pcl->get_u();
             const commonType vnew = pcl->get_v();
             const commonType wnew = pcl->get_w();
             const commonType v2 = unew * unew + vnew * vnew + wnew * wnew;
             constexpr commonType v2max = 0.9999 * 0.9999; // max allowed |v/c|²
-            if (v2 >= v2max) {
-                const commonType scale = sqrt(v2max / v2);
-                pcl->set_u(unew * scale);
-                pcl->set_v(vnew * scale);
-                pcl->set_w(wnew * scale);
+            if (!(v2 < v2max)) {
+                if (isfinite(v2)) {
+                    const commonType scale = sqrt(v2max / v2);
+                    pcl->set_u(unew * scale);
+                    pcl->set_v(vnew * scale);
+                    pcl->set_w(wnew * scale);
+                } else {
+                    // NaN or Inf velocity — position is also corrupted.
+                    // Mark for deletion and exit mover entirely.
+                    moverParam->departureArray->getArray()[pidx].dest = departureArrayElementType::DELETE;
+                    moverParam->departureArray->getArray()[pidx].hashedId =
+                        moverParam->hashedSumArray[departureArrayElementType::DELETE_HASHEDSUM_INDEX].add(pidx);
+                    return;
+                }
             }
         }
 
@@ -452,9 +465,11 @@ __device__ uint32_t deleteAppendOpenBCOutflow(SpeciesParticle* pcl, moverParamet
                 const auto index = moverParam->pclsArray->getNOP() + atomicAdd(&moverParam->appendCountAtomic, 1);
                 // check memory overflow
                 if (index >= moverParam->pclsArray->getSize()) {
-                    printf("Memory overflow in open boundary outflow\n");
-                    //__trap();
-                    return UINT32_MAX; // error sentinel (was -1, changed to avoid signed-to-unsigned conversion warning)
+                    printf("Memory overflow in open boundary outflow (index=%u, size=%u)\n",
+                           index, moverParam->pclsArray->getSize());
+                    // Cannot append — drop this duplicate and mark the original
+                    // particle for deletion so it doesn't corrupt hashed sums.
+                    return departureArrayElementType::DELETE;
                 }
                 memcpy(moverParam->pclsArray->getpcls() + index, &newPcl, sizeof(SpeciesParticle));
                 if(newPcl.get_x() < grid->xStart)
@@ -560,6 +575,17 @@ __device__ void prepareDepartureArray(SpeciesParticle* pcl, moverParameter *move
         
             return;
     }
+
+    // Safety: NaN positions bypass all comparison-based boundary checks
+    // (IEEE 754: NaN < x and NaN > x are both false), so a NaN particle
+    // would fall through to STAY and deposit NaN into the moments array.
+    if (!isfinite(pcl->get_x()) || !isfinite(pcl->get_y()) || !isfinite(pcl->get_z())) {
+        departureArrayElementType element;
+        element.dest = departureArrayElementType::DELETE;
+        element.hashedId = hashedSumArray[departureArrayElementType::DELETE_HASHEDSUM_INDEX].add(pidx);
+        departureArray->getArray()[pidx] = element;
+        return;
+    }
     
     departureArrayElementType element;
 
@@ -581,27 +607,39 @@ __device__ void prepareDepartureArray(SpeciesParticle* pcl, moverParameter *move
 
         if(pcl->get_x() < grid->xStart)
         {
-            element.dest = departureArrayElementType::XLOW;
+            element.dest = moverParam->isExitBC[0]
+                ? departureArrayElementType::DELETE
+                : departureArrayElementType::XLOW;
         }
         else if(pcl->get_x() > grid->xEnd)
         {
-            element.dest = departureArrayElementType::XHIGH;
+            element.dest = moverParam->isExitBC[1]
+                ? departureArrayElementType::DELETE
+                : departureArrayElementType::XHIGH;
         }
         else if(pcl->get_y() < grid->yStart)
         {
-            element.dest = departureArrayElementType::YLOW;
+            element.dest = moverParam->isExitBC[2]
+                ? departureArrayElementType::DELETE
+                : departureArrayElementType::YLOW;
         }
         else if(pcl->get_y() > grid->yEnd)
         {
-            element.dest = departureArrayElementType::YHIGH;
+            element.dest = moverParam->isExitBC[3]
+                ? departureArrayElementType::DELETE
+                : departureArrayElementType::YHIGH;
         }
         else if(pcl->get_z() < grid->zStart)
         {
-            element.dest = departureArrayElementType::ZLOW;
+            element.dest = moverParam->isExitBC[4]
+                ? departureArrayElementType::DELETE
+                : departureArrayElementType::ZLOW;
         }
         else if(pcl->get_z() > grid->zEnd)
         {
-            element.dest = departureArrayElementType::ZHIGH;
+            element.dest = moverParam->isExitBC[5]
+                ? departureArrayElementType::DELETE
+                : departureArrayElementType::ZHIGH;
         }
         else element.dest = departureArrayElementType::STAY;
 

@@ -55,6 +55,11 @@ public: // common parameter
     cudaCommonType sphereOrigin[3];
     cudaCommonType sphereRadius;
 
+    // Per-face EXIT BC flags: if true, particles exiting this face are
+    // deleted on the GPU (dest=DELETE) instead of being sent via MPI.
+    // Order: XLeft, XRight, YLeft, YRight, ZLeft, ZRight
+    bool isExitBC[6];
+
 public:
 
 

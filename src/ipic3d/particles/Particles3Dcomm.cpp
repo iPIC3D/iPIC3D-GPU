@@ -708,10 +708,13 @@ void Particles3Dcomm::apply_BCs_globally(vector_SpeciesParticle& pcl_list)
     // (e.g. we have a runaway particle).
     if(i>=100)
     {
-      print_pcls(pcl_list,pstart, ns);
-      dprint(pstart);
-      dprint(pcl_list.size());
-      eprintf("something went wrong.")
+      // Safety: instead of aborting, remove particles that are clearly
+      // unrecoverable (e.g. garbage positions from GPU memory corruption).
+      // This prevents a single bad particle from crashing the entire run.
+      dprintf("WARNING: apply_BCs_globally removing %d unrecoverable particles (species %d)",
+              (int)pcl_list.size() - pstart, ns);
+      pcl_list.resize(pstart); // discard everything from pstart onward
+      break;
     }
   }
   if(do_apply_periodic_BC_global)
@@ -798,7 +801,6 @@ void Particles3Dcomm::apply_BCs_locally(vector_SpeciesParticle& pcl_list,
   // if appropriate then apply boundary conditions to this block
   else if(do_apply_BCs)
   {
-    int size = pcl_list.size();
     switch(direction)
     {
       default:
@@ -822,7 +824,28 @@ void Particles3Dcomm::apply_BCs_locally(vector_SpeciesParticle& pcl_list,
         apply_Zrght_BC(pcl_list);
         break;
     }
-    pcl_list.resize(size);
+    // Note: DO NOT restore pcl_list.resize(size) here.
+    //
+    // Per-BC-type behaviour (all six apply_*_BC share the same pattern):
+    //   EXIT          – pcls.resize(start): truncates the list.
+    //                   Restoring old size would un-delete them, causing
+    //                   an infinite bounce loop via null2self MPI.
+    //   PERFECT_MIRROR – reflects position & velocity in-place, no resize.
+    //   REEMISSION     – reflects position & re-samples velocity via
+    //                   sample_maxwellian() in-place, no resize.
+    //   OPENBCIn/Out  – empty break (no-op).
+    //
+    // Because pcl_list is a reference to the Block's internal Larray
+    // (via recv_block.fetch_block()), recv_block.size() sees the new
+    // size immediately.  For EXIT this means the subsequent iteration
+    // in handle_received_particles sees size 0 → loop is skipped →
+    // particles are properly discarded.
+    //
+    // Repopulate-injection (deleteRepopulateInjection on GPU +
+    // repopulate_particles_onlyInjection on CPU) runs *after* the MPI
+    // exchange loop in MoverAwaitAndPclExchange, so it is unaffected.
+    // GPU-side EXIT (isExitBC in prepareDepartureArray) prevents most
+    // EXIT particles from entering the MPI pipeline in the first place.
   }
 }
 

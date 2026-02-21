@@ -29,6 +29,76 @@ using commonType = cudaParticleType;
 
 __device__ constexpr bool cap_velocity() { return false; }
 
+// ====== Inline helper functions for mover kernels ======
+
+// Mark particle for deletion and register in the departure hashed sum.
+__device__ __forceinline__ void markForDeletion(
+    moverParameter *moverParam, uint32_t pidx)
+{
+    moverParam->departureArray->getArray()[pidx].dest = departureArrayElementType::DELETE;
+    moverParam->departureArray->getArray()[pidx].hashedId =
+        moverParam->hashedSumArray[departureArrayElementType::DELETE_HASHEDSUM_INDEX].add(pidx);
+}
+
+// Cap particle velocity to v2max = 0.9999^2.
+// Rescales finite superluminal velocities; marks NaN/Inf for deletion.
+// Returns true if the particle was deleted (caller should return).
+__device__ __forceinline__ bool capVelocityOrDelete(
+    SpeciesParticle *pcl, moverParameter *moverParam, uint32_t pidx)
+{
+    const commonType unew = pcl->get_u();
+    const commonType vnew = pcl->get_v();
+    const commonType wnew = pcl->get_w();
+    const commonType v2 = unew * unew + vnew * vnew + wnew * wnew;
+    constexpr commonType v2max = 0.9999 * 0.9999; // max allowed |v/c|^2
+    if (!(v2 < v2max)) {
+        if (isfinite(v2)) {
+            const commonType scale = sqrt(v2max / v2);
+            pcl->set_u(unew * scale);
+            pcl->set_v(vnew * scale);
+            pcl->set_w(wnew * scale);
+        } else {
+            markForDeletion(moverParam, pidx);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Sample nFields components of the EM field at position (x,y,z).
+// Fills weights[8], updates cell coordinates (cx,cy,cz), and writes
+// sampled_field[0..nFields-1] with interpolated values.
+template <int nFields>
+__device__ __forceinline__ void sampleFieldsAtPosition(
+    commonType x, commonType y, commonType z,
+    grid3DCUDA *grid,
+    cudaTypeArray1<cudaFieldType> fieldForPcls,
+    commonType weights[8], int &cx, int &cy, int &cz,
+    commonType sampled_field[6])
+{
+    grid->get_safe_cell_and_weights(x, y, z, cx, cy, cz, weights);
+    const int previousIndex = (cx * (grid->nyn - 1) + cy) * grid->nzn + cz;
+    assert(previousIndex < 24 * (grid->nzn * (grid->nyn - 1) * (grid->nxn - 1)));
+    for (int i = 0; i < nFields; i++)
+        sampled_field[i] = 0;
+    for (int c = 0; c < 8; c++)
+        for (int i = 0; i < nFields; i++)
+            sampled_field[i] += weights[c] * fieldForPcls[previousIndex * 24 + c * 6 + i];
+}
+
+// Compute predictor-corrector convergence error (relative squared velocity change).
+__device__ __forceinline__ commonType computePCError(
+    commonType uavg, commonType vavg, commonType wavg,
+    commonType uavg_old, commonType vavg_old, commonType wavg_old)
+{
+    return ((uavg_old - uavg) * (uavg_old - uavg) +
+            (vavg_old - vavg) * (vavg_old - vavg) +
+            (wavg_old - wavg) * (wavg_old - wavg)) /
+           (uavg_old * uavg_old + vavg_old * vavg_old + wavg_old * wavg_old);
+}
+
+// ====== End inline helper functions ======
+
 // __host__ __device__ void get_field_components_for_cell(
 //     const cudaFieldType *field_components[8],
 //     cudaTypeArray1<cudaFieldType> fieldForPcls, grid3DCUDA *grid,
@@ -84,36 +154,19 @@ __global__ void moverKernel(moverParameter *moverParam,
     while (currErr > PC_err_2 && innter < moverParam->NiterMover)
     {
 
-        // compute weights for field components
-        //
+        // sample E and B field components at current average position
         commonType weights[8];
         int cx, cy, cz;
-        grid->get_safe_cell_and_weights(xavg, yavg, zavg, cx, cy, cz, weights);
-
         commonType sampled_field[6];
-        for (int i = 0; i < 6; i++)
-            sampled_field[i] = 0;
+        sampleFieldsAtPosition<6>(xavg, yavg, zavg, grid, fieldForPcls,
+                                  weights, cx, cy, cz, sampled_field);
+
         commonType &Bxl = sampled_field[0];
         commonType &Byl = sampled_field[1];
         commonType &Bzl = sampled_field[2];
         commonType &Exl = sampled_field[3];
         commonType &Eyl = sampled_field[4];
         commonType &Ezl = sampled_field[5];
-
-        // target previous cell
-        const int previousIndex = (cx * (grid->nyn - 1) + cy) * grid->nzn + cz; // previous cell index
-
-        assert(previousIndex < 24 * (grid->nzn * (grid->nyn - 1) * (grid->nxn - 1)));
-
-        for (int c = 0; c < 8; c++) // grid node
-        {
-            // 4 from previous and 4 from itself
-
-            for (int i = 0; i < 6; i++) // field items
-            {
-                sampled_field[i] += weights[c] * fieldForPcls[previousIndex * 24 + c * 6 + i];
-            }
-        }
         const commonType Omx = qdto2mc * Bxl;
         const commonType Omy = qdto2mc * Byl;
         const commonType Omz = qdto2mc * Bzl;
@@ -137,8 +190,7 @@ __global__ void moverKernel(moverParameter *moverParam,
         zavg = zorig + wavg * dto2;
 
         innter++;
-        currErr = ((uavg_old - uavg) * (uavg_old - uavg) + (vavg_old - vavg) * (vavg_old - vavg) + (wavg_old - wavg) * (wavg_old - wavg)) /
-                  (uavg_old * uavg_old + vavg_old * vavg_old + wavg_old * wavg_old);
+        currErr = computePCError(uavg, vavg, wavg, uavg_old, vavg_old, wavg_old);
         // capture the new velocity for the next iteration
         uavg_old = uavg;
         vavg_old = vavg;
@@ -147,40 +199,34 @@ __global__ void moverKernel(moverParameter *moverParam,
     } // end of iteration
 
     // update the final position and velocity
-    if (cap_velocity()) //used to limit the speed of particles under c
-    {
-        auto umax = moverParam->umax;
-        auto vmax = moverParam->vmax;
-        auto wmax = moverParam->wmax;
-        auto umin = moverParam->umin;
-        auto vmin = moverParam->vmin;
-        auto wmin = moverParam->wmin;
-
-        bool cap = (abs(uavg) > umax || abs(vavg) > vmax || abs(wavg) > wmax) ? true : false;
-        // we could do something more smooth or sophisticated
-        if (cap)
-        {
-            if (uavg > umax)
-                uavg = umax;
-            else if (uavg < umin)
-                uavg = umin;
-            if (vavg > vmax)
-                vavg = vmax;
-            else if (vavg < vmin)
-                vavg = vmin;
-            if (wavg > wmax)
-                wavg = wmax;
-            else if (wavg < wmin)
-                wavg = wmin;
-        }
-    }
+    // if (cap_velocity()) //used to limit the speed of particles under c
+    // {
+    //     auto umax = moverParam->umax;
+    //     auto vmax = moverParam->vmax;
+    //     auto wmax = moverParam->wmax;
+    //     auto umin = moverParam->umin;
+    //     auto vmin = moverParam->vmin;
+    //     auto wmin = moverParam->wmin;
     //
-
-
+    //     bool cap = (abs(uavg) > umax || abs(vavg) > vmax || abs(wavg) > wmax) ? true : false;
+    //     if (cap)
+    //     {
+    //         if (uavg > umax)      uavg = umax;
+    //         else if (uavg < umin) uavg = umin;
+    //         if (vavg > vmax)      vavg = vmax;
+    //         else if (vavg < vmin) vavg = vmin;
+    //         if (wavg > wmax)      wavg = wmax;
+    //         else if (wavg < wmin) wavg = wmin;
+    //     }
+    // }
     pcl->set_x_u(   xorig + uavg * moverParam->dt,  yorig + vavg * moverParam->dt,  zorig + wavg * moverParam->dt,
                     2.0f * uavg - uorig,            2.0f * vavg - vorig,            2.0f * wavg - worig);
 
-
+    // Cap velocity to prevent superluminal particles.
+    // The non-relativistic Boris pusher has no intrinsic speed-of-light limit,
+    // so extreme E fields can produce |v| >= c.
+    if (capVelocityOrDelete(pcl, moverParam, pidx))
+        return;
 
     // prepare the departure array
 
@@ -214,26 +260,10 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
     // first step: evaluate local B magnitude
 
     commonType weights[8];
-
     int cx, cy, cz;
-    grid->get_safe_cell_and_weights(pcl->get_x(), pcl->get_y(), pcl->get_z(), cx, cy, cz, weights);
-    
-    const int previousIndex0 = (cx * (grid->nyn - 1) + cy) * grid->nzn + cz; // previous cell index
-    assert(previousIndex0 < 24 * (grid->nzn * (grid->nyn - 1) * (grid->nxn - 1)));
-
     commonType sampled_field[6];
-    for (int i = 0; i < 6; i++)
-        sampled_field[i] = 0;  
-
-    for (int c = 0; c < 8; c++) // grid node
-    {
-        // 4 from previous and 4 from itself
-
-        for (int i = 0; i < 3; i++) // B field items
-        {
-            sampled_field[i] += weights[c] * fieldForPcls[previousIndex0 * 24 + c * 6 + i];
-        }
-    }
+    sampleFieldsAtPosition<3>(pcl->get_x(), pcl->get_y(), pcl->get_z(),
+                              grid, fieldForPcls, weights, cx, cy, cz, sampled_field);
 
     // evaluate local B field magnitude
     const commonType B_mag = sqrt(sampled_field[0] * sampled_field[0] + sampled_field[1] * sampled_field[1] + sampled_field[2] * sampled_field[2]);
@@ -246,6 +276,21 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
     
     const commonType dto2_sub = .5 * dt_sub;
     const commonType qdto2mc_sub = moverParam->qom * dto2_sub / moverParam->c;
+
+    // Safety: check initial velocity before entering subcycle loop.
+    // If v² >= 1 or NaN (e.g. from MPI injection or previous-cycle noise),
+    // gamma0 = 1/sqrt(1-v²) would produce NaN, cascading through the mover.
+    // After subcycle 0, the velocity cap (S2) at the end of each subcycle
+    // guarantees v² < v2max < 1, so this check is only needed once.
+    {
+        const commonType v2_init = pcl->get_u()*pcl->get_u()
+                                 + pcl->get_v()*pcl->get_v()
+                                 + pcl->get_w()*pcl->get_w();
+        if (!(v2_init < 1.0)) {
+            markForDeletion(moverParam, pidx);
+            return;
+        }
+    }
 
     //start subcycling
     for(int cyc_cnt = 0; cyc_cnt < sub_cycles; cyc_cnt++)
@@ -264,18 +309,7 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         commonType vavg_old = vorig;
         commonType wavg_old = worig;
 
-        assert( (uorig*uorig + vorig*vorig + worig*worig) < 1 );
-        // Safety: if velocity is already superluminal or NaN (e.g. from numerical noise
-        // in a previous cycle), mark for deletion instead of producing NaN.
-        // NOTE: NaN comparisons always return false, so check with !(< 1.0)
-        // instead of (>= 1.0) to also catch NaN velocities.
         const commonType vorig_sq = uorig*uorig + vorig*vorig + worig*worig;
-        if (!(vorig_sq < 1.0)) {
-            moverParam->departureArray->getArray()[pidx].dest = departureArrayElementType::DELETE;
-            moverParam->departureArray->getArray()[pidx].hashedId =
-                moverParam->hashedSumArray[departureArrayElementType::DELETE_HASHEDSUM_INDEX].add(pidx);
-            return;
-        }
         const commonType gamma0 = 1.0 / (sqrt(1.0 - vorig_sq));
         commonType gamma1;
 
@@ -288,11 +322,9 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         while (currErr > PC_err_2 && innter < moverParam->NiterMover)
         {
 
-            // compute weights for field components
-            grid->get_safe_cell_and_weights(xavg, yavg, zavg, cx, cy, cz, weights);
-
-            for (int i = 0; i < 6; i++)
-                sampled_field[i] = 0;
+            // sample E and B field components at current average position
+            sampleFieldsAtPosition<6>(xavg, yavg, zavg, grid, fieldForPcls,
+                                      weights, cx, cy, cz, sampled_field);
 
             commonType &Bxl = sampled_field[0];
             commonType &Byl = sampled_field[1];
@@ -300,20 +332,6 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
             commonType &Exl = sampled_field[3];
             commonType &Eyl = sampled_field[4];
             commonType &Ezl = sampled_field[5];
-
-            // target previous cell
-            const int previousIndex = (cx * (grid->nyn - 1) + cy) * grid->nzn + cz; // previous cell index
-            assert(previousIndex < 24 * (grid->nzn * (grid->nyn - 1) * (grid->nxn - 1)));
-
-            for (int c = 0; c < 8; c++) // grid node
-            {
-                // 4 from previous and 4 from itself
-
-                for (int i = 0; i < 6; i++) // field items
-                {
-                    sampled_field[i] += weights[c] * fieldForPcls[previousIndex * 24 + c * 6 + i];
-                }
-            }
             const commonType Omx = qdto2mc_sub * Bxl;
             const commonType Omy = qdto2mc_sub * Byl;
             const commonType Omz = qdto2mc_sub * Bzl;
@@ -343,8 +361,7 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
             yavg = yorig + vavg * dto2_sub;
             zavg = zorig + wavg * dto2_sub;
 
-            currErr = ((uavg_old - uavg) * (uavg_old - uavg) + (vavg_old - vavg) * (vavg_old - vavg) + (wavg_old - wavg) * (wavg_old - wavg)) /
-                        (uavg_old * uavg_old + vavg_old * vavg_old + wavg_old * wavg_old);
+            currErr = computePCError(uavg, vavg, wavg, uavg_old, vavg_old, wavg_old);
             // capture the new velocity for the next iteration
             uavg_old = uavg;
             vavg_old = vavg;
@@ -383,32 +400,9 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         }
 
         // Cap velocity to prevent superluminal particles.
-        // If |v|² >= 1 (in units of c), the next subcycle's gamma0 = 1/sqrt(1-v²)
-        // would produce NaN, which bypasses grid safety clamps and causes OOB access.
-        // Use !(v2 < v2max) form: NaN < x is always false in IEEE 754,
-        // so !(NaN < v2max) is true — this catches NaN as well as v2 >= v2max.
-        {
-            const commonType unew = pcl->get_u();
-            const commonType vnew = pcl->get_v();
-            const commonType wnew = pcl->get_w();
-            const commonType v2 = unew * unew + vnew * vnew + wnew * wnew;
-            constexpr commonType v2max = 0.9999 * 0.9999; // max allowed |v/c|²
-            if (!(v2 < v2max)) {
-                if (isfinite(v2)) {
-                    const commonType scale = sqrt(v2max / v2);
-                    pcl->set_u(unew * scale);
-                    pcl->set_v(vnew * scale);
-                    pcl->set_w(wnew * scale);
-                } else {
-                    // NaN or Inf velocity — position is also corrupted.
-                    // Mark for deletion and exit mover entirely.
-                    moverParam->departureArray->getArray()[pidx].dest = departureArrayElementType::DELETE;
-                    moverParam->departureArray->getArray()[pidx].hashedId =
-                        moverParam->hashedSumArray[departureArrayElementType::DELETE_HASHEDSUM_INDEX].add(pidx);
-                    return;
-                }
-            }
-        }
+        // If |v|^2 >= 1, the next subcycle's gamma = 1/sqrt(1-v^2) -> NaN.
+        if (capVelocityOrDelete(pcl, moverParam, pidx))
+            return;
 
     } // end iteration over subcycles
     

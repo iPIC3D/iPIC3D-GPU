@@ -27,6 +27,8 @@
 
 using commonType = cudaParticleType;
 
+constexpr cudaTypeDouble PC_err_2 = 1E-12;  // square of error tolerance
+
 __device__ constexpr bool cap_velocity() { return false; }
 
 // ====== Inline helper functions for mover kernels ======
@@ -147,7 +149,6 @@ __global__ void moverKernel(moverParameter *moverParam,
     commonType wavg_old = worig;
 
     int innter = 0;
-    const cudaTypeDouble PC_err_2 = 1E-12;  // square of error tolerance
     cudaTypeDouble currErr = PC_err_2 + 1.; // initialize to a larger value
 
     // calculate the average velocity iteratively
@@ -314,7 +315,6 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         commonType gamma1;
 
         int innter = 0;
-        const cudaTypeDouble PC_err_2 = 1E-12;  // square of error tolerance
         cudaTypeDouble currErr = PC_err_2 + 1.; // initialize to a larger value
 
         // calculate the average velocity iteratively - predictor corrector
@@ -647,4 +647,3 @@ __device__ void prepareDepartureArray(SpeciesParticle* pcl, moverParameter *move
 
     departureArray->getArray()[pidx] = element;
 }
-

@@ -80,13 +80,13 @@ __global__ void chargeCutoffKernel(
  *
  * @param planetArrs       device array of per-electron-species planetArray pointers
  * @param nElecSpecies     number of electron species
- * @param speciesOffsets   per-electron-species offsets into the merged sorted buffers
+ * @param speciesOffsets   per-electron-species offsets into the merged sorted buffers;
+ *                         also used as write offsets into outputBuf
  * @param sortedGlobalIdx  sorted global indices from bitonic sort
  * @param cutoffDevice     device pointer written by chargeCutoffKernel
  * @param totalElecPlanet  total number of electron planet particles
  * @param outputBuf        compact output buffer (SpeciesParticle), laid out by species offsets
  * @param survivorCounters per-electron-species atomic counters (must be zeroed before launch)
- * @param speciesOffsets   also used as per-electron-species write offsets into outputBuf
  * @param originX/Y/Z      planet sphere center
  * @param sphereRadius      planet sphere radius
  * @param doSphere          1: 3D sphere, 2: 2D sphere (XZ plane)
@@ -101,6 +101,26 @@ __global__ void planetReflectCompactKernel(
     int* survivorCounters,
     cudaCommonType originX, cudaCommonType originY, cudaCommonType originZ,
     cudaCommonType sphereRadius, int doSphere);
+
+/**
+ * @brief Fused kernel: DIFFUSELY scatter surviving electrons (isotropic
+ *        velocity on outward hemisphere, preserving speed) and compact
+ *        into a contiguous output buffer.  Structure identical to
+ *        planetReflectCompactKernel; only the velocity update differs.
+ *
+ * @param rngSeedBase  base seed for per-thread PRNG (e.g. cycle number)
+ */
+__global__ void planetDiffuseCompactKernel(
+    planetArray** planetArrs, int nElecSpecies,
+    const int* speciesOffsets,
+    const uint32_t* sortedGlobalIdx,
+    const int* cutoffDevice,
+    int totalElecPlanet,
+    SpeciesParticle* outputBuf,
+    int* survivorCounters,
+    cudaCommonType originX, cudaCommonType originY, cudaCommonType originZ,
+    cudaCommonType sphereRadius, int doSphere,
+    uint32_t rngSeedBase);
 
 
 #endif

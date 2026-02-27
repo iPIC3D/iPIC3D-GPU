@@ -236,6 +236,7 @@ namespace iPic3D {
     int*                planetSurvivorCountDevice; // [planetElecSpeciesCount] per-species atomic counters (device)
     SpeciesParticle*    planetReflectedBuf;        // device buffer for compact reflected particles
     int                 planetReflectedBufCapacity;// capacity (in particles) of planetReflectedBuf
+    uint32_t            planetRngCycleCounter;     // incremented each cycle for diffuse-scatter RNG seed
 
   };
 

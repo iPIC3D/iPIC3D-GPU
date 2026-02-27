@@ -91,6 +91,10 @@ class Collective
     double getz_center_planet()const{ return (z_center_planet); }
     double getL_square()const{ return (L_square); }
 
+    // ── Planet reflection model ──
+    // 0 = specular (mirror) reflection,  1 = diffuse (isotropic) scattering
+    int    getPlanetReflectionType()const{ return (planetReflectionType); }
+
     // ── Exosphere / planet species parameters ──
     int    getNumSolarWindSpecies()const{ return (numSolarWindSpecies); }
     int    getNumPlanetarySpecies()const{ return (numPlanetarySpecies); }
@@ -155,6 +159,7 @@ class Collective
     int getBcPfaceYleft()const{ return (bcPfaceYleft); }
     int getBcPfaceZright()const{ return (bcPfaceZright); }
     int getBcPfaceZleft()const{ return (bcPfaceZleft); }
+    bool getApplyInflowBcsEImage()const{ return applyInflowBcsEImage; }
     int getBcPHIfaceXright()const{ return (bcPHIfaceXright); }
     int getBcPHIfaceXleft()const{ return (bcPHIfaceXleft); }
     int getBcPHIfaceYright()const{ return (bcPHIfaceYright); }
@@ -264,6 +269,9 @@ class Collective
     double z_center_planet;
    /*! object size - assuming a cubic box */
     double L_square;
+
+    /*! planet reflection type: 0=specular, 1=diffuse (isotropic) */
+    int planetReflectionType;
 
     // ── Exosphere / planet species parameters ──
     /*! number of solar wind species */
@@ -382,6 +390,10 @@ class Collective
     int bcPfaceZright;
     /*! Boundary Condition Particles: FaceYleft */
     int bcPfaceZleft;
+
+    /*! Apply inflow E field BCs in GMRes image iterations (default true).
+     *  Inflow BCs are applied per-face only where bcPface == 2 (reemission). */
+    bool applyInflowBcsEImage;
 
 
     /*! Field Boundary Condition 0 = Dirichlet Boundary Condition: specifies the valueto take pn the boundary of the domain 1 = Neumann Boundary Condition: specifies the value of derivative to take on the boundary of the domain 2 = Periodic Condition */

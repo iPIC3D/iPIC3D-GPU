@@ -559,6 +559,7 @@ int c_Solver::initCUDA(){
       planetReflectedBuf = nullptr;
       planetReflectedBufCapacity = 0;
     }
+    planetRngCycleCounter = 0;
   }
 
   cudaErrChk(cudaDeviceSynchronize());
@@ -1057,15 +1058,32 @@ void c_Solver::processPlanetParticles()
                               planetElecSpeciesCount * sizeof(int), planetStream));
 
   // Launch: totalElecPlanet threads; each checks if it is a survivor via device cutoff
-  planetReflectCompactKernel<<<getGridSize(totalElecPlanet, 256), 256, 0, planetStream>>>(
-      planetArrayCUDAPtrDevice, planetElecSpeciesCount,
-      planetElecOffsetsDevice,
-      planetGlobalIdxBuf,
-      planetCutoffDevice,
-      totalElecPlanet,
-      planetReflectedBuf,
-      planetSurvivorCountDevice,
-      originX, originY, originZ, radius, doSphere);
+  const int reflectionType = col->getPlanetReflectionType();
+  if (reflectionType == 1) {
+    // Diffuse (isotropic) scattering — matches legacy rotateAndCountParticlesInsideSphere
+    planetDiffuseCompactKernel<<<getGridSize(totalElecPlanet, 256), 256, 0, planetStream>>>(
+        planetArrayCUDAPtrDevice, planetElecSpeciesCount,
+        planetElecOffsetsDevice,
+        planetGlobalIdxBuf,
+        planetCutoffDevice,
+        totalElecPlanet,
+        planetReflectedBuf,
+        planetSurvivorCountDevice,
+        originX, originY, originZ, radius, doSphere,
+        planetRngCycleCounter);
+  } else {
+    // Specular (mirror) reflection — default
+    planetReflectCompactKernel<<<getGridSize(totalElecPlanet, 256), 256, 0, planetStream>>>(
+        planetArrayCUDAPtrDevice, planetElecSpeciesCount,
+        planetElecOffsetsDevice,
+        planetGlobalIdxBuf,
+        planetCutoffDevice,
+        totalElecPlanet,
+        planetReflectedBuf,
+        planetSurvivorCountDevice,
+        originX, originY, originZ, radius, doSphere);
+  }
+  planetRngCycleCounter++;
 
   // ── Step 8: D2H survivor counts (one small transfer) ──
   cudaErrChk(cudaMemcpyAsync(planetSurvivorCount, planetSurvivorCountDevice,
@@ -1084,7 +1102,7 @@ void c_Solver::processPlanetParticles()
       part[specIdx].get_pcl_arrayPtr()->reserve(newSize * 2);
     }
 
-    // D2H: compact reflected particles → host particle list (after exiting particles)
+    // D2H: compact reflected particles to host particle list (after exiting particles)
     cudaErrChk(cudaMemcpyAsync(
         part[specIdx].get_pcl_array().getList() + currentSize,
         planetReflectedBuf + planetElecOffsets[e],

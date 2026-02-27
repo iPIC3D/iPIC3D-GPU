@@ -236,6 +236,9 @@ void Collective::ReadInput(string inputfile) {
   z_center_planet = config.read < double >("z_center_planet",5.0);
   L_square = config.read < double >("L_square",5.0);
 
+  // ── Planet reflection model: 0=specular (default), 1=diffuse (isotropic) ──
+  planetReflectionType = config.read<int>("planetReflectionType", 0);
+
   // ── Exosphere / planet species parameters ──
   numSolarWindSpecies       = config.read<int>("ns_solar_wind", ns);       // default: all species are SW
   numPlanetarySpecies       = config.read<int>("ns_planetary", 0);        // default: no planetary species
@@ -528,6 +531,9 @@ void Collective::ReadInput(string inputfile) {
   bcPfaceZright = config.read < int >("bcPfaceZright",1);
   bcPfaceZleft  = config.read < int >("bcPfaceZleft",1);
 
+  // E field inflow BC: master switch for applying inflow BCs in GMRes image
+  applyInflowBcsEImage = config.read<int>("ApplyInflowBcsEImage", 1);
+
   if (RESTART1) {               // you are restarting 
     RestartDirName = config.read < string > ("RestartDirName","data");
     restart_status = 1;
@@ -755,6 +761,8 @@ void Collective::Print() {
   cout << "Yright : " << bcPfaceYright << " (" << bcPName(bcPfaceYright) << ")" << endl;
   cout << "Zleft  : " << bcPfaceZleft  << " (" << bcPName(bcPfaceZleft)  << ")" << endl;
   cout << "Zright : " << bcPfaceZright << " (" << bcPName(bcPfaceZright) << ")" << endl;
+  cout << "E inflow BCs in GMRes : " << (applyInflowBcsEImage ? "yes" : "no")
+       << " (applied per-face where bcPface == 2)" << endl;
   cout << "---------------------" << endl;
   cout << "Field Corrections" << endl;
   cout << "---------------------" << endl;
@@ -764,6 +772,11 @@ void Collective::Print() {
   cout << "div(B) cleaning            : " << divBCorrection;
   if (divBCorrection == "yes") cout << ", every " << divBCorrectionCycle << " cycles (in calculateB)";
   cout << endl;
+  cout << "---------------------" << endl;
+  cout << "Planet Boundary" << endl;
+  cout << "---------------------" << endl;
+  cout << "Reflection type            : " << planetReflectionType
+       << (planetReflectionType == 0 ? " (specular)" : " (diffuse/isotropic)") << endl;
   cout << "---------------------" << endl;
   cout << "Exosphere Ionization" << endl;
   cout << "---------------------" << endl;

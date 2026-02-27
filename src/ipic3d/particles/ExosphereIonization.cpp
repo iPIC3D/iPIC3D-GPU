@@ -221,12 +221,11 @@ ExosphereIonization::sampleIonizedParticles(int speciesIndex, int maxParticles)
 
     // ── Charge accumulator (local to this species) ──
     double chargeAccumulator = 0.0;
-    bool budgetExhausted = false;
 
     // ── Loop over local grid cells (excluding ghost cells) ──
-    for (int ix = 1; ix < numCellsX - 1 && !budgetExhausted; ix++) {
-        for (int iy = 1; iy < numCellsY - 1 && !budgetExhausted; iy++) {
-            for (int iz = 1; iz < numCellsZ - 1 && !budgetExhausted; iz++) {
+    for (int ix = 1; ix < numCellsX - 1; ix++) {
+        for (int iy = 1; iy < numCellsY - 1; iy++) {
+            for (int iz = 1; iz < numCellsZ - 1; iz++) {
 
                 // Cell center position relative to planet center
                 const double relativePosX = grid->getXC(ix, iy, iz) - planetCenterX;
@@ -265,10 +264,13 @@ ExosphereIonization::sampleIonizedParticles(int speciesIndex, int maxParticles)
                     + (uniformDist(rng) < fractional ? 1 : 0);
                 if (numParticlesToInject <= 0) continue;
 
-                // Enforce memory budget: clamp injection count
+                // Enforce memory budget: clamp injection count.
+                // When exhausted, continue skips the rest of this cell;
+                // subsequent cells re-check and skip too (negligible cost:
+                // only the distance check runs, no RNG or particle creation).
                 if (hasBudget) {
                     const int remaining = maxParticles - static_cast<int>(buffer.size());
-                    if (remaining <= 0) { budgetExhausted = true; continue; }
+                    if (remaining <= 0) break;  // budget exhausted, stop injecting more particles
                     if (numParticlesToInject > remaining)
                         numParticlesToInject = remaining;
                 }

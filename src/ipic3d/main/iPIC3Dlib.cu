@@ -1277,11 +1277,18 @@ void c_Solver::MomentsAwait() {
 }
 
 void c_Solver::writeParticleNum(int cycle) {
+  if (!pclNumCSV.is_open() || !pclNumCSV.good()) {
+    // Reopen if stream is in a bad state
+    pclNumCSV.close();
+    pclNumCSV.clear();
+    pclNumCSV.open(col->getSaveDirName() + "/particleNum" + std::to_string(myrank) + ".csv", std::ios::app);
+  }
   pclNumCSV << cycle << ",";
   for(int i=0; i<ns-1; i++){
     pclNumCSV << pclsArrayHostPtr[i]->getNOP() << ",";
   }
   pclNumCSV << pclsArrayHostPtr[ns-1]->getNOP() << std::endl;
+  pclNumCSV.flush();
 }
 
 
@@ -1541,43 +1548,40 @@ void c_Solver::injectExosphereParticles()
   if (exosphereIonization == nullptr) return;
 
   // ── Compute memory-aware particle budget per species ──
-  // Query GPU free memory and compute how many new particles can be accommodated
-  // across all planetary species, then divide equally among them.
+  // Only activate a budget when GPU memory is actually scarce or a hard cap
+  // is configured.  When memory is plentiful, maxParticlesPerSpecies stays 0
+  // (unlimited), so sampleIonizedParticles follows the original zero-overhead
+  // code path (hasBudget == false, no per-cell budget check).
   const int numPlanetSpecies = ns - numSolarWindSpecies;
-  int maxParticlesPerSpecies = 0;  // 0 = unlimited
+  int maxParticlesPerSpecies = 0;  // 0 = unlimited (fast path)
 
   // (1) Configurable hard cap from input file (0 = unlimited)
   const int configCap = col->getMaxExosphereParticlesPerSpecies();
-
-  // (2) GPU memory-based dynamic cap
-  size_t gpuFree = 0, gpuTotal = 0;
-  if (cudaMemGetInfo(&gpuFree, &gpuTotal) == cudaSuccess && gpuFree > 0) {
-    // Reserve a fraction of free memory for non-particle allocations
-    // (field arrays, moments, departure arrays, scratch buffers, etc.)
-    const double memoryReserveFraction = 0.20;  // keep 20% free as safety margin
-    const size_t usableBytes = static_cast<size_t>(
-        gpuFree * (1.0 - memoryReserveFraction));
-
-    // Each new particle requires ~1.5x sizeof(SpeciesParticle) on GPU
-    // (1x for the particle array + expansion headroom for the arrayCUDA::expand)
-    const size_t bytesPerParticle = static_cast<size_t>(sizeof(SpeciesParticle) * 1.5);
-    const int gpuBudgetTotal = static_cast<int>(usableBytes / bytesPerParticle);
-
-    // Divide budget equally among planetary species
-    const int gpuBudgetPerSpecies = (numPlanetSpecies > 0)
-        ? gpuBudgetTotal / numPlanetSpecies : gpuBudgetTotal;
-
-    // Take the tighter of config cap and GPU budget
-    if (configCap > 0 && gpuBudgetPerSpecies > 0)
-      maxParticlesPerSpecies = std::min(configCap, gpuBudgetPerSpecies);
-    else if (gpuBudgetPerSpecies > 0)
-      maxParticlesPerSpecies = gpuBudgetPerSpecies;
-    else if (configCap > 0)
-      maxParticlesPerSpecies = configCap;
-    // else both zero → unlimited
-  } else {
-    // cudaMemGetInfo failed — fall back to config cap only
+  if (configCap > 0)
     maxParticlesPerSpecies = configCap;
+
+  // (2) GPU memory-based dynamic cap — only when free memory is low
+  size_t gpuFree = 0, gpuTotal = 0;
+  if (cudaMemGetInfo(&gpuFree, &gpuTotal) == cudaSuccess && gpuTotal > 0) {
+    const double freeRatio = static_cast<double>(gpuFree) / gpuTotal;
+
+    // Only impose a memory budget when <30% of GPU memory remains.
+    // Above this threshold, pass 0 (unlimited) for zero overhead.
+    constexpr double memoryPressureThreshold = 0.30;
+    if (freeRatio < memoryPressureThreshold) {
+      // Keep 20% of current free memory as safety margin
+      const size_t usableBytes = static_cast<size_t>(gpuFree * 0.80);
+      const size_t bytesPerParticle = static_cast<size_t>(sizeof(SpeciesParticle) * 1.5);
+      const int gpuBudgetPerSpecies = (numPlanetSpecies > 0)
+          ? static_cast<int>(usableBytes / bytesPerParticle) / numPlanetSpecies
+          : static_cast<int>(usableBytes / bytesPerParticle);
+
+      // Take the tighter of config cap and GPU budget
+      if (maxParticlesPerSpecies > 0)
+        maxParticlesPerSpecies = std::min(maxParticlesPerSpecies, gpuBudgetPerSpecies);
+      else
+        maxParticlesPerSpecies = gpuBudgetPerSpecies;
+    }
   }
 
   // Enqueue one task per planetary species.

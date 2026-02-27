@@ -61,9 +61,9 @@ y_center_planet =   5.0       # center of the planet - Y
 z_center_planet =   5.0       # center of the planet - Z  
 L_square =   0.5             # radius of the planet
 
-nxc =  30                  # nxc = number of cells - x direction        
-nyc =  30                  # nyc = number of cells - y direction
-nzc =  30                   # nzc = number of cells - z direction        
+nxc =  64                  # nxc = number of cells - x direction        
+nyc =  64                  # nyc = number of cells - y direction
+nzc =  64                   # nzc = number of cells - z direction        
 
 # %%%%%%%%%%%%%% MPI TOPOLOGY %%%%%%%%%%%%%%
 # number of MPI subdomains in each direction
@@ -132,7 +132,7 @@ RmaxExosphereInjection = 3.0            # max radial distance for injection in d
 NeutralSurfaceDensity =      1e7       1e7       1e7       1e7       # neutral surface density [n_sw units]
 ExosphericScaleHeight =      0.25      0.25      0.25      0.25      # exospheric scale height [d_i units]
 PhotoionizationFrequency =   5e-11     5e-11     0.0       0.0       # photoionization frequency [1/wci]
-MacroParticleWeightRatio =   1.0       1.0       1.0       1.0       # macro-particle weight ratio planet/SW
+MacroParticleWeightRatio =   400.0       400.0       400.0       400.0       # macro-particle weight ratio planet/SW
 
 
 # &&&&&&&&&&&& boundary conditions &&&&&&&&&&&&&&&
@@ -167,15 +167,24 @@ MacroParticleWeightRatio =   1.0       1.0       1.0       1.0       # macro-par
 #    Particles Boundary condition
 #    0 = exit
 #    1 = perfect mirror
-#    2 = riemission
-#    3 = open boundary
+#    2 = reemission (injection) - delete particles in 3 cells layer, resample from maxwellian + reflect particles outside the domain resampling velocity from maxwellian
+#    3 = open boundary - open bcs with an effective particle buffer in ghost cells to avoid over depletion 
 #    Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
-    bcPfaceXright = 3
+    bcPfaceXright = 3 // outflow
     bcPfaceXleft =  2
-    bcPfaceYright = 3
-    bcPfaceYleft =  3
-    bcPfaceZright = 3
-    bcPfaceZleft =  3
+    bcPfaceYright = 2
+    bcPfaceYleft =  2
+    bcPfaceZright = 2
+    bcPfaceZleft =  2
+
+# Apply E-field inflow BCs (image constraint in GMRes) — default 1 (true)
+# Inflow is applied per face where bcPface == 2 (reemission)
+ApplyInflowBcsEImage = 1
+
+# Reflection type for electrons not removed from the planet volume
+# 0 - mirror reflection (default 0)
+# 1 - isotropic scattering
+planetReflectionType = 1
 
 #  print to video results 
     verbose = 1
@@ -189,11 +198,11 @@ MacroParticleWeightRatio =   1.0       1.0       1.0       1.0       # macro-par
 # mover predictor corrector iteration
     NiterMover = 8
 # Output for field
-   FieldOutputCycle = 10
+   FieldOutputCycle = 100
    FieldOutputTag   = B+E+Je+Ji+rho
    MomentsOutputTag = rho+PXX+PXY+PXZ+PYY+PYZ+PZZ
 # Output for particles if 0 it doesnt save particles data
-   ParticlesOutputCycle = 15
+   ParticlesOutputCycle = 200
    ParticlesOutputTag = position+velocity+q 
 # restart cycle
    RestartOutputCycle = 0

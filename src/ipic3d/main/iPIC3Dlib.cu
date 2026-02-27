@@ -1525,6 +1525,11 @@ int c_Solver::LastCycle() {
  * ExosphereIonization, then appends them to the host exchange buffer part[i].
  * The particles will be copied to the GPU by the subsequent H2D transfer.
  *
+ * Memory-aware injection: before sampling, the method queries GPU free memory
+ * and computes a per-species particle budget to prevent out-of-memory conditions.
+ * A configurable safety margin (memoryReserveFraction) keeps a fraction of GPU
+ * memory free for field arrays, moments, and other allocations.
+ *
  * Task-based parallelism: each planetary species is submitted as an independent
  * task to the thread pool (same pool used by the mover). Each task uses its own
  * RNG, particle buffer, and part[i] — no cross-species contention. All futures
@@ -1535,6 +1540,46 @@ void c_Solver::injectExosphereParticles()
 {
   if (exosphereIonization == nullptr) return;
 
+  // ── Compute memory-aware particle budget per species ──
+  // Query GPU free memory and compute how many new particles can be accommodated
+  // across all planetary species, then divide equally among them.
+  const int numPlanetSpecies = ns - numSolarWindSpecies;
+  int maxParticlesPerSpecies = 0;  // 0 = unlimited
+
+  // (1) Configurable hard cap from input file (0 = unlimited)
+  const int configCap = col->getMaxExosphereParticlesPerSpecies();
+
+  // (2) GPU memory-based dynamic cap
+  size_t gpuFree = 0, gpuTotal = 0;
+  if (cudaMemGetInfo(&gpuFree, &gpuTotal) == cudaSuccess && gpuFree > 0) {
+    // Reserve a fraction of free memory for non-particle allocations
+    // (field arrays, moments, departure arrays, scratch buffers, etc.)
+    const double memoryReserveFraction = 0.20;  // keep 20% free as safety margin
+    const size_t usableBytes = static_cast<size_t>(
+        gpuFree * (1.0 - memoryReserveFraction));
+
+    // Each new particle requires ~1.5x sizeof(SpeciesParticle) on GPU
+    // (1x for the particle array + expansion headroom for the arrayCUDA::expand)
+    const size_t bytesPerParticle = static_cast<size_t>(sizeof(SpeciesParticle) * 1.5);
+    const int gpuBudgetTotal = static_cast<int>(usableBytes / bytesPerParticle);
+
+    // Divide budget equally among planetary species
+    const int gpuBudgetPerSpecies = (numPlanetSpecies > 0)
+        ? gpuBudgetTotal / numPlanetSpecies : gpuBudgetTotal;
+
+    // Take the tighter of config cap and GPU budget
+    if (configCap > 0 && gpuBudgetPerSpecies > 0)
+      maxParticlesPerSpecies = std::min(configCap, gpuBudgetPerSpecies);
+    else if (gpuBudgetPerSpecies > 0)
+      maxParticlesPerSpecies = gpuBudgetPerSpecies;
+    else if (configCap > 0)
+      maxParticlesPerSpecies = configCap;
+    // else both zero → unlimited
+  } else {
+    // cudaMemGetInfo failed — fall back to config cap only
+    maxParticlesPerSpecies = configCap;
+  }
+
   // Enqueue one task per planetary species.
   // Each task: (1) samples particles via thread-safe RNG, (2) appends to part[i].
   // No shared mutable state between tasks — safe for concurrent execution.
@@ -1544,12 +1589,12 @@ void c_Solver::injectExosphereParticles()
 
   for (int i = numSolarWindSpecies; i < ns; i++) {
     exosphereTaskFutures.push_back(
-      threadPoolPtr->enqueue([this, i]() {
+      threadPoolPtr->enqueue([this, i, maxParticlesPerSpecies]() {
         // sampleIonizedParticles is thread-safe for different species indices:
         // each species uses its own std::mt19937_64 RNG, particle buffer, and
         // charge accumulator (no global rand() or shared mutable state).
         const std::vector<SpeciesParticle>& exosphereParticles =
-            exosphereIonization->sampleIonizedParticles(i);
+            exosphereIonization->sampleIonizedParticles(i, maxParticlesPerSpecies);
 
         if (exosphereParticles.empty()) return;
 

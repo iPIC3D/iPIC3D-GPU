@@ -244,6 +244,7 @@ void Collective::ReadInput(string inputfile) {
   numPlanetarySpecies       = config.read<int>("ns_planetary", 0);        // default: no planetary species
   enableExosphereInjection  = config.read<int>("AddExosphereInjection", 0); // 0=off, 1=on
   maxInjectionRadius        = config.read<double>("RmaxExosphereInjection", 3.0);
+  maxExosphereParticlesPerSpecies = config.read<int>("MaxExosphereParticlesPerSpecies", 0); // 0 = unlimited
 
   // Allocate arrays for planetary neutral species parameters (at least 1 to avoid null)
   const int numNeutralSpecies = std::max(numPlanetarySpecies, 1);

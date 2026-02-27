@@ -144,7 +144,7 @@ double ExosphereIonization::getSpeciesInjectedCharge(int speciesIndex) const
 // ─────────────────────────────────────────────────────────────────────
 
 const std::vector<SpeciesParticle>&
-ExosphereIonization::sampleIonizedParticles(int speciesIndex)
+ExosphereIonization::sampleIonizedParticles(int speciesIndex, int maxParticles)
 {
     // ── Map global species index to neutral-species buffer index ──
     const int neutralIndex = speciesIndex - firstPlanetarySpeciesIndex;
@@ -216,13 +216,17 @@ ExosphereIonization::sampleIonizedParticles(int speciesIndex)
     const int numCellsY = grid->getNYC();
     const int numCellsZ = grid->getNZC();
 
+    // ── Memory budget: 0 means unlimited ──
+    const bool hasBudget = (maxParticles > 0);
+
     // ── Charge accumulator (local to this species) ──
     double chargeAccumulator = 0.0;
+    bool budgetExhausted = false;
 
     // ── Loop over local grid cells (excluding ghost cells) ──
-    for (int ix = 1; ix < numCellsX - 1; ix++) {
-        for (int iy = 1; iy < numCellsY - 1; iy++) {
-            for (int iz = 1; iz < numCellsZ - 1; iz++) {
+    for (int ix = 1; ix < numCellsX - 1 && !budgetExhausted; ix++) {
+        for (int iy = 1; iy < numCellsY - 1 && !budgetExhausted; iy++) {
+            for (int iz = 1; iz < numCellsZ - 1 && !budgetExhausted; iz++) {
 
                 // Cell center position relative to planet center
                 const double relativePosX = grid->getXC(ix, iy, iz) - planetCenterX;
@@ -257,9 +261,17 @@ ExosphereIonization::sampleIonizedParticles(int speciesIndex)
                 // rate on average.
                 const int baseCount      = static_cast<int>(expectedParticleCount);
                 const double fractional  = expectedParticleCount - baseCount;
-                const int numParticlesToInject = baseCount
+                int numParticlesToInject = baseCount
                     + (uniformDist(rng) < fractional ? 1 : 0);
                 if (numParticlesToInject <= 0) continue;
+
+                // Enforce memory budget: clamp injection count
+                if (hasBudget) {
+                    const int remaining = maxParticles - static_cast<int>(buffer.size());
+                    if (remaining <= 0) { budgetExhausted = true; continue; }
+                    if (numParticlesToInject > remaining)
+                        numParticlesToInject = remaining;
+                }
 
                 // Cell center (cached for particle position sampling)
                 const double cellCenterX = grid->getXC(ix, iy, iz);

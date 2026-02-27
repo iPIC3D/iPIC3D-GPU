@@ -100,6 +100,7 @@ class Collective
     int    getNumPlanetarySpecies()const{ return (numPlanetarySpecies); }
     int    getEnableExosphereInjection()const{ return (enableExosphereInjection); }
     double getMaxInjectionRadius()const{ return (maxInjectionRadius); }
+    int    getMaxExosphereParticlesPerSpecies()const{ return (maxExosphereParticlesPerSpecies); }
     double getNeutralSurfaceDensity(int neutralSpecies)const{ return (neutralSurfaceDensity[neutralSpecies]); }
     double getExosphericScaleHeight(int neutralSpecies)const{ return (exosphericScaleHeight[neutralSpecies]); }
     double getPhotoionizationFrequency(int neutralSpecies)const{ return (photoionizationFrequency[neutralSpecies]); }
@@ -282,6 +283,8 @@ class Collective
     int enableExosphereInjection;
     /*! maximum radial distance from planet for exosphere injection */
     double maxInjectionRadius;
+    /*! max exosphere particles per species per timestep (0 = unlimited) */
+    int maxExosphereParticlesPerSpecies;
     /*! neutral surface density per planetary neutral species [n_sw] */
     std::unique_ptr<double[]> neutralSurfaceDensity;
     /*! exospheric scale height per neutral species [d_i] */

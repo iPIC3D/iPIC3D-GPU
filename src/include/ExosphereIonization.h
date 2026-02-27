@@ -57,11 +57,15 @@ public:
      *                      i.e. a planetary species).
      *                      The neutral-parameter index is computed as
      *                      (speciesIndex - numSolarWindSpecies).
+     * @param maxParticles  Maximum number of particles to inject for this species
+     *                      in this call. 0 = unlimited (default). When the limit
+     *                      is reached, sampling stops early. This allows the caller
+     *                      to enforce memory budgets based on GPU/CPU availability.
      * @return Read-only reference to the internal particle buffer for this species.
      *         The caller must consume or copy the data before the next call for
      *         the same species.
      */
-    const std::vector<SpeciesParticle>& sampleIonizedParticles(int speciesIndex);
+    const std::vector<SpeciesParticle>& sampleIonizedParticles(int speciesIndex, int maxParticles = 0);
 
     /**
      * @brief Get the total injected charge across all planetary species.

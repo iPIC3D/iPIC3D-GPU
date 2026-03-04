@@ -31,6 +31,11 @@
 
 #include "cudaTypeDef.cuh"
 
+#ifdef GPU_SOLVER
+#include "GPUFieldArray.cuh"
+#include "GPUHaloComm.cuh"
+#endif
+
 /*! Electromagnetic fields and sources defined for each local grid, and for an implicit maxwell's solver @date May 2008 @par Copyright: (C) 2008 KUL @author Stefano Markidis, Giovanni Lapenta. @version 3.0 */
 
 // dimension of vectors used in fieldForPcls
@@ -302,6 +307,255 @@ class EMfields3D                // :public Field
 
     void freeDataType();
     bool isLittleEndian(){return lEndFlag;};
+
+#ifdef GPU_SOLVER
+    // ---- GPU Solver: lifecycle ----
+    /** Allocate all GPU-resident field arrays (called once after construction). */
+    void gpuSolverAllocate();
+    /** Free all GPU-resident field arrays. */
+    void gpuSolverFree();
+
+    /** Return the dedicated solver CUDA stream. */
+    cudaStream_t gpuSolverStream() const { return solverStream_; }
+    /** Synchronise the solver stream (block host until all solver work is done). */
+    void gpuSolverStreamSync() { cudaStreamSynchronize(solverStream_); }
+
+    // ---- GPU Solver: host ↔ device synchronisation ----
+    /** Copy all primary field arrays from host to device (for initialisation / restart). */
+    void gpuSolverSyncH2D(cudaStream_t stream = 0);
+    /** Copy field arrays from device to host (for I/O output). */
+    void gpuSolverSyncD2H(cudaStream_t stream = 0);
+    // ---- GPU Solver: GPU-aware MPI halo exchange ----
+    /** Node-based halo exchange using GPU-aware MPI (operates on device pointer). */
+    void gpuCommunicateNodeBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
+                              int bcFaceXright, int bcFaceXleft,
+                              int bcFaceYright, int bcFaceYleft,
+                              int bcFaceZright, int bcFaceZleft);
+    /** Batched 3-field node-based halo exchange + BC in one MPI round. */
+    void gpuCommunicateNodeBC_3(int nx, int ny, int nz,
+                                GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
+                                int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL);
+    /** Center-based halo exchange using GPU-aware MPI (operates on device pointer). */
+    void gpuCommunicateCenterBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
+                                int bcFaceXright, int bcFaceXleft,
+                                int bcFaceYright, int bcFaceYleft,
+                                int bcFaceZright, int bcFaceZleft);
+    /** Batched 3-field center-based halo exchange + BC in one MPI round. */
+    void gpuCommunicateCenterBC_3(int nx, int ny, int nz,
+                                  GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
+                                  int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL);
+    /** Batched 9-field center-based halo exchange + BC in one MPI round (for fused triple Laplacian). */
+    void gpuCommunicateCenterBC_9(int nx, int ny, int nz,
+                                  GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
+                                  GPUFieldArray3& a4, GPUFieldArray3& a5, GPUFieldArray3& a6,
+                                  GPUFieldArray3& a7, GPUFieldArray3& a8, GPUFieldArray3& a9,
+                                  int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL);
+    /** Batched 3-field center-based halo exchange + BC_P in one MPI round. */
+    void gpuCommunicateCenterBC_P_3(int nx, int ny, int nz,
+                                    GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
+                                    int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL);
+    /** Batched 3-field node box-stencil halo exchange + BC in one MPI round. */
+    void gpuCommunicateNodeBoxStencilBC_3(int nx, int ny, int nz,
+                                          GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
+                                          int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL);
+    /** Batched 3-field center-based halo exchange with per-field BCs (bc is int[6]). */
+    void gpuCommunicateCenterBC_3mixed(int nx, int ny, int nz,
+                                       GPUFieldArray3& a1, const int* bc1,
+                                       GPUFieldArray3& a2, const int* bc2,
+                                       GPUFieldArray3& a3, const int* bc3);
+    /** Batched 3-field node-based halo exchange with per-field BCs (bc is int[6]). */
+    void gpuCommunicateNodeBC_3mixed(int nx, int ny, int nz,
+                                     GPUFieldArray3& a1, const int* bc1,
+                                     GPUFieldArray3& a2, const int* bc2,
+                                     GPUFieldArray3& a3, const int* bc3);
+    /** Batched 3-field node box-stencil halo exchange with per-field BCs. */
+    void gpuCommunicateNodeBoxStencilBC_3mixed(int nx, int ny, int nz,
+                                               GPUFieldArray3& a1, const int* bc1,
+                                               GPUFieldArray3& a2, const int* bc2,
+                                               GPUFieldArray3& a3, const int* bc3);
+    /** Node-based box-stencil (face-only) halo exchange for smoothing. */
+    void gpuCommunicateNodeBoxStencilBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
+                                        int bcFaceXright, int bcFaceXleft,
+                                        int bcFaceYright, int bcFaceYleft,
+                                        int bcFaceZright, int bcFaceZleft);
+    /** Particle-communicator centre halo exchange (for moments). */
+    void gpuCommunicateCenterBC_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
+                                  int bcFaceXright, int bcFaceXleft,
+                                  int bcFaceYright, int bcFaceYleft,
+                                  int bcFaceZright, int bcFaceZleft);
+    /** Additive (interpolating) node halo exchange for moments (ghost → shared nodes). */
+    void gpuCommunicateInterp(int nx, int ny, int nz, GPUFieldArray3& gpuArr);
+    /** Copy-style node halo exchange for moments (shared → ghost nodes). */
+    void gpuCommunicateNode_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr);
+    /** Node-based box-stencil halo exchange using particle communicator (for smooth). */
+    void gpuCommunicateNodeBoxStencilBC_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
+                                          int bcFaceXright, int bcFaceXleft,
+                                          int bcFaceYright, int bcFaceYleft,
+                                          int bcFaceZright, int bcFaceZleft);
+    /** Batched 3-field node-based box-stencil halo exchange using particle communicator. */
+    void gpuCommunicateNodeBoxStencilBC_P_3(int nx, int ny, int nz,
+                                            GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
+                                            int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL);
+    /** Center-based box-stencil halo exchange using particle communicator (for smooth). */
+    void gpuCommunicateCenterBoxStencilBC_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
+                                            int bcFaceXright, int bcFaceXleft,
+                                            int bcFaceYright, int bcFaceYleft,
+                                            int bcFaceZright, int bcFaceZleft);
+    /** Batched 3-field center-based box-stencil halo exchange using particle communicator. */
+    void gpuCommunicateCenterBoxStencilBC_P_3(int nx, int ny, int nz,
+                                              GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
+                                              int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL);
+
+    // ---- GPU Solver: field-solver methods ----
+    /** GPU version of calculateE. Falls back to CPU if GPU_SOLVER off. */
+    void gpuCalculateE(int cycle);
+    /** GPU version of calculateB. */
+    void gpuCalculateB(int cycle);
+    /** GPU version of calculateHatFunctions. */
+    void gpuCalculateHatFunctions();
+    /** GPU MaxwellImage: A*x callback for GMRES (operates on device Krylov vectors). */
+    void gpuMaxwellImage(double* d_im, double* d_vector);
+    /** GPU MaxwellSource: build RHS of Maxwell system (result in device Krylov vector). */
+    void gpuMaxwellSource(double* d_bkrylov);
+    /** GPU MUdot: compute μ·E for all species. */
+    void gpuMUdot(GPUFieldArray3& MUdotX, GPUFieldArray3& MUdotY, GPUFieldArray3& MUdotZ,
+                  GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ);
+    /** GPU PIdot: compute π·v for one species (accumulative). */
+    void gpuPIdot(GPUFieldArray3& PIX, GPUFieldArray3& PIY, GPUFieldArray3& PIZ,
+                  GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ, int is);
+    /** GPU smooth: SmoothNiter iterations of box smoothing. */
+    void gpuSmooth(GPUFieldArray3& arr, int type);
+    /** GPU smoothE: fused 3-component E-field smoothing. */
+    void gpuSmoothE();
+    /** GPU smooth3: fused 3-component node-field smoothing (for Jhat). */
+    void gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3, int type);
+    /** GPU perfect conductor BC: left boundary. */
+    void gpuPerfectConductorLeft(GPUFieldArray3& imX, GPUFieldArray3& imY, GPUFieldArray3& imZ,
+                                 GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ, int dir);
+    /** GPU perfect conductor BC: right boundary. */
+    void gpuPerfectConductorRight(GPUFieldArray3& imX, GPUFieldArray3& imY, GPUFieldArray3& imZ,
+                                  GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ, int dir);
+    /** GPU lapN2N: Laplacian node→node (gradN2C + halo comm + divC2N). */
+    void gpuLapN2N(GPUFieldArray3& lapN, GPUFieldArray3& fieldN);
+    /** Fused triple Laplacian: 3× lapN2N with ONE batched halo exchange. */
+    void gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
+                     GPUFieldArray3& lapB, GPUFieldArray3& fieldB,
+                     GPUFieldArray3& lapC, GPUFieldArray3& fieldC);
+
+    // ---- GPU Solver: moment post-processing on GPU ----
+    /** D2D scatter: copy 10 packed moment arrays from the moment-kernel buffer
+     *  (momentsSrc, layout [10][gridSize]) into the per-species slices of
+     *  d_rhons, d_Jxs, d_Jys, d_Jzs, d_pXXsn, d_pXYsn, d_pXZsn,
+     *  d_pYYsn, d_pYZsn, d_pZZsn.  Pure device-to-device, no host touch. */
+    void gpuScatterMomentsD2D(double* momentsSrc, int species, cudaStream_t stream = 0);
+
+    /** GPU communicateGhostP2G: full P2G ghost exchange for one species on GPU.
+     *  Performs additive interpolation halo, adjustNonPeriodicDensities,
+     *  and copy-style node halo exchange — all on device arrays. */
+    void gpuCommunicateGhostP2G(int species);
+    /** Batched ghost exchange: all species at once (reduces MPI barriers). */
+    void gpuCommunicateGhostP2G_AllSpecies();
+
+    /** Batched GPU halo exchange: exchanges nFields 3D arrays in a single set
+     *  of MPI messages per direction, using explicit CUDA pack/unpack into
+     *  persistent contiguous GPU buffers.
+     *  @param h_fieldPtrs  Host array of nFields device pointers.
+     *  @param nFields      Number of field arrays to batch.
+     *  @param nx,ny,nz     Grid dimensions (including ghosts).
+     *  @param isCenterFlag true = center-grid offsets, false = node-grid.
+     *  @param isFaceOnlyFlag true = skip edges/corners.
+     *  @param needInterp   true = additive accumulation after exchange.
+     *  @param isParticle   true = use particle communicator.
+     *  @param stream       CUDA stream for kernels. */
+    void gpuBatchedHaloExchange(double** h_fieldPtrs, int nFields,
+                                int nx, int ny, int nz,
+                                bool isCenterFlag, bool isFaceOnlyFlag,
+                                bool needInterp, bool isParticle,
+                                cudaStream_t stream);
+
+    /** Allocate persistent GPU halo exchange buffers. */
+    void gpuAllocateHaloBuffers();
+    /** Free persistent GPU halo exchange buffers. */
+    void gpuFreeHaloBuffers();
+
+    /** GPU setZeroDerivedMoments: zero Jx/Jy/Jz, Jxh/Jyh/Jzh, rhon, rhoc, rhoh on device. */
+    void gpuSetZeroDerivedMoments();
+
+    /** GPU sumOverSpecies: rhon += sum_s(rhons_s) on device. */
+    void gpuSumOverSpecies();
+
+    /** GPU interpDensitiesN2C: rhoc = interpN2C(rhon) on device. */
+    void gpuInterpDensitiesN2C();
+
+    // ---- GPU Solver: open boundary conditions ----
+    /** GPU open BC: zero source term on inflow faces. */
+    void gpuOpenBoundaryInflowESource(double* dX, double* dY, double* dZ, int nx, int ny, int nz);
+    /** GPU open BC: set image = vect - E_inj on inflow faces. */
+    void gpuOpenBoundaryInflowEImage(double* imX, double* imY, double* imZ,
+                                     const double* vX, const double* vY, const double* vZ,
+                                     int nx, int ny, int nz);
+    /** GPU open BC: SAL blend / Dirichlet on E inflow faces (post-solve). */
+    void gpuOpenBoundaryInflowE(double* dX, double* dY, double* dZ, int nx, int ny, int nz);
+    /** GPU open BC: SAL blend / extrapolation on center B inflow faces. */
+    void gpuOpenBoundaryInflowB(double* dX, double* dY, double* dZ, int nx, int ny, int nz);
+
+    // ---- GPU Solver: case-specific B fixes ----
+    /** GPU fix center B for GEM case. */
+    void gpuFixBcGEM();
+    /** GPU fix node B for GEM case. */
+    void gpuFixBnGEM();
+    /** GPU fix center B for ForceFree case. */
+    void gpuFixBforcefree();
+
+    // ---- GPU Solver: ConstantChargePlanet ----
+    /** GPU ConstantChargePlanet: set rhons inside sphere. */
+    void gpuConstantChargePlanet(double R, double x_center, double y_center, double z_center);
+    /** GPU ConstantChargePlanet 2D: set rhons inside circle in XZ plane. */
+    void gpuConstantChargePlanet2DPlaneXZ(double R, double x_center, double z_center);
+
+    // ---- GPU Solver: Poisson/divB correction ----
+    /** GPU Poisson image operator (laplacian on centers). */
+    void gpuPoissonImage(double* d_im, double* d_vec);
+    /** GPU Poisson correction for div(E) cleaning. */
+    void gpuPoissonCorrection(int cycle);
+    /** GPU div(B) cleaning: solve lap(PSI)=div(B), correct B on boundary layers. */
+    void gpuApplyDivBCleaning();
+
+    // ---- GPU Solver: additional halo exchange ----
+    /** Center box-stencil halo exchange using field communicator. */
+    void gpuCommunicateCenterBoxStencilBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
+                                          int bcFaceXright, int bcFaceXleft,
+                                          int bcFaceYright, int bcFaceYleft,
+                                          int bcFaceZright, int bcFaceZleft);
+
+    // ---- GPU Solver: accessor helpers ----
+    GPUFieldArray3& gpuEx()  { return d_Ex;  }
+    GPUFieldArray3& gpuEy()  { return d_Ey;  }
+    GPUFieldArray3& gpuEz()  { return d_Ez;  }
+    GPUFieldArray3& gpuExth(){ return d_Exth;}
+    GPUFieldArray3& gpuEyth(){ return d_Eyth;}
+    GPUFieldArray3& gpuEzth(){ return d_Ezth;}
+    GPUFieldArray3& gpuBxn() { return d_Bxn; }
+    GPUFieldArray3& gpuByn() { return d_Byn; }
+    GPUFieldArray3& gpuBzn() { return d_Bzn; }
+    GPUFieldArray3& gpuBxc() { return d_Bxc; }
+    GPUFieldArray3& gpuByc() { return d_Byc; }
+    GPUFieldArray3& gpuBzc() { return d_Bzc; }
+    GPUFieldArray3& gpuBx_ext() { return d_Bx_ext; }
+    GPUFieldArray3& gpuBy_ext() { return d_By_ext; }
+    GPUFieldArray3& gpuBz_ext() { return d_Bz_ext; }
+    GPUFieldArray4& gpuRhons()  { return d_rhons;   }
+    GPUFieldArray4& gpuJxs()    { return d_Jxs;     }
+    GPUFieldArray4& gpuJys()    { return d_Jys;     }
+    GPUFieldArray4& gpuJzs()    { return d_Jzs;     }
+    GPUFieldArray4& gpupXXsn()  { return d_pXXsn;   }
+    GPUFieldArray4& gpupXYsn()  { return d_pXYsn;   }
+    GPUFieldArray4& gpupXZsn()  { return d_pXZsn;   }
+    GPUFieldArray4& gpupYYsn()  { return d_pYYsn;   }
+    GPUFieldArray4& gpupYZsn()  { return d_pYZsn;   }
+    GPUFieldArray4& gpupZZsn()  { return d_pZZsn;   }
+    bool isGpuSolverAllocated() const { return gpuSolverAllocated_; }
+#endif // GPU_SOLVER
 
   public: // accessors
     const Collective& get_col()const{return _col;}
@@ -613,6 +867,113 @@ class EMfields3D                // :public Field
       int nx, int ny, int nz);
     void OpenBoundaryInflowESource(arr3_double vectorX, arr3_double vectorY, arr3_double vectorZ,
       int nx, int ny, int nz);
+
+#ifdef GPU_SOLVER
+    // =========================================================================
+    //  GPU-resident copies of all field arrays
+    //  -----------------------------------------------------------------------
+    //  Layout is identical to the host arrays (row-major, contiguous), so the
+    //  same MPI derived datatypes can be used with GPU-aware MPI by passing
+    //  the device pointer instead of the host pointer.
+    // =========================================================================
+
+    // Electric field (node-based)
+    GPUFieldArray3 d_Ex, d_Ey, d_Ez;
+    GPUFieldArray3 d_Exth, d_Eyth, d_Ezth;
+
+    // Magnetic field (center-based)
+    GPUFieldArray3 d_Bxc, d_Byc, d_Bzc;
+    // Magnetic field (node-based)
+    GPUFieldArray3 d_Bxn, d_Byn, d_Bzn;
+
+    // Charge / current densities (node-based, summed over species)
+    GPUFieldArray3 d_rhon, d_rhoc, d_rhoh;
+    GPUFieldArray3 d_Jx, d_Jy, d_Jz;
+    GPUFieldArray3 d_Jxh, d_Jyh, d_Jzh;
+
+    // Per-species densities and currents (node-based, species-indexed)
+    GPUFieldArray4 d_rhons;
+    GPUFieldArray4 d_Jxs, d_Jys, d_Jzs;
+
+    // Pressure tensor (node-based, species-indexed)
+    GPUFieldArray4 d_pXXsn, d_pXYsn, d_pXZsn;
+    GPUFieldArray4 d_pYYsn, d_pYZsn, d_pZZsn;
+
+    // Potentials (center-based)
+    GPUFieldArray3 d_PHI, d_PSI;
+
+    // External / total B (node-based)
+    GPUFieldArray3 d_Bx_ext, d_By_ext, d_Bz_ext;
+
+    // Temporary / work arrays (node-based)
+    GPUFieldArray3 d_tempXC, d_tempYC, d_tempZC;
+    GPUFieldArray3 d_tempXN, d_tempYN, d_tempZN;
+    GPUFieldArray3 d_tempC;
+    GPUFieldArray3 d_tempX,  d_tempY,  d_tempZ;
+    GPUFieldArray3 d_temp2X, d_temp2Y, d_temp2Z;
+    GPUFieldArray3 d_imageX, d_imageY, d_imageZ;
+    GPUFieldArray3 d_Dx, d_Dy, d_Dz;
+    GPUFieldArray3 d_vectX, d_vectY, d_vectZ;
+    GPUFieldArray3 d_divC;
+
+    // divB cleaning work arrays
+    GPUFieldArray3 d_divBwork;
+    GPUFieldArray3 d_gradPSIX, d_gradPSIY, d_gradPSIZ;
+
+    // Poisson / Maxwell Krylov vectors
+    GPUKrylovVector d_xkrylovMaxwell, d_bkrylovMaxwell;
+    GPUKrylovVector d_xkrylovPoisson_B, d_bkrylovPoisson_B;
+    GPUKrylovVector d_xkrylovPoisson_E, d_bkrylovPoisson_E;
+
+    // calculateE work arrays
+    GPUFieldArray3 d_divE_work;
+    GPUFieldArray3 d_gradPHIX_work, d_gradPHIY_work, d_gradPHIZ_work;
+
+    // Poisson image work arrays
+    GPUFieldArray3 d_poissonTemp, d_poissonIm;
+
+    // Smooth temp buffer
+    GPUFieldArray3 d_smoothTemp;
+
+    // Device copy of species q/m for perfectConductor kernels
+    double* d_qom = nullptr;
+
+    // Reduction scratch buffer for GPU BLAS dot/norm operations
+    double* d_blasScratch = nullptr;
+
+    // GPU GMRES workspace (allocated on first use in gpuCalculateE)
+    double* d_gmresV    = nullptr;  // [m+1][xkrylovlen]
+    double* d_gmresW    = nullptr;  // [xkrylovlen]
+    int     gmresVAlloc = 0;
+
+    // ---- Persistent PINNED host buffers for GMRES reductions ----
+    // Avoids per-call heap allocation and enables true async D→H DMA.
+    static constexpr int GMRES_M = 20;
+    static constexpr int GMRES_MP1 = GMRES_M + 1;
+    double* h_gmresReduceLocal  = nullptr;  // pinned, [GMRES_MP1] for Arnoldi reductions
+    double* h_gmresReduceGlobal = nullptr;  // pinned, [GMRES_MP1] for MPI_Allreduce output
+    double* h_gmresH  = nullptr;  // pinned, [GMRES_MP1 * GMRES_M] Hessenberg matrix
+    double* h_gmresG  = nullptr;  // pinned, [GMRES_MP1] residual vector
+    double* h_gmresCS = nullptr;  // pinned, [GMRES_M] Givens cosines
+    double* h_gmresSN = nullptr;  // pinned, [GMRES_M] Givens sines
+    double* h_gmresY  = nullptr;  // pinned, [GMRES_MP1] back-substitution work
+
+    // Dedicated non-blocking CUDA stream for the GPU field solver.
+    // Avoids implicit serialisation with particle streams via the legacy default stream.
+    cudaStream_t solverStream_ = 0;
+
+    // ---- Persistent batched halo-exchange buffers ----
+    // 6 directions: 0=XL 1=XR 2=YL 3=YR 4=ZL 5=ZR
+    static constexpr int HALO_MAX_BATCH = 64;
+    double* d_haloBuf_send_[6] = {};   // contiguous GPU send buffers
+    double* d_haloBuf_recv_[6] = {};   // contiguous GPU recv buffers
+    double** d_ptrArray_       = nullptr; // device array of field pointers for kernels
+    double** h_ptrArray_       = nullptr; // pinned host staging for d_ptrArray_ H→D copies
+    bool    haloBufsAllocated_ = false;
+
+    // Flag tracking whether GPU solver arrays have been allocated
+    bool gpuSolverAllocated_ = false;
+#endif // GPU_SOLVER
 };
 
 typedef EMfields3D Field;

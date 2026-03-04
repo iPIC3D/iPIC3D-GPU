@@ -189,6 +189,7 @@ namespace iPic3D {
     ThreadPool *threadPoolPtr;
 
     cudaEvent_t event0, eventOutputCopy;
+    cudaEvent_t solverDoneEvent; ///< recorded on solverStream_ after field solve
 
     //bool verbose;
     string SaveDirName;

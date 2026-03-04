@@ -56,6 +56,7 @@ set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture to compile for (e.g. gf
 
 option(BENCH_MARK "Print tasks time" OFF)
 option(USE_OPENMP "Use OpenMP in supported loops" ON) # must delete all cmake cache if you change this option
+option(GPU_SOLVER "Run the entire field solver on GPU (requires CUDA-aware MPI)" OFF)
 
 include(GNUInstallDirs)
 
@@ -280,6 +281,11 @@ endif()
 
 if(USE_ADIOS2)
   target_compile_definitions(iPIC3Dlib PUBLIC USE_ADIOS2)
+endif()
+
+if(GPU_SOLVER)
+  target_compile_definitions(iPIC3Dlib PUBLIC GPU_SOLVER)
+  message(STATUS "GPU field solver enabled – requires CUDA-aware MPI at runtime")
 endif()
 
 

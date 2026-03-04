@@ -37,6 +37,11 @@
 #include "ParallelIO.h"
 #include "outputPrepare.h"
 #include "IOManager.h"
+
+#ifdef GPU_SOLVER
+#include "GPUFieldPacking.cuh"
+#endif
+
 //
 #ifndef NO_HDF5
 #include "WriteOutputParallel.h"
@@ -451,21 +456,45 @@ int c_Solver::initCUDA(){
   auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
   momentsCUDAPtr = new cudaTypeArray1<cudaMomentType>[ns];
   //for(int i=0; i<ns; i++)cudaMallocAsync(&(momentsCUDAPtr[i]), gridSize*10*sizeof(cudaMomentType), streams[i]);
-  for(int i=0; i<ns; i++)cudaMalloc(&(momentsCUDAPtr[i]), gridSize*10*sizeof(cudaMomentType));
+  for(int i=0; i<ns; i++) cudaErrChk(cudaMalloc(&(momentsCUDAPtr[i]), gridSize*10*sizeof(cudaMomentType)));
 
+#ifndef GPU_SOLVER
   { // register the 10 densities to host pinned memory
+    // NOTE: when GPU_SOLVER is ON, pinning is deferred to after
+    // gpuSolverSyncH2D to avoid conflicting with cudaMemcpyAsync
+    // on the full 4D arrays (cudaHostRegister per-species slices
+    // + whole-array async copy = "invalid argument").
     for(int i=0; i<ns; i++)
       registerMomentsPinnedMemory(i);
   }
+#endif
 
   // cudaMallocAsync(&fieldForPclCUDAPtr, gridSize*8*sizeof(cudaCommonType), 0);
 
   const int fieldSize = grid->getNZN() * (grid->getNYN() - 1) * (grid->getNXN() - 1);
 
   //cudaMallocAsync(&fieldForPclCUDAPtr, fieldSize * 24 * sizeof(cudaFieldType), 0);
-  cudaMalloc(&fieldForPclCUDAPtr, fieldSize * 24 * sizeof(cudaFieldType));
+  cudaErrChk(cudaMalloc(&fieldForPclCUDAPtr, fieldSize * 24 * sizeof(cudaFieldType)));
 
+#ifdef GPU_SOLVER
+  // When GPU solver is ON, field packing is done on GPU — no need for
+  // the pinned host staging buffer.
+  fieldForPclHostPtr = nullptr;
+
+  // Clear any stale CUDA error before GPU solver init
+  cudaGetLastError();
+
+  // Allocate GPU solver field arrays and perform initial H2D sync.
+  EMf->gpuSolverAllocate();
+  EMf->gpuSolverSyncH2D(EMf->gpuSolverStream());
+  cudaErrChk(cudaEventCreateWithFlags(&solverDoneEvent, cudaEventDisableTiming));
+
+  // Now safe to pin moment memory (after the initial H2D sync is done)
+  for(int i=0; i<ns; i++)
+    registerMomentsPinnedMemory(i);
+#else
   cudaErrChk(cudaHostAlloc((void**)&fieldForPclHostPtr, fieldSize * 24 * sizeof(cudaFieldType), 0));
+#endif
 
   threadPoolPtr = new ThreadPool(ns);
   cudaErrChk(cudaEventCreateWithFlags(&event0, cudaEventDisableTiming));
@@ -575,6 +604,9 @@ int c_Solver::deInitCUDA(){
 
   cudaEventDestroy(event0);
   cudaEventDestroy(eventOutputCopy);
+#ifdef GPU_SOLVER
+  cudaEventDestroy(solverDoneEvent);
+#endif
 
   delete threadPoolPtr;
 
@@ -582,7 +614,11 @@ int c_Solver::deInitCUDA(){
   cudaFree(grid3DCUDACUDAPtr);
 
   cudaFree(fieldForPclCUDAPtr);
+#ifdef GPU_SOLVER
+  // fieldForPclHostPtr was not allocated when GPU_SOLVER is ON.
+#else
   cudaFreeHost(fieldForPclHostPtr);
+#endif
 
   // release device objects
   for(int i=0; i<ns; i++){
@@ -733,7 +769,12 @@ void c_Solver::CalculateMoments() {
     // copy the particles to device---- already there...by initliazation or Mover
     // launch the moment kernel
     momentKernelNew<<<(pclsArrayHostPtr[i]->getNOP()/256 + 1), 256, 0, streams[i] >>>(momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], 0);
+#ifdef GPU_SOLVER
+    // D2D scatter: packed moments → per-field GPU solver arrays (no host touch)
+    EMf->gpuScatterMomentsD2D(momentsCUDAPtr[i], i, streams[i]);
+#else
     copyMomentsD2H(i, streams[i]);
+#endif
   }
 
   // synchronize
@@ -746,8 +787,15 @@ void c_Solver::CalculateMoments() {
 void c_Solver::CalculateField(int cycle) {
   timeTasks_set_main_task(TimeTasks::FIELDS);
 
-  // calculate the E field
+#ifdef GPU_SOLVER
+  // Full GPU field solver — results stay in device arrays (d_Ex, d_Exth, ...)
+  EMf->gpuCalculateE(cycle);
+  // Record event so particle packing can wait for solver completion
+  cudaErrChk(cudaEventRecord(solverDoneEvent, EMf->gpuSolverStream()));
+#else
+  // Legacy CPU field solver
   EMf->calculateE(cycle);
+#endif
 }
 
 
@@ -902,14 +950,37 @@ bool c_Solver::ParticlesMoverMomentAsync()
   // move all species of particles
   
   timeTasks_set_main_task(TimeTasks::PARTICLES);
+
+  auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
+
+#ifdef GPU_SOLVER
+  // ---- GPU path: pack fields entirely on the GPU ----
+  // gpuCalculateE / gpuCalculateB produce results directly in d_Ex etc.
+  // No H2D sync needed — launch the GPU packing kernel immediately.
+  // Wait for solverStream_ to finish before packing on streams[0]
+  cudaErrChk(cudaStreamWaitEvent(streams[0], solverDoneEvent, 0));
+  {
+    const int ncells = (grid->getNXN() - 1) * (grid->getNYN() - 1) * grid->getNZN();
+    const int blockSize = 256;
+    const int gridDim   = (ncells + blockSize - 1) / blockSize;
+    gpuPackFieldForPclsToCenter<<<gridDim, blockSize, 0, streams[0]>>>(
+        fieldForPclCUDAPtr,
+        EMf->gpuEx().devPtr(),     EMf->gpuEy().devPtr(),     EMf->gpuEz().devPtr(),
+        EMf->gpuBxn().devPtr(),    EMf->gpuByn().devPtr(),    EMf->gpuBzn().devPtr(),
+        EMf->gpuBx_ext().devPtr(), EMf->gpuBy_ext().devPtr(), EMf->gpuBz_ext().devPtr(),
+        grid->getNXN(), grid->getNYN(), grid->getNZN());
+  }
+#else
+  // ---- Legacy CPU path: pack on host, then H2D copy ----
   // Should change this to add background field
   //EMf->set_fieldForPcls();
   EMf->set_fieldForPclsToCenter(fieldForPclHostPtr);
 
-  auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
   //! copy fieldForPcls to device, for every species 
   cudaErrChk(cudaMemcpyAsync(fieldForPclCUDAPtr, fieldForPclHostPtr, (grid->getNZN() * (grid->getNYN() - 1) * (grid->getNXN() - 1)) * 24 * sizeof(cudaFieldType), cudaMemcpyDefault, streams[0]));
     // castingField<<<gridSize/256 + 1, 256, 0, streams[0]>>>(grid3DCUDACUDAPtr, fieldForPclCUDAPtr);
+#endif
+
   cudaErrChk(cudaEventRecord(event0, streams[0]));
 
   for(int i=0; i<ns; i++){
@@ -1194,7 +1265,12 @@ bool c_Solver::MoverAwaitAndPclExchange()
   }
 
   for(int i=0; i<ns; i++){ // copy moments back to 10 densities
+#ifdef GPU_SOLVER
+    // D2D scatter: packed moments → per-field GPU solver arrays (no host touch)
+    EMf->gpuScatterMomentsD2D(momentsCUDAPtr[i], i, streams[i]);
+#else
     copyMomentsD2H(i, streams[i]);
+#endif
   }
 
 
@@ -1204,8 +1280,20 @@ bool c_Solver::MoverAwaitAndPclExchange()
 //! MAXWELL SOLVER for Bfield (assuming Efield has already been calculated)
 void c_Solver::CalculateB(int cycle) {
   timeTasks_set_main_task(TimeTasks::FIELDS);
-  // calculate the B field
+
+  auto tB0 = std::chrono::high_resolution_clock::now();
+#ifdef GPU_SOLVER
+  // Full GPU B solver — results stay in device arrays (d_Bxc, d_Bxn, ...)
+  EMf->gpuCalculateB(cycle);
+#else
+  // Legacy CPU B solver
   EMf->calculateB(cycle);
+#endif
+  auto tB1 = std::chrono::high_resolution_clock::now();
+  //if (MPIdata::get_rank() == 0) {
+  //  double ms = std::chrono::duration<double, std::milli>(tB1 - tB0).count();
+  //  std::cout << "[CalculateB] total: " << ms << " ms" << std::endl;
+  //}
 }
 
 void c_Solver::MomentsAwait() {
@@ -1213,7 +1301,13 @@ void c_Solver::MomentsAwait() {
   timeTasks_set_main_task(TimeTasks::MOMENTS);
 
   // synchronize
+  auto t0 = std::chrono::high_resolution_clock::now();
   cudaErrChk(cudaDeviceSynchronize());
+  auto t1 = std::chrono::high_resolution_clock::now();
+  //if (myrank == 0) {
+  //  double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  //  std::cout << "[MomentsAwait] cudaDeviceSynchronize: " << ms << " ms" << std::endl;
+  //}
 
   constexpr bool PARTICLE_MERGING = false; // set to true to enable particle merging, false to disable. Note that the merging process is not fully optimized yet, so it might cause performance drop if enabled. Use with caution.
   if constexpr(PARTICLE_MERGING)
@@ -1254,26 +1348,58 @@ void c_Solver::MomentsAwait() {
     mergeIdx = -1; 
   }
 
-  for (int i = 0; i < ns; i++)
-  {
-    EMf->communicateGhostP2G(i);
+#ifdef GPU_SOLVER
+  // ---- Full GPU moment-processing pipeline (no host touch) ----
+  // Phase 1: all-species ghost exchange batched (2 halo exchanges instead of 2*ns)
+  auto tGhostStart = std::chrono::high_resolution_clock::now();
+  EMf->gpuCommunicateGhostP2G_AllSpecies();
+  auto tGhostEnd = std::chrono::high_resolution_clock::now();
+  //if (myrank == 0) {
+  //  double ms = std::chrono::duration<double, std::milli>(tGhostEnd - tGhostStart).count();
+  //  std::cout << "[MomentsAwait] gpuCommunicateGhostP2G_AllSpecies: " << ms << " ms" << std::endl;
+  //}
+
+  // Phase 2: zero derived quantities, planet charge fix, sum over species, interp N→C
+  EMf->gpuSetZeroDerivedMoments();
+  // Enforce constant charge inside planet BEFORE summing over species,
+  // so that rhon (and downstream rhoc, rhoh) includes the planet fix.
+  if (col->getCase() == "Dipole") {
+    EMf->gpuConstantChargePlanet(col->getL_square(),
+        col->getx_center_planet(), col->gety_center_planet(), col->getz_center_planet());
+  } else if (col->getCase() == "Dipole2D") {
+    EMf->gpuConstantChargePlanet2DPlaneXZ(col->getL_square(),
+        col->getx_center_planet(), col->getz_center_planet());
   }
+  EMf->gpuSumOverSpecies();
+  EMf->gpuInterpDensitiesN2C();
+
+  // Phase 3: hat functions (Jhat, rhohat) — already GPU-implemented
+  EMf->gpuCalculateHatFunctions();
+  auto tEnd = std::chrono::high_resolution_clock::now();
+  //if (myrank == 0) {
+  //  double ghostMs  = std::chrono::duration<double, std::milli>(tGhostEnd - tGhostStart).count();
+  //  double phaseMs  = std::chrono::duration<double, std::milli>(tEnd - tGhostEnd).count();
+  //  double totalMs  = std::chrono::duration<double, std::milli>(tEnd - t0).count();
+  //  std::cout << "[MomentsAwait] ghost total: " << ghostMs << " ms, phase2+3: " << phaseMs
+  //            << " ms, total: " << totalMs << " ms" << std::endl;
+  //}
+#else
+  // ---- Legacy CPU moment-processing pipeline ----
+  for (int i = 0; i < ns; i++)
+    EMf->communicateGhostP2G(i);
 
   EMf->setZeroDerivedMoments();
-  // sum all over the species
-  EMf->sumOverSpecies();
-  // Fill with constant charge the planet
+  // Enforce constant charge inside planet BEFORE summing over species,
+  // so that rhon (and downstream rhoc, rhoh) includes the planet fix.
   if (col->getCase()=="Dipole") {
     EMf->ConstantChargePlanet(col->getL_square(),col->getx_center_planet(),col->gety_center_planet(),col->getz_center_planet());
   }else if(col->getCase()=="Dipole2D") {
 	EMf->ConstantChargePlanet2DPlaneXZ(col->getL_square(),col->getx_center_planet(),col->getz_center_planet());
   }
-  // Set a constant charge in the OpenBC boundaries
-  //EMf->ConstantChargeOpenBC();
-  // calculate densities on centers from nodes
+  EMf->sumOverSpecies();
   EMf->interpDensitiesN2C();
-  // calculate the hat quantities for the implicit method
   EMf->calculateHatFunctions();
+#endif
 }
 
 void c_Solver::writeParticleNum(int cycle) {
@@ -1293,6 +1419,32 @@ void c_Solver::writeParticleNum(int cycle) {
 
 
 void c_Solver::WriteOutput(int cycle) {
+
+#ifdef GPU_SOLVER
+  // ---- GPU solver: sync device → host only when I/O actually needs host arrays ----
+  {
+    bool needFieldSync = false;
+    // Diagnostics (energy conservation) need host E, B, rhons, Jxs
+    if (col->getDiagnosticsOutputCycle() > 0 && cycle % col->getDiagnosticsOutputCycle() == 0)
+      needFieldSync = true;
+    // Restart checkpoint needs host fields
+    if (restart_cycle > 0 && cycle % restart_cycle == 0)
+      needFieldSync = true;
+    // Field file output needs host fields
+    if (Parameters::get_doWriteOutput() && !col->field_output_is_off() &&
+        (cycle % col->getFieldOutputCycle() == 0 || cycle == first_cycle))
+      needFieldSync = true;
+    if (needFieldSync) {
+      // Catch any pending async kernel errors before D2H copy
+      cudaError_t syncErr = cudaDeviceSynchronize();
+      if (syncErr != cudaSuccess) {
+        std::cerr << "[WriteOutput] cudaDeviceSynchronize before D2H failed: "
+                  << cudaGetErrorString(syncErr) << std::endl;
+      }
+      EMf->gpuSolverSyncD2H(EMf->gpuSolverStream());
+    }
+  }
+#endif
 
 #ifdef USE_CATALYST
   Adaptor::CoProcess(col->getDt()*cycle, cycle, EMf);

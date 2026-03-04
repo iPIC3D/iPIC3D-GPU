@@ -1260,8 +1260,6 @@ void c_Solver::MomentsAwait() {
   }
 
   EMf->setZeroDerivedMoments();
-  // sum all over the species
-  EMf->sumOverSpecies();
   // Fill with constant charge the planet
   if (col->getCase()=="Dipole") {
     EMf->ConstantChargePlanet(col->getL_square(),col->getx_center_planet(),col->gety_center_planet(),col->getz_center_planet());
@@ -1270,6 +1268,8 @@ void c_Solver::MomentsAwait() {
   }
   // Set a constant charge in the OpenBC boundaries
   //EMf->ConstantChargeOpenBC();
+  // sum all over the species
+  EMf->sumOverSpecies();
   // calculate densities on centers from nodes
   EMf->interpDensitiesN2C();
   // calculate the hat quantities for the implicit method

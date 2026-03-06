@@ -55,6 +55,7 @@
 #include "Moments.h" // for debugging
 
 #include "ExosphereIonization.h"
+#include <cstdlib>  // std::getenv
 #include <cstring>  // std::memcpy
 
 #include "cudaTypeDef.cuh"
@@ -365,11 +366,26 @@ int c_Solver::initCUDA(){
 #elif defined(OMPI_HAVE_MPI_EXT_ROCM) && OMPI_HAVE_MPI_EXT_ROCM
     gpuAwareMPI = true; // Open MPI compiled with ROCm support
 #endif
-    if (!gpuAwareMPI && myrank == 0) {
-      cerr << "[WARNING] GPU_SOLVER is enabled but GPU-aware MPI could not be "
-              "confirmed at runtime.  Halo exchanges pass device pointers to "
-              "MPI_Isend/Irecv — this will fail or silently corrupt data if the "
-              "MPI library is not GPU-aware (CUDA-aware or ROCm-aware)." << endl;
+    if (!gpuAwareMPI) {
+      // Allow the user to override the check when the MPI implementation is
+      // GPU-aware but does not expose compile-time query macros (e.g. Cray
+      // MPICH, MVAPICH2-GDR).
+      const char* override = std::getenv("IPIC_FORCE_GPU_MPI");
+      if (override && std::string(override) == "1") {
+        gpuAwareMPI = true;
+        if (myrank == 0)
+          cout << "[INFO] IPIC_FORCE_GPU_MPI=1 — skipping GPU-aware MPI check." << endl;
+      }
+    }
+    if (!gpuAwareMPI) {
+      if (myrank == 0) {
+        cerr << "[ERROR] GPU_SOLVER is enabled but GPU-aware MPI could not be "
+                "confirmed at runtime.  Halo exchanges pass device pointers to "
+                "MPI_Isend/Irecv — this will fail or silently corrupt data if the "
+                "MPI library is not GPU-aware (CUDA-aware or ROCm-aware).\n"
+                "  Set IPIC_FORCE_GPU_MPI=1 to override this check." << endl;
+      }
+      MPI_Abort(MPI_COMM_WORLD, 1);
     }
   }
 #endif

@@ -329,6 +329,7 @@ void EMfields3D::gpuBatchedHaloExchange(
     bool isParticle,
     cudaStream_t stream)
 {
+    assert(nFields > 0 && nFields <= HALO_MAX_BATCH);
     const VirtualTopology3D* vct = &get_vct();
     const int myrank = vct->getCartesian_rank();
 
@@ -835,6 +836,7 @@ int EMfields3D::gpuBatchedHaloBeginExchange(
     bool needInterp, bool isParticle,
     cudaStream_t stream)
 {
+    assert(nFields > 0 && nFields <= HALO_MAX_BATCH);
     const VirtualTopology3D* vct = &get_vct();
     const int myrank = vct->getCartesian_rank();
     const int xlN = isParticle ? vct->getXleft_neighbor_P()  : vct->getXleft_neighbor();

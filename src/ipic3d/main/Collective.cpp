@@ -178,6 +178,12 @@ void Collective::ReadInput(string inputfile) {
     CGtol = config.read < double >("CGtol",1e-3);
     GMREStol = config.read < double >("GMREStol",1e-3);
     NiterMover = config.read < int >("NiterMover",3);
+    // solver selection: "GMRES" (default) or "Chebyshev"
+    SolverType = config.read < string >("SolverType","GMRES");
+    ChebyshevMaxIter = config.read < int >("ChebyshevMaxIter",20);
+    ChebyshevPrecMaxIter = config.read < int >("ChebyshevPrecMaxIter",8);
+    ChebyshevEigMin = config.read < double >("ChebyshevEigMin",0.0);
+    ChebyshevEigMax = config.read < double >("ChebyshevEigMax",0.0);
     // take the injection of the particless
     Vinj = config.read < double >("Vinj",0.0);
 

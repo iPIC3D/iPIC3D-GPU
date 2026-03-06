@@ -80,7 +80,7 @@ __device__ __forceinline__ void sampleFieldsAtPosition(
 {
     grid->get_safe_cell_and_weights(x, y, z, cx, cy, cz, weights);
     const int previousIndex = (cx * (grid->nyn - 1) + cy) * grid->nzn + cz;
-    assert(previousIndex < 24 * (grid->nzn * (grid->nyn - 1) * (grid->nxn - 1)));
+    assert(previousIndex >= 0 && previousIndex < (grid->nxn - 1) * (grid->nyn - 1) * grid->nzn);
     for (int i = 0; i < nFields; i++)
         sampled_field[i] = 0;
     for (int c = 0; c < 8; c++)

@@ -415,8 +415,57 @@ class EMfields3D                // :public Field
     void gpuCalculateHatFunctions();
     /** GPU MaxwellImage: A*x callback for GMRES (operates on device Krylov vectors). */
     void gpuMaxwellImage(double* d_im, double* d_vector);
+    /** GPU MaxwellImage (local): communication-free A*x for use as preconditioner.
+     *  Ghost cells are treated as zero and physical boundary image corrections
+     *  are enforced locally so the operator better matches the full Maxwell image. */
+    void gpuMaxwellImageLocal(double* d_im, double* d_vector);
     /** GPU MaxwellSource: build RHS of Maxwell system (result in device Krylov vector). */
     void gpuMaxwellSource(double* d_bkrylov);
+
+    // ---- GPU Chebyshev Semi-Iterative Solver ----
+    /** Full Chebyshev solver (with MPI communication).
+     *  Solves  A·x = b  in Krylov space using Chebyshev polynomial acceleration.
+     *  @param d_x      [in/out] initial guess → solution (Krylov vector, device)
+     *  @param n         Krylov vector length = 3*(nxn-2)*(nyn-2)*(nzn-2)
+     *  @param d_b       [in] right-hand side (Krylov vector, device)
+     *  @param GpuImage  operator callback A·v  (e.g. &EMfields3D::gpuMaxwellImage)
+     *  @param maxIter   number of Chebyshev polynomial steps
+     *  @param eigMin    lower bound on eigenvalues of A  (>0)
+     *  @param eigMax    upper bound on eigenvalues of A  (>eigMin)
+     *  @param fieldcomm MPI communicator for residual norms
+     */
+    void gpuChebyshevSolve(double* d_x, int n, double* d_b,
+                           void (EMfields3D::*GpuImage)(double*, double*),
+                           int maxIter, double eigMin, double eigMax,
+                           MPI_Comm fieldcomm);
+
+    /** Chebyshev preconditioner (communication-free).
+     *  Approximately solves  A_local·x = b  using gpuMaxwellImageLocal.
+     *  Intended as a preconditioner inside FGMRES.
+     *  @param d_x  [out] approximate solution (Krylov vector, device)
+     *  @param d_b  [in]  right-hand side       (Krylov vector, device)
+     */
+    void gpuChebyshevPrecond(double* d_x, double* d_b);
+
+    /** GPU FGMRES(m) with Chebyshev preconditioner.
+     *  Right-preconditioned flexible GMRES: Z[k] = M⁻¹ V[k], w = A Z[k].
+     *  Uses gpuChebyshevPrecond as the variable preconditioner.
+     *  Solution update uses Z basis.  True residual checked every restart.
+     */
+    void gpuFGMRES_ChebyshevPrecond(
+        double* d_x, int n, double* d_b,
+        int m, int max_iter, double tol,
+        MPI_Comm fieldcomm);
+
+    /** Power iteration to estimate the largest eigenvalue of A.
+     *  @param GpuImage  operator callback A·v
+     *  @param n         Krylov vector length
+     *  @param nIter     number of power iterations (10–20 typical)
+     *  @param fieldcomm MPI communicator for reductions
+     *  @return          estimate of lambda_max
+     */
+    double gpuEstimateMaxEigenvalue(void (EMfields3D::*GpuImage)(double*, double*),
+                                   int n, int nIter, MPI_Comm fieldcomm);
     /** GPU MUdot: compute μ·E for all species. */
     void gpuMUdot(GPUFieldArray3& MUdotX, GPUFieldArray3& MUdotY, GPUFieldArray3& MUdotZ,
                   GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ);
@@ -845,6 +894,8 @@ class EMfields3D                // :public Field
     double CGtol;
     /*! GMRES tolerance criterium for stopping iterations */
     double GMREStol;
+    /*! Solver type for Maxwell: "GMRES" or "Chebyshev" */
+    std::string SolverType;
 
 
     //MPI Derived Datatype for Center Halo Exchange
@@ -963,6 +1014,24 @@ class EMfields3D                // :public Field
     double* d_gmresV    = nullptr;  // [m+1][xkrylovlen]
     double* d_gmresW    = nullptr;  // [xkrylovlen]
     int     gmresVAlloc = 0;
+
+    // GPU FGMRES workspace (Z basis = preconditioned vectors)
+    double* d_fgmresZ   = nullptr;  // [m][xkrylovlen]
+    int     fgmresZAlloc = 0;
+
+    // ---- GPU Chebyshev workspace (4 Krylov-sized vectors) ----
+    double* d_chebY   = nullptr;   // current iterate
+    double* d_chebW   = nullptr;   // new iterate
+    double* d_chebZ   = nullptr;   // previous iterate
+    double* d_chebTmp = nullptr;   // operator output scratch
+    int     chebAlloc = 0;         // allocated length (0 = not yet)
+    // Chebyshev parameters (configurable, estimated if <= 0)
+    int     chebMaxIter  = 20;     // default polynomial degree
+    int     chebPrecMaxIter = 8;   // steps for preconditioner mode
+    double  chebEigMin   = 0.0;    // 0 → will be set to 1.0
+    double  chebEigMax   = 0.0;    // 0 → estimated via power iteration
+    double  chebPrecEigMin = 0.0;  // eigenvalue bounds for preconditioner
+    double  chebPrecEigMax = 0.0;
 
     // ---- Persistent PINNED host buffers for GMRES reductions ----
     // Avoids per-call heap allocation and enables true async D→H DMA.

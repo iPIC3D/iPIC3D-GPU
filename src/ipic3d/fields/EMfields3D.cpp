@@ -48,6 +48,8 @@
 #include "GPUBlas.cuh"
 #include "GPUStencils.cuh"
 #include "GPUPhysicsKernels.cuh"
+#include "GPUMaxwellLocal.cuh"
+#include "GPUChebyshev.cuh"
 
 #ifdef HALO_OVERLAP
 // Forward declarations for BC face functions (defined in GPUHaloComm.cu).
@@ -273,6 +275,13 @@ EMfields3D::EMfields3D(Collective *col, Grid *grid, VirtualTopology3D *vct) :
   }
   CGtol = col->getCGtol();
   GMREStol = col->getGMREStol();
+  SolverType = col->getSolverType();
+  chebMaxIter = col->getChebyshevMaxIter();
+  chebPrecMaxIter = col->getChebyshevPrecMaxIter();
+  chebEigMin = col->getChebyshevEigMin();
+  chebEigMax = col->getChebyshevEigMax();
+  chebPrecEigMin = chebEigMin;
+  chebPrecEigMax = chebEigMax;
   qom = new double[ns];
   for (int i = 0; i < ns; i++)
     qom[i] = col->getQOM(i);
@@ -622,6 +631,17 @@ void EMfields3D::gpuSolverAllocate()
   d_gmresW    = nullptr;
   gmresVAlloc = 0;
 
+  // ---- FGMRES workspace (lazy allocation) ----
+  d_fgmresZ    = nullptr;
+  fgmresZAlloc = 0;
+
+  // ---- Chebyshev workspace (4 Krylov-sized vectors, lazy alloc) ----
+  d_chebY   = nullptr;
+  d_chebW   = nullptr;
+  d_chebZ   = nullptr;
+  d_chebTmp = nullptr;
+  chebAlloc = 0;
+
   // ---- Dedicated non-blocking solver stream ----
   cudaErrChk(cudaStreamCreateWithFlags(&solverStream_, cudaStreamNonBlocking));
 
@@ -696,6 +716,17 @@ void EMfields3D::gpuSolverFree()
   if (d_gmresV) { cudaFree(d_gmresV); d_gmresV = nullptr; }
   if (d_gmresW) { cudaFree(d_gmresW); d_gmresW = nullptr; }
   gmresVAlloc = 0;
+
+  // Free Chebyshev workspace
+  if (d_chebY)   { cudaFree(d_chebY);   d_chebY   = nullptr; }
+  if (d_chebW)   { cudaFree(d_chebW);   d_chebW   = nullptr; }
+  if (d_chebZ)   { cudaFree(d_chebZ);   d_chebZ   = nullptr; }
+  if (d_chebTmp) { cudaFree(d_chebTmp); d_chebTmp = nullptr; }
+  chebAlloc = 0;
+
+  // Free FGMRES workspace
+  if (d_fgmresZ) { cudaFree(d_fgmresZ); d_fgmresZ = nullptr; }
+  fgmresZAlloc = 0;
 
   // Free pinned GMRES host buffers
   if (h_gmresReduceLocal)  { cudaFreeHost(h_gmresReduceLocal);  h_gmresReduceLocal  = nullptr; }
@@ -1333,6 +1364,449 @@ void EMfields3D::gpuMaxwellImage(double* d_im, double* d_vector)
 }
 
 // =========================================================================
+//  GPU MaxwellImageLocal:  communication-free  im = A * vector
+//
+//  Computes a local approximation to gpuMaxwellImage:
+//    • NO MPI communication  (halo exchanges skipped)
+//    • Ghost cells are treated as zero
+//    • Physical boundary image corrections are still applied locally
+//
+//  Intended for use as a GPU-local preconditioner in FGMRES.
+//
+//  Pipeline (2 + ns kernel launches):
+//    1. gpuSolver2Phys3         — unpack Krylov → vectX/Y/Z
+//    2. gpuMUdot                — D = μ̂·E  (ns species sub-launches)
+//    3. gpuMaxwellLocalCenterOps — fused 3×gradN2C + divN2C
+//    4. gpuMaxwellLocalNodeFused — fused 3×divC2N + gradC2N
+//                                  + arithmetic + phys2solver → d_im
+//
+//  Scratch arrays used (all pre-allocated in gpuSolverAllocate):
+//    Node-sized:  d_vectX/Y/Z, d_Dx/Y/Z           (input/work)
+//    Center-sized: d_tempXC/YC/ZC                   (grad Ex)
+//                  d_divC, d_poissonTemp, d_poissonIm (grad Ey)
+//                  d_divBwork, d_divE_work, d_tempC   (grad Ez)
+//                  d_imageX (first centSize elems)     (div D)
+// =========================================================================
+
+void EMfields3D::gpuMaxwellImageLocal(double* d_im, double* d_vector)
+{
+  const VirtualTopology3D* vct = &get_vct();
+  const Grid* grid = &get_grid();
+  double _invdx = grid->get_invdx();
+  double _invdy = grid->get_invdy();
+  double _invdz = grid->get_invdz();
+
+  size_t centSize = (size_t)nxc * nyc * nzc;
+
+  // ---- Step 0: Zero center-sized scratch arrays ----
+  // Ghost cells of center arrays MUST be zero since we skip communication.
+  // gpuGradN2C / gpuDivN2C only write interior cells; ghost cells must be
+  // pre-zeroed so the subsequent divC2N / gradC2N stencils read zeros at
+  // subdomain boundaries.
+  cudaErrChk(cudaMemsetAsync(d_tempXC.devPtr(),     0, centSize * sizeof(double), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_tempYC.devPtr(),     0, centSize * sizeof(double), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_tempZC.devPtr(),     0, centSize * sizeof(double), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_divC.devPtr(),       0, centSize * sizeof(double), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_poissonTemp.devPtr(),0, centSize * sizeof(double), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_poissonIm.devPtr(),  0, centSize * sizeof(double), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_divBwork.devPtr(),   0, centSize * sizeof(double), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_divE_work.devPtr(),  0, centSize * sizeof(double), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_tempC.devPtr(),      0, centSize * sizeof(double), solverStream_));
+  // 10th center array: reuse first centSize doubles of d_imageX (node-sized, > centSize)
+  cudaErrChk(cudaMemsetAsync(d_imageX.devPtr(),     0, centSize * sizeof(double), solverStream_));
+
+  // ---- Step 1: Krylov → physical space ----
+  gpuSolver2Phys3(d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(),
+                  d_vector, nxn, nyn, nzn, solverStream_);
+
+  // ---- Step 2: MUdot: D = μ̂·E ----
+  // Purely local (no communication), loops over species internally.
+  gpuMUdot(d_Dx, d_Dy, d_Dz, d_vectX, d_vectY, d_vectZ);
+
+  // ---- Step 3: Fused center-level operations ----
+  // Computes 3×gradN2C(Ex,Ey,Ez) → 9 center arrays
+  //        + divN2C(Dx,Dy,Dz)    → 1 center array
+  // All in a single kernel launch.
+  gpuMaxwellLocalCenterOps(
+      d_tempXC.devPtr(),     d_tempYC.devPtr(),     d_tempZC.devPtr(),     // grad(Ex)
+      d_divC.devPtr(),       d_poissonTemp.devPtr(), d_poissonIm.devPtr(), // grad(Ey)
+      d_divBwork.devPtr(),   d_divE_work.devPtr(),   d_tempC.devPtr(),     // grad(Ez)
+      d_imageX.devPtr(),     // div(D) — stored in first centSize of d_imageX
+      d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(),
+      d_Dx.devPtr(),    d_Dy.devPtr(),    d_Dz.devPtr(),
+      nxc, nyc, nzc,
+      _invdx, _invdy, _invdz,
+      solverStream_);
+
+  // ---- Step 4: Fused node-level operations + Krylov packing ----
+  // For each interior node:
+  //   lapX = divC2N(grad(Ex))       — from 3 center arrays
+  //   lapY = divC2N(grad(Ey))       — from 3 center arrays
+  //   lapZ = divC2N(grad(Ez))       — from 3 center arrays
+  //   gdivX/Y/Z = gradC2N(div(D))  — from 1 center array
+  //   im = dt²·(-lap - gdiv) + D + E
+  // Output is packed into Krylov space first, then boundary corrections are
+  // applied after unpacking to node arrays.
+  gpuMaxwellLocalNodeFused(
+      d_im,
+      d_tempXC.devPtr(),     d_tempYC.devPtr(),     d_tempZC.devPtr(),     // grad(Ex)
+      d_divC.devPtr(),       d_poissonTemp.devPtr(), d_poissonIm.devPtr(), // grad(Ey)
+      d_divBwork.devPtr(),   d_divE_work.devPtr(),   d_tempC.devPtr(),     // grad(Ez)
+      d_imageX.devPtr(),     // div(D)
+      d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(),
+      d_Dx.devPtr(),    d_Dy.devPtr(),    d_Dz.devPtr(),
+      nxn, nyn, nzn,
+      _invdx, _invdy, _invdz,
+      delt * delt,
+      solverStream_);
+
+  // Match the CPU local operator: enforce boundary image corrections on the
+  // unpacked node fields, then repack to Krylov space.
+  gpuSolver2Phys3(d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
+                  d_im, nxn, nyn, nzn, solverStream_);
+
+  if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 0)
+    gpuPerfectConductorLeft(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY, d_vectZ, 0);
+  if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 0)
+    gpuPerfectConductorRight(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY, d_vectZ, 0);
+  if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 0)
+    gpuPerfectConductorLeft(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY, d_vectZ, 1);
+  if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 0)
+    gpuPerfectConductorRight(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY, d_vectZ, 1);
+  if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 0)
+    gpuPerfectConductorLeft(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY, d_vectZ, 2);
+  if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 0)
+    gpuPerfectConductorRight(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY, d_vectZ, 2);
+
+  if (get_col().getApplyInflowBcsEImage())
+    gpuOpenBoundaryInflowEImage(d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
+                                d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(),
+                                nxn, nyn, nzn);
+
+  gpuPhys2Solver3(d_im,
+                  d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
+                  nxn, nyn, nzn, solverStream_);
+}
+
+// =========================================================================
+//  GPU Chebyshev: estimate λ_max via power iteration (Rayleigh quotient)
+// =========================================================================
+
+double EMfields3D::gpuEstimateMaxEigenvalue(
+    void (EMfields3D::*GpuImage)(double*, double*),
+    int n, int nIter, MPI_Comm fieldcomm)
+{
+  // Lazy allocate Chebyshev workspace (needed for d_chebTmp as scratch)
+  if (chebAlloc < n) {
+    if (d_chebY)   cudaFree(d_chebY);
+    if (d_chebW)   cudaFree(d_chebW);
+    if (d_chebZ)   cudaFree(d_chebZ);
+    if (d_chebTmp) cudaFree(d_chebTmp);
+    cudaErrChk(cudaMalloc(&d_chebY,   (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebW,   (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebZ,   (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebTmp, (size_t)n * sizeof(double)));
+    chebAlloc = n;
+  }
+
+  // Initialize v = 1/sqrt(n) (uniform vector)
+  gpuEqValue(d_chebY, 1.0 / sqrt((double)n), n, solverStream_);
+
+  double lambda = 0.0;
+  for (int iter = 0; iter < nIter; iter++) {
+    // w = A(v)
+    (this->*GpuImage)(d_chebTmp, d_chebY);
+
+    // Rayleigh quotient: λ = (v, w) / (v, v)
+    // Since v is normalized, (v,v) ≈ local_sum; need global via MPI
+    gpuDot_async(d_chebY, d_chebTmp, n, d_blasScratch,
+                 &h_gmresReduceLocal[0], solverStream_);
+    gpuNorm2_async(d_chebTmp, n, d_blasScratch,
+                   &h_gmresReduceLocal[1], solverStream_);
+    cudaErrChk(cudaStreamSynchronize(solverStream_));
+
+    double localBuf[2] = { h_gmresReduceLocal[0], h_gmresReduceLocal[1] };
+    double globalBuf[2];
+    MPI_Allreduce(localBuf, globalBuf, 2, MPI_DOUBLE, MPI_SUM, fieldcomm);
+
+    double vw = globalBuf[0];  // (v, Av)
+    double ww = globalBuf[1];  // ||Av||²
+
+    if (ww < 1e-30) break;
+    lambda = vw;  // since v is normalized: (v,v) = 1 globally → λ = (v,Av)
+
+    // v = w / ||w||
+    gpuScaleCopy(d_chebY, d_chebTmp, 1.0 / sqrt(ww), n, solverStream_);
+  }
+
+  return lambda;
+}
+
+// =========================================================================
+//  GPU Chebyshev Solve: full solver (with MPI communication)
+//
+//  Solves  A·x = b  via Chebyshev semi-iteration with initial guess x₀.
+//  The recurrence operates on the residual  r₀ = b - A·x₀  and produces
+//  a correction  δx ≈ A⁻¹·r₀.  Final result: x = x₀ + δx.
+//
+//  The polynomial applies to the NEGATED operator -A (positive eigenvalues
+//  mapped to the standard Chebyshev interval), matching the formulation
+//  in the Poisson Chebyshev solver.
+// =========================================================================
+
+void EMfields3D::gpuChebyshevSolve(
+    double* d_x, int n, double* d_b,
+    void (EMfields3D::*GpuImage)(double*, double*),
+    int maxIter, double eigMin, double eigMax,
+    MPI_Comm fieldcomm)
+{
+  const VirtualTopology3D* vct = &get_vct();
+
+  // ---- Lazy workspace allocation ----
+  if (chebAlloc < n) {
+    if (d_chebY)   cudaFree(d_chebY);
+    if (d_chebW)   cudaFree(d_chebW);
+    if (d_chebZ)   cudaFree(d_chebZ);
+    if (d_chebTmp) cudaFree(d_chebTmp);
+    cudaErrChk(cudaMalloc(&d_chebY,   (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebW,   (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebZ,   (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebTmp, (size_t)n * sizeof(double)));
+    chebAlloc = n;
+  }
+
+  // ---- Chebyshev parameters ----
+  double theta = (eigMin + eigMax) * 0.5;
+  double delta = (eigMax - eigMin) * 0.5;
+  double sigma = theta / delta;
+
+  double rhoOld = 1.0 / sigma;
+  double rho    = 1.0 / (2.0 * sigma - rhoOld);
+
+  // ---- Compute residual r₀ = b - A·x₀ ----
+  // Store r₀ in d_chebW (temporary).  d_chebTmp is used for A·x₀.
+  (this->*GpuImage)(d_chebTmp, d_x);                // tmp = A·x₀
+  gpuSubRes(d_chebW, d_b, d_chebTmp, n, solverStream_);  // w = b - A·x₀ = r₀
+
+  // ---- Optional: print initial residual norm ----
+  gpuNorm2_async(d_chebW, n, d_blasScratch, &h_gmresReduceLocal[0], solverStream_);
+  cudaErrChk(cudaStreamSynchronize(solverStream_));
+  double localNorm = h_gmresReduceLocal[0];
+  double globalNorm;
+  MPI_Allreduce(&localNorm, &globalNorm, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+  double initial_error = sqrt(globalNorm);
+  if (vct->getCartesian_rank() == 0)
+    printf("  [Chebyshev] Initial residual: %g  (eigMin=%.4g, eigMax=%.4g, %d steps)\n",
+           initial_error, eigMin, eigMax, maxIter);
+
+  // Now d_chebW holds r₀.  Use it as the "b" for the Chebyshev recurrence.
+  // We'll call it d_r0 conceptually.  Pointers:
+  //   d_r0  = d_chebW  (the fixed RHS of the recurrence = residual)
+  //   d_y   = d_chebY
+  //   d_z   = d_chebZ
+  //   d_w   = d_chebTmp  (reused for both operator output and new iterate)
+  //
+  // But we also need an operator-output buffer separate from the iterate
+  // buffers.  Since we have 4 buffers total, assign:
+  //   d_r0    = d_chebW   (never overwritten during the recurrence)
+  //   d_chY   = d_chebY   (current iterate y)
+  //   d_chZ   = d_chebZ   (previous iterate z)
+  //   d_chTmp = d_chebTmp (both w-output and operator scratch)
+  //
+  // Problem: d_chTmp is used for both A(y) and the new w in stepN.
+  // Solution: gpuChebyshevStepN reads A(y) and writes w.
+  //   If w = d_chTmp then we'd overwrite A(y) before reading it.
+  //   So we need separate buffers for A(y) output and w output.
+  //
+  // Actually, the stepN kernel reads A(y) and writes w atomically per element,
+  // so we CAN'T alias them.  We need 5 buffers total:
+  //   r0, y, z, w, Ay.
+  //
+  // We have 4 allocated.  But d_chebW (r0) is read-only after step 0.
+  // So the issue is that we need 4 "mutable" buffers plus 1 read-only.
+  //
+  // Trick: we can store r0 in a separate pointer (d_chebW) and use the
+  // other 3 for y, z, and Ay, but we still need space for w.
+  // After each step, we rotate: z←y, y←w.  So w gets reused.
+  //
+  // Actually, we need: 1 for A(y) output, 1 for w (new iterate), 1 for y,
+  // 1 for z, 1 for r0.  That's 5.  We have 4 + the d_blasScratch is too
+  // small.
+  //
+  // Simplest fix: allocate r0 on the Krylov vector we already have:
+  //   d_bkrylovMaxwell is the original RHS but we DON'T want to modify it.
+  //
+  // Better: swap trick.  After computing stepN into d_w (which could be
+  // the same pointer as d_chebTmp), rotate pointers so Ay is never aliased
+  // with the write target.
+  //
+  // Cleanest approach: allocate a 5th buffer if needed.  But to avoid extra
+  // allocation, notice that after step1, d_chebTmp holds A(r0) which is
+  // no longer needed.  For step N, we need A(y) which overwrites d_chebTmp.
+  // Then stepN writes w to... we need a free buffer.
+  //
+  // The rotating pointer scheme: in iteration n, the kernel writes to the
+  // buffer that held z_{n-2} (which is no longer needed after this step).
+  // So we can write w into the old-z memory.  This means d_w = old d_z.
+  // After the step: new_z = old_y, new_y = old_z (which now has w).
+  //
+  // Concretely:
+  //   Ay goes into d_chebTmp (always the operator scratch).
+  //   w  goes into old d_chZ (overwriting old z, which is consumed by stepN).
+  //   Then rotate: z←y, y←w(=old z).
+
+  double* d_r0 = d_chebW;    // residual (read-only after this)
+  double* pY   = d_chebY;    // current iterate
+  double* pZ   = d_chebZ;    // previous iterate
+  double* pAy  = d_chebTmp;  // operator output A(.) — always this buffer
+
+  // ---- Step 0+1: z = r0/theta,  y = f(r0, A(r0)) ----
+  (this->*GpuImage)(pAy, d_r0);  // Ay = A(r0)
+  gpuChebyshevStep1(pY, pZ, d_r0, pAy, theta, delta, rho, n, solverStream_);
+  // Now: pY = y₁,  pZ = z₀ = r0/theta
+
+  // ---- Steps 2..maxIter ----
+  for (int step = 2; step <= maxIter; step++) {
+    rhoOld = rho;
+    rho = 1.0 / (2.0 * sigma - rhoOld);
+
+    // Ay = A(y)
+    (this->*GpuImage)(pAy, pY);
+
+    // w = rho*(2σ·y + 2/δ·(r0 - Ay) - ρold·z)
+    // Write w into... old z's memory (pZ), since z is consumed in this step.
+    // But we can't write into pZ while stepN is reading it!  We need a
+    // separate output buffer.
+    //
+    // Use d_r0's const status: we know d_r0 = d_chebW is not modified.
+    // Actually, we have 4 buffers: chebY, chebZ, chebW, chebTmp.
+    // Assign: chebW = r0 (read-only), chebTmp = Ay (read-only after gpuImage),
+    //         chebY = y, chebZ = z.
+    // We need to write w somewhere.  Only option without extra alloc: we can
+    // create a separate small alloc on the first call, or we can fuse the
+    // stepN computation so w overwrites z IN-PLACE after z is read.
+    //
+    // Since the kernel is element-wise with no data dependencies between
+    // elements, d_w[i] only depends on d_z[i] (and d_y[i], d_b[i], d_Ay[i]).
+    // So writing to d_z[i] (w overwrites z) is safe WITHIN one kernel launch
+    // as long as each thread reads z[i] BEFORE writing w[i].
+    //
+    // → Make w alias z:  the stepN kernel reads y[i], z[i], b[i], Ay[i],
+    //   then writes w[i] to the z buffer.  Since it's element-wise with no
+    //   cross-element dependencies, this is perfectly safe.
+    gpuChebyshevStepN(pZ,  // output: overwrite z in-place with w
+                      pY, pZ, d_r0, pAy,
+                      delta, sigma, rho, rhoOld, n, solverStream_);
+
+    // Rotate: old_z now holds w.  We need z←y, y←w.
+    // After writing w into pZ:  pZ has w, pY has old y.
+    // We want: new_z = old_y, new_y = w.
+    // So: swap(pZ, pY) → pZ = old_y, pY = w.  ✓
+    std::swap(pZ, pY);
+  }
+
+  // ---- Apply correction: x = x₀ + y  (y ≈ A⁻¹·r₀) ----
+  // The Chebyshev iteration solves A·y = r₀, giving y ≈ A⁻¹·r₀.
+  // x_new = x₀ + y = x₀ + A⁻¹·(b - A·x₀)
+  gpuAddscale(1.0, d_x, pY, n, solverStream_);
+
+  // ---- Print final residual ----
+  (this->*GpuImage)(pAy, d_x);
+  gpuSubRes(d_chebW, d_b, pAy, n, solverStream_);
+  gpuNorm2_async(d_chebW, n, d_blasScratch, &h_gmresReduceLocal[0], solverStream_);
+  cudaErrChk(cudaStreamSynchronize(solverStream_));
+  localNorm = h_gmresReduceLocal[0];
+  MPI_Allreduce(&localNorm, &globalNorm, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+  double final_error = sqrt(globalNorm);
+  if (vct->getCartesian_rank() == 0)
+    printf("  [Chebyshev] Final residual: %g  (reduction: %.2e)\n",
+           final_error, final_error / (initial_error + 1e-30));
+}
+
+// =========================================================================
+//  GPU Chebyshev Preconditioner: communication-free
+//
+//  Approximately solves  A_local·x = b  using gpuMaxwellImageLocal.
+//  Uses zero ghost cells (no MPI, no BCs).
+//  x₀ = 0  (no initial guess for preconditioner).
+//  Result: x ≈ A_local⁻¹·b.
+// =========================================================================
+
+void EMfields3D::gpuChebyshevPrecond(double* d_x, double* d_b)
+{
+  const int n = 3 * (nxn - 2) * (nyn - 2) * (nzn - 2);
+
+  // ---- Lazy workspace allocation ----
+  if (chebAlloc < n) {
+    if (d_chebY)   cudaFree(d_chebY);
+    if (d_chebW)   cudaFree(d_chebW);
+    if (d_chebZ)   cudaFree(d_chebZ);
+    if (d_chebTmp) cudaFree(d_chebTmp);
+    cudaErrChk(cudaMalloc(&d_chebY,   (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebW,   (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebZ,   (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebTmp, (size_t)n * sizeof(double)));
+    chebAlloc = n;
+  }
+
+  // ---- Eigenvalue bounds (use preconditioner-specific if set) ----
+  double eigMin = chebPrecEigMin > 0.0 ? chebPrecEigMin : 1.0;
+  double eigMax = chebPrecEigMax;
+  if (eigMax <= eigMin) {
+    // Fallback: rough Gershgorin bound for Maxwell operator
+    const Grid* grid = &get_grid();
+    double invdx = grid->get_invdx();
+    double invdy = grid->get_invdy();
+    double invdz = grid->get_invdz();
+    // Laplacian spectral radius ≈ 4(1/dx² + 1/dy² + 1/dz²)
+    // Operator A = dt²(-Lap - grad·div·μ) + μ + I
+    // Upper bound: dt²·4·(1/dx² + 1/dy² + 1/dz²)·(1+μ_max) + μ_max + 1
+    // Conservative estimate assuming μ_max ≈ 2 (vacuum-like)
+    double lapMax = 4.0 * (invdx*invdx + invdy*invdy + invdz*invdz);
+    eigMax = delt * delt * lapMax * 3.0 + 3.0;  // conservative
+  }
+
+  int maxIter = chebPrecMaxIter;
+
+  // ---- If maxIter <= 0, identity preconditioner: x = b ----
+  if (maxIter <= 0) {
+    gpuEq(d_x, d_b, n, solverStream_);
+    return;
+  }
+
+  // ---- Parameters ----
+  double theta = (eigMin + eigMax) * 0.5;
+  double delta = (eigMax - eigMin) * 0.5;
+  double sigma = theta / delta;
+
+  double rhoOld = 1.0 / sigma;
+  double rho    = 1.0 / (2.0 * sigma - rhoOld);
+
+  // ---- Preconditioner: x₀ = 0, so r₀ = b.  No residual computation. ----
+  double* pY  = d_chebY;
+  double* pZ  = d_chebZ;
+  double* pAy = d_chebTmp;
+
+  // Step 0+1: z = b/θ,  y = f(b, A(b))
+  gpuMaxwellImageLocal(pAy, d_b);  // Ay = A_local(b)
+  gpuChebyshevStep1(pY, pZ, d_b, pAy, theta, delta, rho, n, solverStream_);
+
+  // Steps 2..maxIter
+  for (int step = 2; step <= maxIter; step++) {
+    rhoOld = rho;
+    rho = 1.0 / (2.0 * sigma - rhoOld);
+
+    gpuMaxwellImageLocal(pAy, pY);
+    gpuChebyshevStepN(pZ, pY, pZ, d_b, pAy,
+                      delta, sigma, rho, rhoOld, n, solverStream_);
+    std::swap(pZ, pY);
+  }
+
+  // x = y  (y holds latest iterate ≈ A_local⁻¹·b)
+  gpuEq(d_x, pY, n, solverStream_);
+}
+
+// =========================================================================
 //  GPU MaxwellSource:  build RHS of Maxwell system
 // =========================================================================
 
@@ -1518,6 +1992,7 @@ static void gpuGMRES_impl(EMfields3D* field,
     memset(cs, 0, m * sizeof(double));
     memset(sn, 0, m * sizeof(double));
     g[0] = error;
+    int kEnd = m - 1;
 
     for (int k = 0; k < m; k++) {
       // w = A * V[k]
@@ -1596,33 +2071,22 @@ static void gpuGMRES_impl(EMfields3D* field,
       error = fabs(g[k + 1]);
 
       if (error / initial_error < tol) {
-        // Early exit: solve and update
-        for (int i = k; i >= 0; i--) {
-          y[i] = g[i];
-          for (int j = i + 1; j <= k; j++)
-            y[i] -= H[i * m + j] * y[j];
-          y[i] /= H[i * m + i];
-        }
-        for (int j = 0; j <= k; j++)
-          gpuAddscale(y[j], d_x, d_V + (size_t)j * n, n, stream);
-        if (gmresRank == 0)
-          printf("GMRES converged at restart # %d; iteration #%d with error: %g\n",
-                 restart, k, error / initial_error);
-        return;
+        kEnd = k;
+        break;  // Givens suggests convergence — verify with true residual
       }
     } // end inner loop
 
-    // Full m iterations: solve and update
-    for (int i = m - 1; i >= 0; i--) {
+    // ---- Back-substitution and solution update ----
+    for (int i = kEnd; i >= 0; i--) {
       y[i] = g[i];
-      for (int j = i + 1; j < m; j++)
+      for (int j = i + 1; j <= kEnd; j++)
         y[i] -= H[i * m + j] * y[j];
       y[i] /= H[i * m + i];
     }
-    for (int j = 0; j < m; j++)
+    for (int j = 0; j <= kEnd; j++)
       gpuAddscale(y[j], d_x, d_V + (size_t)j * n, n, stream);
 
-    // Restart: new residual
+    // ---- True residual check (handles affine operators correctly) ----
     (field->*GpuImage)(d_w, d_x);
     gpuEq(d_V, d_b, n, stream);
     gpuSub(d_V, d_w, n, stream);
@@ -1635,13 +2099,237 @@ static void gpuGMRES_impl(EMfields3D* field,
     if (error / initial_error < tol) {
       if (gmresRank == 0)
         printf("GMRES converged at restart # %d; iteration #%d with error: %g\n",
-               restart, m - 1, error / initial_error);
+               restart, kEnd, error / initial_error);
       return;
     }
     gpuScale(d_V, 1.0 / error, n, stream);
   }
   if (gmresRank == 0)
     std::cout << "  [GMRES] WARNING: did not converge after " << max_iter << " restarts" << std::endl;
+}
+
+// =========================================================================
+//  GPU FGMRES(m) with Chebyshev preconditioner
+//
+//  Right-preconditioned flexible GMRES:
+//    z_k = M⁻¹ v_k          (Chebyshev preconditioner, comm-free)
+//    w   = A z_k             (gpuMaxwellImage, with MPI halo exchange)
+//    Arnoldi orthogonalisation of w against V[0..k]
+//    Solution update: x += Z · y   (not V · y)
+//
+//  After each full restart, a TRUE residual r = b - A·x is recomputed
+//  because the variable preconditioner breaks the Krylov invariant.
+//
+//  Memory: V[(m+1)*n] + Z[m*n] on device  (lazy, cached).
+//  Uses the same pinned host buffers as gpuGMRES_impl (H, g, cs, sn, y).
+//  Uses the same batched Arnoldi kernel (gpuBatchedDotNorm).
+// =========================================================================
+
+void EMfields3D::gpuFGMRES_ChebyshevPrecond(
+    double* d_x, int n, double* d_b,
+    int m, int max_iter, double tol,
+    MPI_Comm fieldcomm)
+{
+  const int mp1 = m + 1;
+
+  // ---- Allocate V[(m+1)*n] and w[n] (shared with GMRES, lazy) ----
+  if (gmresVAlloc < mp1 * n) {
+    if (d_gmresV) cudaFree(d_gmresV);
+    if (d_gmresW) cudaFree(d_gmresW);
+    cudaErrChk(cudaMalloc(&d_gmresV, (size_t)mp1 * n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_gmresW, (size_t)n * sizeof(double)));
+    gmresVAlloc = mp1 * n;
+  }
+  // ---- Allocate Z[m*n] (FGMRES-only, lazy) ----
+  if (fgmresZAlloc < m * n) {
+    if (d_fgmresZ) cudaFree(d_fgmresZ);
+    cudaErrChk(cudaMalloc(&d_fgmresZ, (size_t)m * n * sizeof(double)));
+    fgmresZAlloc = m * n;
+  }
+  double* d_V = d_gmresV;
+  double* d_w = d_gmresW;
+  double* d_Z = d_fgmresZ;
+
+  cudaStream_t stream = solverStream_;
+  double* d_scratch = d_blasScratch;
+  double* h_reduceLocal  = h_gmresReduceLocal;
+  double* h_reduceGlobal = h_gmresReduceGlobal;
+  double* H  = h_gmresH;
+  double* g  = h_gmresG;
+  double* cs = h_gmresCS;
+  double* sn = h_gmresSN;
+  double* y  = h_gmresY;
+
+  // ---- Estimate eigenvalue bounds for the local Chebyshev preconditioner ----
+  // The Chebyshev recurrence is applied to gpuMaxwellImageLocal, so its
+  // eigenvalue interval must bound the local operator, not the global one.
+  if (chebPrecEigMax <= 1.0) {
+    chebPrecEigMax = gpuEstimateMaxEigenvalue(
+        &EMfields3D::gpuMaxwellImageLocal, n, 30, fieldcomm);
+    chebPrecEigMin = 1.0;   // λ_min ≥ 1 by construction (identity term)
+    int rank;
+    MPI_Comm_rank(fieldcomm, &rank);
+    if (rank == 0)
+      printf("  [FGMRES] Chebyshev preconditioner eigenvalue bounds: "
+             "[%.4f, %.4f]\n", chebPrecEigMin, chebPrecEigMax);
+  }
+
+  // r = b - A*x  →  V[0]
+  gpuMaxwellImage(d_w, d_x);              // w = A*x
+  gpuEq(d_V, d_b, n, stream);            // V[0] = b
+  gpuSub(d_V, d_w, n, stream);           // V[0] = b - A*x
+
+  // ||r||₂
+  gpuNorm2_async(d_V, n, d_scratch, &h_reduceLocal[0], stream);
+  cudaErrChk(cudaStreamSynchronize(stream));
+  double initial_error;
+  MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+  initial_error = sqrt(initial_error);
+  if (initial_error < 1e-30) return;
+
+  int rank;
+  MPI_Comm_rank(fieldcomm, &rank);
+
+  // ||b|| for status print
+  gpuNorm2_async(d_b, n, d_scratch, &h_reduceLocal[0], stream);
+  cudaErrChk(cudaStreamSynchronize(stream));
+  double normb;
+  MPI_Allreduce(&h_reduceLocal[0], &normb, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+  normb = sqrt(normb);
+  if (normb == 0.0) normb = 1.0;
+  if (rank == 0)
+    printf("Initial residual: %g norm b vector (source) = %g\n", initial_error, normb);
+
+  double rho_tol = initial_error * tol;
+
+  gpuScale(d_V, 1.0 / initial_error, n, stream);
+  double error = initial_error;
+
+  for (int restart = 0; restart < max_iter; restart++) {
+    memset(H,  0, (size_t)mp1 * m * sizeof(double));
+    memset(g,  0, mp1 * sizeof(double));
+    memset(cs, 0, m * sizeof(double));
+    memset(sn, 0, m * sizeof(double));
+    g[0] = error;
+
+    int kk = 0;  // last k used in inner loop
+
+    for (int k = 0; k < m && error > rho_tol; k++) {
+      kk = k;
+
+      // ---- Z[k] = M⁻¹ V[k]  (Chebyshev preconditioner, no MPI) ----
+      gpuChebyshevPrecond(d_Z + (size_t)k * n, d_V + (size_t)k * n);
+
+      // ---- w = A * Z[k]  (full operator, with MPI halo exchange) ----
+      gpuMaxwellImage(d_w, d_Z + (size_t)k * n);
+
+      // ---- Batched Arnoldi: fuse k+1 dot products + ||w||² ----
+      gpuBatchedDotNorm(d_w, d_V, (size_t)n, k, (size_t)n, d_scratch, stream);
+      cudaErrChk(cudaMemcpyAsync(h_reduceLocal, d_scratch,
+                                  (k + 2) * sizeof(double),
+                                  cudaMemcpyDeviceToHost, stream));
+      cudaErrChk(cudaStreamSynchronize(stream));
+      MPI_Allreduce(h_reduceLocal, h_reduceGlobal,
+                    k + 2, MPI_DOUBLE, MPI_SUM, fieldcomm);
+
+      // Orthogonalise w against V[0..k]
+      for (int j = 0; j <= k; j++) {
+        double h_jk = h_reduceGlobal[j];
+        H[j * m + k] = h_jk;
+        gpuAddscale(-h_jk, d_w, d_V + (size_t)j * n, n, stream);
+      }
+
+      // H[k+1][k] = ||w_perp||
+      gpuNorm2_async(d_w, n, d_scratch, &h_reduceLocal[0], stream);
+      cudaErrChk(cudaStreamSynchronize(stream));
+      double global_wNorm;
+      MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+      H[(k + 1) * m + k] = sqrt(global_wNorm);
+
+      // Re-orthogonalise if needed
+      double av = sqrt(h_reduceGlobal[k + 1]);
+      const double delta = 0.001;
+      if (av + delta * H[(k + 1) * m + k] == av) {
+        for (int j = 0; j <= k; j++) {
+          gpuDot_async(d_w, d_V + (size_t)j * n, n, d_scratch, &h_reduceLocal[0], stream);
+          cudaErrChk(cudaStreamSynchronize(stream));
+          double htmp;
+          MPI_Allreduce(&h_reduceLocal[0], &htmp, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+          H[j * m + k] += htmp;
+          gpuAddscale(-htmp, d_w, d_V + (size_t)j * n, n, stream);
+        }
+        gpuNorm2_async(d_w, n, d_scratch, &h_reduceLocal[0], stream);
+        cudaErrChk(cudaStreamSynchronize(stream));
+        MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        H[(k + 1) * m + k] = sqrt(global_wNorm);
+      }
+
+      // V[k+1] = w / H[k+1][k]
+      if (H[(k + 1) * m + k] > 1e-30)
+        gpuScaleCopy(d_V + (size_t)(k + 1) * n, d_w, 1.0 / H[(k + 1) * m + k], n, stream);
+      else
+        gpuEq(d_V + (size_t)(k + 1) * n, d_w, n, stream);
+
+      // Apply previous Givens rotations
+      for (int j = 0; j < k; j++) {
+        double h0 = H[j * m + k];
+        double h1 = H[(j + 1) * m + k];
+        H[j * m + k]       =  cs[j] * h0 + sn[j] * h1;
+        H[(j + 1) * m + k] = -sn[j] * h0 + cs[j] * h1;
+      }
+
+      // New Givens rotation
+      double h_kk  = H[k * m + k];
+      double h_k1k = H[(k + 1) * m + k];
+      double r_val = sqrt(h_kk * h_kk + h_k1k * h_k1k);
+      cs[k] = h_kk  / r_val;
+      sn[k] = h_k1k / r_val;
+      H[k * m + k]       = r_val;
+      H[(k + 1) * m + k] = 0.0;
+
+      double g_k = g[k];
+      g[k]     =  cs[k] * g_k;
+      g[k + 1] = -sn[k] * g_k;
+
+      error = fabs(g[k + 1]);
+    } // end inner loop
+
+    // Back-substitution
+    {
+      int kEnd = (error <= rho_tol) ? kk : m - 1;
+      for (int i = kEnd; i >= 0; i--) {
+        y[i] = g[i];
+        for (int j = i + 1; j <= kEnd; j++)
+          y[i] -= H[i * m + j] * y[j];
+        y[i] /= H[i * m + i];
+      }
+      // x += Z · y  (FGMRES uses Z, not V)
+      for (int j = 0; j <= kEnd; j++)
+        gpuAddscale(y[j], d_x, d_Z + (size_t)j * n, n, stream);
+    }
+
+    // ---- True residual check (mandatory for flexible preconditioning) ----
+    gpuMaxwellImage(d_w, d_x);
+    gpuEq(d_V, d_b, n, stream);
+    gpuSub(d_V, d_w, n, stream);
+
+    gpuNorm2_async(d_V, n, d_scratch, &h_reduceLocal[0], stream);
+    cudaErrChk(cudaStreamSynchronize(stream));
+    MPI_Allreduce(&h_reduceLocal[0], &error, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+    error = sqrt(error);
+
+    if (error <= rho_tol) {
+      if (rank == 0)
+        printf("FGMRES converged at restart # %d; iteration #%d with error: %g\n",
+               restart, kk, error / initial_error);
+      return;
+    }
+    gpuScale(d_V, 1.0 / error, n, stream);
+  }
+
+  if (rank == 0)
+    printf("  [FGMRES] WARNING: did not converge after %d restarts, error: %g\n",
+           max_iter, error / initial_error);
 }
 
 // =========================================================================
@@ -1681,15 +2369,38 @@ void EMfields3D::gpuCalculateE(int cycle)
   //if (vct->getCartesian_rank() == 0)
   //  cout << "  [gpuCalculateE] Starting GMRES (n=" << nMaxwell << ", m=20, maxIter=200, tol=" << GMREStol << ")..." << endl;
   MPI_Comm fieldcomm = vct->getFieldComm();
-  gpuGMRES_impl(this, &EMfields3D::gpuMaxwellImage,
-                d_xkrylovMaxwell.devPtr(), nMaxwell,
-                d_bkrylovMaxwell.devPtr(),
-                20, 200, GMREStol,
-                d_blasScratch,
-                d_gmresV, d_gmresW, gmresVAlloc,
-                fieldcomm, solverStream_,
-                h_gmresReduceLocal, h_gmresReduceGlobal,
-                h_gmresH, h_gmresG, h_gmresCS, h_gmresSN, h_gmresY);
+
+  if (SolverType == "Chebyshev") {
+    // Chebyshev semi-iterative solver
+    double eigMin = (chebEigMin > 0.0) ? chebEigMin : 1.0;
+    double eigMax = chebEigMax;
+    if (eigMax <= 0.0) {
+      eigMax = gpuEstimateMaxEigenvalue(&EMfields3D::gpuMaxwellImage,
+                                        nMaxwell, 20, fieldcomm);
+    }
+    gpuChebyshevSolve(d_xkrylovMaxwell.devPtr(), nMaxwell,
+                      d_bkrylovMaxwell.devPtr(),
+                      &EMfields3D::gpuMaxwellImage,
+                      chebMaxIter, eigMin, eigMax, fieldcomm);
+  } else if (SolverType == "FGMRES") {
+    // FGMRES(20) with Chebyshev preconditioner
+    if (vct->getCartesian_rank() == 0)
+      cout << "*** MAXWELL SOLVER [GPU FGMRES+Chebyshev] ***" << endl;
+    gpuFGMRES_ChebyshevPrecond(d_xkrylovMaxwell.devPtr(), nMaxwell,
+                               d_bkrylovMaxwell.devPtr(),
+                               20, 200, GMREStol, fieldcomm);
+  } else {
+    // Default: GMRES(20) solver
+    gpuGMRES_impl(this, &EMfields3D::gpuMaxwellImage,
+                  d_xkrylovMaxwell.devPtr(), nMaxwell,
+                  d_bkrylovMaxwell.devPtr(),
+                  20, 200, GMREStol,
+                  d_blasScratch,
+                  d_gmresV, d_gmresW, gmresVAlloc,
+                  fieldcomm, solverStream_,
+                  h_gmresReduceLocal, h_gmresReduceGlobal,
+                  h_gmresH, h_gmresG, h_gmresCS, h_gmresSN, h_gmresY);
+  }
   //if (vct->getCartesian_rank() == 0)
   //  cout << "  [gpuCalculateE] GMRES done" << endl;
 

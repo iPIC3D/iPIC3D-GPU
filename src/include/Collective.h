@@ -203,6 +203,11 @@ class Collective
     double getCGtol()const{ return (CGtol); }
     double getGMREStol()const{ return (GMREStol); }
     int getNiterMover()const{ return (NiterMover); }
+    string getSolverType()const{ return (SolverType); }
+    int getChebyshevMaxIter()const{ return (ChebyshevMaxIter); }
+    int getChebyshevPrecMaxIter()const{ return (ChebyshevPrecMaxIter); }
+    double getChebyshevEigMin()const{ return (ChebyshevEigMin); }
+    double getChebyshevEigMax()const{ return (ChebyshevEigMax); }
     int getFieldOutputCycle()const{ return (FieldOutputCycle); }
     int getParticlesOutputCycle()const{ return (ParticlesOutputCycle); }
     int getTestParticlesOutputCycle()const{ return (TestParticlesOutputCycle); }
@@ -457,6 +462,17 @@ class Collective
     double GMREStol;
     /*! mover predictor correcto iteration */
     int NiterMover;
+
+    /*! Solver type for Maxwell: "GMRES" (default) or "Chebyshev" */
+    string SolverType;
+    /*! Chebyshev solver: max iterations (polynomial degree) */
+    int ChebyshevMaxIter;
+    /*! Chebyshev preconditioner: max iterations */
+    int ChebyshevPrecMaxIter;
+    /*! Chebyshev solver: min eigenvalue estimate (0 = use default 1.0) */
+    double ChebyshevEigMin;
+    /*! Chebyshev solver: max eigenvalue estimate (0 = power iteration) */
+    double ChebyshevEigMax;
 
     /*! Output for field */
     int FieldOutputCycle;

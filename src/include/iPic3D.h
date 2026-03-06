@@ -190,6 +190,9 @@ namespace iPic3D {
 
     cudaEvent_t event0, eventOutputCopy;
     cudaEvent_t solverDoneEvent; ///< recorded on solverStream_ after field solve
+    cudaEvent_t* moverEvent1_; ///< persistent per-species events for mover→moment sync
+    cudaEvent_t* moverEvent2_; ///< persistent per-species events for exiting→sorting sync
+    cudaStream_t outputStream_; ///< dedicated stream for output D2H copies
 
     //bool verbose;
     string SaveDirName;

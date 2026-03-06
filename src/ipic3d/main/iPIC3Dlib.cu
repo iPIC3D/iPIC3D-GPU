@@ -350,6 +350,30 @@ int c_Solver::initCUDA(){
 #endif
   }
   
+  // Runtime check for GPU-aware MPI (required for GPU_SOLVER halo exchange)
+#ifdef GPU_SOLVER
+  {
+    bool gpuAwareMPI = false;
+#if defined(MPIX_CUDA_AWARE_SUPPORT)
+    gpuAwareMPI = (MPIX_Query_cuda_support() != 0);
+#elif defined(OMPI_HAVE_MPI_EXT_CUDA) && OMPI_HAVE_MPI_EXT_CUDA
+    gpuAwareMPI = true; // Open MPI compiled with CUDA support
+#endif
+    // ROCm / HIP-aware MPI detection (AMD GPUs)
+#if defined(MPIX_ROCM_AWARE_SUPPORT)
+    if (!gpuAwareMPI) gpuAwareMPI = (MPIX_Query_rocm_support() != 0);
+#elif defined(OMPI_HAVE_MPI_EXT_ROCM) && OMPI_HAVE_MPI_EXT_ROCM
+    gpuAwareMPI = true; // Open MPI compiled with ROCm support
+#endif
+    if (!gpuAwareMPI && myrank == 0) {
+      cerr << "[WARNING] GPU_SOLVER is enabled but GPU-aware MPI could not be "
+              "confirmed at runtime.  Halo exchanges pass device pointers to "
+              "MPI_Isend/Irecv — this will fail or silently corrupt data if the "
+              "MPI library is not GPU-aware (CUDA-aware or ROCm-aware)." << endl;
+    }
+  }
+#endif
+
 	// init the streams according to the species
   streams = new cudaStream_t[ns*2]; stayedParticle = new int[ns]; exitingResults = new std::future<int>[ns];
   for(int i=0; i<ns; i++){ cudaErrChk(cudaStreamCreate(streams+i)); cudaErrChk(cudaStreamCreate(streams+i+ns)); stayedParticle[i] = 0; }
@@ -499,6 +523,17 @@ int c_Solver::initCUDA(){
   threadPoolPtr = new ThreadPool(ns);
   cudaErrChk(cudaEventCreateWithFlags(&event0, cudaEventDisableTiming));
   cudaErrChk(cudaEventCreateWithFlags(&eventOutputCopy, cudaEventDisableTiming|cudaEventBlockingSync));
+
+  // Persistent per-species mover events (avoid per-call create/destroy overhead)
+  moverEvent1_ = new cudaEvent_t[ns];
+  moverEvent2_ = new cudaEvent_t[ns];
+  for (int i = 0; i < ns; i++) {
+    cudaErrChk(cudaEventCreateWithFlags(&moverEvent1_[i], cudaEventDisableTiming));
+    cudaErrChk(cudaEventCreateWithFlags(&moverEvent2_[i], cudaEventDisableTiming));
+  }
+
+  // Dedicated output stream (decouples D2H output copies from field packing on streams[0])
+  cudaErrChk(cudaStreamCreateWithFlags(&outputStream_, cudaStreamNonBlocking));
 
   // merging
   toBeMerged = new int[2 * ns];
@@ -691,6 +726,17 @@ int c_Solver::deInitCUDA(){
   if (planetReflectedBuf)        cudaFree(planetReflectedBuf);
 
 
+  // destroy persistent mover events
+  for (int i = 0; i < ns; i++) {
+    cudaEventDestroy(moverEvent1_[i]);
+    cudaEventDestroy(moverEvent2_[i]);
+  }
+  delete[] moverEvent1_;
+  delete[] moverEvent2_;
+
+  // destroy dedicated output stream
+  cudaStreamDestroy(outputStream_);
+
   // delete streams
   for(int i=0; i<ns*2; i++)cudaStreamDestroy(streams[i]);
   cudaStreamDestroy(planetStream);
@@ -806,9 +852,8 @@ void c_Solver::CalculateField(int cycle) {
 int c_Solver::cudaLauncherAsync(const int species){
   cudaSetDevice(cudaDeviceOnNode); // a must on multi-device node
 
-  cudaEvent_t event1, event2;
-  cudaErrChk(cudaEventCreateWithFlags(&event1, cudaEventDisableTiming));
-  cudaErrChk(cudaEventCreateWithFlags(&event2, cudaEventDisableTiming));
+  cudaEvent_t& event1 = moverEvent1_[species];
+  cudaEvent_t& event2 = moverEvent2_[species];
   auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
 
   
@@ -939,8 +984,6 @@ int c_Solver::cudaLauncherAsync(const int species){
   sortingKernel2<<<getGridSize((int)(pclsArrayHostPtr[species]->getNOP()-hole), 256), 256, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
                                                           fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+departureArrayElementType::HOLE_HASHEDSUM_INDEX, pclsArrayHostPtr[species]->getNOP()-hole);
 
-  cudaErrChk(cudaEventDestroy(event1));
-  cudaErrChk(cudaEventDestroy(event2));
   cudaErrChk(cudaStreamSynchronize(streams[species+ns])); // exiting particle copied
   return hole; // Number of exiting + deleted + planet particles
 }
@@ -1300,14 +1343,13 @@ void c_Solver::MomentsAwait() {
 
   timeTasks_set_main_task(TimeTasks::MOMENTS);
 
-  // synchronize
+  // Synchronize only the per-species streams that ran moment kernels +
+  // gpuScatterMomentsD2D, instead of a global cudaDeviceSynchronize which
+  // would stall unrelated async work (e.g. solver stream overlap).
   auto t0 = std::chrono::high_resolution_clock::now();
-  cudaErrChk(cudaDeviceSynchronize());
+  for (int i = 0; i < ns; i++)
+    cudaErrChk(cudaStreamSynchronize(streams[i]));
   auto t1 = std::chrono::high_resolution_clock::now();
-  //if (myrank == 0) {
-  //  double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-  //  std::cout << "[MomentsAwait] cudaDeviceSynchronize: " << ms << " ms" << std::endl;
-  //}
 
   constexpr bool PARTICLE_MERGING = false; // set to true to enable particle merging, false to disable. Note that the merging process is not fully optimized yet, so it might cause performance drop if enabled. Use with caution.
   if constexpr(PARTICLE_MERGING)
@@ -1435,12 +1477,8 @@ void c_Solver::WriteOutput(int cycle) {
         (cycle % col->getFieldOutputCycle() == 0 || cycle == first_cycle))
       needFieldSync = true;
     if (needFieldSync) {
-      // Catch any pending async kernel errors before D2H copy
-      cudaError_t syncErr = cudaDeviceSynchronize();
-      if (syncErr != cudaSuccess) {
-        std::cerr << "[WriteOutput] cudaDeviceSynchronize before D2H failed: "
-                  << cudaGetErrorString(syncErr) << std::endl;
-      }
+      // gpuSolverSyncD2H internally synchronises the solver stream after
+      // issuing all D2H copies, so no separate cudaStreamSynchronize is needed.
       EMf->gpuSolverSyncD2H(EMf->gpuSolverStream());
     }
   }
@@ -1496,10 +1534,10 @@ void c_Solver::outputCopyAsync(int cycle) { // -1 to enable
           outputPart[i].get_pcl_array().getList(),
           pclsArrayHostPtr[i]->getpcls(),
           pclsArrayHostPtr[i]->getNOP() * sizeof(SpeciesParticle),
-          cudaMemcpyDefault, streams[0]));
+          cudaMemcpyDefault, outputStream_));
       outputPart[i].get_pcl_array().setSize(pclsArrayHostPtr[i]->getNOP());
     }
-    cudaErrChk(cudaEventRecord(eventOutputCopy, streams[0]));
+    cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream_));
   }
 }
 
@@ -1612,6 +1650,13 @@ void c_Solver::Finalize() {
 
   if (col->getCallFinalize() && Parameters::get_doWriteOutput() && col->getRestartOutputCycle() > 0)
   {
+    // Sync EM fields from device to host before final restart write
+#ifdef GPU_SOLVER
+    EMf->gpuSolverSyncD2H(EMf->gpuSolverStream());
+#else
+    cudaErrChk(cudaDeviceSynchronize());
+#endif
+
     outputCopyAsync(-1);
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     convertOutputParticlesToSynched();

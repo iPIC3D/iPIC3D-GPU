@@ -13,7 +13,7 @@
 //  Kernel configuration
 // =========================================================================
 static constexpr int BLAS_BLOCK = 256;
-
+static  constexpr int MAX_WARPS = BLAS_BLOCK / WARP_SIZE;
 static inline size_t divCeil(size_t n, size_t d) { return (n + d - 1) / d; }
 
 // =========================================================================
@@ -374,10 +374,9 @@ __global__ void k_dotReduce(const double* __restrict__ a,
         sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
 
     // First lane of each warp writes to shared memory
-    constexpr int MAX_WARPS = BLAS_BLOCK / 32;
     __shared__ double warpSums[MAX_WARPS];
-    int lane   = threadIdx.x & 31;
-    int warpId = threadIdx.x >> 5;
+    int lane   = threadIdx.x % WARP_SIZE;
+    int warpId = threadIdx.x / WARP_SIZE;
     if (lane == 0) warpSums[warpId] = sum;
     __syncthreads();
 
@@ -407,10 +406,9 @@ __global__ void k_norm2Reduce(const double* __restrict__ a,
     for (int offset = warpSize / 2; offset > 0; offset >>= 1)
         sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
 
-    constexpr int MAX_WARPS = BLAS_BLOCK / 32;
     __shared__ double warpSums[MAX_WARPS];
-    int lane   = threadIdx.x & 31;
-    int warpId = threadIdx.x >> 5;
+    int lane   = threadIdx.x % WARP_SIZE;
+    int warpId = threadIdx.x / WARP_SIZE;
     if (lane == 0) warpSums[warpId] = sum;
     __syncthreads();
 
@@ -539,10 +537,9 @@ __global__ void k_batchedDotNorm(const double* __restrict__ w,
     }
 
     // Per-warp partial sums to shared memory
-    constexpr int MAX_WARPS = BLAS_BLOCK / 32;
     extern __shared__ double smem[]; // MAX_WARPS * total
-    int lane   = threadIdx.x & 31;
-    int warpId = threadIdx.x >> 5;
+    int lane   = threadIdx.x % WARP_SIZE;
+    int warpId = threadIdx.x / WARP_SIZE;
 
     if (lane == 0) {
         for (int j = 0; j < total; j++)
@@ -575,7 +572,6 @@ void gpuBatchedDotNorm(const double* w, const double* V_base,
 
     int grid = reduceGridSize(n);
     // Shared memory: MAX_WARPS * total doubles
-    constexpr int MAX_WARPS = BLAS_BLOCK / 32;
     size_t smemBytes = MAX_WARPS * total * sizeof(double);
 
     k_batchedDotNorm<<<grid, BLAS_BLOCK, smemBytes, stream>>>(

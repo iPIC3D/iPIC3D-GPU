@@ -35,6 +35,9 @@
 #define cudaFreeAsync hipFreeAsync
 #define cudaMallocHost hipHostMalloc // hipMallocHost is deprecated, and there is no cudaHostMalloc but cudaHostAlloc
 
+// Memory Query
+#define cudaMemGetInfo hipMemGetInfo
+
 // Memory Types
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
@@ -44,9 +47,11 @@
 // Stream Management
 #define cudaStream_t hipStream_t
 #define cudaStreamCreate hipStreamCreate
+#define cudaStreamCreateWithFlags hipStreamCreateWithFlags
 #define cudaStreamDestroy hipStreamDestroy
 #define cudaStreamSynchronize hipStreamSynchronize
 #define cudaStreamWaitEvent hipStreamWaitEvent
+#define cudaStreamNonBlocking hipStreamNonBlocking
 
 // Event Management
 #define cudaEvent_t hipEvent_t
@@ -74,10 +79,13 @@
 #define cudaLaunchCooperativeKernel hipLaunchCooperativeKernel
 
 // Kernel Launch Configuration
-#define cudaLaunchKernel hipLaunchKernelGGL
+// Note: hipLaunchKernel has the same signature as cudaLaunchKernel.
+// hipLaunchKernelGGL is a different HIP-specific API — do NOT use it here.
+#define cudaLaunchKernel hipLaunchKernel
 
 
-// warp primitive
+// Warp primitives
+// HIP __shfl_down / __shfl do not take a mask argument; drop it.
 #define __shfl_down_sync(x, y, z) __shfl_down(y, z)
 #define __shfl_sync(x, y, z) __shfl(y, z)
 

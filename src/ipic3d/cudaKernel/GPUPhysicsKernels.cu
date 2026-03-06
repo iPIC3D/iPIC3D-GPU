@@ -697,7 +697,7 @@ __global__ void k_batchDoubleFaceZ(double* const* __restrict__ ptrs,
 }
 
 void gpuAdjustNonPeriodicDensities(
-    double* const* ptrs, int nptrs,
+    int nptrs,
     double* const* d_devPtrs,
     int nxn, int nyn, int nzn,
     bool xLeftNull, bool xRightNull,

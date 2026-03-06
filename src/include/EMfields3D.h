@@ -964,6 +964,9 @@ class EMfields3D                // :public Field
 
     // ---- Persistent batched halo-exchange buffers ----
     // 6 directions: 0=XL 1=XR 2=YL 3=YR 4=ZL 5=ZR
+    // HALO_MAX_BATCH is the max number of fields per single batched exchange.
+    // Functions with more fields (e.g. gpuCommunicateGhostP2G_AllSpecies)
+    // automatically split into multiple passes of this size.
     static constexpr int HALO_MAX_BATCH = 64;
     double* d_haloBuf_send_[6] = {};   // contiguous GPU send buffers
     double* d_haloBuf_recv_[6] = {};   // contiguous GPU recv buffers

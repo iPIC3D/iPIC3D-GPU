@@ -50,6 +50,7 @@
 #include "GPUPhysicsKernels.cuh"
 #endif
 
+#include <algorithm>
 #include <iostream>
 #include <chrono>
 #include <vector>
@@ -704,17 +705,35 @@ void EMfields3D::gpuAllocateHaloBuffers()
 {
   if (haloBufsAllocated_) return;
 
-  // Compute max face size per direction (use node grid — always >= center grid)
-  // Dir 0,1 (XL,XR): (nyn-2)*(nzn-2)
-  // Dir 2,3 (YL,YR): (nxn-2)*(nzn-2)
-  // Dir 4,5 (ZL,ZR): (nxn-2)*(nyn-2)
-  size_t sz[6];
-  sz[0] = sz[1] = (size_t)(nyn - 2) * (nzn - 2);
-  sz[2] = sz[3] = (size_t)(nxn - 2) * (nzn - 2);
-  sz[4] = sz[5] = (size_t)(nxn - 2) * (nyn - 2);
+  // Compute max per-field element count per direction across ALL phases
+  // (face, edge, corner) to avoid overflow for skinny local domains.
+  //
+  // Face phase (per field):
+  //   Dir 0,1 (XL,XR): (nyn-2)*(nzn-2)
+  //   Dir 2,3 (YL,YR): (nxn-2)*(nzn-2)
+  //   Dir 4,5 (ZL,ZR): (nxn-2)*(nyn-2)
+  // Edge phase (per field, worst case both cross-edges active):
+  //   Dir 0,1: 2*(nyn-2)   [Y-edges to X neighbours]
+  //   Dir 2,3: 2*(nzn-2)   [Z-edges to Y neighbours]
+  //   Dir 4,5: 2*(nxn-2)   [X-edges to Z neighbours]
+  // Corner phase (per field): 4 per direction
+
+  size_t faceSz[6], edgeSz[6];
+  faceSz[0] = faceSz[1] = (size_t)(nyn - 2) * (nzn - 2);
+  faceSz[2] = faceSz[3] = (size_t)(nxn - 2) * (nzn - 2);
+  faceSz[4] = faceSz[5] = (size_t)(nxn - 2) * (nyn - 2);
+
+  edgeSz[0] = edgeSz[1] = 2 * (size_t)(nyn - 2);
+  edgeSz[2] = edgeSz[3] = 2 * (size_t)(nzn - 2);
+  edgeSz[4] = edgeSz[5] = 2 * (size_t)(nxn - 2);
+
+  constexpr size_t cornerSz = 4;  // 4 corners per direction
 
   for (int d = 0; d < 6; ++d) {
-    size_t bytes = sz[d] * HALO_MAX_BATCH * sizeof(double);
+    size_t maxPerField = faceSz[d];
+    if (edgeSz[d]  > maxPerField) maxPerField = edgeSz[d];
+    if (cornerSz   > maxPerField) maxPerField = cornerSz;
+    size_t bytes = maxPerField * HALO_MAX_BATCH * sizeof(double);
     cudaErrChk(cudaMalloc(&d_haloBuf_send_[d], bytes));
     cudaErrChk(cudaMalloc(&d_haloBuf_recv_[d], bytes));
   }
@@ -1089,7 +1108,6 @@ void EMfields3D::gpuMaxwellImage(double* d_im, double* d_vector)
   double _invdy = grid->get_invdy();
   double _invdz = grid->get_invdz();
 
-  const int nMaxwell = 3 * (nxn - 2) * (nyn - 2) * (nzn - 2);
   size_t nodeSize = (size_t)nxn * nyn * nzn;
 
   // Zero work arrays (9 memsets batched)
@@ -1730,7 +1748,7 @@ void EMfields3D::gpuCommunicateGhostP2G(int species)
 
   // Phase 2: adjust non-periodic boundary densities (×2 on domain boundaries)
   gpuAdjustNonPeriodicDensities(
-      ptrs, 10, d_ptrArray_, nxn, nyn, nzn,
+      10, d_ptrArray_, nxn, nyn, nzn,
       vct->getXleft_neighbor_P()  == MPI_PROC_NULL,
       vct->getXright_neighbor_P() == MPI_PROC_NULL,
       vct->getYleft_neighbor_P()  == MPI_PROC_NULL,
@@ -1747,51 +1765,58 @@ void EMfields3D::gpuCommunicateGhostP2G(int species)
 
 // =========================================================================
 //  GPU CommunicateGhostP2G – ALL species batched
-//  Instead of 2*ns individual halo exchanges, do 2 exchanges of 10*ns fields.
-//  Requires HALO_MAX_BATCH >= 10*ns (currently 64, supports up to 6 species).
+//  Processes species in chunks of HALO_MAX_BATCH / 10 . Each chunk runs the full 3-phase
+//  sequence (additive halo → boundary adjust → copy halo) independently.
 // =========================================================================
 
 void EMfields3D::gpuCommunicateGhostP2G_AllSpecies()
 {
   const VirtualTopology3D* vct = &get_vct();
   const int nFieldsPerSpecies = 10;
-  const int totalFields = nFieldsPerSpecies * ns;
+  const int speciesPerBatch = HALO_MAX_BATCH / nFieldsPerSpecies;  // floor
 
-  // Gather all per-species device pointers
-  double* ptrs[HALO_MAX_BATCH];
-  for (int is = 0; is < ns; is++) {
-    int off = is * nFieldsPerSpecies;
-    ptrs[off + 0] = d_rhons.speciesPtr(is);
-    ptrs[off + 1] = d_Jxs.speciesPtr(is);
-    ptrs[off + 2] = d_Jys.speciesPtr(is);
-    ptrs[off + 3] = d_Jzs.speciesPtr(is);
-    ptrs[off + 4] = d_pXXsn.speciesPtr(is);
-    ptrs[off + 5] = d_pXYsn.speciesPtr(is);
-    ptrs[off + 6] = d_pXZsn.speciesPtr(is);
-    ptrs[off + 7] = d_pYYsn.speciesPtr(is);
-    ptrs[off + 8] = d_pYZsn.speciesPtr(is);
-    ptrs[off + 9] = d_pZZsn.speciesPtr(is);
+  for (int isStart = 0; isStart < ns; isStart += speciesPerBatch) {
+    const int isEnd   = std::min(isStart + speciesPerBatch, ns);
+    const int nsBatch = isEnd - isStart;
+    const int nFields = nsBatch * nFieldsPerSpecies;
+
+    // Gather device pointers for this chunk
+    double* ptrs[HALO_MAX_BATCH];
+    for (int is = 0; is < nsBatch; is++) {
+      int off = is * nFieldsPerSpecies;
+      int src = isStart + is;
+      ptrs[off + 0] = d_rhons.speciesPtr(src);
+      ptrs[off + 1] = d_Jxs.speciesPtr(src);
+      ptrs[off + 2] = d_Jys.speciesPtr(src);
+      ptrs[off + 3] = d_Jzs.speciesPtr(src);
+      ptrs[off + 4] = d_pXXsn.speciesPtr(src);
+      ptrs[off + 5] = d_pXYsn.speciesPtr(src);
+      ptrs[off + 6] = d_pXZsn.speciesPtr(src);
+      ptrs[off + 7] = d_pYYsn.speciesPtr(src);
+      ptrs[off + 8] = d_pYZsn.speciesPtr(src);
+      ptrs[off + 9] = d_pZZsn.speciesPtr(src);
+    }
+
+    // Phase 1: Batched additive (interpolating) halo exchange — ghost → shared nodes
+    gpuBatchedHaloExchange(ptrs, nFields, nxn, nyn, nzn,
+                           /*isCenterFlag=*/true, /*isFaceOnly=*/false,
+                           /*needInterp=*/true, /*isParticle=*/true, solverStream_);
+
+    // Phase 2: adjust non-periodic boundary densities
+    gpuAdjustNonPeriodicDensities(
+        nFields, d_ptrArray_, nxn, nyn, nzn,
+        vct->getXleft_neighbor_P()  == MPI_PROC_NULL,
+        vct->getXright_neighbor_P() == MPI_PROC_NULL,
+        vct->getYleft_neighbor_P()  == MPI_PROC_NULL,
+        vct->getYright_neighbor_P() == MPI_PROC_NULL,
+        vct->getZleft_neighbor_P()  == MPI_PROC_NULL,
+        vct->getZright_neighbor_P() == MPI_PROC_NULL, solverStream_);
+
+    // Phase 3: Batched copy-style node halo exchange — shared → ghost nodes
+    gpuBatchedHaloExchange(ptrs, nFields, nxn, nyn, nzn,
+                           /*isCenterFlag=*/false, /*isFaceOnly=*/false,
+                           /*needInterp=*/false, /*isParticle=*/true, solverStream_);
   }
-
-  // Phase 1: Batched additive (interpolating) halo exchange — ghost → shared nodes
-  gpuBatchedHaloExchange(ptrs, totalFields, nxn, nyn, nzn,
-                         /*isCenterFlag=*/true, /*isFaceOnly=*/false,
-                         /*needInterp=*/true, /*isParticle=*/true, solverStream_);
-
-  // Phase 2: adjust non-periodic boundary densities (all species at once)
-  gpuAdjustNonPeriodicDensities(
-      ptrs, totalFields, d_ptrArray_, nxn, nyn, nzn,
-      vct->getXleft_neighbor_P()  == MPI_PROC_NULL,
-      vct->getXright_neighbor_P() == MPI_PROC_NULL,
-      vct->getYleft_neighbor_P()  == MPI_PROC_NULL,
-      vct->getYright_neighbor_P() == MPI_PROC_NULL,
-      vct->getZleft_neighbor_P()  == MPI_PROC_NULL,
-      vct->getZright_neighbor_P() == MPI_PROC_NULL, solverStream_);
-
-  // Phase 3: Batched copy-style node halo exchange — shared → ghost nodes
-  gpuBatchedHaloExchange(ptrs, totalFields, nxn, nyn, nzn,
-                         /*isCenterFlag=*/false, /*isFaceOnly=*/false,
-                         /*needInterp=*/false, /*isParticle=*/true, solverStream_);
 }
 
 // =========================================================================
@@ -1800,9 +1825,6 @@ void EMfields3D::gpuCommunicateGhostP2G_AllSpecies()
 
 void EMfields3D::gpuSetZeroDerivedMoments()
 {
-  size_t nodeSize = (size_t)nxn * nyn * nzn;
-  size_t centSize = (size_t)nxc * nyc * nzc;
-
   d_Jx.setAll(0.0, solverStream_);
   d_Jy.setAll(0.0, solverStream_);
   d_Jz.setAll(0.0, solverStream_);
@@ -4941,6 +4963,7 @@ EMfields3D::~EMfields3D()
 {
   delete[] qom;
   delete[] rhoINIT;
+  delete[] DriftSpecies;
   freeDataType();
 }
 

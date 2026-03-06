@@ -169,32 +169,6 @@ __global__ void gpuAddCorner(double* __restrict__ arr, int nx, int ny, int nz,
 class EMfields3D;
 
 /**
- * @brief GPU-aware counterpart of NBDerivedHaloComm.
- *
- * Uses the same MPI derived datatypes and topology info, but passes
- * device pointers from GPUFieldArray3 to MPI_Isend/Irecv.
- *
- * @param nx, ny, nz  Grid dimensions (including ghosts).
- * @param gpuArr      GPU-resident 3D field array.
- * @param vct         Virtual topology (neighbour ranks, comms).
- * @param EMf         EMfields3D (provides MPI datatypes).
- * @param isCenterFlag  true = center-based grid, false = node-based grid.
- * @param isFaceOnlyFlag  true = face-only exchange (skip edges/corners).
- * @param needInterp  true = additive interpolation after exchange.
- * @param isParticle  true = use particle communicator/topology.
- * @param stream      CUDA stream for local kernels (0 = default).
- */
-void gpuNBDerivedHaloComm(int nx, int ny, int nz,
-                           GPUFieldArray3& gpuArr,
-                           const VirtualTopology3D* vct,
-                           EMfields3D* EMf,
-                           bool isCenterFlag,
-                           bool isFaceOnlyFlag,
-                           bool needInterp,
-                           bool isParticle,
-                           cudaStream_t stream = 0);
-
-/**
  * @brief Apply face boundary conditions on GPU array.
  *
  * GPU counterpart of BCface() in BcFields3D.cpp.

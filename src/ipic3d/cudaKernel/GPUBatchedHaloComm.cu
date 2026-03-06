@@ -445,7 +445,8 @@ void EMfields3D::gpuBatchedHaloExchange(
             dim3 grid(((nx-2)+BLK-1)/BLK, ((ny-2)+BLK-1)/BLK, nFields);
             gpuBatchSelfCopyFaceZ<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz);
         }
-        cudaStreamSynchronize(stream);
+        // No sync needed: self-copy and unpack share the same stream,
+        // so CUDA stream ordering guarantees self-copy completes first.
     }
 
     if (scnt > 0) MPI_Waitall(scnt, mpiReq, mpiStat);
@@ -475,8 +476,8 @@ void EMfields3D::gpuBatchedHaloExchange(
     // =====================================================================
     if (!isFaceOnlyFlag) {
 
-        // Sync so that face-unpacked ghost values are visible to edge packing
-        cudaStreamSynchronize(stream);
+        // Face unpack and edge pack share the same stream — CUDA
+        // stream ordering guarantees face data is visible to edge packing.
 
         // ---- Pack edges ----
         // Y-edges to X neighbours:  (ix_send, jy=1..ny-2, jz=0 and/or nz-1)
@@ -629,7 +630,7 @@ void EMfields3D::gpuBatchedHaloExchange(
                     yrN != MPI_PROC_NULL, ylN != MPI_PROC_NULL,
                     xrN != MPI_PROC_NULL, xlN != MPI_PROC_NULL);
             }
-            cudaStreamSynchronize(stream);
+            // No sync needed: same stream as unpack.
         }
 
         if (scnt > 0) MPI_Waitall(scnt, mpiReq, mpiStat);
@@ -694,8 +695,8 @@ void EMfields3D::gpuBatchedHaloExchange(
         // Corners are only exchanged if at least one Y and one Z neighbour is
         // active, and only with X neighbours.
         if ((cc[2] || cc[3]) && (cc[4] || cc[5])) {
-            // Sync so edge unpack is visible to corner pack
-            cudaStreamSynchronize(stream);
+            // Edge unpack and corner pack share the same stream — CUDA
+            // stream ordering guarantees visibility.
 
             // Pack corners: 4 elements at (ix, 0, 0/nz-1, ny-1, 0/nz-1)
             if (cc[0]) {
@@ -734,7 +735,7 @@ void EMfields3D::gpuBatchedHaloExchange(
                         ylN != MPI_PROC_NULL, yrN != MPI_PROC_NULL,
                         xlN != MPI_PROC_NULL, xrN != MPI_PROC_NULL);
                 }
-                cudaStreamSynchronize(stream);
+                // No sync needed: same stream as unpack.
             }
 
             if (scnt > 0) MPI_Waitall(scnt, mpiReq, mpiStat);
@@ -757,8 +758,8 @@ void EMfields3D::gpuBatchedHaloExchange(
     //  Additive interpolation  (for moments: ghost → interior boundary)
     // =====================================================================
     if (needInterp) {
-        // Need to sync so all unpack / self-copy data is visible
-        cudaStreamSynchronize(stream);
+        // Unpack and additive kernels share the same stream — CUDA
+        // stream ordering guarantees all ghost data is visible.
 
         // The hasNeighbor flags for additive kernels use particle topology
         bool hasXR = vct->hasXrghtNeighbor_P();

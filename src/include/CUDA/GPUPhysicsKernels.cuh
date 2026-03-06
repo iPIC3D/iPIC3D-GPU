@@ -170,7 +170,7 @@ void gpuPerfectConductorRightS(
  * @param stream     CUDA stream.
  */
 void gpuAdjustNonPeriodicDensities(
-    double* const* ptrs, int nptrs,
+    int nptrs,
     double* const* d_devPtrs,
     int nxn, int nyn, int nzn,
     bool xLeftNull, bool xRightNull,

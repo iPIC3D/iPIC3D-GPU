@@ -158,5 +158,52 @@ void gpuSmoothStep(double* out, const double* in,
                    double alpha, double beta3D,
                    cudaStream_t stream = 0);
 
+// =========================================================================
+//  Interior / boundary stencil variants for halo-computation overlap.
+//  Interior covers [2..n-3] (no ghost dependency).
+//  Boundary covers [1..n-2] minus the interior block.
+// =========================================================================
+#ifdef HALO_OVERLAP
+
+void gpuDivC2N_interior(double* divN,
+                        const double* vecXC, const double* vecYC, const double* vecZC,
+                        int nxn, int nyn, int nzn,
+                        double invdx, double invdy, double invdz,
+                        cudaStream_t stream = 0);
+void gpuDivC2N_boundary(double* divN,
+                        const double* vecXC, const double* vecYC, const double* vecZC,
+                        int nxn, int nyn, int nzn,
+                        double invdx, double invdy, double invdz,
+                        cudaStream_t stream = 0);
+
+void gpuGradC2N_interior(double* gradXN, double* gradYN, double* gradZN,
+                         const double* scFieldC,
+                         int nxn, int nyn, int nzn,
+                         double invdx, double invdy, double invdz,
+                         cudaStream_t stream = 0);
+void gpuGradC2N_boundary(double* gradXN, double* gradYN, double* gradZN,
+                         const double* scFieldC,
+                         int nxn, int nyn, int nzn,
+                         double invdx, double invdy, double invdz,
+                         cudaStream_t stream = 0);
+
+void gpuInterpC2N_interior(double* fieldN, const double* fieldC,
+                           int nxn, int nyn, int nzn,
+                           cudaStream_t stream = 0);
+void gpuInterpC2N_boundary(double* fieldN, const double* fieldC,
+                           int nxn, int nyn, int nzn,
+                           cudaStream_t stream = 0);
+
+void gpuSmoothStep_interior(double* out, const double* in,
+                            int nx, int ny, int nz,
+                            double alpha, double beta3D,
+                            cudaStream_t stream = 0);
+void gpuSmoothStep_boundary(double* out, const double* in,
+                            int nx, int ny, int nz,
+                            double alpha, double beta3D,
+                            cudaStream_t stream = 0);
+
+#endif // HALO_OVERLAP
+
 #endif // GPU_SOLVER
 #endif // GPU_STENCILS_CUH

@@ -48,7 +48,25 @@
 #include "GPUBlas.cuh"
 #include "GPUStencils.cuh"
 #include "GPUPhysicsKernels.cuh"
-#endif
+
+#ifdef HALO_OVERLAP
+// Forward declarations for BC face functions (defined in GPUHaloComm.cu).
+// Cannot include GPUHaloComm.cuh here because it contains __global__ decls
+// and this file is compiled by the host compiler.
+void gpuBCface(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
+               int bcFaceXright, int bcFaceXleft,
+               int bcFaceYright, int bcFaceYleft,
+               int bcFaceZright, int bcFaceZleft,
+               const VirtualTopology3D* vct,
+               cudaStream_t stream);
+void gpuBCface_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
+                 int bcFaceXright, int bcFaceXleft,
+                 int bcFaceYright, int bcFaceYleft,
+                 int bcFaceZright, int bcFaceZleft,
+                 const VirtualTopology3D* vct,
+                 cudaStream_t stream);
+#endif // HALO_OVERLAP
+#endif // GPU_SOLVER
 
 #include <algorithm>
 #include <iostream>
@@ -925,14 +943,25 @@ void EMfields3D::gpuSmooth(GPUFieldArray3& arr, int type)
   else           { nx = nxn; ny = nyn; nz = nzn; }
 
   size_t fieldSize = (size_t)nx * ny * nz;
+  bool isCenter = (type == 0);
 
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
+#ifdef HALO_OVERLAP
+    double* ptr1[1] = { arr.devPtr() };
+    gpuBatchedHaloBeginExchange(ptr1, 1, nx, ny, nz,
+                                isCenter, true, false, true, solverStream_);
+    gpuSmoothStep_interior(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
+    gpuBatchedHaloEndExchange(ptr1, 1, nx, ny, nz,
+                              isCenter, true, false, true, solverStream_);
+    gpuBCface_P(nx, ny, nz, arr, 2,2,2,2,2,2, &_vct, solverStream_);
+    gpuSmoothStep_boundary(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
+#else
     if (type == 0)
       gpuCommunicateCenterBoxStencilBC_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2);
     else
       gpuCommunicateNodeBoxStencilBC_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2);
-
     gpuSmoothStep(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
+#endif
     gpuEq(arr.devPtr(), d_smoothTemp.devPtr(), fieldSize, solverStream_);
   }
 }
@@ -947,13 +976,29 @@ void EMfields3D::gpuSmoothE()
   size_t nodeSize = (size_t)nxn * nyn * nzn;
 
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
+#ifdef HALO_OVERLAP
+    double* eptrs[3] = { d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr() };
+    gpuBatchedHaloBeginExchange(eptrs, 3, nxn, nyn, nzn,
+                                false, true, false, false, solverStream_);
+    gpuSmoothStep_interior(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn, alpha, beta3D, solverStream_);
+    gpuSmoothStep_interior(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn, alpha, beta3D, solverStream_);
+    gpuSmoothStep_interior(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn, alpha, beta3D, solverStream_);
+    gpuBatchedHaloEndExchange(eptrs, 3, nxn, nyn, nzn,
+                              false, true, false, false, solverStream_);
+    gpuBCface(nxn, nyn, nzn, d_Ex, col->bcEx[0], col->bcEx[1], col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5], &_vct, solverStream_);
+    gpuBCface(nxn, nyn, nzn, d_Ey, col->bcEy[0], col->bcEy[1], col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5], &_vct, solverStream_);
+    gpuBCface(nxn, nyn, nzn, d_Ez, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], &_vct, solverStream_);
+    gpuSmoothStep_boundary(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn, alpha, beta3D, solverStream_);
+    gpuSmoothStep_boundary(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn, alpha, beta3D, solverStream_);
+    gpuSmoothStep_boundary(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn, alpha, beta3D, solverStream_);
+#else
     // Batched: 3 fields in 1 MPI round instead of 3 sequential exchanges
     gpuCommunicateNodeBoxStencilBC_3mixed(nxn, nyn, nzn,
         d_Ex, col->bcEx, d_Ey, col->bcEy, d_Ez, col->bcEz);
-
     gpuSmoothStep(d_tempX.devPtr(),  d_Ex.devPtr(), nxn, nyn, nzn, alpha, beta3D, solverStream_);
     gpuSmoothStep(d_tempY.devPtr(),  d_Ey.devPtr(), nxn, nyn, nzn, alpha, beta3D, solverStream_);
     gpuSmoothStep(d_tempZ.devPtr(),  d_Ez.devPtr(), nxn, nyn, nzn, alpha, beta3D, solverStream_);
+#endif
 
     gpuEq(d_Ex.devPtr(), d_tempX.devPtr(), nodeSize, solverStream_);
     gpuEq(d_Ey.devPtr(), d_tempY.devPtr(), nodeSize, solverStream_);
@@ -973,17 +1018,34 @@ void EMfields3D::gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArra
   else           { nx = nxn; ny = nyn; nz = nzn; }
 
   size_t fieldSize = (size_t)nx * ny * nz;
+  bool isCenter = (type == 0);
 
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
+#ifdef HALO_OVERLAP
+    double* s3ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
+    gpuBatchedHaloBeginExchange(s3ptrs, 3, nx, ny, nz,
+                                isCenter, true, false, true, solverStream_);
+    gpuSmoothStep_interior(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
+    gpuSmoothStep_interior(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
+    gpuSmoothStep_interior(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
+    gpuBatchedHaloEndExchange(s3ptrs, 3, nx, ny, nz,
+                              isCenter, true, false, true, solverStream_);
+    gpuBCface_P(nx, ny, nz, a1, 2,2,2,2,2,2, &_vct, solverStream_);
+    gpuBCface_P(nx, ny, nz, a2, 2,2,2,2,2,2, &_vct, solverStream_);
+    gpuBCface_P(nx, ny, nz, a3, 2,2,2,2,2,2, &_vct, solverStream_);
+    gpuSmoothStep_boundary(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
+    gpuSmoothStep_boundary(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
+    gpuSmoothStep_boundary(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
+#else
     // Batched: 3 fields in 1 MPI round
     if (type == 0)
       gpuCommunicateCenterBoxStencilBC_P_3(nx, ny, nz, a1, a2, a3, 2, 2, 2, 2, 2, 2);
     else
       gpuCommunicateNodeBoxStencilBC_P_3(nx, ny, nz, a1, a2, a3, 2, 2, 2, 2, 2, 2);
-
     gpuSmoothStep(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
     gpuSmoothStep(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
     gpuSmoothStep(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
+#endif
 
     gpuEq(a1.devPtr(), d_temp2X.devPtr(), fieldSize, solverStream_);
     gpuEq(a2.devPtr(), d_temp2Y.devPtr(), fieldSize, solverStream_);
@@ -1034,6 +1096,26 @@ void EMfields3D::gpuLapN2N(GPUFieldArray3& lapN, GPUFieldArray3& fieldN)
   gpuGradN2C(d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
              fieldN.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz, solverStream_);
 
+#ifdef HALO_OVERLAP
+  double* ptrs3[3] = { d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr() };
+  gpuBatchedHaloBeginExchange(ptrs3, 3, nxc, nyc, nzc,
+                              true, false, false, false, solverStream_);
+
+  gpuDivC2N_interior(lapN.devPtr(),
+            d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
+            nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+
+  gpuBatchedHaloEndExchange(ptrs3, 3, nxc, nyc, nzc,
+                            true, false, false, false, solverStream_);
+
+  gpuBCface(nxc, nyc, nzc, d_tempXC, 1,1,1,1,1,1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_tempYC, 1,1,1,1,1,1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_tempZC, 1,1,1,1,1,1, &_vct, solverStream_);
+
+  gpuDivC2N_boundary(lapN.devPtr(),
+            d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
+            nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+#else
   // Communicate gradient ghost cells (batched: 3 fields in 1 MPI round)
   gpuCommunicateCenterBC_3(nxc, nyc, nzc, d_tempXC, d_tempYC, d_tempZC, 1, 1, 1, 1, 1, 1);
 
@@ -1041,6 +1123,7 @@ void EMfields3D::gpuLapN2N(GPUFieldArray3& lapN, GPUFieldArray3& fieldN)
   gpuDivC2N(lapN.devPtr(),
             d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
             nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+#endif
 }
 
 // =========================================================================
@@ -1073,7 +1156,53 @@ void EMfields3D::gpuLapN2N_3(
   gpuGradN2C(d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr(),
              fieldC.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz, solverStream_);
 
-  // ONE batched communicate of all 9 center-gradient arrays + BC (type 1)
+#ifdef HALO_OVERLAP
+  // ---- Begin halo exchange: pack faces + post MPI ----
+  double* ptrs9[9] = { d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
+                       d_divC.devPtr(), d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
+                       d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr() };
+  gpuBatchedHaloBeginExchange(ptrs9, 9, nxc, nyc, nzc,
+                              true, false, false, false, solverStream_);
+
+  // ---- Interior divC2N while MPI is in flight ----
+  gpuDivC2N_interior(lapA.devPtr(),
+            d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
+            nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+  gpuDivC2N_interior(lapB.devPtr(),
+            d_divC.devPtr(), d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
+            nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+  gpuDivC2N_interior(lapC.devPtr(),
+            d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr(),
+            nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+
+  // ---- End halo exchange: MPI_Waitall + unpack + edges/corners ----
+  gpuBatchedHaloEndExchange(ptrs9, 9, nxc, nyc, nzc,
+                            true, false, false, false, solverStream_);
+
+  // ---- BC face application (type 1 on all faces) ----
+  gpuBCface(nxc, nyc, nzc, d_tempXC,      1,1,1,1,1,1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_tempYC,      1,1,1,1,1,1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_tempZC,      1,1,1,1,1,1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_divC,        1,1,1,1,1,1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_poissonTemp, 1,1,1,1,1,1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_poissonIm,   1,1,1,1,1,1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_divBwork,    1,1,1,1,1,1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_divE_work,   1,1,1,1,1,1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_tempC,       1,1,1,1,1,1, &_vct, solverStream_);
+
+  // ---- Boundary divC2N (ghost + BC data now available) ----
+  gpuDivC2N_boundary(lapA.devPtr(),
+            d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
+            nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+  gpuDivC2N_boundary(lapB.devPtr(),
+            d_divC.devPtr(), d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
+            nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+  gpuDivC2N_boundary(lapC.devPtr(),
+            d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr(),
+            nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+
+#else
+  // ---- Original blocking path ----
   gpuCommunicateCenterBC_9(nxc, nyc, nzc,
       d_tempXC, d_tempYC, d_tempZC,
       d_divC, d_poissonTemp, d_poissonIm,
@@ -1094,6 +1223,7 @@ void EMfields3D::gpuLapN2N_3(
   gpuDivC2N(lapC.devPtr(),
             d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr(),
             nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+#endif
 }
 
 // =========================================================================
@@ -1134,12 +1264,32 @@ void EMfields3D::gpuMaxwellImage(double* d_im, double* d_vector)
             d_Dx.devPtr(), d_Dy.devPtr(), d_Dz.devPtr(),
             nxc, nyc, nzc, _invdx, _invdy, _invdz, solverStream_);
 
+#ifdef HALO_OVERLAP
+  // ---- Begin halo on divC ----
+  double* ptr1[1] = { d_divC.devPtr() };
+  gpuBatchedHaloBeginExchange(ptr1, 1, nxc, nyc, nzc,
+                              true, false, false, false, solverStream_);
+
+  // ---- Interior gradC2N while MPI is in flight ----
+  gpuGradC2N_interior(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
+                      d_divC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+
+  // ---- End halo ----
+  gpuBatchedHaloEndExchange(ptr1, 1, nxc, nyc, nzc,
+                            true, false, false, false, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_divC, 2,2,2,2,2,2, &_vct, solverStream_);
+
+  // ---- Boundary gradC2N ----
+  gpuGradC2N_boundary(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
+                      d_divC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+#else
   // Communicate divC
   gpuCommunicateCenterBC(nxc, nyc, nzc, d_divC, 2, 2, 2, 2, 2, 2);
 
   // grad(divC) on nodes
   gpuGradC2N(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
              d_divC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz, solverStream_);
+#endif
 
   // image -= temp  (fused triple)
   gpuSub3(d_imageX.devPtr(), d_tempX.devPtr(),
@@ -1597,6 +1747,41 @@ void EMfields3D::gpuCalculateB(int cycle)
                d_Bzc.devPtr(), d_tempZC.devPtr(), centSize, solverStream_);
 
   // Communicate center B ghost cells (batched: 3 fields in 1 MPI round)
+#ifdef HALO_OVERLAP
+  {
+    double* bptrs[3] = { d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr() };
+    gpuBatchedHaloBeginExchange(bptrs, 3, nxc, nyc, nzc,
+                                true, false, false, false, solverStream_);
+
+    // Interior interpC2N while MPI is in flight
+    gpuInterpC2N_interior(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn, solverStream_);
+    gpuInterpC2N_interior(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn, solverStream_);
+    gpuInterpC2N_interior(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn, solverStream_);
+
+    gpuBatchedHaloEndExchange(bptrs, 3, nxc, nyc, nzc,
+                              true, false, false, false, solverStream_);
+
+    // Mixed BC face application
+    gpuBCface(nxc, nyc, nzc, d_Bxc, col->bcBx[0], col->bcBx[1], col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5], &_vct, solverStream_);
+    gpuBCface(nxc, nyc, nzc, d_Byc, col->bcBy[0], col->bcBy[1], col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5], &_vct, solverStream_);
+    gpuBCface(nxc, nyc, nzc, d_Bzc, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], &_vct, solverStream_);
+  }
+
+  // Open boundary conditions on center-based B
+  gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc, nyc, nzc);
+
+  // Case-specific fixes on center-based B
+  {
+    const string& simCase = col->getCase();
+    if (simCase == "GEM" || simCase == "GEMnoPert" || simCase == "GEMDoubleHarris")
+      gpuFixBcGEM();
+  }
+
+  // Boundary interpC2N (ghost + BC + fixup data now available)
+  gpuInterpC2N_boundary(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn, solverStream_);
+  gpuInterpC2N_boundary(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn, solverStream_);
+  gpuInterpC2N_boundary(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn, solverStream_);
+#else
   gpuCommunicateCenterBC_3mixed(nxc, nyc, nzc,
       d_Bxc, col->bcBx, d_Byc, col->bcBy, d_Bzc, col->bcBz);
 
@@ -1614,6 +1799,7 @@ void EMfields3D::gpuCalculateB(int cycle)
   gpuInterpC2N(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn, solverStream_);
   gpuInterpC2N(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn, solverStream_);
   gpuInterpC2N(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn, solverStream_);
+#endif
 
   // Communicate node B ghost cells (batched: 3 fields in 1 MPI round)
   gpuCommunicateNodeBC_3mixed(nxn, nyn, nzn,
@@ -1665,6 +1851,29 @@ void EMfields3D::gpuCalculateHatFunctions()
     gpuScale3(d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
               -dt / 2.0, centSize, solverStream_);
 
+#ifdef HALO_OVERLAP
+    // --- overlap: begin face exchange for 3 centre fields ---
+    double* hatPtrs[3] = { d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr() };
+    int hatReqs = gpuBatchedHaloBeginExchange(hatPtrs, 3, nxc, nyc, nzc,
+                    /*isCenter=*/true, /*faceOnly=*/false,
+                    /*needInterp=*/false, /*isParticle=*/true, solverStream_);
+    // --- interior interpC2N while faces in flight ---
+    gpuInterpC2N_interior(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn, solverStream_);
+    gpuInterpC2N_interior(d_tempYN.devPtr(), d_tempYC.devPtr(), nxn, nyn, nzn, solverStream_);
+    gpuInterpC2N_interior(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn, solverStream_);
+    // --- end exchange: wait + unpack + edges + corners ---
+    gpuBatchedHaloEndExchange(hatPtrs, 3, nxc, nyc, nzc,
+                    /*isCenter=*/true, /*faceOnly=*/false,
+                    /*needInterp=*/false, /*isParticle=*/true, solverStream_);
+    // BC
+    gpuBCface_P(nxc, nyc, nzc, d_tempXC, 2, 2, 2, 2, 2, 2, &get_vct(), solverStream_);
+    gpuBCface_P(nxc, nyc, nzc, d_tempYC, 2, 2, 2, 2, 2, 2, &get_vct(), solverStream_);
+    gpuBCface_P(nxc, nyc, nzc, d_tempZC, 2, 2, 2, 2, 2, 2, &get_vct(), solverStream_);
+    // --- boundary interpC2N ---
+    gpuInterpC2N_boundary(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn, solverStream_);
+    gpuInterpC2N_boundary(d_tempYN.devPtr(), d_tempYC.devPtr(), nxn, nyn, nzn, solverStream_);
+    gpuInterpC2N_boundary(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn, solverStream_);
+#else
     // Communicate (batched: 3 fields in 1 MPI round)
     gpuCommunicateCenterBC_P_3(nxc, nyc, nzc, d_tempXC, d_tempYC, d_tempZC, 2, 2, 2, 2, 2, 2);
 
@@ -1672,6 +1881,7 @@ void EMfields3D::gpuCalculateHatFunctions()
     gpuInterpC2N(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn, solverStream_);
     gpuInterpC2N(d_tempYN.devPtr(), d_tempYC.devPtr(), nxn, nyn, nzn, solverStream_);
     gpuInterpC2N(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn, solverStream_);
+#endif
 
     // Add species current: tempN += Jxs[is] (fused triple)
     gpuSum3(d_tempXN.devPtr(), d_Jxs.speciesPtr(is),

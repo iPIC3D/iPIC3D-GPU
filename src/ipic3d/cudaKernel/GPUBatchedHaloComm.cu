@@ -813,4 +813,280 @@ void EMfields3D::gpuBatchedHaloExchange(
     }
 }
 
+// =========================================================================
+//  HALO_OVERLAP: split halo exchange into begin / end
+//
+//  gpuBatchedHaloBeginExchange:
+//    Packs face data → cudaStreamSync → posts MPI_Irecv / MPI_Isend
+//    → self-copy periodic faces.  Stores requests in haloFaceRequests_.
+//    Caller can launch interior stencil kernels on 'stream' while
+//    MPI messages are in flight.
+//
+//  gpuBatchedHaloEndExchange:
+//    MPI_Waitall on face requests → unpack faces → PHASE 2 edges
+//    → PHASE 3 corners → additive interpolation (if requested).
+// =========================================================================
+#ifdef HALO_OVERLAP
+
+int EMfields3D::gpuBatchedHaloBeginExchange(
+    double** h_fieldPtrs, int nFields,
+    int nx, int ny, int nz,
+    bool isCenterFlag, bool isFaceOnlyFlag,
+    bool needInterp, bool isParticle,
+    cudaStream_t stream)
+{
+    const VirtualTopology3D* vct = &get_vct();
+    const int myrank = vct->getCartesian_rank();
+    const int xlN = isParticle ? vct->getXleft_neighbor_P()  : vct->getXleft_neighbor();
+    const int xrN = isParticle ? vct->getXright_neighbor_P() : vct->getXright_neighbor();
+    const int ylN = isParticle ? vct->getYleft_neighbor_P()  : vct->getYleft_neighbor();
+    const int yrN = isParticle ? vct->getYright_neighbor_P() : vct->getYright_neighbor();
+    const int zlN = isParticle ? vct->getZleft_neighbor_P()  : vct->getZleft_neighbor();
+    const int zrN = isParticle ? vct->getZright_neighbor_P() : vct->getZright_neighbor();
+    const MPI_Comm comm = isParticle ? vct->getParticleComm() : vct->getFieldComm();
+
+    memcpy(h_ptrArray_, h_fieldPtrs, nFields * sizeof(double*));
+    cudaMemcpyAsync(d_ptrArray_, h_ptrArray_, nFields * sizeof(double*),
+                    cudaMemcpyHostToDevice, stream);
+
+    int cc[6];
+    cc[0] = (xlN != MPI_PROC_NULL && xlN != myrank) ? 1 : 0;
+    cc[1] = (xrN != MPI_PROC_NULL && xrN != myrank) ? 1 : 0;
+    cc[2] = (ylN != MPI_PROC_NULL && ylN != myrank) ? 1 : 0;
+    cc[3] = (yrN != MPI_PROC_NULL && yrN != myrank) ? 1 : 0;
+    cc[4] = (zlN != MPI_PROC_NULL && zlN != myrank) ? 1 : 0;
+    cc[5] = (zrN != MPI_PROC_NULL && zrN != myrank) ? 1 : 0;
+
+    const int offset = isCenterFlag ? 0 : 1;
+    const int tag_XL = 1, tag_XR = 4;
+    const int tag_YL = 2, tag_YR = 5;
+    const int tag_ZL = 3, tag_ZR = 6;
+
+    double* const* d_ptrs = (double* const*) d_ptrArray_;
+    const int nyzF = (ny - 2) * (nz - 2);
+    const int nxzF = (nx - 2) * (nz - 2);
+    const int nxyF = (nx - 2) * (ny - 2);
+
+    // ---- Pack faces ----
+    if (cc[0]) { int ix = 1+offset;      launchPack2D(d_haloBuf_send_[0], d_ptrs, nFields, ix*ny*nz+1*nz+1,     nz, 1, ny-2, nz-2, stream); }
+    if (cc[1]) { int ix = nx-2-offset;    launchPack2D(d_haloBuf_send_[1], d_ptrs, nFields, ix*ny*nz+1*nz+1,     nz, 1, ny-2, nz-2, stream); }
+    if (cc[2]) { int iy = 1+offset;      launchPack2D(d_haloBuf_send_[2], d_ptrs, nFields, 1*ny*nz+iy*nz+1,  ny*nz, 1, nx-2, nz-2, stream); }
+    if (cc[3]) { int iy = ny-2-offset;    launchPack2D(d_haloBuf_send_[3], d_ptrs, nFields, 1*ny*nz+iy*nz+1,  ny*nz, 1, nx-2, nz-2, stream); }
+    if (cc[4]) { int iz = 1+offset;      launchPack2D(d_haloBuf_send_[4], d_ptrs, nFields, 1*ny*nz+1*nz+iz,  ny*nz, nz, nx-2, ny-2, stream); }
+    if (cc[5]) { int iz = nz-2-offset;    launchPack2D(d_haloBuf_send_[5], d_ptrs, nFields, 1*ny*nz+1*nz+iz,  ny*nz, nz, nx-2, ny-2, stream); }
+
+    cudaStreamSynchronize(stream);
+
+    // ---- Post face Irecv / Isend ----
+    int rcnt = 0;
+    if (cc[0]) MPI_Irecv(d_haloBuf_recv_[0], nyzF*nFields, MPI_DOUBLE, xlN, tag_XR, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[1]) MPI_Irecv(d_haloBuf_recv_[1], nyzF*nFields, MPI_DOUBLE, xrN, tag_XL, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[2]) MPI_Irecv(d_haloBuf_recv_[2], nxzF*nFields, MPI_DOUBLE, ylN, tag_YR, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[3]) MPI_Irecv(d_haloBuf_recv_[3], nxzF*nFields, MPI_DOUBLE, yrN, tag_YL, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[4]) MPI_Irecv(d_haloBuf_recv_[4], nxyF*nFields, MPI_DOUBLE, zlN, tag_ZR, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[5]) MPI_Irecv(d_haloBuf_recv_[5], nxyF*nFields, MPI_DOUBLE, zrN, tag_ZL, comm, &haloFaceRequests_[rcnt++]);
+    int scnt = rcnt;
+    if (cc[0]) MPI_Isend(d_haloBuf_send_[0], nyzF*nFields, MPI_DOUBLE, xlN, tag_XL, comm, &haloFaceRequests_[scnt++]);
+    if (cc[1]) MPI_Isend(d_haloBuf_send_[1], nyzF*nFields, MPI_DOUBLE, xrN, tag_XR, comm, &haloFaceRequests_[scnt++]);
+    if (cc[2]) MPI_Isend(d_haloBuf_send_[2], nxzF*nFields, MPI_DOUBLE, ylN, tag_YL, comm, &haloFaceRequests_[scnt++]);
+    if (cc[3]) MPI_Isend(d_haloBuf_send_[3], nxzF*nFields, MPI_DOUBLE, yrN, tag_YR, comm, &haloFaceRequests_[scnt++]);
+    if (cc[4]) MPI_Isend(d_haloBuf_send_[4], nxyF*nFields, MPI_DOUBLE, zlN, tag_ZL, comm, &haloFaceRequests_[scnt++]);
+    if (cc[5]) MPI_Isend(d_haloBuf_send_[5], nxyF*nFields, MPI_DOUBLE, zrN, tag_ZR, comm, &haloFaceRequests_[scnt++]);
+
+    // ---- Self-copy periodic faces ----
+    {
+        constexpr int BLK = 16;
+        dim3 block(BLK, BLK);
+        if (xlN == myrank && xrN == myrank) {
+            dim3 grid(((ny-2)+BLK-1)/BLK, ((nz-2)+BLK-1)/BLK, nFields);
+            gpuBatchSelfCopyFaceX<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz);
+        }
+        if (ylN == myrank && yrN == myrank) {
+            dim3 grid(((nx-2)+BLK-1)/BLK, ((nz-2)+BLK-1)/BLK, nFields);
+            gpuBatchSelfCopyFaceY<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz);
+        }
+        if (zlN == myrank && zrN == myrank) {
+            dim3 grid(((nx-2)+BLK-1)/BLK, ((ny-2)+BLK-1)/BLK, nFields);
+            gpuBatchSelfCopyFaceZ<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz);
+        }
+    }
+
+    haloFaceReqCount_ = scnt;
+    return scnt;
+}
+
+void EMfields3D::gpuBatchedHaloEndExchange(
+    double** h_fieldPtrs, int nFields,
+    int nx, int ny, int nz,
+    bool isCenterFlag, bool isFaceOnlyFlag,
+    bool needInterp, bool isParticle,
+    cudaStream_t stream)
+{
+    // ---- Wait for face MPI ----
+    if (haloFaceReqCount_ > 0) {
+        MPI_Status stat[12];
+        MPI_Waitall(haloFaceReqCount_, haloFaceRequests_, stat);
+        haloFaceReqCount_ = 0;
+    }
+
+    const VirtualTopology3D* vct = &get_vct();
+    const int myrank = vct->getCartesian_rank();
+    const int xlN = isParticle ? vct->getXleft_neighbor_P()  : vct->getXleft_neighbor();
+    const int xrN = isParticle ? vct->getXright_neighbor_P() : vct->getXright_neighbor();
+    const int ylN = isParticle ? vct->getYleft_neighbor_P()  : vct->getYleft_neighbor();
+    const int yrN = isParticle ? vct->getYright_neighbor_P() : vct->getYright_neighbor();
+    const int zlN = isParticle ? vct->getZleft_neighbor_P()  : vct->getZleft_neighbor();
+    const int zrN = isParticle ? vct->getZright_neighbor_P() : vct->getZright_neighbor();
+    const MPI_Comm comm = isParticle ? vct->getParticleComm() : vct->getFieldComm();
+
+    int cc[6];
+    cc[0] = (xlN != MPI_PROC_NULL && xlN != myrank) ? 1 : 0;
+    cc[1] = (xrN != MPI_PROC_NULL && xrN != myrank) ? 1 : 0;
+    cc[2] = (ylN != MPI_PROC_NULL && ylN != myrank) ? 1 : 0;
+    cc[3] = (yrN != MPI_PROC_NULL && yrN != myrank) ? 1 : 0;
+    cc[4] = (zlN != MPI_PROC_NULL && zlN != myrank) ? 1 : 0;
+    cc[5] = (zrN != MPI_PROC_NULL && zrN != myrank) ? 1 : 0;
+
+    const int tag_XL = 1, tag_XR = 4;
+    const int tag_YL = 2, tag_YR = 5;
+    const int tag_ZL = 3, tag_ZR = 6;
+
+    // d_ptrArray_ was already populated by begin
+    double* const* d_ptrs = (double* const*) d_ptrArray_;
+
+    MPI_Status  mpiStat[12];
+    MPI_Request mpiReq[12];
+    int rcnt, scnt;
+
+    // ---- Unpack face recv buffers ----
+    if (cc[0]) launchUnpack2D(d_haloBuf_recv_[0], d_ptrs, nFields, 0*ny*nz+1*nz+1,         nz, 1, ny-2, nz-2, stream);
+    if (cc[1]) launchUnpack2D(d_haloBuf_recv_[1], d_ptrs, nFields, (nx-1)*ny*nz+1*nz+1,    nz, 1, ny-2, nz-2, stream);
+    if (cc[2]) launchUnpack2D(d_haloBuf_recv_[2], d_ptrs, nFields, 1*ny*nz+0*nz+1,     ny*nz, 1, nx-2, nz-2, stream);
+    if (cc[3]) launchUnpack2D(d_haloBuf_recv_[3], d_ptrs, nFields, 1*ny*nz+(ny-1)*nz+1,ny*nz, 1, nx-2, nz-2, stream);
+    if (cc[4]) launchUnpack2D(d_haloBuf_recv_[4], d_ptrs, nFields, 1*ny*nz+1*nz+0,     ny*nz, nz, nx-2, ny-2, stream);
+    if (cc[5]) launchUnpack2D(d_haloBuf_recv_[5], d_ptrs, nFields, 1*ny*nz+1*nz+(nz-1),ny*nz, nz, nx-2, ny-2, stream);
+
+    // ---- PHASE 2: Edge exchange (skip if face-only) ----
+    if (!isFaceOnlyFlag) {
+        int edgeYlen = ny - 2, edgeZlen = nz - 2, edgeXlen = nx - 2;
+
+        // Pack edges
+        for (int dir = 0; dir < 2; ++dir) {
+            if (!cc[dir]) continue;
+            int ix_send = (dir == 0) ? 1 : (nx - 2);
+            double* buf = d_haloBuf_send_[dir]; int off = 0;
+            if (cc[4]) { launchPack2D(buf+off, d_ptrs, nFields, ix_send*ny*nz+1*nz+0, nz, 1, edgeYlen, 1, stream); off += edgeYlen*nFields; }
+            if (cc[5]) { launchPack2D(buf+off, d_ptrs, nFields, ix_send*ny*nz+1*nz+(nz-1), nz, 1, edgeYlen, 1, stream); off += edgeYlen*nFields; }
+        }
+        for (int dir = 2; dir < 4; ++dir) {
+            if (!cc[dir]) continue;
+            int iy_send = (dir == 2) ? 1 : (ny - 2);
+            double* buf = d_haloBuf_send_[dir]; int off = 0;
+            if (cc[0]) { launchPack2D(buf+off, d_ptrs, nFields, 0*ny*nz+iy_send*nz+1, 1, 1, edgeZlen, 1, stream); off += edgeZlen*nFields; }
+            if (cc[1]) { launchPack2D(buf+off, d_ptrs, nFields, (nx-1)*ny*nz+iy_send*nz+1, 1, 1, edgeZlen, 1, stream); off += edgeZlen*nFields; }
+        }
+        for (int dir = 4; dir < 6; ++dir) {
+            if (!cc[dir]) continue;
+            int iz_send = (dir == 4) ? 1 : (nz - 2);
+            double* buf = d_haloBuf_send_[dir]; int off = 0;
+            if (cc[2]) { launchPack2D(buf+off, d_ptrs, nFields, 1*ny*nz+0*nz+iz_send, ny*nz, 1, edgeXlen, 1, stream); off += edgeXlen*nFields; }
+            if (cc[3]) { launchPack2D(buf+off, d_ptrs, nFields, 1*ny*nz+(ny-1)*nz+iz_send, ny*nz, 1, edgeXlen, 1, stream); off += edgeXlen*nFields; }
+        }
+
+        cudaStreamSynchronize(stream);
+
+        // Post edge Irecv / Isend
+        rcnt = 0;
+        for (int dir = 0; dir < 2; ++dir) { if (!cc[dir]) continue; int nE=(cc[4]?1:0)+(cc[5]?1:0); if(!nE) continue; int nb=(dir==0)?xlN:xrN; int tag=(dir==0)?tag_XR:tag_XL; MPI_Irecv(d_haloBuf_recv_[dir], nE*edgeYlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[rcnt++]); }
+        for (int dir = 2; dir < 4; ++dir) { if (!cc[dir]) continue; int nE=(cc[0]?1:0)+(cc[1]?1:0); if(!nE) continue; int nb=(dir==2)?ylN:yrN; int tag=(dir==2)?tag_YR:tag_YL; MPI_Irecv(d_haloBuf_recv_[dir], nE*edgeZlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[rcnt++]); }
+        for (int dir = 4; dir < 6; ++dir) { if (!cc[dir]) continue; int nE=(cc[2]?1:0)+(cc[3]?1:0); if(!nE) continue; int nb=(dir==4)?zlN:zrN; int tag=(dir==4)?tag_ZR:tag_ZL; MPI_Irecv(d_haloBuf_recv_[dir], nE*edgeXlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[rcnt++]); }
+        scnt = rcnt;
+        for (int dir = 0; dir < 2; ++dir) { if (!cc[dir]) continue; int nE=(cc[4]?1:0)+(cc[5]?1:0); if(!nE) continue; int nb=(dir==0)?xlN:xrN; int tag=(dir==0)?tag_XL:tag_XR; MPI_Isend(d_haloBuf_send_[dir], nE*edgeYlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[scnt++]); }
+        for (int dir = 2; dir < 4; ++dir) { if (!cc[dir]) continue; int nE=(cc[0]?1:0)+(cc[1]?1:0); if(!nE) continue; int nb=(dir==2)?ylN:yrN; int tag=(dir==2)?tag_YL:tag_YR; MPI_Isend(d_haloBuf_send_[dir], nE*edgeZlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[scnt++]); }
+        for (int dir = 4; dir < 6; ++dir) { if (!cc[dir]) continue; int nE=(cc[2]?1:0)+(cc[3]?1:0); if(!nE) continue; int nb=(dir==4)?zlN:zrN; int tag=(dir==4)?tag_ZL:tag_ZR; MPI_Isend(d_haloBuf_send_[dir], nE*edgeXlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[scnt++]); }
+
+        // Edge self-copy
+        {
+            int maxDim = (nx > ny ? (nx > nz ? nx : nz) : (ny > nz ? ny : nz));
+            int nblks = (maxDim + 255) / 256;
+            if (xlN == myrank && xrN == myrank) { dim3 grid(nblks, nFields); gpuBatchSelfCopyEdgeX<<<grid, 256, 0, stream>>>(d_ptrs, nx, ny, nz, zrN!=MPI_PROC_NULL, zlN!=MPI_PROC_NULL, yrN!=MPI_PROC_NULL, ylN!=MPI_PROC_NULL); }
+            if (ylN == myrank && yrN == myrank) { dim3 grid(nblks, nFields); gpuBatchSelfCopyEdgeY<<<grid, 256, 0, stream>>>(d_ptrs, nx, ny, nz, xrN!=MPI_PROC_NULL, xlN!=MPI_PROC_NULL, zrN!=MPI_PROC_NULL, zlN!=MPI_PROC_NULL); }
+            if (zlN == myrank && zrN == myrank) { dim3 grid(nblks, nFields); gpuBatchSelfCopyEdgeZ<<<grid, 256, 0, stream>>>(d_ptrs, nx, ny, nz, yrN!=MPI_PROC_NULL, ylN!=MPI_PROC_NULL, xrN!=MPI_PROC_NULL, xlN!=MPI_PROC_NULL); }
+        }
+
+        if (scnt > 0) MPI_Waitall(scnt, mpiReq, mpiStat);
+
+        // Unpack edges
+        for (int dir = 0; dir < 2; ++dir) {
+            if (!cc[dir]) continue;
+            int ix_recv = (dir == 0) ? 0 : (nx - 1);
+            const double* buf = d_haloBuf_recv_[dir]; int off = 0;
+            if (cc[4]) { launchUnpack2D(buf+off, d_ptrs, nFields, ix_recv*ny*nz+1*nz+0, nz, 1, edgeYlen, 1, stream); off += edgeYlen*nFields; }
+            if (cc[5]) { launchUnpack2D(buf+off, d_ptrs, nFields, ix_recv*ny*nz+1*nz+(nz-1), nz, 1, edgeYlen, 1, stream); off += edgeYlen*nFields; }
+        }
+        for (int dir = 2; dir < 4; ++dir) {
+            if (!cc[dir]) continue;
+            int iy_recv = (dir == 2) ? 0 : (ny - 1);
+            const double* buf = d_haloBuf_recv_[dir]; int off = 0;
+            if (cc[0]) { launchUnpack2D(buf+off, d_ptrs, nFields, 0*ny*nz+iy_recv*nz+1, 1, 1, edgeZlen, 1, stream); off += edgeZlen*nFields; }
+            if (cc[1]) { launchUnpack2D(buf+off, d_ptrs, nFields, (nx-1)*ny*nz+iy_recv*nz+1, 1, 1, edgeZlen, 1, stream); off += edgeZlen*nFields; }
+        }
+        for (int dir = 4; dir < 6; ++dir) {
+            if (!cc[dir]) continue;
+            int iz_recv = (dir == 4) ? 0 : (nz - 1);
+            const double* buf = d_haloBuf_recv_[dir]; int off = 0;
+            if (cc[2]) { launchUnpack2D(buf+off, d_ptrs, nFields, 1*ny*nz+0*nz+iz_recv, ny*nz, 1, edgeXlen, 1, stream); off += edgeXlen*nFields; }
+            if (cc[3]) { launchUnpack2D(buf+off, d_ptrs, nFields, 1*ny*nz+(ny-1)*nz+iz_recv, ny*nz, 1, edgeXlen, 1, stream); off += edgeXlen*nFields; }
+        }
+
+        // ---- PHASE 3: Corner exchange ----
+        if ((cc[2] || cc[3]) && (cc[4] || cc[5])) {
+            if (cc[0]) { int total = nFields*4; k_batchPackCorners4<<<(total+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_haloBuf_send_[0], d_ptrs, nFields, 1*ny*nz, ny, nz); }
+            if (cc[1]) { int total = nFields*4; k_batchPackCorners4<<<(total+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_haloBuf_send_[1], d_ptrs, nFields, (nx-2)*ny*nz, ny, nz); }
+            cudaStreamSynchronize(stream);
+
+            rcnt = 0;
+            if (cc[0]) MPI_Irecv(d_haloBuf_recv_[0], 4*nFields, MPI_DOUBLE, xlN, tag_XR, comm, &mpiReq[rcnt++]);
+            if (cc[1]) MPI_Irecv(d_haloBuf_recv_[1], 4*nFields, MPI_DOUBLE, xrN, tag_XL, comm, &mpiReq[rcnt++]);
+            scnt = rcnt;
+            if (cc[0]) MPI_Isend(d_haloBuf_send_[0], 4*nFields, MPI_DOUBLE, xlN, tag_XL, comm, &mpiReq[scnt++]);
+            if (cc[1]) MPI_Isend(d_haloBuf_send_[1], 4*nFields, MPI_DOUBLE, xrN, tag_XR, comm, &mpiReq[scnt++]);
+
+            // Corner self-copy
+            {
+                if (xlN == myrank && xrN == myrank)
+                    gpuBatchSelfCopyCornerX<<<nFields, 1, 0, stream>>>(d_ptrs, nx, ny, nz, ylN!=MPI_PROC_NULL, yrN!=MPI_PROC_NULL, zlN!=MPI_PROC_NULL, zrN!=MPI_PROC_NULL);
+                else if (ylN == myrank && yrN == myrank)
+                    gpuBatchSelfCopyCornerY<<<nFields, 1, 0, stream>>>(d_ptrs, nx, ny, nz, xlN!=MPI_PROC_NULL, xrN!=MPI_PROC_NULL, zlN!=MPI_PROC_NULL, zrN!=MPI_PROC_NULL);
+                else if (zlN == myrank && zrN == myrank)
+                    gpuBatchSelfCopyCornerZ<<<nFields, 1, 0, stream>>>(d_ptrs, nx, ny, nz, ylN!=MPI_PROC_NULL, yrN!=MPI_PROC_NULL, xlN!=MPI_PROC_NULL, xrN!=MPI_PROC_NULL);
+            }
+
+            if (scnt > 0) MPI_Waitall(scnt, mpiReq, mpiStat);
+
+            if (cc[0]) { int total = nFields*4; k_batchUnpackCorners4<<<(total+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_haloBuf_recv_[0], d_ptrs, nFields, 0*ny*nz, ny, nz); }
+            if (cc[1]) { int total = nFields*4; k_batchUnpackCorners4<<<(total+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_haloBuf_recv_[1], d_ptrs, nFields, (nx-1)*ny*nz, ny, nz); }
+        }
+    } // end !isFaceOnlyFlag
+
+    // ---- Additive interpolation ----
+    if (needInterp) {
+        bool hasXR = vct->hasXrghtNeighbor_P(), hasXL = vct->hasXleftNeighbor_P();
+        bool hasYR = vct->hasYrghtNeighbor_P(), hasYL = vct->hasYleftNeighbor_P();
+        bool hasZR = vct->hasZrghtNeighbor_P(), hasZL = vct->hasZleftNeighbor_P();
+        int nxr = nx-2, nyr = ny-2, nzr = nz-2;
+
+        { int total = nyr*nzr*nFields; k_batchAddFaceX<<<(total+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL); }
+        { int total = nxr*nzr*nFields; k_batchAddFaceY<<<(total+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_ptrs, nFields, nx, ny, nz, hasYR, hasYL); }
+        { int total = nxr*nyr*nFields; k_batchAddFaceZ<<<(total+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_ptrs, nFields, nx, ny, nz, hasZR, hasZL); }
+        { int total = nzr*nFields;     k_batchAddEdgeZ<<<(total+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL, hasYR, hasYL); }
+        { int total = nyr*nFields;     k_batchAddEdgeY<<<(total+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL, hasZR, hasZL); }
+        { int total = nxr*nFields;     k_batchAddEdgeX<<<(total+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_ptrs, nFields, nx, ny, nz, hasYR, hasYL, hasZR, hasZL); }
+        k_batchAddCorner<<<(nFields+BATCH_BLK-1)/BATCH_BLK, BATCH_BLK, 0, stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL, hasYR, hasYL, hasZR, hasZL);
+        cudaStreamSynchronize(stream);
+    }
+}
+
+#endif // HALO_OVERLAP
+
 #endif // GPU_SOLVER

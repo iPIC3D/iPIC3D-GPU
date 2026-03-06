@@ -473,6 +473,24 @@ class EMfields3D                // :public Field
                                 bool needInterp, bool isParticle,
                                 cudaStream_t stream);
 
+#ifdef HALO_OVERLAP
+    /** Phase 1 of split halo exchange: pack boundary faces, post
+     *  non-blocking MPI sends/receives, self-copy periodic faces.
+     *  Returns the number of MPI requests stored in haloFaceRequests_. */
+    int gpuBatchedHaloBeginExchange(double** h_fieldPtrs, int nFields,
+                                    int nx, int ny, int nz,
+                                    bool isCenterFlag, bool isFaceOnlyFlag,
+                                    bool needInterp, bool isParticle,
+                                    cudaStream_t stream);
+    /** Phase 2 of split halo exchange: MPI_Waitall on face requests,
+     *  unpack face buffers, then run edge + corner phases as usual. */
+    void gpuBatchedHaloEndExchange(double** h_fieldPtrs, int nFields,
+                                   int nx, int ny, int nz,
+                                   bool isCenterFlag, bool isFaceOnlyFlag,
+                                   bool needInterp, bool isParticle,
+                                   cudaStream_t stream);
+#endif
+
     /** Allocate persistent GPU halo exchange buffers. */
     void gpuAllocateHaloBuffers();
     /** Free persistent GPU halo exchange buffers. */
@@ -973,6 +991,12 @@ class EMfields3D                // :public Field
     double** d_ptrArray_       = nullptr; // device array of field pointers for kernels
     double** h_ptrArray_       = nullptr; // pinned host staging for d_ptrArray_ H→D copies
     bool    haloBufsAllocated_ = false;
+
+#ifdef HALO_OVERLAP
+    // ---- Split halo exchange state ----
+    MPI_Request haloFaceRequests_[12] = {};
+    int         haloFaceReqCount_     = 0;
+#endif // HALO_OVERLAP
 
     // Flag tracking whether GPU solver arrays have been allocated
     bool gpuSolverAllocated_ = false;

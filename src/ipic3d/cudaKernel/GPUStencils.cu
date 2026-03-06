@@ -567,6 +567,304 @@ void gpuSmoothStep(double* out, const double* in,
     cudaErrChk(cudaGetLastError());
 }
 
+// =========================================================================
+//  HALO_OVERLAP: interior / boundary stencil variants
+//
+//  Each centre→node stencil (divC2N, gradC2N, interpC2N) reads
+//  centre[i-1..i][j-1..j][k-1..k] for node output at [i][j][k].
+//    Interior [2..n-3]: all reads fall in centre interior — no ghost deps.
+//    Boundary [1, n-2]: at least one read hits a ghost centre cell.
+//
+//  smoothStep reads [i±1][j±1][k±1]: same interior range [2..n-3].
+//
+//  Device helper functions are used to avoid duplicating computation code
+//  across the original, interior, and boundary kernel variants.
+// =========================================================================
+#ifdef HALO_OVERLAP
+
+// Helper: grid dims covering a ranged sub-volume [lo..hi] per axis.
+static inline dim3 rangedGrid(int iLo, int iHi, int jLo, int jHi, int kLo, int kHi)
+{
+    return dim3(((iHi - iLo + 1) + BX - 1) / BX,
+                ((jHi - jLo + 1) + BY - 1) / BY,
+                ((kHi - kLo + 1) + BZ - 1) / BZ);
+}
+
+// -----------------------------------------------------------------
+//  divC2N  (centre → node divergence)
+// -----------------------------------------------------------------
+__device__ __forceinline__
+void d_divC2N(double* __restrict__ divN,
+              const double* __restrict__ vXC,
+              const double* __restrict__ vYC,
+              const double* __restrict__ vZC,
+              int i, int j, int k,
+              int nyn, int nzn, int nyc, int nzc,
+              double invdx, double invdy, double invdz)
+{
+    #define C_D(arr, ii, jj, kk) arr[IDX(ii, jj, kk, nyc, nzc)]
+    double cX = 0.25 * invdx * (
+        (C_D(vXC,i  ,j  ,k  ) - C_D(vXC,i-1,j  ,k  )) +
+        (C_D(vXC,i  ,j  ,k-1) - C_D(vXC,i-1,j  ,k-1)) +
+        (C_D(vXC,i  ,j-1,k  ) - C_D(vXC,i-1,j-1,k  )) +
+        (C_D(vXC,i  ,j-1,k-1) - C_D(vXC,i-1,j-1,k-1)));
+    double cY = 0.25 * invdy * (
+        (C_D(vYC,i  ,j  ,k  ) - C_D(vYC,i  ,j-1,k  )) +
+        (C_D(vYC,i  ,j  ,k-1) - C_D(vYC,i  ,j-1,k-1)) +
+        (C_D(vYC,i-1,j  ,k  ) - C_D(vYC,i-1,j-1,k  )) +
+        (C_D(vYC,i-1,j  ,k-1) - C_D(vYC,i-1,j-1,k-1)));
+    double cZ = 0.25 * invdz * (
+        (C_D(vZC,i  ,j  ,k  ) - C_D(vZC,i  ,j  ,k-1)) +
+        (C_D(vZC,i-1,j  ,k  ) - C_D(vZC,i-1,j  ,k-1)) +
+        (C_D(vZC,i  ,j-1,k  ) - C_D(vZC,i  ,j-1,k-1)) +
+        (C_D(vZC,i-1,j-1,k  ) - C_D(vZC,i-1,j-1,k-1)));
+    divN[IDX(i, j, k, nyn, nzn)] = cX + cY + cZ;
+    #undef C_D
+}
+
+__global__ void k_divC2N_interior(
+    double* __restrict__ divN,
+    const double* __restrict__ vXC, const double* __restrict__ vYC, const double* __restrict__ vZC,
+    int nxn, int nyn, int nzn, int nyc, int nzc,
+    double invdx, double invdy, double invdz,
+    int iLo, int iHi, int jLo, int jHi, int kLo, int kHi)
+{
+    int i = blockIdx.x * BX + threadIdx.x + iLo;
+    int j = blockIdx.y * BY + threadIdx.y + jLo;
+    int k = blockIdx.z * BZ + threadIdx.z + kLo;
+    if (i > iHi || j > jHi || k > kHi) return;
+    d_divC2N(divN, vXC, vYC, vZC, i, j, k, nyn, nzn, nyc, nzc, invdx, invdy, invdz);
+}
+
+__global__ void k_divC2N_boundary(
+    double* __restrict__ divN,
+    const double* __restrict__ vXC, const double* __restrict__ vYC, const double* __restrict__ vZC,
+    int nxn, int nyn, int nzn, int nyc, int nzc,
+    double invdx, double invdy, double invdz,
+    int sILo, int sIHi, int sJLo, int sJHi, int sKLo, int sKHi)
+{
+    int i = blockIdx.x * BX + threadIdx.x + 1;
+    int j = blockIdx.y * BY + threadIdx.y + 1;
+    int k = blockIdx.z * BZ + threadIdx.z + 1;
+    if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2) return;
+    if (i >= sILo && i <= sIHi && j >= sJLo && j <= sJHi && k >= sKLo && k <= sKHi) return;
+    d_divC2N(divN, vXC, vYC, vZC, i, j, k, nyn, nzn, nyc, nzc, invdx, invdy, invdz);
+}
+
+void gpuDivC2N_interior(double* divN,
+                        const double* vXC, const double* vYC, const double* vZC,
+                        int nxn, int nyn, int nzn,
+                        double invdx, double invdy, double invdz,
+                        cudaStream_t stream)
+{
+    int iLo=2, iHi=nxn-3, jLo=2, jHi=nyn-3, kLo=2, kHi=nzn-3;
+    if (iLo>iHi || jLo>jHi || kLo>kHi) return;
+    int nyc=nyn-1, nzc=nzn-1;
+    dim3 grid = rangedGrid(iLo,iHi,jLo,jHi,kLo,kHi);
+    dim3 block(BX,BY,BZ);
+    k_divC2N_interior<<<grid,block,0,stream>>>(divN,vXC,vYC,vZC,nxn,nyn,nzn,nyc,nzc,invdx,invdy,invdz,iLo,iHi,jLo,jHi,kLo,kHi);
+    cudaErrChk(cudaGetLastError());
+}
+
+void gpuDivC2N_boundary(double* divN,
+                        const double* vXC, const double* vYC, const double* vZC,
+                        int nxn, int nyn, int nzn,
+                        double invdx, double invdy, double invdz,
+                        cudaStream_t stream)
+{
+    int nyc=nyn-1, nzc=nzn-1;
+    dim3 grid = stencilGrid(nxn,nyn,nzn);
+    dim3 block(BX,BY,BZ);
+    k_divC2N_boundary<<<grid,block,0,stream>>>(divN,vXC,vYC,vZC,nxn,nyn,nzn,nyc,nzc,invdx,invdy,invdz,2,nxn-3,2,nyn-3,2,nzn-3);
+    cudaErrChk(cudaGetLastError());
+}
+
+// -----------------------------------------------------------------
+//  gradC2N  (centre → node gradient)
+// -----------------------------------------------------------------
+__device__ __forceinline__
+void d_gradC2N(double* __restrict__ gXN, double* __restrict__ gYN, double* __restrict__ gZN,
+               const double* __restrict__ C,
+               int i, int j, int k,
+               int nyn, int nzn, int nyc, int nzc,
+               double invdx, double invdy, double invdz)
+{
+    #define CG(ii,jj,kk) C[IDX(ii,jj,kk,nyc,nzc)]
+    double c000=CG(i-1,j-1,k-1), c001=CG(i-1,j-1,k), c010=CG(i-1,j,k-1), c011=CG(i-1,j,k);
+    double c100=CG(i,  j-1,k-1), c101=CG(i,  j-1,k), c110=CG(i,  j,k-1), c111=CG(i,  j,k);
+    int nidx = IDX(i,j,k,nyn,nzn);
+    gXN[nidx] = 0.25*invdx*((c111-c011)+(c110-c010)+(c101-c001)+(c100-c000));
+    gYN[nidx] = 0.25*invdy*((c111-c101)+(c110-c100)+(c011-c001)+(c010-c000));
+    gZN[nidx] = 0.25*invdz*((c111-c110)+(c101-c100)+(c011-c010)+(c001-c000));
+    #undef CG
+}
+
+__global__ void k_gradC2N_interior(
+    double* __restrict__ gXN, double* __restrict__ gYN, double* __restrict__ gZN,
+    const double* __restrict__ C,
+    int nxn, int nyn, int nzn, int nyc, int nzc,
+    double invdx, double invdy, double invdz,
+    int iLo, int iHi, int jLo, int jHi, int kLo, int kHi)
+{
+    int i=blockIdx.x*BX+threadIdx.x+iLo, j=blockIdx.y*BY+threadIdx.y+jLo, k=blockIdx.z*BZ+threadIdx.z+kLo;
+    if (i>iHi||j>jHi||k>kHi) return;
+    d_gradC2N(gXN,gYN,gZN,C,i,j,k,nyn,nzn,nyc,nzc,invdx,invdy,invdz);
+}
+
+__global__ void k_gradC2N_boundary(
+    double* __restrict__ gXN, double* __restrict__ gYN, double* __restrict__ gZN,
+    const double* __restrict__ C,
+    int nxn, int nyn, int nzn, int nyc, int nzc,
+    double invdx, double invdy, double invdz,
+    int sILo, int sIHi, int sJLo, int sJHi, int sKLo, int sKHi)
+{
+    int i=blockIdx.x*BX+threadIdx.x+1, j=blockIdx.y*BY+threadIdx.y+1, k=blockIdx.z*BZ+threadIdx.z+1;
+    if (i>nxn-2||j>nyn-2||k>nzn-2) return;
+    if (i>=sILo&&i<=sIHi&&j>=sJLo&&j<=sJHi&&k>=sKLo&&k<=sKHi) return;
+    d_gradC2N(gXN,gYN,gZN,C,i,j,k,nyn,nzn,nyc,nzc,invdx,invdy,invdz);
+}
+
+void gpuGradC2N_interior(double* gXN, double* gYN, double* gZN,
+                         const double* C,
+                         int nxn, int nyn, int nzn,
+                         double invdx, double invdy, double invdz,
+                         cudaStream_t stream)
+{
+    int iLo=2,iHi=nxn-3,jLo=2,jHi=nyn-3,kLo=2,kHi=nzn-3;
+    if (iLo>iHi||jLo>jHi||kLo>kHi) return;
+    int nyc=nyn-1,nzc=nzn-1;
+    dim3 grid=rangedGrid(iLo,iHi,jLo,jHi,kLo,kHi); dim3 block(BX,BY,BZ);
+    k_gradC2N_interior<<<grid,block,0,stream>>>(gXN,gYN,gZN,C,nxn,nyn,nzn,nyc,nzc,invdx,invdy,invdz,iLo,iHi,jLo,jHi,kLo,kHi);
+    cudaErrChk(cudaGetLastError());
+}
+
+void gpuGradC2N_boundary(double* gXN, double* gYN, double* gZN,
+                         const double* C,
+                         int nxn, int nyn, int nzn,
+                         double invdx, double invdy, double invdz,
+                         cudaStream_t stream)
+{
+    int nyc=nyn-1,nzc=nzn-1;
+    dim3 grid=stencilGrid(nxn,nyn,nzn); dim3 block(BX,BY,BZ);
+    k_gradC2N_boundary<<<grid,block,0,stream>>>(gXN,gYN,gZN,C,nxn,nyn,nzn,nyc,nzc,invdx,invdy,invdz,2,nxn-3,2,nyn-3,2,nzn-3);
+    cudaErrChk(cudaGetLastError());
+}
+
+// -----------------------------------------------------------------
+//  interpC2N  (centre → node interpolation)
+// -----------------------------------------------------------------
+__device__ __forceinline__
+void d_interpC2N(double* __restrict__ fN, const double* __restrict__ fC,
+                 int i, int j, int k, int nyn, int nzn, int nyc, int nzc)
+{
+    #define CI(ii,jj,kk) fC[IDX(ii,jj,kk,nyc,nzc)]
+    fN[IDX(i,j,k,nyn,nzn)] = 0.125*(CI(i,j,k)+CI(i-1,j,k)+CI(i,j-1,k)+CI(i,j,k-1)
+                                     +CI(i-1,j-1,k)+CI(i-1,j,k-1)+CI(i,j-1,k-1)+CI(i-1,j-1,k-1));
+    #undef CI
+}
+
+__global__ void k_interpC2N_interior(
+    double* __restrict__ fN, const double* __restrict__ fC,
+    int nxn, int nyn, int nzn, int nyc, int nzc,
+    int iLo, int iHi, int jLo, int jHi, int kLo, int kHi)
+{
+    int i=blockIdx.x*BX+threadIdx.x+iLo, j=blockIdx.y*BY+threadIdx.y+jLo, k=blockIdx.z*BZ+threadIdx.z+kLo;
+    if (i>iHi||j>jHi||k>kHi) return;
+    d_interpC2N(fN,fC,i,j,k,nyn,nzn,nyc,nzc);
+}
+
+__global__ void k_interpC2N_boundary(
+    double* __restrict__ fN, const double* __restrict__ fC,
+    int nxn, int nyn, int nzn, int nyc, int nzc,
+    int sILo, int sIHi, int sJLo, int sJHi, int sKLo, int sKHi)
+{
+    int i=blockIdx.x*BX+threadIdx.x+1, j=blockIdx.y*BY+threadIdx.y+1, k=blockIdx.z*BZ+threadIdx.z+1;
+    if (i>nxn-2||j>nyn-2||k>nzn-2) return;
+    if (i>=sILo&&i<=sIHi&&j>=sJLo&&j<=sJHi&&k>=sKLo&&k<=sKHi) return;
+    d_interpC2N(fN,fC,i,j,k,nyn,nzn,nyc,nzc);
+}
+
+void gpuInterpC2N_interior(double* fN, const double* fC,
+                           int nxn, int nyn, int nzn,
+                           cudaStream_t stream)
+{
+    int iLo=2,iHi=nxn-3,jLo=2,jHi=nyn-3,kLo=2,kHi=nzn-3;
+    if (iLo>iHi||jLo>jHi||kLo>kHi) return;
+    int nyc=nyn-1,nzc=nzn-1;
+    dim3 grid=rangedGrid(iLo,iHi,jLo,jHi,kLo,kHi); dim3 block(BX,BY,BZ);
+    k_interpC2N_interior<<<grid,block,0,stream>>>(fN,fC,nxn,nyn,nzn,nyc,nzc,iLo,iHi,jLo,jHi,kLo,kHi);
+    cudaErrChk(cudaGetLastError());
+}
+
+void gpuInterpC2N_boundary(double* fN, const double* fC,
+                           int nxn, int nyn, int nzn,
+                           cudaStream_t stream)
+{
+    int nyc=nyn-1,nzc=nzn-1;
+    dim3 grid=stencilGrid(nxn,nyn,nzn); dim3 block(BX,BY,BZ);
+    k_interpC2N_boundary<<<grid,block,0,stream>>>(fN,fC,nxn,nyn,nzn,nyc,nzc,2,nxn-3,2,nyn-3,2,nzn-3);
+    cudaErrChk(cudaGetLastError());
+}
+
+// -----------------------------------------------------------------
+//  smoothStep  (6-point box smooth)
+// -----------------------------------------------------------------
+__device__ __forceinline__
+void d_smoothStep(double* __restrict__ out, const double* __restrict__ in,
+                  int i, int j, int k, int ny, int nz,
+                  double alpha, double beta3D)
+{
+    #define INS(ii,jj,kk) in[IDX(ii,jj,kk,ny,nz)]
+    out[IDX(i,j,k,ny,nz)] = alpha*INS(i,j,k) + beta3D*(
+        INS(i-1,j,k)+INS(i+1,j,k)+INS(i,j-1,k)+INS(i,j+1,k)+INS(i,j,k-1)+INS(i,j,k+1));
+    #undef INS
+}
+
+__global__ void k_smoothStep_interior(
+    double* __restrict__ out, const double* __restrict__ in,
+    int nx, int ny, int nz, double alpha, double beta3D,
+    int iLo, int iHi, int jLo, int jHi, int kLo, int kHi)
+{
+    int i=blockIdx.x*BX+threadIdx.x+iLo, j=blockIdx.y*BY+threadIdx.y+jLo, k=blockIdx.z*BZ+threadIdx.z+kLo;
+    if (i>iHi||j>jHi||k>kHi) return;
+    d_smoothStep(out,in,i,j,k,ny,nz,alpha,beta3D);
+}
+
+__global__ void k_smoothStep_boundary(
+    double* __restrict__ out, const double* __restrict__ in,
+    int nx, int ny, int nz, double alpha, double beta3D,
+    int sILo, int sIHi, int sJLo, int sJHi, int sKLo, int sKHi)
+{
+    int i=blockIdx.x*BX+threadIdx.x+1, j=blockIdx.y*BY+threadIdx.y+1, k=blockIdx.z*BZ+threadIdx.z+1;
+    if (i>nx-2||j>ny-2||k>nz-2) return;
+    if (i>=sILo&&i<=sIHi&&j>=sJLo&&j<=sJHi&&k>=sKLo&&k<=sKHi) return;
+    d_smoothStep(out,in,i,j,k,ny,nz,alpha,beta3D);
+}
+
+void gpuSmoothStep_interior(double* out, const double* in,
+                            int nx, int ny, int nz,
+                            double alpha, double beta3D,
+                            cudaStream_t stream)
+{
+    int iLo=2,iHi=nx-3,jLo=2,jHi=ny-3,kLo=2,kHi=nz-3;
+    if (iLo>iHi||jLo>jHi||kLo>kHi) return;
+    dim3 grid=rangedGrid(iLo,iHi,jLo,jHi,kLo,kHi); dim3 block(BX,BY,BZ);
+    k_smoothStep_interior<<<grid,block,0,stream>>>(out,in,nx,ny,nz,alpha,beta3D,iLo,iHi,jLo,jHi,kLo,kHi);
+    cudaErrChk(cudaGetLastError());
+}
+
+void gpuSmoothStep_boundary(double* out, const double* in,
+                            int nx, int ny, int nz,
+                            double alpha, double beta3D,
+                            cudaStream_t stream)
+{
+    dim3 grid=stencilGrid(nx,ny,nz); dim3 block(BX,BY,BZ);
+    k_smoothStep_boundary<<<grid,block,0,stream>>>(out,in,nx,ny,nz,alpha,beta3D,2,nx-3,2,ny-3,2,nz-3);
+    cudaErrChk(cudaGetLastError());
+}
+
+#endif // HALO_OVERLAP
+
 #undef IDX
 
 #endif // GPU_SOLVER

@@ -326,15 +326,6 @@ class EMfields3D                // :public Field
     /** Copy field arrays from device to host (for I/O output). */
     void gpuSolverSyncD2H(cudaStream_t stream = 0);
     // ---- GPU Solver: GPU-aware MPI halo exchange ----
-    /** Node-based halo exchange using GPU-aware MPI (operates on device pointer). */
-    void gpuCommunicateNodeBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
-                              int bcFaceXright, int bcFaceXleft,
-                              int bcFaceYright, int bcFaceYleft,
-                              int bcFaceZright, int bcFaceZleft);
-    /** Batched 3-field node-based halo exchange + BC in one MPI round. */
-    void gpuCommunicateNodeBC_3(int nx, int ny, int nz,
-                                GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
-                                int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL);
     /** Center-based halo exchange using GPU-aware MPI (operates on device pointer). */
     void gpuCommunicateCenterBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
                                 int bcFaceXright, int bcFaceXleft,
@@ -354,10 +345,6 @@ class EMfields3D                // :public Field
     void gpuCommunicateCenterBC_P_3(int nx, int ny, int nz,
                                     GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
                                     int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL);
-    /** Batched 3-field node box-stencil halo exchange + BC in one MPI round. */
-    void gpuCommunicateNodeBoxStencilBC_3(int nx, int ny, int nz,
-                                          GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
-                                          int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL);
     /** Batched 3-field center-based halo exchange with per-field BCs (bc is int[6]). */
     void gpuCommunicateCenterBC_3mixed(int nx, int ny, int nz,
                                        GPUFieldArray3& a1, const int* bc1,
@@ -373,20 +360,11 @@ class EMfields3D                // :public Field
                                                GPUFieldArray3& a1, const int* bc1,
                                                GPUFieldArray3& a2, const int* bc2,
                                                GPUFieldArray3& a3, const int* bc3);
-    /** Node-based box-stencil (face-only) halo exchange for smoothing. */
-    void gpuCommunicateNodeBoxStencilBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
-                                        int bcFaceXright, int bcFaceXleft,
-                                        int bcFaceYright, int bcFaceYleft,
-                                        int bcFaceZright, int bcFaceZleft);
     /** Particle-communicator centre halo exchange (for moments). */
     void gpuCommunicateCenterBC_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
                                   int bcFaceXright, int bcFaceXleft,
                                   int bcFaceYright, int bcFaceYleft,
                                   int bcFaceZright, int bcFaceZleft);
-    /** Additive (interpolating) node halo exchange for moments (ghost → shared nodes). */
-    void gpuCommunicateInterp(int nx, int ny, int nz, GPUFieldArray3& gpuArr);
-    /** Copy-style node halo exchange for moments (shared → ghost nodes). */
-    void gpuCommunicateNode_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr);
     /** Node-based box-stencil halo exchange using particle communicator (for smooth). */
     void gpuCommunicateNodeBoxStencilBC_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
                                           int bcFaceXright, int bcFaceXleft,
@@ -439,20 +417,19 @@ class EMfields3D                // :public Field
                            int maxIter, double eigMin, double eigMax,
                            MPI_Comm fieldcomm);
 
-    /** Chebyshev preconditioner (communication-free).
-     *  Approximately solves  A_local·x = b  using gpuMaxwellImageLocal.
-     *  Intended as a preconditioner inside FGMRES.
+    /** GPU point-block Jacobi preconditioner (communication-free).
+     *  Builds the 3×3 diagonal block D_i of the Maxwell operator at each
+     *  node and solves D_i z_i = r_i via Cramer's rule.
      *  @param d_x  [out] approximate solution (Krylov vector, device)
      *  @param d_b  [in]  right-hand side       (Krylov vector, device)
      */
-    void gpuChebyshevPrecond(double* d_x, double* d_b);
+    void gpuBlockJacobiPrecond(double* d_x, double* d_b);
 
-    /** GPU FGMRES(m) with Chebyshev preconditioner.
+    /** GPU FGMRES(m) with communication-free block-Jacobi preconditioner.
      *  Right-preconditioned flexible GMRES: Z[k] = M⁻¹ V[k], w = A Z[k].
-     *  Uses gpuChebyshevPrecond as the variable preconditioner.
-     *  Solution update uses Z basis.  True residual checked every restart.
+     *  Uses gpuBlockJacobiPrecond as the preconditioner.
      */
-    void gpuFGMRES_ChebyshevPrecond(
+    void gpuFGMRES_BlockJacobiPrecond(
         double* d_x, int n, double* d_b,
         int m, int max_iter, double tol,
         MPI_Comm fieldcomm);
@@ -484,8 +461,6 @@ class EMfields3D                // :public Field
     /** GPU perfect conductor BC: right boundary. */
     void gpuPerfectConductorRight(GPUFieldArray3& imX, GPUFieldArray3& imY, GPUFieldArray3& imZ,
                                   GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ, int dir);
-    /** GPU lapN2N: Laplacian node→node (gradN2C + halo comm + divC2N). */
-    void gpuLapN2N(GPUFieldArray3& lapN, GPUFieldArray3& fieldN);
     /** Fused triple Laplacian: 3× lapN2N with ONE batched halo exchange. */
     void gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
                      GPUFieldArray3& lapB, GPUFieldArray3& fieldB,
@@ -498,10 +473,6 @@ class EMfields3D                // :public Field
      *  d_pYYsn, d_pYZsn, d_pZZsn.  Pure device-to-device, no host touch. */
     void gpuScatterMomentsD2D(double* momentsSrc, int species, cudaStream_t stream = 0);
 
-    /** GPU communicateGhostP2G: full P2G ghost exchange for one species on GPU.
-     *  Performs additive interpolation halo, adjustNonPeriodicDensities,
-     *  and copy-style node halo exchange — all on device arrays. */
-    void gpuCommunicateGhostP2G(int species);
     /** Batched ghost exchange: all species at once (reduces MPI barriers). */
     void gpuCommunicateGhostP2G_AllSpecies();
 
@@ -581,8 +552,19 @@ class EMfields3D                // :public Field
     void gpuConstantChargePlanet2DPlaneXZ(double R, double x_center, double z_center);
 
     // ---- GPU Solver: Poisson/divB correction ----
-    /** GPU Poisson image operator (laplacian on centers). */
+    /** GPU Poisson image operator (laplacian on centers, with communication). */
     void gpuPoissonImage(double* d_im, double* d_vec);
+    /** GPU Poisson image operator, communication-free (computes -∇², positive eigenvalues). */
+    void gpuPoissonImageLocal(double* d_im, double* d_vec);
+    /** Compute analytic eigenvalue bounds of the local -∇² operator (once per simulation). */
+    void computePoissonChebyshevEigenvalues();
+    /** Chebyshev preconditioner for Poisson (communication-free, analytic eigenvalues). */
+    void gpuChebyshevPrecondPoisson(double* d_x, double* d_b);
+    /** GPU FGMRES(m) with Chebyshev preconditioner for Poisson (divergence cleaning). */
+    void gpuFGMRES_PoissonChebyshev(
+        double* d_x, int n, double* d_b,
+        int m, int max_iter, double tol,
+        MPI_Comm fieldcomm);
     /** GPU Poisson correction for div(E) cleaning. */
     void gpuPoissonCorrection(int cycle);
     /** GPU div(B) cleaning: solve lap(PSI)=div(B), correct B on boundary layers. */
@@ -1027,11 +1009,30 @@ class EMfields3D                // :public Field
     int     chebAlloc = 0;         // allocated length (0 = not yet)
     // Chebyshev parameters (configurable, estimated if <= 0)
     int     chebMaxIter  = 20;     // default polynomial degree
-    int     chebPrecMaxIter = 8;   // steps for preconditioner mode
     double  chebEigMin   = 0.0;    // 0 → will be set to 1.0
     double  chebEigMax   = 0.0;    // 0 → estimated via power iteration
-    double  chebPrecEigMin = 0.0;  // eigenvalue bounds for preconditioner
-    double  chebPrecEigMax = 0.0;
+
+    // Poisson Chebyshev preconditioner (analytic eigenvalues of local -∇²)
+    double  poissonChebEigMin = 0.0;
+    double  poissonChebEigMax = 0.0;
+    bool    poissonChebComputed = false;
+    int     poissonChebMaxIter = 10;  // Chebyshev polynomial degree for Poisson preconditioner
+    double  poissonChebRescaleEigMin = 1.0;  // rescale factor for min eigenvalue
+    double  poissonChebRescaleEigMax = 1.0;  // rescale factor for max eigenvalue
+
+    // Block-Jacobi preconditioner parameters
+    int     blockJacobiSweeps = 1;    // number of Richardson sweeps (1 = single application)
+    double  blockJacobiOmega  = 1.0;  // damping factor (1.0 = no damping, 2/3 typical for 3D)
+
+    // Precomputed D^{-1} (9 entries per node, allocated lazily)
+    double* d_blockJacobiDinv = nullptr;
+    int     blockJacobiDinvAlloc = 0;  // allocated nodeSlice (0 = not yet)
+    bool    blockJacobiDinvStale = true;
+
+    // Block-Jacobi Richardson sweep scratch (separate from Chebyshev workspace)
+    double* d_bjScratch1 = nullptr;  // residual vector
+    double* d_bjScratch2 = nullptr;  // D^{-1} residual
+    int     bjScratchAlloc = 0;      // allocated length (0 = not yet)
 
     // ---- Persistent PINNED host buffers for GMRES reductions ----
     // Avoids per-call heap allocation and enables true async D→H DMA.

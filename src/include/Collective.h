@@ -205,9 +205,13 @@ class Collective
     int getNiterMover()const{ return (NiterMover); }
     string getSolverType()const{ return (SolverType); }
     int getChebyshevMaxIter()const{ return (ChebyshevMaxIter); }
-    int getChebyshevPrecMaxIter()const{ return (ChebyshevPrecMaxIter); }
     double getChebyshevEigMin()const{ return (ChebyshevEigMin); }
     double getChebyshevEigMax()const{ return (ChebyshevEigMax); }
+    int getBlockJacobiSweeps()const{ return (BlockJacobiSweeps); }
+    double getBlockJacobiOmega()const{ return (BlockJacobiOmega); }
+    int getPoissonChebMaxIter()const{ return (PoissonChebMaxIter); }
+    double getPoissonChebRescaleEigMin()const{ return (PoissonChebRescaleEigMin); }
+    double getPoissonChebRescaleEigMax()const{ return (PoissonChebRescaleEigMax); }
     int getFieldOutputCycle()const{ return (FieldOutputCycle); }
     int getParticlesOutputCycle()const{ return (ParticlesOutputCycle); }
     int getTestParticlesOutputCycle()const{ return (TestParticlesOutputCycle); }
@@ -467,12 +471,22 @@ class Collective
     string SolverType;
     /*! Chebyshev solver: max iterations (polynomial degree) */
     int ChebyshevMaxIter;
-    /*! Chebyshev preconditioner: max iterations */
-    int ChebyshevPrecMaxIter;
     /*! Chebyshev solver: min eigenvalue estimate (0 = use default 1.0) */
     double ChebyshevEigMin;
     /*! Chebyshev solver: max eigenvalue estimate (0 = power iteration) */
     double ChebyshevEigMax;
+
+    /*! Block-Jacobi preconditioner: number of Richardson sweeps (default 1) */
+    int BlockJacobiSweeps;
+    /*! Block-Jacobi preconditioner: damping factor omega (default 1.0) */
+    double BlockJacobiOmega;
+
+    /*! Poisson Chebyshev preconditioner: polynomial degree (default 10) */
+    int PoissonChebMaxIter;
+    /*! Poisson Chebyshev preconditioner: rescale factor for min eigenvalue (default 1.0) */
+    double PoissonChebRescaleEigMin;
+    /*! Poisson Chebyshev preconditioner: rescale factor for max eigenvalue (default 1.0) */
+    double PoissonChebRescaleEigMax;
 
     /*! Output for field */
     int FieldOutputCycle;

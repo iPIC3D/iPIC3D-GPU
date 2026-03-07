@@ -1269,4 +1269,292 @@ void gpuLapC2CKernel(double* lapC, const double* fC,
     cudaErrChk(cudaGetLastError());
 }
 
+// =========================================================================
+//  Block-Jacobi preconditioner kernel
+//  Solves D_i * z_i = r_i at each interior node, where
+//    D_i = (1 + δ²/2 * cΣ) I  +  (I + δ²/2 * C) * μ_i
+//  μ_i is the full MUdot susceptibility tensor summed over species.
+//  3×3 inversion via Cramer's rule.
+// =========================================================================
+
+#define BJK_IDX3(i, j, k, ny, nz) ((i) * (ny) * (nz) + (j) * (nz) + (k))
+
+__global__ void k_BlockJacobiPrecond(
+    double* __restrict__ zX,
+    double* __restrict__ zY,
+    double* __restrict__ zZ,
+    const double* __restrict__ rX,
+    const double* __restrict__ rY,
+    const double* __restrict__ rZ,
+    const double* __restrict__ Bxn,
+    const double* __restrict__ Byn,
+    const double* __restrict__ Bzn,
+    const double* __restrict__ Bx_ext,
+    const double* __restrict__ By_ext,
+    const double* __restrict__ Bz_ext,
+    const double* __restrict__ rhons,   // flat [ns][nxn][nyn][nzn]
+    const double* __restrict__ d_qom,   // [ns]
+    int ns,
+    double dt, double c_val, double delt, double FourPI,
+    double diagScalar,   // 1 + δ²/2 * cΣ
+    double wx,           // 1 + δ²/2 / hx²
+    double wy,           // 1 + δ²/2 / hy²
+    double wz,           // 1 + δ²/2 / hz²
+    int nxn, int nyn, int nzn)
+{
+    int i = blockIdx.x * BX + threadIdx.x + 1;
+    int j = blockIdx.y * BY + threadIdx.y + 1;
+    int k = blockIdx.z * BZ + threadIdx.z + 1;
+    if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2) return;
+
+    int idx = BJK_IDX3(i, j, k, nyn, nzn);
+    size_t nodeSlice = (size_t)nxn * nyn * nzn;
+
+    // ---- Build μ tensor at this node (sum over species) ----
+    double mu00 = 0.0, mu01 = 0.0, mu02 = 0.0;
+    double mu10 = 0.0, mu11 = 0.0, mu12 = 0.0;
+    double mu20 = 0.0, mu21 = 0.0, mu22 = 0.0;
+
+    double bx = Bxn[idx] + Bx_ext[idx];
+    double by = Byn[idx] + By_ext[idx];
+    double bz = Bzn[idx] + Bz_ext[idx];
+
+    for (int is = 0; is < ns; is++) {
+        double beta = 0.5 * d_qom[is] * dt / c_val;
+        double omcx = beta * bx;
+        double omcy = beta * by;
+        double omcz = beta * bz;
+        double omc2 = omcx * omcx + omcy * omcy + omcz * omcz;
+        double prefactor = FourPI / 2.0 * delt * dt / c_val * d_qom[is];
+        double denom = prefactor * rhons[is * nodeSlice + idx] / (1.0 + omc2);
+
+        // μ_s = denom * (I + ω×  + ωωᵀ)
+        // Row 0: E_x + (E_y*ωz - E_z*ωy) + (E·ω)*ωx
+        //   → coeffs: E_x*(1 + ωx²), E_y*(ωz + ωx*ωy), E_z*(-ωy + ωx*ωz)
+        mu00 += denom * (1.0 + omcx * omcx);
+        mu01 += denom * (omcz + omcx * omcy);
+        mu02 += denom * (-omcy + omcx * omcz);
+        // Row 1: E_y + (E_z*ωx - E_x*ωz) + (E·ω)*ωy
+        //   → coeffs: E_x*(-ωz + ωy*ωx), E_y*(1 + ωy²), E_z*(ωx + ωy*ωz)
+        mu10 += denom * (-omcz + omcy * omcx);
+        mu11 += denom * (1.0 + omcy * omcy);
+        mu12 += denom * (omcx + omcy * omcz);
+        // Row 2: E_z + (E_x*ωy - E_y*ωx) + (E·ω)*ωz
+        //   → coeffs: E_x*(ωy + ωz*ωx), E_y*(-ωx + ωz*ωy), E_z*(1 + ωz²)
+        mu20 += denom * (omcy + omcz * omcx);
+        mu21 += denom * (-omcx + omcz * omcy);
+        mu22 += denom * (1.0 + omcz * omcz);
+    }
+
+    // ---- Build D_i = diagScalar*I + diag(wx,wy,wz) * μ ----
+    // D[p][s] = diagScalar * δ_{ps} + w_p * μ_{ps}
+    double D00 = diagScalar + wx * mu00;
+    double D01 =              wx * mu01;
+    double D02 =              wx * mu02;
+    double D10 =              wy * mu10;
+    double D11 = diagScalar + wy * mu11;
+    double D12 =              wy * mu12;
+    double D20 =              wz * mu20;
+    double D21 =              wz * mu21;
+    double D22 = diagScalar + wz * mu22;
+
+    // ---- Solve D * z = r via Cramer's rule ----
+    double rx = rX[idx], ry = rY[idx], rz = rZ[idx];
+
+    // det(D)
+    double det = D00 * (D11 * D22 - D12 * D21)
+               - D01 * (D10 * D22 - D12 * D20)
+               + D02 * (D10 * D21 - D11 * D20);
+
+    double invDet = 1.0 / det;
+
+    // Adjugate (cofactor transpose) applied to r
+    zX[idx] = invDet * ( (D11 * D22 - D12 * D21) * rx
+                       + (D02 * D21 - D01 * D22) * ry
+                       + (D01 * D12 - D02 * D11) * rz );
+
+    zY[idx] = invDet * ( (D12 * D20 - D10 * D22) * rx
+                       + (D00 * D22 - D02 * D20) * ry
+                       + (D02 * D10 - D00 * D12) * rz );
+
+    zZ[idx] = invDet * ( (D10 * D21 - D11 * D20) * rx
+                       + (D01 * D20 - D00 * D21) * ry
+                       + (D00 * D11 - D01 * D10) * rz );
+}
+
+void gpuBlockJacobiPrecondKernel(
+    double* zX, double* zY, double* zZ,
+    const double* rX, const double* rY, const double* rZ,
+    const double* Bxn, const double* Byn, const double* Bzn,
+    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
+    const double* rhons, const double* d_qom,
+    int ns,
+    double dt, double c_val, double delt, double FourPI,
+    double diagScalar, double wx, double wy, double wz,
+    int nxn, int nyn, int nzn,
+    cudaStream_t stream)
+{
+    dim3 grid = interiorGrid3D(nxn, nyn, nzn);
+    dim3 block(BX, BY, BZ);
+    k_BlockJacobiPrecond<<<grid, block, 0, stream>>>(
+        zX, zY, zZ,
+        rX, rY, rZ,
+        Bxn, Byn, Bzn,
+        Bx_ext, By_ext, Bz_ext,
+        rhons, d_qom,
+        ns,
+        dt, c_val, delt, FourPI,
+        diagScalar, wx, wy, wz,
+        nxn, nyn, nzn);
+    cudaErrChk(cudaGetLastError());
+}
+
+// =========================================================================
+//  Precompute D^{-1} at each interior node.
+//  Stores 9 entries per node in row-major order:
+//    Dinv[(row*3 + col) * nodeSlice + nodeIdx]
+// =========================================================================
+__global__ void k_PrecomputeBlockJacobiInv(
+    double* __restrict__ Dinv,
+    const double* __restrict__ Bxn,
+    const double* __restrict__ Byn,
+    const double* __restrict__ Bzn,
+    const double* __restrict__ Bx_ext,
+    const double* __restrict__ By_ext,
+    const double* __restrict__ Bz_ext,
+    const double* __restrict__ rhons,
+    const double* __restrict__ d_qom,
+    int ns,
+    double dt, double c_val, double delt, double FourPI,
+    double diagScalar, double wx, double wy, double wz,
+    int nxn, int nyn, int nzn)
+{
+    int i = blockIdx.x * BX + threadIdx.x + 1;
+    int j = blockIdx.y * BY + threadIdx.y + 1;
+    int k = blockIdx.z * BZ + threadIdx.z + 1;
+    if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2) return;
+
+    int idx = BJK_IDX3(i, j, k, nyn, nzn);
+    size_t nodeSlice = (size_t)nxn * nyn * nzn;
+
+    double mu00 = 0.0, mu01 = 0.0, mu02 = 0.0;
+    double mu10 = 0.0, mu11 = 0.0, mu12 = 0.0;
+    double mu20 = 0.0, mu21 = 0.0, mu22 = 0.0;
+
+    double bx = Bxn[idx] + Bx_ext[idx];
+    double by = Byn[idx] + By_ext[idx];
+    double bz = Bzn[idx] + Bz_ext[idx];
+
+    for (int is = 0; is < ns; is++) {
+        double beta = 0.5 * d_qom[is] * dt / c_val;
+        double omcx = beta * bx, omcy = beta * by, omcz = beta * bz;
+        double omc2 = omcx*omcx + omcy*omcy + omcz*omcz;
+        double prefactor = FourPI / 2.0 * delt * dt / c_val * d_qom[is];
+        double denom = prefactor * rhons[is * nodeSlice + idx] / (1.0 + omc2);
+
+        mu00 += denom * (1.0 + omcx*omcx);
+        mu01 += denom * (omcz + omcx*omcy);
+        mu02 += denom * (-omcy + omcx*omcz);
+        mu10 += denom * (-omcz + omcy*omcx);
+        mu11 += denom * (1.0 + omcy*omcy);
+        mu12 += denom * (omcx + omcy*omcz);
+        mu20 += denom * (omcy + omcz*omcx);
+        mu21 += denom * (-omcx + omcz*omcy);
+        mu22 += denom * (1.0 + omcz*omcz);
+    }
+
+    double D00 = diagScalar + wx*mu00, D01 = wx*mu01,              D02 = wx*mu02;
+    double D10 = wy*mu10,              D11 = diagScalar + wy*mu11, D12 = wy*mu12;
+    double D20 = wz*mu20,              D21 = wz*mu21,              D22 = diagScalar + wz*mu22;
+
+    double det = D00*(D11*D22 - D12*D21) - D01*(D10*D22 - D12*D20) + D02*(D10*D21 - D11*D20);
+    double invDet = 1.0 / det;
+
+    Dinv[0 * nodeSlice + idx] = invDet * (D11*D22 - D12*D21);  // (0,0)
+    Dinv[1 * nodeSlice + idx] = invDet * (D02*D21 - D01*D22);  // (0,1)
+    Dinv[2 * nodeSlice + idx] = invDet * (D01*D12 - D02*D11);  // (0,2)
+    Dinv[3 * nodeSlice + idx] = invDet * (D12*D20 - D10*D22);  // (1,0)
+    Dinv[4 * nodeSlice + idx] = invDet * (D00*D22 - D02*D20);  // (1,1)
+    Dinv[5 * nodeSlice + idx] = invDet * (D02*D10 - D00*D12);  // (1,2)
+    Dinv[6 * nodeSlice + idx] = invDet * (D10*D21 - D11*D20);  // (2,0)
+    Dinv[7 * nodeSlice + idx] = invDet * (D01*D20 - D00*D21);  // (2,1)
+    Dinv[8 * nodeSlice + idx] = invDet * (D00*D11 - D01*D10);  // (2,2)
+}
+
+void gpuPrecomputeBlockJacobiInv(
+    double* Dinv,
+    const double* Bxn, const double* Byn, const double* Bzn,
+    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
+    const double* rhons, const double* d_qom,
+    int ns, double dt, double c_val, double delt, double FourPI,
+    double diagScalar, double wx, double wy, double wz,
+    int nxn, int nyn, int nzn, cudaStream_t stream)
+{
+    dim3 grid = interiorGrid3D(nxn, nyn, nzn);
+    dim3 block(BX, BY, BZ);
+    k_PrecomputeBlockJacobiInv<<<grid, block, 0, stream>>>(
+        Dinv, Bxn, Byn, Bzn, Bx_ext, By_ext, Bz_ext,
+        rhons, d_qom, ns, dt, c_val, delt, FourPI,
+        diagScalar, wx, wy, wz, nxn, nyn, nzn);
+    cudaErrChk(cudaGetLastError());
+}
+
+// =========================================================================
+//  Fast D^{-1} application operating directly on Krylov vectors.
+//  No pack/unpack needed — reads and writes Krylov layout directly.
+//  Krylov layout: INTERLEAVED [Ex0,Ey0,Ez0, Ex1,Ey1,Ez1, ...]
+//  tid = (i-1)*ny2*nz2 + (j-1)*nz2 + (k-1), sol_idx = tid*3
+// =========================================================================
+__global__ void k_ApplyBlockJacobiInvKrylov(
+    double* __restrict__ zKrylov,
+    const double* __restrict__ rKrylov,
+    const double* __restrict__ Dinv,
+    int nxn, int nyn, int nzn)
+{
+    int i = blockIdx.x * BX + threadIdx.x + 1;
+    int j = blockIdx.y * BY + threadIdx.y + 1;
+    int k = blockIdx.z * BZ + threadIdx.z + 1;
+    if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2) return;
+
+    int nodeIdx = BJK_IDX3(i, j, k, nyn, nzn);
+    size_t nodeSlice = (size_t)nxn * nyn * nzn;
+
+    // Interior linearisation (matches gpuSolver2Phys3/gpuPhys2Solver3)
+    int nz2 = nzn - 2, ny2 = nyn - 2;
+    int tid = ((i - 1) * ny2 + (j - 1)) * nz2 + (k - 1);
+    int sol_idx = tid * 3;
+
+    // Read r from interleaved Krylov vector
+    double rx = rKrylov[sol_idx];
+    double ry = rKrylov[sol_idx + 1];
+    double rz = rKrylov[sol_idx + 2];
+
+    // Read D^{-1} entries
+    double A00 = Dinv[0 * nodeSlice + nodeIdx];
+    double A01 = Dinv[1 * nodeSlice + nodeIdx];
+    double A02 = Dinv[2 * nodeSlice + nodeIdx];
+    double A10 = Dinv[3 * nodeSlice + nodeIdx];
+    double A11 = Dinv[4 * nodeSlice + nodeIdx];
+    double A12 = Dinv[5 * nodeSlice + nodeIdx];
+    double A20 = Dinv[6 * nodeSlice + nodeIdx];
+    double A21 = Dinv[7 * nodeSlice + nodeIdx];
+    double A22 = Dinv[8 * nodeSlice + nodeIdx];
+
+    // z = D^{-1} r
+    zKrylov[sol_idx]     = A00*rx + A01*ry + A02*rz;
+    zKrylov[sol_idx + 1] = A10*rx + A11*ry + A12*rz;
+    zKrylov[sol_idx + 2] = A20*rx + A21*ry + A22*rz;
+}
+
+void gpuApplyBlockJacobiInvKrylov(
+    double* zKrylov, const double* rKrylov, const double* Dinv,
+    int nxn, int nyn, int nzn, cudaStream_t stream)
+{
+    dim3 grid = interiorGrid3D(nxn, nyn, nzn);
+    dim3 block(BX, BY, BZ);
+    k_ApplyBlockJacobiInvKrylov<<<grid, block, 0, stream>>>(
+        zKrylov, rKrylov, Dinv, nxn, nyn, nzn);
+    cudaErrChk(cudaGetLastError());
+}
+
 #endif // GPU_SOLVER

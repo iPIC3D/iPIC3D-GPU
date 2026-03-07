@@ -181,9 +181,15 @@ void Collective::ReadInput(string inputfile) {
     // solver selection: "GMRES" (default) or "Chebyshev"
     SolverType = config.read < string >("SolverType","GMRES");
     ChebyshevMaxIter = config.read < int >("ChebyshevMaxIter",20);
-    ChebyshevPrecMaxIter = config.read < int >("ChebyshevPrecMaxIter",8);
     ChebyshevEigMin = config.read < double >("ChebyshevEigMin",0.0);
     ChebyshevEigMax = config.read < double >("ChebyshevEigMax",0.0);
+    // Block-Jacobi preconditioner parameters
+    BlockJacobiSweeps = config.read < int >("BlockJacobiSweeps",1);
+    BlockJacobiOmega = config.read < double >("BlockJacobiOmega",1.0);
+    // Poisson Chebyshev preconditioner parameters (divergence cleaning)
+    PoissonChebMaxIter = config.read < int >("PoissonChebMaxIter",10);
+    PoissonChebRescaleEigMin = config.read < double >("PoissonChebRescaleEigMin",1.0);
+    PoissonChebRescaleEigMax = config.read < double >("PoissonChebRescaleEigMax",1.0);
     // take the injection of the particless
     Vinj = config.read < double >("Vinj",0.0);
 

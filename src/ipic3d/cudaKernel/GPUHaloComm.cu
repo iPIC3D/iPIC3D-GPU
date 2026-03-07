@@ -793,20 +793,9 @@ void gpuBCface_P(int nx, int ny, int nz,
 // =========================================================================
 //  EMfields3D GPU halo exchange wrapper methods
 //
-//  All wrappers now route through gpuBatchedHaloExchange (nFields=1)
-//  which uses explicit CUDA pack/unpack + contiguous MPI instead of
-//  MPI derived datatypes on device memory.
+//  Single-field wrappers route through gpuBatchedHaloExchange (nFields=1).
+//  Batched wrappers route through gpuBatchedHaloExchange (nFields=3 or 9).
 // =========================================================================
-
-void EMfields3D::gpuCommunicateNodeBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
-                                       int bcFaceXright, int bcFaceXleft,
-                                       int bcFaceYright, int bcFaceYleft,
-                                       int bcFaceZright, int bcFaceZleft)
-{
-    double* ptr = gpuArr.devPtr();
-    gpuBatchedHaloExchange(&ptr, 1, nx, ny, nz, false, false, false, false, solverStream_);
-    gpuBCface(nx, ny, nz, gpuArr, bcFaceXright, bcFaceXleft, bcFaceYright, bcFaceYleft, bcFaceZright, bcFaceZleft, &_vct, solverStream_);
-}
 
 void EMfields3D::gpuCommunicateCenterBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
                                          int bcFaceXright, int bcFaceXleft,
@@ -818,16 +807,6 @@ void EMfields3D::gpuCommunicateCenterBC(int nx, int ny, int nz, GPUFieldArray3& 
     gpuBCface(nx, ny, nz, gpuArr, bcFaceXright, bcFaceXleft, bcFaceYright, bcFaceYleft, bcFaceZright, bcFaceZleft, &_vct, solverStream_);
 }
 
-void EMfields3D::gpuCommunicateNodeBoxStencilBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
-                                                 int bcFaceXright, int bcFaceXleft,
-                                                 int bcFaceYright, int bcFaceYleft,
-                                                 int bcFaceZright, int bcFaceZleft)
-{
-    double* ptr = gpuArr.devPtr();
-    gpuBatchedHaloExchange(&ptr, 1, nx, ny, nz, false, true, false, false, solverStream_);
-    gpuBCface(nx, ny, nz, gpuArr, bcFaceXright, bcFaceXleft, bcFaceYright, bcFaceYleft, bcFaceZright, bcFaceZleft, &_vct, solverStream_);
-}
-
 void EMfields3D::gpuCommunicateCenterBC_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
                                            int bcFaceXright, int bcFaceXleft,
                                            int bcFaceYright, int bcFaceYleft,
@@ -836,18 +815,6 @@ void EMfields3D::gpuCommunicateCenterBC_P(int nx, int ny, int nz, GPUFieldArray3
     double* ptr = gpuArr.devPtr();
     gpuBatchedHaloExchange(&ptr, 1, nx, ny, nz, true, false, false, true, solverStream_);
     gpuBCface_P(nx, ny, nz, gpuArr, bcFaceXright, bcFaceXleft, bcFaceYright, bcFaceYleft, bcFaceZright, bcFaceZleft, &_vct, solverStream_);
-}
-
-void EMfields3D::gpuCommunicateInterp(int nx, int ny, int nz, GPUFieldArray3& gpuArr)
-{
-    double* ptr = gpuArr.devPtr();
-    gpuBatchedHaloExchange(&ptr, 1, nx, ny, nz, true, false, true, true, solverStream_);
-}
-
-void EMfields3D::gpuCommunicateNode_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr)
-{
-    double* ptr = gpuArr.devPtr();
-    gpuBatchedHaloExchange(&ptr, 1, nx, ny, nz, false, false, false, true, solverStream_);
 }
 
 void EMfields3D::gpuCommunicateNodeBoxStencilBC_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
@@ -910,17 +877,6 @@ void EMfields3D::gpuCommunicateCenterBoxStencilBC(int nx, int ny, int nz, GPUFie
 //  cudaStreamSynchronize + MPI_Waitall barriers per call.
 // =========================================================================
 
-void EMfields3D::gpuCommunicateNodeBC_3(int nx, int ny, int nz,
-                                         GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
-                                         int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL)
-{
-    double* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
-    gpuBatchedHaloExchange(ptrs, 3, nx, ny, nz, false, false, false, false, solverStream_);
-    gpuBCface(nx, ny, nz, a1, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
-    gpuBCface(nx, ny, nz, a2, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
-    gpuBCface(nx, ny, nz, a3, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
-}
-
 void EMfields3D::gpuCommunicateCenterBC_3(int nx, int ny, int nz,
                                            GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
                                            int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL)
@@ -941,17 +897,6 @@ void EMfields3D::gpuCommunicateCenterBC_P_3(int nx, int ny, int nz,
     gpuBCface_P(nx, ny, nz, a1, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
     gpuBCface_P(nx, ny, nz, a2, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
     gpuBCface_P(nx, ny, nz, a3, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
-}
-
-void EMfields3D::gpuCommunicateNodeBoxStencilBC_3(int nx, int ny, int nz,
-                                                   GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
-                                                   int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL)
-{
-    double* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
-    gpuBatchedHaloExchange(ptrs, 3, nx, ny, nz, false, true, false, false, solverStream_);
-    gpuBCface(nx, ny, nz, a1, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
-    gpuBCface(nx, ny, nz, a2, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
-    gpuBCface(nx, ny, nz, a3, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
 }
 
 void EMfields3D::gpuCommunicateCenterBC_3mixed(int nx, int ny, int nz,

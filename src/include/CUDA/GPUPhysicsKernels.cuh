@@ -268,5 +268,64 @@ void gpuLapC2CKernel(double* lapC, const double* fC,
     int nxc, int nyc, int nzc,
     double invdx2, double invdy2, double invdz2, cudaStream_t stream = 0);
 
+// =========================================================================
+//  Block-Jacobi preconditioner: solve D_i z_i = r_i per node
+// =========================================================================
+
+/**
+ * @brief Point-block Jacobi preconditioner for the Maxwell operator.
+ *
+ * At each interior node, builds the 3×3 diagonal block D_i of the
+ * discretised Maxwell operator (including the MUdot tensor summed over
+ * all species) and solves D_i z_i = r_i via Cramer's rule.
+ *
+ * Completely communication-free.
+ *
+ * @param zX/zY/zZ   Output solution (node-based).
+ * @param rX/rY/rZ   Input RHS (node-based).
+ * @param Bxn/Byn/Bzn   Total B at nodes.
+ * @param Bx_ext/By_ext/Bz_ext  External B at nodes.
+ * @param rhons      Per-species density, flat [ns][nxn*nyn*nzn].
+ * @param d_qom      Charge-to-mass ratio per species [ns].
+ * @param ns         Number of species.
+ * @param dt,c_val,delt,FourPI  Physical constants.
+ * @param diagScalar  1 + δ²/2 * cΣ
+ * @param wx,wy,wz    1 + δ²/(2 hα²) for α = x,y,z
+ * @param nxn,nyn,nzn  Node grid dimensions.
+ * @param stream      CUDA stream.
+ */
+void gpuBlockJacobiPrecondKernel(
+    double* zX, double* zY, double* zZ,
+    const double* rX, const double* rY, const double* rZ,
+    const double* Bxn, const double* Byn, const double* Bzn,
+    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
+    const double* rhons, const double* d_qom,
+    int ns,
+    double dt, double c_val, double delt, double FourPI,
+    double diagScalar, double wx, double wy, double wz,
+    int nxn, int nyn, int nzn,
+    cudaStream_t stream = 0);
+
+/**
+ * Precompute D^{-1} at each interior node and store 9 entries per node.
+ * Layout: Dinv[(row*3+col) * nodeSlice + nodeIdx]
+ */
+void gpuPrecomputeBlockJacobiInv(
+    double* Dinv,
+    const double* Bxn, const double* Byn, const double* Bzn,
+    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
+    const double* rhons, const double* d_qom,
+    int ns, double dt, double c_val, double delt, double FourPI,
+    double diagScalar, double wx, double wy, double wz,
+    int nxn, int nyn, int nzn, cudaStream_t stream = 0);
+
+/**
+ * Fast D^{-1} application operating directly on Krylov vectors.
+ * zKrylov = D^{-1} * rKrylov  (no pack/unpack needed).
+ */
+void gpuApplyBlockJacobiInvKrylov(
+    double* zKrylov, const double* rKrylov, const double* Dinv,
+    int nxn, int nyn, int nzn, cudaStream_t stream = 0);
+
 #endif // GPU_SOLVER
 #endif // GPU_PHYSICS_KERNELS_CUH

@@ -95,8 +95,9 @@ void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, Particles3Dcomm *part,
     ss << is;
     string s_is = ss.str();
 
-    // charge density
-    outputfile.WritePHDF5dataset("Fields", "rho_"+s_is, EMf->getRHOcs(is), nxc-2, nyc-2, nzc-2);
+    // Keep legacy PHDF5 output consistent with the active IOManager path:
+    // densities are written in rhoINIT-style scaling (4*pi * rho_physical).
+    outputfile.WritePHDF5dataset("Fields", "rho_"+s_is, EMf->getRHOcs(is), nxc-2, nyc-2, nzc-2, 4*3.1415926535897);
     // current (on node grid, same as pvtk output)
     outputfile.WritePHDF5dataset("Fields", "Jx_"+s_is, EMf->getJxs(is), nxc-2, nyc-2, nzc-2);
     outputfile.WritePHDF5dataset("Fields", "Jy_"+s_is, EMf->getJys(is), nxc-2, nyc-2, nzc-2);

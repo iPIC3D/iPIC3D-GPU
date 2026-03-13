@@ -51,9 +51,12 @@ The key consequence of the $\omega_{pi}$ normalization is:
 
 $$\omega_{pi}^2 = \frac{4\pi\, n_0\, e^2}{m_i} = 1 \quad \Longrightarrow \quad n_0 = \frac{1}{4\pi} \approx 0.0796$$
 
-This means the **physical background charge density** in normalized units is
-$1/(4\pi)$, not 1. The input file parameter `rhoINIT` is a convenience quantity
-equal to $4\pi \times \rho_{\text{physical}}$ so that the background value is 1.
+This means the physical background **number density** in normalized units is
+$1/(4\pi)$, not 1. The input file parameters `rhoINIT` and `rhoINJECT` are
+convenience quantities equal to $4\pi \times n_s$ for each species. They are
+input number-density magnitudes, not signed charge densities; the species sign
+enters later through `qom` when particle charges are assigned and moments are
+deposited.
 
 ---
 
@@ -79,7 +82,10 @@ equations require it.
 
 All particle moments (ρ, J, pressure tensor) are stored in the physical
 normalized units defined in [Section 1](#1-unit-system). Internally, densities
-are not kept in the `rhoINIT`/`rhoINJECT` input scaling.
+are not kept in the `rhoINIT`/`rhoINJECT` input scaling. After particle loading
+and deposition, `rho` arrays represent signed charge density. The special case
+is the input convention: `rhoINIT` and `rhoINJECT` themselves are unsigned
+species number-density magnitudes.
 
 ### 3.1 Density Initialization
 
@@ -89,8 +95,9 @@ In `EMfields3D::initGEM()` (EMfields3D.cpp, line 3283):
 rhons[is][i][j][k] = rhoINIT[is] / FourPI;   // physical density
 ```
 
-The input `rhoINIT` is divided by $4\pi$ to obtain the physical charge density
-used internally.
+The input `rhoINIT` is divided by $4\pi$ to obtain the seeded species number
+density magnitude on the grid. The charge sign is not encoded in `rhoINIT`; it
+is applied later through `qom` when particle weights are formed.
 
 ### 3.2 Particle Weight
 
@@ -100,8 +107,9 @@ In `Particles3D::maxwellian()` (Particles3D.cpp, line 135):
 q = sign(qom) * (VOL / npcel) * getRHOcs(i, j, k, ns);
 ```
 
-`getRHOcs()` returns the center-interpolated physical density, so the particle
-charge `q` is consistent with the internal storage convention.
+`getRHOcs()` returns the center-interpolated seeded density magnitude. The
+factor `sign(qom)` applies the species sign, so the particle charge `q` and the
+deposited `rho_s` become signed charge-density quantities.
 
 For boundary repopulation (Particles3D.cpp, line 457), `Ninj` (= `rhoINJECT`
 from input) is explicitly divided by `FourPI`:
@@ -182,8 +190,8 @@ Key parameters and their relationship to physical units:
 
 | Input parameter  | Physical meaning                           | Internal value            |
 |------------------|--------------------------------------------|---------------------------|
-| `rhoINIT`        | $4\pi \times \rho_{\text{phys}}$           | `rhons = rhoINIT / 4π`   |
-| `rhoINJECT`      | $4\pi \times \rho_{\text{inject,phys}}$    | `q ∝ rhoINJECT / 4π`    |
+| `rhoINIT`        | $4\pi \times n_s$ (species number-density magnitude) | Seeds `rhons = rhoINIT / 4π` before deposition |
+| `rhoINJECT`      | $4\pi \times n_{\text{inject},s}$ (injected number-density magnitude) | `q ∝ rhoINJECT / 4π`, sign from `qom` |
 | `B0x, B0y, B0z`  | Physical $\mathbf{B}_0$ (= Alfvén speed)   | Used directly             |
 | `uth, vth, wth`  | Thermal speeds $v_{th} = \sqrt{kT/m}$      | Used directly             |
 | `u0, v0, w0`     | Drift velocities (per species)             | Used directly             |
@@ -191,6 +199,9 @@ Key parameters and their relationship to physical units:
 | `dt`             | Time step in $\omega_{pi}^{-1}$            | Used directly             |
 | `Lx, Ly, Lz`    | Box size in $d_i$                          | Used directly             |
 | `c`              | Speed of light (should be 1.0)             | Used directly             |
+
+`rhoINIT` and `rhoINJECT` set density magnitudes only. They do not encode the
+sign of the species charge.
 
 ---
 
@@ -255,14 +266,18 @@ field components.
 
 ### 7.2 Charge Density
 
-**ρ is written multiplied by $4\pi$ (= `rhoINIT`-scale).**
+**ρ is written multiplied by $4\pi$ and stored on disk as a signed charge
+density.**
 
 | Density | Internal value | On-disk value | Scale |
 |---------|---------------|---------------|-------|
-| $\rho_s$ (per-species) | $\rho_{\text{phys}}$ | $4\pi \times \rho_{\text{phys}}$ | × 4π |
+| $\rho_s$ (per-species) | signed $\rho_{\text{phys}} = q_s n_s$ | $4\pi \times \rho_{\text{phys}}$ | × 4π |
 | $\rho_{\text{total}}$ | $\sum_s \rho_{s,\text{phys}}$ | $4\pi \times \sum_s \rho_{s,\text{phys}}$ | × 4π |
 
-This means the on-disk density matches the `rhoINIT` input convention.
+This uses the same numerical $4\pi$ scaling as `rhoINIT`, but it is not the
+same physical quantity: `rhoINIT` is an unsigned input number-density
+magnitude, while the written `rho` datasets are signed deposited charge
+density.
 
 ### 7.3 Current Density
 
@@ -298,7 +313,7 @@ Available in SHDF5 backend:
 
 | Quantity | Tag | Formula | Notes |
 |----------|-----|---------|-------|
-| Kinetic energy | `k_energy` | $\frac{1}{2} \sum_p \|q_p\| \mathbf{v}_p^2 / \|q/m\|$ | Per species |
+| Kinetic energy | `k_energy` | $\frac{1}{2} \sum_p \lvert q_p \rvert \, \lVert \mathbf{v}_p \rVert^2 / \lvert q/m \rvert$ | Per species |
 | Magnetic energy | `B_energy` | $\sum (B_x^2 + B_y^2 + B_z^2) \cdot \text{VOL}$ | Global |
 
 ---
@@ -330,13 +345,13 @@ Written for **all species**.
 
 | Tag | Filename pattern | Scaling |
 |-----|-----------------|---------|
-| `rho` | `{SimName}_rho{e\|i}{species}_{cycle}.vtk` | × 4π |
-| `PXX` | `{SimName}_PXX{e\|i}{species}_{cycle}.vtk` | none |
-| `PXY` | `{SimName}_PXY{e\|i}{species}_{cycle}.vtk` | none |
-| `PXZ` | `{SimName}_PXZ{e\|i}{species}_{cycle}.vtk` | none |
-| `PYY` | `{SimName}_PYY{e\|i}{species}_{cycle}.vtk` | none |
-| `PYZ` | `{SimName}_PYZ{e\|i}{species}_{cycle}.vtk` | none |
-| `PZZ` | `{SimName}_PZZ{e\|i}{species}_{cycle}.vtk` | none |
+| `rho` | `{SimName}_rho{e_or_i}{species}_{cycle}.vtk` | × 4π |
+| `PXX` | `{SimName}_PXX{e_or_i}{species}_{cycle}.vtk` | none |
+| `PXY` | `{SimName}_PXY{e_or_i}{species}_{cycle}.vtk` | none |
+| `PXZ` | `{SimName}_PXZ{e_or_i}{species}_{cycle}.vtk` | none |
+| `PYY` | `{SimName}_PYY{e_or_i}{species}_{cycle}.vtk` | none |
+| `PYZ` | `{SimName}_PYZ{e_or_i}{species}_{cycle}.vtk` | none |
+| `PZZ` | `{SimName}_PZZ{e_or_i}{species}_{cycle}.vtk` | none |
 
 Species naming: even-indexed species get `e` (electrons), odd-indexed get `i` (ions).
 Examples for 4 species: `rhoe0`, `rhoi1`, `rhoe2`, `rhoi3`, `PXXe0`, `PXXi1`, etc.
@@ -390,7 +405,8 @@ Serial HDF5 (one file per MPI process). Tags are parsed from both
 
 When post-processing output, convert density back to its internal physical form
 with $\rho_{\text{phys}} = \rho_{\text{disk}}/(4\pi)$ whenever it appears in a
-formula. J, E, B, and P can be used directly.
+formula. J, E, B, and P can be used directly. Note that `rho_disk` is a signed
+charge density in `4πρ` scaling, not the unsigned `rhoINIT` input quantity.
 
 ### 11.1 Correct Formulas Using On-Disk Values
 
@@ -399,9 +415,10 @@ formula. J, E, B, and P can be used directly.
 | **Bulk velocity** | $\mathbf{V}_s = \mathbf{J}_s / (\rho_{s,\text{disk}} / 4\pi)$ | Uses species density |
 | **Hall E-field** | $\mathbf{J} \times \mathbf{B} / (\rho_{e,\text{disk}} / 4\pi)$ | Uses electron density |
 | **E·J dissipation** | $\mathbf{E} \cdot \mathbf{J}$ | Both physical, use directly |
-| **Alfvén speed** | $v_A = B_0 / \sqrt{\rho_{\text{disk}} / \|q/m\|}$ | $4\pi$ in $v_A = B/\sqrt{4\pi\rho_m}$ cancels with $\rho_m = \rho_{\text{disk}}/(4\pi\cdot\|q/m\|)$. For ions ($\|q/m\|=1$, `rhoINIT=1`): $v_A = B_0$ |
-| **Plasma beta** | $\beta = 2 v_{th}^2 \rho_{\text{disk}} / B^2$ | $4\pi$ cancels between $p_{\text{gas}} = v_{th}^2 \rho_{\text{disk}}/(4\pi)$ and $p_B = B^2/(8\pi)$ |
-| **Gas pressure** | $p = v_{th}^2 \times \rho_{\text{disk}} / (4\pi)$ | Mass density $\rho_m = \rho_{\text{disk}}/(4\pi)$ for ions ($m_i=1$) |
+| **Alfvén speed** | $v_A = B_0 / \sqrt{\lvert \rho_{\text{disk}} \rvert / \lvert q/m \rvert}$ | Uses density magnitude. For ions ($\lvert q/m \rvert=1$, `rhoINIT=1`): $v_A = B_0$ |
+| **Species gas pressure** | $p_s = v_{th,s}^2 \times \lvert \rho_{s,\text{disk}} \rvert / (4\pi\,\lvert q/m \rvert_s)$ | Use density magnitude because on-disk $\rho_s$ is signed |
+| **Total gas pressure** | $p_{\text{gas}} = \sum_s p_s$ | Sum species contributions |
+| **Plasma beta** | $\beta = 8\pi\, p_{\text{gas}} / B^2$ | Equivalent to the usual Gaussian CGS definition |
 | **Magnetic pressure** | $p_B = B^2 / (8\pi)$ | Standard Gaussian CGS |
 | **Gauss's law check** | $\nabla \cdot \mathbf{E} = \rho_{\text{disk}}$ | $\rho_{\text{disk}}$ already is $4\pi\rho_{\text{phys}}$ |
 
@@ -421,12 +438,13 @@ P_physical = P_disk           (already physical)
 
 | Quantity | Internal storage | On-disk value | Input convention |
 |----------|-----------------|---------------|------------------|
-| $\rho_s$ | $\rho_{\text{phys}} = \rho_{\text{init}} / 4\pi$ | $\rho_{\text{init}}$ (× 4π) | `rhoINIT` = $4\pi\rho_{\text{phys}}$ |
+| $\rho_s$ | signed $\rho_s = q_s n_s$ after deposition | $4\pi \times \rho_s$ | `rhoINIT` sets unsigned $4\pi n_s$ input magnitude |
 | $\mathbf{J}_s$ | $J_{\text{phys}}$ | $J_{\text{phys}}$ | — |
 | $\mathbf{E}$ | Physical | Physical | — |
 | $\mathbf{B}$ | Physical (incl. external) | Physical | `B0x, B0y, B0z` = physical |
 | $P_{ij,s}$ | Physical | Physical | — |
 | Particle $q$ | Physical | Physical | — |
 
-Only ρ is written in the input-style `4πρ` scaling; J, E, B, P, and particle
+Only ρ uses the same numerical `4π` scaling as `rhoINIT`; unlike `rhoINIT`, the
+written ρ datasets are signed charge densities. J, E, B, P, and particle
 weights are written in the internal physical normalized units.

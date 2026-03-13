@@ -412,7 +412,7 @@ charge density in `4πρ` scaling, not the unsigned `rhoINIT` input quantity.
 
 | Derived quantity | Formula using disk values | Notes |
 |-----------------|--------------------------|-------|
-| **Bulk velocity** | $\mathbf{V}_s = \mathbf{J}_s / (\rho_{s,\text{disk}} / 4\pi)$ | Uses species density |
+| **Bulk velocity** | $\mathbf{V}_s = \mathbf{J}_s / ({\rho} _{s,\text{disk}} / 4\pi)$ | Uses species density |
 | **Hall E-field** | $\mathbf{J} \times \mathbf{B} / (\rho_{e,\text{disk}} / 4\pi)$ | Uses electron density |
 | **E·J dissipation** | $\mathbf{E} \cdot \mathbf{J}$ | Both physical, use directly |
 | **Alfvén speed** | $v_A = B_0 / \sqrt{\lvert \rho_{\text{disk}} \rvert / \lvert q/m \rvert}$ | Uses density magnitude. For ions ($\lvert q/m \rvert=1$, `rhoINIT=1`): $v_A = B_0$ |

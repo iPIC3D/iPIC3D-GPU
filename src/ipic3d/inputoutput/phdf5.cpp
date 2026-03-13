@@ -164,7 +164,7 @@ void PHDF5fileClass::ClosePHDF5file(){
 
 }
 
-int PHDF5fileClass::WritePHDF5dataset(string grpname, string datasetname, const_arr3_double data, int nx, int ny, int nz)
+int PHDF5fileClass::WritePHDF5dataset(string grpname, string datasetname, const_arr3_double data, int nx, int ny, int nz, double scale)
 {
 
   /* -------------------------- */
@@ -218,7 +218,7 @@ int PHDF5fileClass::WritePHDF5dataset(string grpname, string datasetname, const_
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
-        buffer[l++] = data[i][j][k];
+        buffer[l++] = data[i][j][k] * scale;
 
   /* -------------------------------------------------------- */
   /* 5- Set the stride, count and block values for each chunk */

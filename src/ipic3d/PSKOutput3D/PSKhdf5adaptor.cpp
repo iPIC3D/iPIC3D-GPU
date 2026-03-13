@@ -662,7 +662,7 @@ void HDF5OutputAdaptor::write(const std::string & tag, const Dimens dimens, cons
   //}
 }
 
-void HDF5OutputAdaptor::write(const std::string & objname, const Dimens dimens, const_arr3_double d_array) {
+void HDF5OutputAdaptor::write(const std::string & objname, const Dimens dimens, const_arr3_double d_array, double scale) {
   if (dimens.size() != 3) {
     eprintf("Dimens size not 3 for object %s", objname.c_str());
     //PSK::OutputException e("Dimens size not 3 for object " + objname, "HDF5OutputAdaptor::write(const_arr3_double array)");
@@ -681,11 +681,11 @@ void HDF5OutputAdaptor::write(const std::string & objname, const Dimens dimens, 
         for (int k = 0; k < dk; ++k) {
 
           if (dk != 1)
-            d_array_p[i * djk + j * dk + k] = d_array[i + 1][j + 1][k + 1]; // I am not writing ghost cells
+            d_array_p[i * djk + j * dk + k] = d_array[i + 1][j + 1][k + 1] * scale;
           else if (dj != 1)
-            d_array_p[i * djk + j * dk] = d_array[i + 1][j + 1][0];
+            d_array_p[i * djk + j * dk] = d_array[i + 1][j + 1][0] * scale;
           else {
-            d_array_p[i * djk + j * dk] = d_array[i + 1][0][0];
+            d_array_p[i * djk + j * dk] = d_array[i + 1][0][0] * scale;
 
           }
         }
@@ -698,7 +698,7 @@ void HDF5OutputAdaptor::write(const std::string & objname, const Dimens dimens, 
   //}
 }
 
-void HDF5OutputAdaptor::write(const std::string & objname, const Dimens dimens, const int ns, const_arr4_double d_array) {
+void HDF5OutputAdaptor::write(const std::string & objname, const Dimens dimens, const int ns, const_arr4_double d_array, double scale) {
   if (dimens.size() != 3) {
     eprintf("Dimens size not 3 for object %s", objname.c_str());
     //PSK::OutputException e("Dimens size not 3 for object " + objname, "HDF5OutputAdaptor::write(const_arr4_double array)");
@@ -718,11 +718,11 @@ void HDF5OutputAdaptor::write(const std::string & objname, const Dimens dimens, 
       for (int j = 0; j < dj; ++j)
         for (int k = 0; k < dk; ++k) {
           if (dk != 1)
-            d_array_p[i * djk + j * dk + k] = d_array[ns][i + 1][j + 1][k + 1]; // I am not writing ghost cells
+            d_array_p[i * djk + j * dk + k] = d_array[ns][i + 1][j + 1][k + 1] * scale;
           else if (dj != 1)
-            d_array_p[i * djk + j * dk] = d_array[ns][i + 1][j + 1][0];
+            d_array_p[i * djk + j * dk] = d_array[ns][i + 1][j + 1][0] * scale;
           else
-            d_array_p[i * djk + j * dk] = d_array[ns][i + 1][0][0];
+            d_array_p[i * djk + j * dk] = d_array[ns][i + 1][0][0] * scale;
         }
     write(objname, dimens, d_array_p);
     delete[]d_array_p;

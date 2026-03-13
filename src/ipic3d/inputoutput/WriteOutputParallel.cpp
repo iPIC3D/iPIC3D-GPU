@@ -94,7 +94,7 @@ void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
     const string num = snmbr.str();
 
     // Charge Density
-    outputfile.WritePHDF5dataset("Fields", string("Rho_")+num , EMf->getRHOcs(is), nxc-2, nyc-2, nzc-2);
+    outputfile.WritePHDF5dataset("Fields", string("Rho_")+num , EMf->getRHOcs(is), nxc-2, nyc-2, nzc-2, 4*3.1415926535897);
     // Current (on node grid, same as pvtk output)
     outputfile.WritePHDF5dataset("Fields", string("Jx_")+num, EMf->getJxs(is), nxc-2, nyc-2, nzc-2);
     outputfile.WritePHDF5dataset("Fields", string("Jy_")+num, EMf->getJys(is), nxc-2, nyc-2, nzc-2);

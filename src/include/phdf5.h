@@ -44,7 +44,7 @@ class PHDF5fileClass{
     void OpenPHDF5file();
     void ReadPHDF5dataset_double(string dataset, arr3_double data);
     void ReadPHDF5param();
-    int  WritePHDF5dataset(string grpname, string datasetname, const_arr3_double data, int nx, int ny, int nz);
+    int  WritePHDF5dataset(string grpname, string datasetname, const_arr3_double data, int nx, int ny, int nz, double scale = 1.0);
 
     int  getPHDF5ndim();
     int  getPHDF5ncx();

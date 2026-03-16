@@ -622,12 +622,8 @@ void EMfields3D::MaxwellSource(double *bkrylov)
 
   if (get_col().getCase() == "ForceFree")
     fixBforcefree();
-  if (get_col().getCase() == "GEM")
-    fixBnGEM();
-  if (get_col().getCase() == "GEMnoPert")
-    fixBnGEM();
-  if (get_col().getCase() == "GEMDoubleHarris")
-    fixBnGEM();
+  // fixBnGEM removed: it writes node B but curlC2N below only reads cell B,
+  // so the call had no effect on the source term.
 
   // OpenBC:
   OpenBoundaryInflowB(Bxc, Byc, Bzc, nxc, nyc, nzc);
@@ -1644,6 +1640,9 @@ void EMfields3D::calculateB(int cycle)
   const string &simCase = get_col().getCase();
   if (simCase == "GEM" || simCase == "GEMnoPert" || simCase == "GEMDoubleHarris")
     fixBcGEM();
+  // fixBforcefree edits cell-centered B, so it must run before C2N interpolation
+  if (simCase == "ForceFree")
+    fixBforcefree();
 
   // interpolate center-to-node
   grid->interpC2N(Bxn, Bxc);
@@ -1656,8 +1655,6 @@ void EMfields3D::calculateB(int cycle)
   communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0], col->bcBz[1], col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
 
   // case-specific fixes on node-based B
-  if (simCase == "ForceFree")
-    fixBforcefree();
   if (simCase == "GEM" || simCase == "GEMnoPert" || simCase == "GEMDoubleHarris")
     fixBnGEM();
 

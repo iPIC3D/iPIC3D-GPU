@@ -833,6 +833,59 @@ void Collective::Print() {
 
   }
 
+  cout << endl;
+  cout << "CFL Condition (c*dt/dx < 1):  " << endl;
+  cout << "---------------------" << endl;
+  cout << "Speed of light c     = " << c << endl;
+  cout << "Time step dt         = " << dt << endl;
+  cout << "Grid spacing dx      = " << dx << endl;
+  cout << "Grid spacing dy      = " << dy << endl;
+  cout << "Grid spacing dz      = " << dz << endl;
+  double cfl_x = c * dt / dx;
+  double cfl_y = c * dt / dy;
+  double cfl_z = c * dt / dz;
+  double cfl_max = cfl_x;
+  if (cfl_y > cfl_max) cfl_max = cfl_y;
+  if (nzc > 1 && cfl_z > cfl_max) cfl_max = cfl_z;
+  cout << "c*dt/dx              = " << cfl_x;
+  if (cfl_x < 1.0) cout << "  OK" << endl; else cout << "  WARNING: CFL VIOLATED!" << endl;
+  cout << "c*dt/dy              = " << cfl_y;
+  if (cfl_y < 1.0) cout << "  OK" << endl; else cout << "  WARNING: CFL VIOLATED!" << endl;
+  if (nzc > 1) {
+    cout << "c*dt/dz              = " << cfl_z;
+    if (cfl_z < 1.0) cout << "  OK" << endl; else cout << "  WARNING: CFL VIOLATED!" << endl;
+  }
+  // Multi-dimensional CFL: c*dt * sqrt(1/dx^2 + 1/dy^2 + 1/dz^2) < 1
+  double cfl_multi = c * dt * sqrt(1.0/(dx*dx) + 1.0/(dy*dy) + (nzc > 1 ? 1.0/(dz*dz) : 0.0));
+  cout << "c*dt*|1/dx|          = " << cfl_multi;
+  if (cfl_multi < 1.0) cout << "  OK" << endl; else cout << "  WARNING: multi-dim CFL VIOLATED!" << endl;
+
+  cout << endl;
+  cout << "Numerical Resolution Parameters:  " << endl;
+  cout << "---------------------" << endl;
+  // Larmor radius / grid spacing (using thermal velocity and B0)
+  // In Gaussian CGS: Omega_s = |q/m|_s * B0 / c, so r_L = v_th * c / (|q/m| * B0)
+  double B0 = sqrt(B0x*B0x + B0y*B0y + B0z*B0z);
+  if (B0 > 0.0) {
+    for (int is = 0; is < ns; is++) {
+      // Use single-component thermal speed as proxy for perpendicular v_th
+      double rL = uth[is] * c / (fabs(qom[is]) * B0);
+      cout << "Larmor radius / dx (species " << is << ") = " << rL / dx
+           << "  (rL = " << rL << ", Omega_c*dt = " << fabs(qom[is]) * B0 / c * dt << ")" << endl;
+    }
+  }
+  // Plasma frequency: omega_ps^2 = 4*pi * n_s * |q/m|_s  (CGS)
+  // Since rhoINIT = 4*pi * n_s: omega_ps = sqrt(|qom| * rhoINIT)
+  for (int is = 0; is < ns; is++) {
+    double omega_p = sqrt(fabs(qom[is]) * rhoINIT[is]);
+    double skin_depth = c / omega_p;
+    double omega_p_dt = omega_p * dt;
+    cout << "Species " << is << " (qom=" << qom[is] << "): omega_p = " << omega_p
+         << ", d_s/dx = " << skin_depth / dx
+         << ", omega_p*dt = " << omega_p_dt;
+    if (omega_p_dt < 2.0) cout << "  OK" << endl; else cout << "  WARNING: plasma oscillations under-resolved!" << endl;
+  }
+
 
 }
 /*! Print Simulation Parameters */

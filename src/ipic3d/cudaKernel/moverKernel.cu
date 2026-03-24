@@ -43,22 +43,21 @@ __device__ __forceinline__ void markForDeletion(
 }
 
 // Cap particle velocity to v2max = 0.9999^2.
+// Operates on register references — caller keeps velocity in registers.
 // Rescales finite superluminal velocities; marks NaN/Inf for deletion.
 // Returns true if the particle was deleted (caller should return).
 __device__ __forceinline__ bool capVelocityOrDelete(
-    SpeciesParticle *pcl, moverParameter *moverParam, uint32_t pidx)
+    commonType& ufinal, commonType& vfinal, commonType& wfinal,
+    moverParameter *moverParam, uint32_t pidx)
 {
-    const commonType unew = pcl->get_u();
-    const commonType vnew = pcl->get_v();
-    const commonType wnew = pcl->get_w();
-    const commonType v2 = unew * unew + vnew * vnew + wnew * wnew;
+    const commonType v2 = ufinal * ufinal + vfinal * vfinal + wfinal * wfinal;
     constexpr commonType v2max = 0.9999 * 0.9999; // max allowed |v/c|^2
     if (!(v2 < v2max)) {
         if (isfinite(v2)) {
             const commonType scale = sqrt(v2max / v2);
-            pcl->set_u(unew * scale);
-            pcl->set_v(vnew * scale);
-            pcl->set_w(wnew * scale);
+            ufinal *= scale;
+            vfinal *= scale;
+            wfinal *= scale;
         } else {
             markForDeletion(moverParam, pidx);
             return true;
@@ -106,12 +105,12 @@ __device__ __forceinline__ commonType computePCError(
 //     cudaTypeArray1<cudaFieldType> fieldForPcls, grid3DCUDA *grid,
 //     int cx, int cy, int cz);
 
-__device__ void prepareDepartureArray(SpeciesParticle* pcl, 
+__device__ void prepareDepartureArray(commonType xpcl, commonType ypcl, commonType zpcl,
+                                    particleArrayCUDA* pclsArray, uint32_t pidx,
                                     moverParameter *moverParam,
                                     departureArrayType* departureArray, 
                                     grid3DCUDA* grid, 
-                                    hashedSum* hashedSumArray, 
-                                    uint32_t pidx);
+                                    hashedSum* hashedSumArray);
 
 __global__ void moverKernel(moverParameter *moverParam,
                             cudaTypeArray1<cudaFieldType> fieldForPcls,
@@ -125,21 +124,20 @@ __global__ void moverKernel(moverParameter *moverParam,
     const commonType dto2 = .5 * moverParam->dt,
                      qdto2mc = moverParam->qom * dto2 / moverParam->c;
 
-    // copy the particle
-    SpeciesParticle *pcl = pclsArray->getpcls() + pidx;
-
-    if(moverParam->departureArray->getArray()[pidx].dest != 0){ // deleted during the merging
-        prepareDepartureArray(pcl, moverParam, moverParam->departureArray, grid, moverParam->hashedSumArray, pidx);
+    // Early exit for particles already deleted (e.g. during merging)
+    if(moverParam->departureArray->getArray()[pidx].dest != 0){
+        prepareDepartureArray(pclsArray->getX()[pidx], pclsArray->getY()[pidx], pclsArray->getZ()[pidx],
+                              pclsArray, pidx, moverParam, moverParam->departureArray, grid, moverParam->hashedSumArray);
         return;
     }
 
-
-    const commonType xorig = pcl->get_x();
-    const commonType yorig = pcl->get_y();
-    const commonType zorig = pcl->get_z();
-    const commonType uorig = pcl->get_u();
-    const commonType vorig = pcl->get_v();
-    const commonType worig = pcl->get_w();
+    // Load particle state from SoA into registers
+    const commonType xorig = pclsArray->getX()[pidx];
+    const commonType yorig = pclsArray->getY()[pidx];
+    const commonType zorig = pclsArray->getZ()[pidx];
+    const commonType uorig = pclsArray->getU()[pidx];
+    const commonType vorig = pclsArray->getV()[pidx];
+    const commonType worig = pclsArray->getW()[pidx];
     commonType xavg = xorig;
     commonType yavg = yorig;
     commonType zavg = zorig;
@@ -199,39 +197,31 @@ __global__ void moverKernel(moverParameter *moverParam,
 
     } // end of iteration
 
-    // update the final position and velocity
-    // if (cap_velocity()) //used to limit the speed of particles under c
-    // {
-    //     auto umax = moverParam->umax;
-    //     auto vmax = moverParam->vmax;
-    //     auto wmax = moverParam->wmax;
-    //     auto umin = moverParam->umin;
-    //     auto vmin = moverParam->vmin;
-    //     auto wmin = moverParam->wmin;
-    //
-    //     bool cap = (abs(uavg) > umax || abs(vavg) > vmax || abs(wavg) > wmax) ? true : false;
-    //     if (cap)
-    //     {
-    //         if (uavg > umax)      uavg = umax;
-    //         else if (uavg < umin) uavg = umin;
-    //         if (vavg > vmax)      vavg = vmax;
-    //         else if (vavg < vmin) vavg = vmin;
-    //         if (wavg > wmax)      wavg = wmax;
-    //         else if (wavg < wmin) wavg = wmin;
-    //     }
-    // }
-    pcl->set_x_u(   xorig + uavg * moverParam->dt,  yorig + vavg * moverParam->dt,  zorig + wavg * moverParam->dt,
-                    2.0f * uavg - uorig,            2.0f * vavg - vorig,            2.0f * wavg - worig);
+    // Compute final position and velocity in registers
+    commonType xfinal = xorig + uavg * moverParam->dt;
+    commonType yfinal = yorig + vavg * moverParam->dt;
+    commonType zfinal = zorig + wavg * moverParam->dt;
+    commonType ufinal = 2.0 * uavg - uorig;
+    commonType vfinal = 2.0 * vavg - vorig;
+    commonType wfinal = 2.0 * wavg - worig;
 
     // Cap velocity to prevent superluminal particles.
     // The non-relativistic Boris pusher has no intrinsic speed-of-light limit,
     // so extreme E fields can produce |v| >= c.
-    if (capVelocityOrDelete(pcl, moverParam, pidx))
+    if (capVelocityOrDelete(ufinal, vfinal, wfinal, moverParam, pidx))
         return;
 
-    // prepare the departure array
+    // Write final state to SoA
+    pclsArray->getX()[pidx] = xfinal;
+    pclsArray->getY()[pidx] = yfinal;
+    pclsArray->getZ()[pidx] = zfinal;
+    pclsArray->getU()[pidx] = ufinal;
+    pclsArray->getV()[pidx] = vfinal;
+    pclsArray->getW()[pidx] = wfinal;
 
-    prepareDepartureArray(pcl, moverParam, moverParam->departureArray, grid, moverParam->hashedSumArray, pidx);
+    // prepare the departure array
+    prepareDepartureArray(xfinal, yfinal, zfinal, pclsArray, pidx,
+                          moverParam, moverParam->departureArray, grid, moverParam->hashedSumArray);
     
 }
 
@@ -249,28 +239,32 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
     auto pclsArray = moverParam->pclsArray;
     if(pidx >= pclsArray->getNOP())return;
 
-    // copy the particle
-    SpeciesParticle *pcl = pclsArray->getpcls() + pidx;
-
-    if(moverParam->departureArray->getArray()[pidx].dest != 0){ // deleted during the merging
-        prepareDepartureArray(pcl, moverParam, moverParam->departureArray, grid, moverParam->hashedSumArray, pidx);
+    // Early exit for particles already deleted (e.g. during merging)
+    if(moverParam->departureArray->getArray()[pidx].dest != 0){
+        prepareDepartureArray(pclsArray->getX()[pidx], pclsArray->getY()[pidx], pclsArray->getZ()[pidx],
+                              pclsArray, pidx, moverParam, moverParam->departureArray, grid, moverParam->hashedSumArray);
         return;
     }
 
+    // Load particle state from SoA into registers — kept in registers across all subcycles
+    commonType cur_x = pclsArray->getX()[pidx];
+    commonType cur_y = pclsArray->getY()[pidx];
+    commonType cur_z = pclsArray->getZ()[pidx];
+    commonType cur_u = pclsArray->getU()[pidx];
+    commonType cur_v = pclsArray->getV()[pidx];
+    commonType cur_w = pclsArray->getW()[pidx];
 
     // first step: evaluate local B magnitude
-
     commonType weights[8];
     int cx, cy, cz;
     commonType sampled_field[6];
-    sampleFieldsAtPosition<3>(pcl->get_x(), pcl->get_y(), pcl->get_z(),
+    sampleFieldsAtPosition<3>(cur_x, cur_y, cur_z,
                               grid, fieldForPcls, weights, cx, cy, cz, sampled_field);
 
     // evaluate local B field magnitude
     const commonType B_mag = sqrt(sampled_field[0] * sampled_field[0] + sampled_field[1] * sampled_field[1] + sampled_field[2] * sampled_field[2]);
 
     // evaluate dt_substep and number of sub cycles
-
     commonType dt_sub = M_PI * moverParam->c / (4 * fabs(moverParam->qom) * B_mag);
     const int sub_cycles = (int)(moverParam->dt / dt_sub) + 1;
     dt_sub = moverParam->dt / (commonType)(sub_cycles);
@@ -284,24 +278,22 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
     // After subcycle 0, the velocity cap (S2) at the end of each subcycle
     // guarantees v² < v2max < 1, so this check is only needed once.
     {
-        const commonType v2_init = pcl->get_u()*pcl->get_u()
-                                 + pcl->get_v()*pcl->get_v()
-                                 + pcl->get_w()*pcl->get_w();
+        const commonType v2_init = cur_u*cur_u + cur_v*cur_v + cur_w*cur_w;
         if (!(v2_init < 1.0)) {
             markForDeletion(moverParam, pidx);
             return;
         }
     }
 
-    //start subcycling
+    //start subcycling — all state kept in registers
     for(int cyc_cnt = 0; cyc_cnt < sub_cycles; cyc_cnt++)
     {
-        const commonType xorig = pcl->get_x();
-        const commonType yorig = pcl->get_y();
-        const commonType zorig = pcl->get_z();
-        const commonType uorig = pcl->get_u();
-        const commonType vorig = pcl->get_v();
-        const commonType worig = pcl->get_w();
+        const commonType xorig = cur_x;
+        const commonType yorig = cur_y;
+        const commonType zorig = cur_z;
+        const commonType uorig = cur_u;
+        const commonType vorig = cur_v;
+        const commonType worig = cur_w;
         commonType xavg = xorig;
         commonType yavg = yorig;
         commonType zavg = zorig;
@@ -386,45 +378,63 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         
         const commonType delta_rel = cfb * cfb - 4.0 * cfa * cfc;
 
-         // update velocity
+         // update velocity in registers
         if (delta_rel < 0.0){
-
-            //cout << "Relativity violated: gamma0=" << gamma0 << ",  vavg_sq=" << vavg_sq;
-            pcl->set_x_u(   xorig + uavg * dt_sub,  yorig + vavg * dt_sub,  zorig + wavg * dt_sub,
-                (2.0*gamma1)*uavg - uorig*gamma0, (2.0*gamma1)*vavg - vorig*gamma0, (2.0*gamma1)*wavg - worig*gamma0);
+            cur_x = xorig + uavg * dt_sub;
+            cur_y = yorig + vavg * dt_sub;
+            cur_z = zorig + wavg * dt_sub;
+            cur_u = (2.0*gamma1)*uavg - uorig*gamma0;
+            cur_v = (2.0*gamma1)*vavg - vorig*gamma0;
+            cur_w = (2.0*gamma1)*wavg - worig*gamma0;
         }
         else{
-            const commonType gamma1 = ( -cfb + sqrt(delta_rel)) / 2.0 / cfa;
-            pcl->set_x_u(   xorig + uavg * dt_sub,  yorig + vavg * dt_sub,  zorig + wavg * dt_sub,
-                (1.0 + gamma0/gamma1)*uavg - ut/gamma1, (1.0 + gamma0/gamma1)*vavg - vt/gamma1, (1.0 + gamma0/gamma1)*wavg - wt/gamma1);
+            const commonType gamma1_rel = ( -cfb + sqrt(delta_rel)) / 2.0 / cfa;
+            cur_x = xorig + uavg * dt_sub;
+            cur_y = yorig + vavg * dt_sub;
+            cur_z = zorig + wavg * dt_sub;
+            cur_u = (1.0 + gamma0/gamma1_rel)*uavg - ut/gamma1_rel;
+            cur_v = (1.0 + gamma0/gamma1_rel)*vavg - vt/gamma1_rel;
+            cur_w = (1.0 + gamma0/gamma1_rel)*wavg - wt/gamma1_rel;
         }
 
         // Cap velocity to prevent superluminal particles.
         // If |v|^2 >= 1, the next subcycle's gamma = 1/sqrt(1-v^2) -> NaN.
-        if (capVelocityOrDelete(pcl, moverParam, pidx))
+        if (capVelocityOrDelete(cur_u, cur_v, cur_w, moverParam, pidx))
             return;
 
     } // end iteration over subcycles
     
-    // prepare the departure array
+    // Write final state to SoA once
+    pclsArray->getX()[pidx] = cur_x;
+    pclsArray->getY()[pidx] = cur_y;
+    pclsArray->getZ()[pidx] = cur_z;
+    pclsArray->getU()[pidx] = cur_u;
+    pclsArray->getV()[pidx] = cur_v;
+    pclsArray->getW()[pidx] = cur_w;
 
-    prepareDepartureArray(pcl, moverParam, moverParam->departureArray, grid, moverParam->hashedSumArray, pidx);
+    // prepare the departure array
+    prepareDepartureArray(cur_x, cur_y, cur_z, pclsArray, pidx,
+                          moverParam, moverParam->departureArray, grid, moverParam->hashedSumArray);
 
 }
 
-__device__ uint32_t deleteAppendOpenBCOutflow(SpeciesParticle* pcl, moverParameter *moverParam, departureArrayType* departureArray, grid3DCUDA* grid, hashedSum* hashedSumArray) {
+__device__ uint32_t deleteAppendOpenBCOutflow(commonType xpcl, commonType ypcl, commonType zpcl,
+    particleArrayCUDA* pclsArray, uint32_t pidx,
+    moverParameter *moverParam, departureArrayType* departureArray, grid3DCUDA* grid, hashedSum* hashedSumArray) {
 
     if (!moverParam->doOpenBC) return 0;
 
     auto& delBdry = moverParam->deleteBoundary;
     auto& openBdry = moverParam->openBoundary;
     
+    const commonType pos[3] = {xpcl, ypcl, zpcl};
+
     for (int side = 0; side < 6; side++) {
 
         if (!moverParam->applyOpenBC[side]) continue;
 
         const auto direction = side / 2; // x,y,z
-        const auto location = pcl->get_x(direction);
+        const auto location = pos[direction];
         const bool leftRight = side % 2; // 0: left, 1: right
 
         // delete boundary
@@ -435,58 +445,64 @@ __device__ uint32_t deleteAppendOpenBCOutflow(SpeciesParticle* pcl, moverParamet
 
         // open boundary
         if ( (leftRight == 0 && location < openBdry[side]) || (leftRight == 1 && location > openBdry[side]) ) {
-            SpeciesParticle newPcl = *pcl;
-            
-            // update the position
-            newPcl.set_x(direction, newPcl.get_x(direction) + (leftRight==0?-1:1) * openBdry[direction*2]);
-            newPcl.fetch_x() += newPcl.get_u() * moverParam->dt;
-            newPcl.fetch_y() += newPcl.get_v() * moverParam->dt;
-            newPcl.fetch_z() += newPcl.get_w() * moverParam->dt;
+            // Read velocity and charge from SoA for particle duplication
+            const commonType vel[3] = {pclsArray->getU()[pidx], pclsArray->getV()[pidx], pclsArray->getW()[pidx]};
+            const commonType charge = pclsArray->getQ()[pidx];
 
-            newPcl.set_t(114514.0);
+            // Compute new particle position
+            commonType newPos[3] = {pos[0], pos[1], pos[2]};
+            newPos[direction] += (leftRight==0 ? -1 : 1) * openBdry[direction*2];
+            newPos[0] += vel[0] * moverParam->dt;
+            newPos[1] += vel[1] * moverParam->dt;
+            newPos[2] += vel[2] * moverParam->dt;
 
             // if the new particle is still in the domain
-            
             if (
-                newPcl.get_x() > delBdry[0] && newPcl.get_x() < delBdry[1] &&
-                newPcl.get_y() > delBdry[2] && newPcl.get_y() < delBdry[3] &&
-                newPcl.get_z() > delBdry[4] && newPcl.get_z() < delBdry[5]
-                //newPcl.get_x() > grid->xStart && newPcl.get_x() < grid->xEnd &&
-                //newPcl.get_y() > grid->yStart && newPcl.get_y() < grid->yEnd &&
-                //newPcl.get_z() > grid->zStart && newPcl.get_z() < grid->zEnd
+                newPos[0] > delBdry[0] && newPos[0] < delBdry[1] &&
+                newPos[1] > delBdry[2] && newPos[1] < delBdry[3] &&
+                newPos[2] > delBdry[4] && newPos[2] < delBdry[5]
             ) {
                 departureArrayElementType element;
-                const auto index = moverParam->pclsArray->getNOP() + atomicAdd(&moverParam->appendCountAtomic, 1);
+                const auto index = pclsArray->getNOP() + atomicAdd(&moverParam->appendCountAtomic, 1);
                 // check memory overflow
-                if (index >= moverParam->pclsArray->getSize()) {
+                if (index >= pclsArray->getSize()) {
                     printf("Memory overflow in open boundary outflow (index=%u, size=%u)\n",
-                           index, moverParam->pclsArray->getSize());
+                           index, pclsArray->getSize());
                     // Cannot append — drop this duplicate and mark the original
                     // particle for deletion so it doesn't corrupt hashed sums.
                     return departureArrayElementType::DELETE;
                 }
-                memcpy(moverParam->pclsArray->getpcls() + index, &newPcl, sizeof(SpeciesParticle));
-                if(newPcl.get_x() < grid->xStart)
+                // Write new particle to SoA arrays
+                pclsArray->getX()[index] = newPos[0];
+                pclsArray->getY()[index] = newPos[1];
+                pclsArray->getZ()[index] = newPos[2];
+                pclsArray->getU()[index] = vel[0];
+                pclsArray->getV()[index] = vel[1];
+                pclsArray->getW()[index] = vel[2];
+                pclsArray->getQ()[index] = charge;
+                pclsArray->getT()[index] = 114514.0;
+
+                if(newPos[0] < grid->xStart)
                 {
                     element.dest = departureArrayElementType::XLOW;
                 }
-                else if(newPcl.get_x() > grid->xEnd)
+                else if(newPos[0] > grid->xEnd)
                 {
                     element.dest = departureArrayElementType::XHIGH;
                 }
-                else if(newPcl.get_y() < grid->yStart)
+                else if(newPos[1] < grid->yStart)
                 {
                     element.dest = departureArrayElementType::YLOW;
                 }
-                else if(newPcl.get_y() > grid->yEnd)
+                else if(newPos[1] > grid->yEnd)
                 {
                     element.dest = departureArrayElementType::YHIGH;
                 }
-                else if(newPcl.get_z() < grid->zStart)
+                else if(newPos[2] < grid->zStart)
                 {
                     element.dest = departureArrayElementType::ZLOW;
                 }
-                else if(newPcl.get_z() > grid->zEnd)
+                else if(newPos[2] > grid->zEnd)
                 {
                     element.dest = departureArrayElementType::ZHIGH;
                 }
@@ -508,20 +524,21 @@ __device__ uint32_t deleteAppendOpenBCOutflow(SpeciesParticle* pcl, moverParamet
 
 }
 
-__device__ uint32_t deleteRepopulateInjection(SpeciesParticle* pcl, moverParameter *moverParam, grid3DCUDA *grid) {
+__device__ uint32_t deleteRepopulateInjection(commonType xpcl, commonType ypcl, commonType zpcl,
+    moverParameter *moverParam, grid3DCUDA *grid) {
     if (!moverParam->doRepopulateInjection) return 0;
 
     auto& doRepopulateInjectionSide = moverParam->doRepopulateInjectionSide;
     auto& repopulateBoundary = moverParam->repopulateBoundary;
 
     if (
-        (doRepopulateInjectionSide[0] && pcl->get_x() < repopulateBoundary[0]) ||
-        (doRepopulateInjectionSide[1] && pcl->get_x() > repopulateBoundary[1]) ||
-        (doRepopulateInjectionSide[2] && pcl->get_y() < repopulateBoundary[2]) ||
-        (doRepopulateInjectionSide[3] && pcl->get_y() > repopulateBoundary[3]) ||
-        (doRepopulateInjectionSide[4] && pcl->get_z() < repopulateBoundary[4]) ||
-        (doRepopulateInjectionSide[5] && pcl->get_z() > repopulateBoundary[5])
-    ) { // In the repoopulate layers
+        (doRepopulateInjectionSide[0] && xpcl < repopulateBoundary[0]) ||
+        (doRepopulateInjectionSide[1] && xpcl > repopulateBoundary[1]) ||
+        (doRepopulateInjectionSide[2] && ypcl < repopulateBoundary[2]) ||
+        (doRepopulateInjectionSide[3] && ypcl > repopulateBoundary[3]) ||
+        (doRepopulateInjectionSide[4] && zpcl < repopulateBoundary[4]) ||
+        (doRepopulateInjectionSide[5] && zpcl > repopulateBoundary[5])
+    ) { // In the repopulate layers
         return departureArrayElementType::DELETE;
     } else {
         return 0;
@@ -529,7 +546,8 @@ __device__ uint32_t deleteRepopulateInjection(SpeciesParticle* pcl, moverParamet
 
 }
 
-__device__ uint32_t deleteInsideSphere(SpeciesParticle* pcl, moverParameter *moverParam, grid3DCUDA *grid) {
+__device__ uint32_t deleteInsideSphere(commonType xpcl, commonType ypcl, commonType zpcl,
+    moverParameter *moverParam, grid3DCUDA *grid) {
     
     if (moverParam->doSphere == 0) return 0;
 
@@ -537,9 +555,9 @@ __device__ uint32_t deleteInsideSphere(SpeciesParticle* pcl, moverParameter *mov
         const auto& sphereOrigin = moverParam->sphereOrigin;
         const auto& sphereRadius = moverParam->sphereRadius;
 
-        const auto dx = pcl->get_x() - sphereOrigin[0];
-        const auto dy = pcl->get_y() - sphereOrigin[1];
-        const auto dz = pcl->get_z() - sphereOrigin[2];
+        const auto dx = xpcl - sphereOrigin[0];
+        const auto dy = ypcl - sphereOrigin[1];
+        const auto dz = zpcl - sphereOrigin[2];
 
         if (dx*dx + dy*dy + dz*dz < sphereRadius*sphereRadius) {
             return departureArrayElementType::PLANET;
@@ -548,8 +566,8 @@ __device__ uint32_t deleteInsideSphere(SpeciesParticle* pcl, moverParameter *mov
         const auto& sphereOrigin = moverParam->sphereOrigin;
         const auto& sphereRadius = moverParam->sphereRadius;
 
-        const auto dx = pcl->get_x() - sphereOrigin[0];
-        const auto dz = pcl->get_z() - sphereOrigin[2];
+        const auto dx = xpcl - sphereOrigin[0];
+        const auto dz = zpcl - sphereOrigin[2];
 
         if (dx*dx + dz*dz < sphereRadius*sphereRadius) {
             return departureArrayElementType::PLANET;
@@ -561,7 +579,9 @@ __device__ uint32_t deleteInsideSphere(SpeciesParticle* pcl, moverParameter *mov
 }
 
 
-__device__ void prepareDepartureArray(SpeciesParticle* pcl, moverParameter *moverParam, departureArrayType* departureArray, grid3DCUDA* grid, hashedSum* hashedSumArray, uint32_t pidx){
+__device__ void prepareDepartureArray(commonType xpcl, commonType ypcl, commonType zpcl,
+    particleArrayCUDA* pclsArray, uint32_t pidx,
+    moverParameter *moverParam, departureArrayType* departureArray, grid3DCUDA* grid, hashedSum* hashedSumArray){
 
     if(departureArray->getArray()[pidx].dest != 0) {
         departureArray->getArray()[pidx].hashedId = 
@@ -573,7 +593,7 @@ __device__ void prepareDepartureArray(SpeciesParticle* pcl, moverParameter *move
     // Safety: NaN positions bypass all comparison-based boundary checks
     // (IEEE 754: NaN < x and NaN > x are both false), so a NaN particle
     // would fall through to STAY and deposit NaN into the moments array.
-    if (!isfinite(pcl->get_x()) || !isfinite(pcl->get_y()) || !isfinite(pcl->get_z())) {
+    if (!isfinite(xpcl) || !isfinite(ypcl) || !isfinite(zpcl)) {
         departureArrayElementType element;
         element.dest = departureArrayElementType::DELETE;
         element.hashedId = hashedSumArray[departureArrayElementType::DELETE_HASHEDSUM_INDEX].add(pidx);
@@ -586,50 +606,50 @@ __device__ void prepareDepartureArray(SpeciesParticle* pcl, moverParameter *move
     do {
 
         // OpenBC_outflow
-        element.dest = deleteAppendOpenBCOutflow(pcl, moverParam, departureArray, grid, hashedSumArray);
+        element.dest = deleteAppendOpenBCOutflow(xpcl, ypcl, zpcl, pclsArray, pidx, moverParam, departureArray, grid, hashedSumArray);
         if(element.dest != 0)break;
 
         // INJECT
-        element.dest = deleteRepopulateInjection(pcl, moverParam, grid);
+        element.dest = deleteRepopulateInjection(xpcl, ypcl, zpcl, moverParam, grid);
         if(element.dest != 0)break;
 
         // sphere
-        element.dest = deleteInsideSphere(pcl, moverParam, grid);
+        element.dest = deleteInsideSphere(xpcl, ypcl, zpcl, moverParam, grid);
         if(element.dest != 0)break;
 
         // Exiting
 
-        if(pcl->get_x() < grid->xStart)
+        if(xpcl < grid->xStart)
         {
             element.dest = moverParam->isExitBC[0]
                 ? departureArrayElementType::DELETE
                 : departureArrayElementType::XLOW;
         }
-        else if(pcl->get_x() > grid->xEnd)
+        else if(xpcl > grid->xEnd)
         {
             element.dest = moverParam->isExitBC[1]
                 ? departureArrayElementType::DELETE
                 : departureArrayElementType::XHIGH;
         }
-        else if(pcl->get_y() < grid->yStart)
+        else if(ypcl < grid->yStart)
         {
             element.dest = moverParam->isExitBC[2]
                 ? departureArrayElementType::DELETE
                 : departureArrayElementType::YLOW;
         }
-        else if(pcl->get_y() > grid->yEnd)
+        else if(ypcl > grid->yEnd)
         {
             element.dest = moverParam->isExitBC[3]
                 ? departureArrayElementType::DELETE
                 : departureArrayElementType::YHIGH;
         }
-        else if(pcl->get_z() < grid->zStart)
+        else if(zpcl < grid->zStart)
         {
             element.dest = moverParam->isExitBC[4]
                 ? departureArrayElementType::DELETE
                 : departureArrayElementType::ZLOW;
         }
-        else if(pcl->get_z() > grid->zEnd)
+        else if(zpcl > grid->zEnd)
         {
             element.dest = moverParam->isExitBC[5]
                 ? departureArrayElementType::DELETE

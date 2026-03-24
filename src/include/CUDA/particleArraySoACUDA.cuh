@@ -70,6 +70,15 @@ public:
 
     __host__ void updateFromAoS(particleArrayCUDA* pclArray, cudaStream_t stream = 0);
 
+    /**
+     * @brief Borrow SoA pointers from particleArrayCUDA's persistent SoA arrays.
+     *
+     * Zero-copy: no allocation, no kernel launch, no memcpy.
+     * Frees any previously owned memory. After this call the instance is
+     * a non-owning view into the particleArrayCUDA SoA fields.
+     */
+    __host__ void updateFromSoA(particleArrayCUDA* pclArray);
+
 
     __host__ __device__ T* getElement(int i) const {
         return elementPtr[i];

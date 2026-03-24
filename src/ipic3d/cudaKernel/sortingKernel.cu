@@ -26,8 +26,6 @@ __global__ void sortingKernel1(particleArrayCUDA* pclsArray, departureArrayType*
 	auto departureElement = departureArray->getArray() + pidx;
     if(departureElement->dest != 0)return; 		// exiting particles, the holes in the rear part
 
-	auto pcl = pclsArray->getpcls() + pidx;
-
 	auto index = hashedSumArray->getIndex(pidx, departureElement->hashedId); // updated
 
 	fillerBuffer->getArray()[index] = pidx;
@@ -57,11 +55,18 @@ __global__ void sortingKernel2(particleArrayCUDA* pclsArray, departureArrayType*
 	auto departureElement = departureArray->getArray() + pidx;
     if(departureElement->dest == 0)return; 				// exiting particles, the holes
 
-	auto pcl = pclsArray->getpcls() + pidx;
-
 	auto index = hashedSumArray->getIndex(pidx, departureElement->hashedId); // updated
 
-	memcpy(pcl, pclsArray->getpcls() + fillerBuffer->getArray()[index], sizeof(SpeciesParticle));
+	// Copy particle data from filler to hole via SoA
+	const uint32_t srcIdx = fillerBuffer->getArray()[index];
+	pclsArray->getX()[pidx] = pclsArray->getX()[srcIdx];
+	pclsArray->getY()[pidx] = pclsArray->getY()[srcIdx];
+	pclsArray->getZ()[pidx] = pclsArray->getZ()[srcIdx];
+	pclsArray->getU()[pidx] = pclsArray->getU()[srcIdx];
+	pclsArray->getV()[pidx] = pclsArray->getV()[srcIdx];
+	pclsArray->getW()[pidx] = pclsArray->getW()[srcIdx];
+	pclsArray->getQ()[pidx] = pclsArray->getQ()[srcIdx];
+	pclsArray->getT()[pidx] = pclsArray->getT()[srcIdx];
 
 
 }

@@ -3,6 +3,44 @@
 #include "cudaTypeDef.cuh"
 
 
+// ── Runtime AoS→SoA scatter kernel (used after H→D AoS copies) ──
+
+__global__ void scatterAoSToSoAKernel(particleArrayCUDA* pclsArray,
+                                       uint32_t offset, uint32_t count)
+{
+    const uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tidx >= count) return;
+    const uint32_t pidx = offset + tidx;
+    const SpeciesParticle& pcl = pclsArray->getpcls()[pidx];
+    pclsArray->getU()[pidx] = pcl.get_u();
+    pclsArray->getV()[pidx] = pcl.get_v();
+    pclsArray->getW()[pidx] = pcl.get_w();
+    pclsArray->getQ()[pidx] = pcl.get_q();
+    pclsArray->getX()[pidx] = pcl.get_x();
+    pclsArray->getY()[pidx] = pcl.get_y();
+    pclsArray->getZ()[pidx] = pcl.get_z();
+    pclsArray->getT()[pidx] = pcl.get_t();
+}
+
+
+// ── Runtime SoA→AoS gather kernel (used before D→H AoS copies) ──
+
+__global__ void gatherSoAToAoSKernel(particleArrayCUDA* pclsArray,
+                                      uint32_t offset, uint32_t count)
+{
+    const uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tidx >= count) return;
+    const uint32_t pidx = offset + tidx;
+    SpeciesParticle& pcl = pclsArray->getpcls()[pidx];
+    pcl.set_u(pclsArray->getU()[pidx]);
+    pcl.set_v(pclsArray->getV()[pidx]);
+    pcl.set_w(pclsArray->getW()[pidx]);
+    pcl.set_q(pclsArray->getQ()[pidx]);
+    pcl.set_x(pclsArray->getX()[pidx]);
+    pcl.set_y(pclsArray->getY()[pidx]);
+    pcl.set_z(pclsArray->getZ()[pidx]);
+    pcl.set_t(pclsArray->getT()[pidx]);
+}
 
 
 namespace particleArraySoA{
@@ -55,6 +93,28 @@ __host__ void particleArraySoACUDA<T, startElement, stopElement>::updateFromAoS(
     particleToSoAKernel<T, startElement, stopElement><<<getGridSize(nop / 64, 256), 256, 0, stream>>>(pclArray->getArray(), nop, objOnDevice);
     cudaErrChk(cudaStreamSynchronize(stream));
     cudaErrChk(cudaFree(objOnDevice));
+}
+
+
+template<typename T, int startElement, int stopElement>
+__host__ void particleArraySoACUDA<T, startElement, stopElement>::updateFromSoA(particleArrayCUDA* pclArray){
+    // Free any previously owned memory
+    if (allocated) {
+        freeMemory();
+        allocated = false;
+    }
+
+    nop = pclArray->getNOP();
+    size = 0; // non-owning view — no owned capacity
+
+    // Borrow device pointers from particleArrayCUDA's persistent SoA
+    cudaParticleType* soaPtrs[8] = {
+        pclArray->getU(), pclArray->getV(), pclArray->getW(), pclArray->getQ(),
+        pclArray->getX(), pclArray->getY(), pclArray->getZ(), pclArray->getT()
+    };
+    for (int i = startElement; i <= stopElement; i++) {
+        elementPtr[i] = soaPtrs[i];
+    }
 }
 
 

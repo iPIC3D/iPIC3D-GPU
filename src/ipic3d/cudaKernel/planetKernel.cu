@@ -31,11 +31,19 @@ __global__ void planetExtractionKernel(
     if (dep.dest != departureArrayElementType::PLANET) return;
 
     int index = hashedSumArray[departureArrayElementType::PLANET_HASHEDSUM_INDEX]
-                    .getIndex(pidx, dep.hashedId);
+                .getIndex(pidx, dep.hashedId);
 
-    memcpy(planetArr->getArray() + index,
-           pclsArray->getpcls() + pidx,
-           sizeof(SpeciesParticle));
+    // Gather SoA fields into AoS SpeciesParticle for planet buffer
+    SpeciesParticle pcl;
+    pcl.set_u(pclsArray->getU()[pidx]);
+    pcl.set_v(pclsArray->getV()[pidx]);
+    pcl.set_w(pclsArray->getW()[pidx]);
+    pcl.set_q(pclsArray->getQ()[pidx]);
+    pcl.set_x(pclsArray->getX()[pidx]);
+    pcl.set_y(pclsArray->getY()[pidx]);
+    pcl.set_z(pclsArray->getZ()[pidx]);
+    pcl.set_t(pclsArray->getT()[pidx]);
+    planetArr->getArray()[index] = pcl;
 }
 
 

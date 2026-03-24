@@ -356,8 +356,8 @@ int dataAnalysisPipelineImpl::analysisEntre(int cycle){
     // species by species to save VRAM
     for(int i = 0; i < ns; i++){
         if constexpr (VELOCITY_HISTOGRAM_ENABLE) {
-            // to SoA
-            velocitySoACUDA->updateFromAoS(pclsArrayHostPtr[i], streams[i]);
+            // Borrow SoA pointers from particleArrayCUDA (zero-copy, no kernel)
+            velocitySoACUDA->updateFromSoA(pclsArrayHostPtr[i]);
 
             // histogram
             auto histogramSpeciesOutputPath = HistogramSubDomainOutputPath + "species" + std::to_string(i) + "_";

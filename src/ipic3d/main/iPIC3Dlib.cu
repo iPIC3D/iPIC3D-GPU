@@ -935,6 +935,11 @@ bool c_Solver::ParticlesMoverMomentAsync()
     cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getpcls(), outputPart[i].get_pcl_array().getList(), 
                               pclsArrayHostPtr[i]->getNOP()*sizeof(SpeciesParticle), cudaMemcpyDefault, streams[i]));
 
+    // Scatter uploaded AoS particles into SoA (mergingKernel now reads from SoA)
+    const uint32_t mergeNop = pclsArrayHostPtr[i]->getNOP();
+    scatterAoSToSoAKernel<<<getGridSize((int)mergeNop, 256), 256, 0, streams[i]>>>(
+        pclsArrayCUDAPtr[i], 0u, mergeNop);
+
     // merge
     mergingKernel<<<getGridSize(totalCells * WARP_SIZE, 256), 256, 0, streams[i]>>>(cellOffsetCUDAPtr, cellCountCUDAPtr, 
         grid3DCUDACUDAPtr, pclsArrayCUDAPtr[i], departureArrayCUDAPtr[i]);
@@ -1170,15 +1175,22 @@ bool c_Solver::MoverAwaitAndPclExchange()
       departureArrayHostPtr[i]->expand(pclsArrayHostPtr[i]->getSize(), streams[i]);
       cudaErrChk(cudaMemcpyAsync(departureArrayCUDAPtr[i], departureArrayHostPtr[i], sizeof(departureArrayType), cudaMemcpyDefault, streams[i]));
     }
-    // now enough size on device pcls array, copy particles
+    // now enough size on device pcls array, copy particles (AoS H→D)
+    const int incomingCount = part[i].getNOP();
     cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getpcls() + pclsArrayHostPtr[i]->getNOP(), 
               (void*)&(part[i].get_pcl_list()[0]), 
-              part[i].getNOP()*sizeof(SpeciesParticle),
+              incomingCount*sizeof(SpeciesParticle),
               cudaMemcpyDefault, streams[i]));
 
               
     pclsArrayHostPtr[i]->setNOE(newPclNum);  // host metadata: total particles on device
     cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i], sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));  // sync metadata to device  
+
+    // Scatter incoming AoS particles into SoA arrays (all GPU kernels now read SoA)
+    if (incomingCount > 0)
+      scatterAoSToSoAKernel<<<getGridSize(incomingCount, 256), 256, 0, streams[i]>>>(
+          pclsArrayCUDAPtr[i], (uint32_t)stayedParticle[i], (uint32_t)incomingCount);
+
     // Compute moments for all new particles (MPI-incoming + repopulated + exosphere)
     const int momentOffset = stayedParticle[i];
     if(pclsArrayHostPtr[i]->getNOP() - momentOffset > 0)
@@ -1244,9 +1256,13 @@ void c_Solver::MomentsAwait() {
         auto pclArray = outputPart[i].get_pcl_arrayPtr();
         pclArray->reserve(pclsArrayHostPtr[i]->getNOP() * 1.2);
       }
+      // Gather SoA → AoS before D→H (SoA is authoritative after mover/sorting)
+      const uint32_t mergeNopCopy = pclsArrayHostPtr[i]->getNOP();
+      if (mergeNopCopy > 0)
+        gatherSoAToAoSKernel<<<getGridSize((int)mergeNopCopy, 256), 256, 0, streams[i]>>>(pclsArrayCUDAPtr[i], 0u, mergeNopCopy);
       cudaErrChk(cudaMemcpyAsync(outputPart[i].get_pcl_array().getList(), pclsArrayHostPtr[i]->getpcls(), 
-                                pclsArrayHostPtr[i]->getNOP()*sizeof(SpeciesParticle), cudaMemcpyDefault, streams[i]));
-      outputPart[i].get_pcl_array().setSize(pclsArrayHostPtr[i]->getNOP()); 
+                                mergeNopCopy*sizeof(SpeciesParticle), cudaMemcpyDefault, streams[i]));
+      outputPart[i].get_pcl_array().setSize(mergeNopCopy); 
     }
   }
   else
@@ -1336,16 +1352,20 @@ void c_Solver::WriteOutput(int cycle) {
 void c_Solver::outputCopyAsync(int cycle) { // -1 to enable
   if (ioManager->needsParticleSync(cycle + 1)) {
     for (int i = 0; i < ns; i++) {
-      if (outputPart[i].get_pcl_array().capacity() < pclsArrayHostPtr[i]->getNOP()) {
+      const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
+      if (outputPart[i].get_pcl_array().capacity() < nop) {
         auto pclArray = outputPart[i].get_pcl_arrayPtr();
-        pclArray->reserve(pclsArrayHostPtr[i]->getNOP() * 1.2);
+        pclArray->reserve(nop * 1.2);
       }
+      // Gather SoA → AoS before D→H (SoA is authoritative after mover/sorting)
+      if (nop > 0)
+        gatherSoAToAoSKernel<<<getGridSize((int)nop, 256), 256, 0, streams[0]>>>(pclsArrayCUDAPtr[i], 0u, nop);
       cudaErrChk(cudaMemcpyAsync(
           outputPart[i].get_pcl_array().getList(),
           pclsArrayHostPtr[i]->getpcls(),
-          pclsArrayHostPtr[i]->getNOP() * sizeof(SpeciesParticle),
+          nop * sizeof(SpeciesParticle),
           cudaMemcpyDefault, streams[0]));
-      outputPart[i].get_pcl_array().setSize(pclsArrayHostPtr[i]->getNOP());
+      outputPart[i].get_pcl_array().setSize(nop);
     }
     cudaErrChk(cudaEventRecord(eventOutputCopy, streams[0]));
   }

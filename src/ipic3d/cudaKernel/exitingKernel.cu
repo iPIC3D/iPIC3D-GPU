@@ -39,9 +39,8 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
     // return the stayed particles in the front part
     if(pidx < (pclsArray->getNOP()-x) && departureElement->dest == 0)return; 
     
-    // Exiting particles
+    // Exiting particles — gather from SoA into AoS for MPI transport
     if(departureElement->dest > 0 && departureElement->dest < departureArrayElementType::DELETE){ 
-        auto pcl = pclsArray->getpcls() + pidx;
 
         int index = 0;
         // get the index in exitingBuffer
@@ -50,8 +49,17 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
         }
         // index in its direction
         index += hashedSumArray[departureElement->dest-1].getIndex(pidx, departureElement->hashedId);
-        // copy the particle
-        memcpy(exitingArray->getArray() + index, pcl, sizeof(SpeciesParticle));
+        // Pack SoA fields into AoS SpeciesParticle for MPI
+        SpeciesParticle pcl;
+        pcl.set_u(pclsArray->getU()[pidx]);
+        pcl.set_v(pclsArray->getV()[pidx]);
+        pcl.set_w(pclsArray->getW()[pidx]);
+        pcl.set_q(pclsArray->getQ()[pidx]);
+        pcl.set_x(pclsArray->getX()[pidx]);
+        pcl.set_y(pclsArray->getY()[pidx]);
+        pcl.set_z(pclsArray->getZ()[pidx]);
+        pcl.set_t(pclsArray->getT()[pidx]);
+        exitingArray->getArray()[index] = pcl;
     }
 
     // holes

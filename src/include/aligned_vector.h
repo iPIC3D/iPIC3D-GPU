@@ -50,4 +50,4 @@ typedef aligned_vector(SpeciesParticle) vector_SpeciesParticle;
 typedef aligned_vector(double) vector_double;
 
 typedef aligned_vector_registered(SpeciesParticle) vector_SpeciesParticle_registered;
-
+typedef aligned_vector_registered(double) vector_double_registered;

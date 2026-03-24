@@ -130,7 +130,7 @@ void Particles3D::maxwellian(Field * EMf)
   /* initialize random generator with different seed on different processor */
   srand(vct->getCartesian_rank() + 2);
 
-  assert_eq(_pcls.size(),0);
+  assert_eq(getNOP(),0);
 
   const double q_sgn = (qom / fabs(qom));
   // multipled by charge density gives charge per particle
@@ -158,14 +158,6 @@ void Particles3D::maxwellian(Field * EMf)
       create_new_particle(u,v,w,q,x,y,z);
     }
   }
-  //dprintf("capacity=%d, size=%d", _pcls.capacity(), getNOP());
-  }
-  if(0)
-  {
-    dprintf("number of particles of species %d: %d", ns, getNOP());
-    const int num_ids = 1;
-    longid id_list[num_ids] = {0};
-    print_pcls(_pcls,ns,id_list, num_ids);
   }
 }
 
@@ -223,7 +215,7 @@ void Particles3D::maxwellianDoubleHarris(Field * EMf)
   /* initialize random generator with different seed on different processor */
   srand(vct->getCartesian_rank() + 2);
 
-  assert_eq(_pcls.size(),0);
+  assert_eq(getNOP(),0);
 
   const double q_sgn = (qom / fabs(qom));
   const double Ly_upper = Ly/2.0;
@@ -262,7 +254,7 @@ void Particles3D::maxwellianHumpPerturbation(Field * EMf)
   /* initialize random generator with different seed on different processor */
   srand(vct->getCartesian_rank() + 2);
 
-  assert_eq(_pcls.size(),0);
+  assert_eq(getNOP(),0);
 
   const double q_sgn = (qom / fabs(qom));
   // multipled by charge density gives charge per particle
@@ -300,7 +292,7 @@ void Particles3D::pitch_angle_energy(Field * EMf) {
 
     /* initialize random generator with different seed on different processor */
     srand(vct->getCartesian_rank() + 3 + ns);
-    assert_eq(_pcls.size(),0);
+    assert_eq(getNOP(),0);
 
     double p0, pperp0, gyro_phase;
 
@@ -476,15 +468,17 @@ void Particles3D::repopulate_particles()
   int pidx = 0;
   while(pidx < getNOP())
   {
-    SpeciesParticle& pcl = _pcls[pidx];
-    // determine whether to delete the particle
+    // determine whether to delete the particle (using mode-aware accessors)
+    const double xpcl = getX(pidx);
+    const double ypcl = getY(pidx);
+    const double zpcl = getZ(pidx);
     const bool delete_pcl =
-      (repopulateXleft && pcl.get_x() < xLow) ||
-      (repopulateYleft && pcl.get_y() < yLow) ||
-      (repopulateZleft && pcl.get_z() < zLow) ||
-      (repopulateXrght && pcl.get_x() > xHgh) ||
-      (repopulateYrght && pcl.get_y() > yHgh) ||
-      (repopulateZrght && pcl.get_z() > zHgh);
+      (repopulateXleft && xpcl < xLow) ||
+      (repopulateYleft && ypcl < yLow) ||
+      (repopulateZleft && zpcl < zLow) ||
+      (repopulateXrght && xpcl > xHgh) ||
+      (repopulateYrght && ypcl > yHgh) ||
+      (repopulateZrght && zpcl > zHgh);
     if(delete_pcl)
       delete_particle(pidx);
     else
@@ -876,8 +870,10 @@ void Particles3D::openbc_particles_outflow()
 		  double location;
 		  while(pidx < getNOP())
 		  {
-		     SpeciesParticle& pcl = _pcls[pidx];
-		     location = pcl.get_x(direction);
+		     // Read position for the appropriate direction (mode-aware)
+		     if (direction == 0) location = getX(pidx);
+		     else if (direction == 1) location = getY(pidx);
+		     else location = getZ(pidx);
 
 		     // delete the exiting particle if out of box on the direction of OpenBC
 		     if((dir_cnt%2==0 && location<delbry) ||(dir_cnt%2==1 && location>delbry))
@@ -887,9 +883,9 @@ void Particles3D::openbc_particles_outflow()
 
 		       //copy the particle within open boundary to inject particle list if their shifted location after 1 time step is within simulation box
 		       if ((dir_cnt%2==0 && location<openbry) ||(dir_cnt%2==1 && location>openbry)){
-		    	   double injx=pcl.get_x(0), injy=pcl.get_x(1), injz=pcl.get_x(2);
-		    	   double inju=pcl.get_u(0), injv=pcl.get_u(1), injw=pcl.get_u(2);
-		    	   double injq=pcl.get_q();
+		    	   double injx=getX(pidx-1), injy=getY(pidx-1), injz=getZ(pidx-1);
+		    	   double inju=getU(pidx-1), injv=getV(pidx-1), injw=getW(pidx-1);
+		    	   double injq=getQ(pidx-1);
 
 		    	   //shift 3 layers out, not mirror
 		    	   if(direction == 0) injx = (dir_cnt%2==0) ?(injx-xLow):(injx+xLow);
@@ -917,8 +913,11 @@ void Particles3D::openbc_particles_outflow()
 
   //dprintf("change in # particles: %d - %d + %d = %d",nop_orig, nop_deleted, nop_created, nop_remaining);
 
-  for(int outId=0;outId<nop_created;outId++)
-	  _pcls.push_back(injpcls[outId]);
+  for(int outId=0;outId<nop_created;outId++) {
+	  const SpeciesParticle& pcl = injpcls[outId];
+	  add_new_particle(pcl.get_u(), pcl.get_v(), pcl.get_w(), pcl.get_q(),
+	                   pcl.get_x(), pcl.get_y(), pcl.get_z(), pcl.get_t());
+  }
 }
 
 void Particles3D::openbc_particles_outflowInfo(bool* doOpenBC, bool* applyOpenBC, cudaCommonType* delBdry, cudaCommonType* openBdry) {

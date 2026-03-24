@@ -44,8 +44,9 @@ class Particles3D:public Particles3Dcomm {
   public:
     /** constructor */
     //Particles3D();
-    Particles3D(int species, CollectiveIO *col, VirtualTopology3D *vct, Grid * grid):
-      Particles3Dcomm(species, col, vct, grid)
+    Particles3D(int species, CollectiveIO *col, VirtualTopology3D *vct, Grid * grid,
+                StorageMode mode = StorageMode::SoA):
+      Particles3Dcomm(species, col, vct, grid, mode)
     {}
     /** destructor */
     ~Particles3D(){}

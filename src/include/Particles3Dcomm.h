@@ -63,7 +63,8 @@ class Particles3Dcomm // :public Particles
 public:
   /** constructor */
   Particles3Dcomm(int species, CollectiveIO * col,
-    VirtualTopology3D * vct, Grid * grid);
+    VirtualTopology3D * vct, Grid * grid,
+    StorageMode mode = StorageMode::SoA);
 
   void reserveSpace(int nop);
   void restartLoad();
@@ -117,22 +118,47 @@ public:
  private:
   void resize_AoS(int nop);
   void resize_SoA(int nop);
+  void resizeActive(int nop);
+ public:
   void copyParticlesToAoS();
   void copyParticlesToSoA();
 
  public:
+  // --- Legacy conversion shims (compatibility) ---
   void convertParticlesToSynched();
   void convertParticlesToAoS();
   void convertParticlesToSoA();
   bool particlesAreSoA()const;
 
+  // --- New SoA-primary helpers ---
+  /** Pack SoA vectors into _pcls AoS buffer (for I/O or MPI bridging). */
+  void packSoAToAoS();
+  /** Clear the _pcls AoS buffer to free memory after use. */
+  void clearAoS() { _pcls.clear(); }
+  /** Append particles from an AoS buffer into the active storage. */
+  void appendFromAoS(const SpeciesParticle* buf, int count);
+  /** Get the storage mode of this instance. */
+  StorageMode getStorageMode() const { return storageMode; }
+  bool isSoAMode() const { return storageMode == StorageMode::SoA; }
+  bool isAoSMode() const { return storageMode == StorageMode::AoS; }
+
+  /** Clear all particles from the active storage (mode-aware). */
+  void clearParticles() {
+    if (storageMode == StorageMode::SoA) {
+      u.clear(); v.clear(); w.clear(); q.clear();
+      x.clear(); y.clear(); z.clear(); t.clear();
+    } else {
+      _pcls.clear();
+    }
+  }
+
   /*! sort particles for vectorized push (needs to be parallelized) */
-  //void sort_particles_serial_SoA_by_xavg();
   void sort_particles_serial();
   void sort_particles_serial_AoS();
+  void sort_particles_serial_SoA();
   void sort_particles_parallel(int* cellCount, int* cellOffset);
   void sort_particles_parallel_AoS(int* globalCount, int* bucketOffset);
-  //void sort_particles_serial_SoA();
+  void sort_particles_parallel_SoA(int* cellCount, int* cellOffset);
 
   // get accessors for optional arrays
   //
@@ -146,27 +172,47 @@ public:
     // reserve remaining particle IDs starting from getNOP()
     pclIDgenerator.reserve_particles_in_range(getNOP());
   }
-  // create new particle
+  // create new particle (pushes to active storage based on storageMode)
   void create_new_particle(
-    cudaParticleType u, cudaParticleType v, cudaParticleType w, cudaParticleType q,
-    cudaParticleType x, cudaParticleType y, cudaParticleType z)
+    cudaParticleType u_, cudaParticleType v_, cudaParticleType w_, cudaParticleType q_,
+    cudaParticleType x_, cudaParticleType y_, cudaParticleType z_)
   {
-    const cudaParticleType t = pclIDgenerator.generateID();
-    _pcls.push_back(SpeciesParticle(u,v,w,q,x,y,z,t));
+    const cudaParticleType t_ = pclIDgenerator.generateID();
+    if (storageMode == StorageMode::SoA) {
+      u.push_back(u_); v.push_back(v_); w.push_back(w_); q.push_back(q_);
+      x.push_back(x_); y.push_back(y_); z.push_back(z_); t.push_back(t_);
+    } else {
+      _pcls.push_back(SpeciesParticle(u_,v_,w_,q_,x_,y_,z_,t_));
+    }
   }
-  // add particle to the list
+  // add particle with explicit ID to the active storage
   void add_new_particle(
-    cudaParticleType u, cudaParticleType v, cudaParticleType w, cudaParticleType q,
-    cudaParticleType x, cudaParticleType y, cudaParticleType z, cudaParticleType t)
+    cudaParticleType u_, cudaParticleType v_, cudaParticleType w_, cudaParticleType q_,
+    cudaParticleType x_, cudaParticleType y_, cudaParticleType z_, cudaParticleType t_)
   {
-    _pcls.push_back(SpeciesParticle(u,v,w,q,x,y,z,t));
+    if (storageMode == StorageMode::SoA) {
+      u.push_back(u_); v.push_back(v_); w.push_back(w_); q.push_back(q_);
+      x.push_back(x_); y.push_back(y_); z.push_back(z_); t.push_back(t_);
+    } else {
+      _pcls.push_back(SpeciesParticle(u_,v_,w_,q_,x_,y_,z_,t_));
+    }
   }
 
+  // swap-remove particle at index pidx from the active storage
   void delete_particle(int pidx)
   {
-    _pcls[pidx]=_pcls.back();
-    _pcls.pop_back();
-    //_pcls.delete_element(pidx);
+    if (storageMode == StorageMode::SoA) {
+      const int last = getNOP() - 1;
+      if (pidx != last) {
+        u[pidx]=u[last]; v[pidx]=v[last]; w[pidx]=w[last]; q[pidx]=q[last];
+        x[pidx]=x[last]; y[pidx]=y[last]; z[pidx]=z[last]; t[pidx]=t[last];
+      }
+      u.pop_back(); v.pop_back(); w.pop_back(); q.pop_back();
+      x.pop_back(); y.pop_back(); z.pop_back(); t.pop_back();
+    } else {
+      _pcls[pidx]=_pcls.back();
+      _pcls.pop_back();
+    }
   }
 
   // inline get accessors
@@ -180,51 +226,99 @@ public:
   double get_xstart(){return xstart;}
   double get_ystart(){return ystart;}
   double get_zstart(){return zstart;}
-  ParticleType::Type get_particleType()const { return particleType; }
-  void set_particleType(ParticleType::Type newType) { particleType = newType; }
+  // Legacy compatibility shims for ParticleType
+  ParticleType::Type get_particleType()const {
+    return (storageMode == StorageMode::SoA) ? ParticleType::SoA : ParticleType::AoS;
+  }
+  void set_particleType(ParticleType::Type /*newType*/) {
+    // No-op: storageMode is fixed at construction. Kept for API compatibility.
+  }
   const SpeciesParticle& get_pcl(int pidx)const{ return _pcls[pidx]; }
   const vector_SpeciesParticle& get_pcl_list()const{ return _pcls; }
   vector_SpeciesParticle& get_pcl_array(){ return _pcls; }
   vector_SpeciesParticle* get_pcl_arrayPtr(){ return &_pcls; }
   const SpeciesParticle* get_pclptr(int id)const{ return &(_pcls[id]); }
-  const double *getUall()  const { assert(particlesAreSoA()); return &u[0]; }
-  const double *getVall()  const { assert(particlesAreSoA()); return &v[0]; }
-  const double *getWall()  const { assert(particlesAreSoA()); return &w[0]; }
-  const double *getQall()  const { assert(particlesAreSoA()); return &q[0]; }
-  const double *getXall()  const { assert(particlesAreSoA()); return &x[0]; }
-  const double *getYall()  const { assert(particlesAreSoA()); return &y[0]; }
-  const double *getZall()  const { assert(particlesAreSoA()); return &z[0]; }
-  const double *getParticleIDall() const{assert(particlesAreSoA());return &t[0];  }
+
+  // Mode-safe AoS data accessors (assert AoS mode at call site)
+  /** Raw pointer to AoS particle data. Asserts AoS mode. */
+  SpeciesParticle* getAoSDataPtr() {
+    assert(storageMode == StorageMode::AoS && "getAoSDataPtr called on SoA-mode instance");
+    return _pcls.getList();
+  }
+  /** Number of particles in AoS storage. Asserts AoS mode. */
+  int getAoSSize() const {
+    assert(storageMode == StorageMode::AoS && "getAoSSize called on SoA-mode instance");
+    return _pcls.size();
+  }
+  /** Set the AoS particle count. Asserts AoS mode. */
+  void setAoSSize(int n) {
+    assert(storageMode == StorageMode::AoS && "setAoSSize called on SoA-mode instance");
+    _pcls.setSize(n);
+  }
+  /** AoS storage capacity. Asserts AoS mode. */
+  int getAoSCapacity() const {
+    assert(storageMode == StorageMode::AoS && "getAoSCapacity called on SoA-mode instance");
+    return _pcls.capacity();
+  }
+  /** Reserve AoS storage. Asserts AoS mode. */
+  void reserveAoS(int cap) {
+    assert(storageMode == StorageMode::AoS && "reserveAoS called on SoA-mode instance");
+    _pcls.reserve(cap);
+  }
+  // SoA bulk accessors — always valid in SoA mode
+  const double *getUall()  const { return &u[0]; }
+  const double *getVall()  const { return &v[0]; }
+  const double *getWall()  const { return &w[0]; }
+  const double *getQall()  const { return &q[0]; }
+  const double *getXall()  const { return &x[0]; }
+  const double *getYall()  const { return &y[0]; }
+  const double *getZall()  const { return &z[0]; }
+  const double *getParticleIDall() const{ return &t[0]; }
+  // Mutable SoA data pointers (for direct D→H copies into host SoA vectors)
+  double *getUallMut() { return &u[0]; }
+  double *getVallMut() { return &v[0]; }
+  double *getWallMut() { return &w[0]; }
+  double *getQallMut() { return &q[0]; }
+  double *getXallMut() { return &x[0]; }
+  double *getYallMut() { return &y[0]; }
+  double *getZallMut() { return &z[0]; }
+  double *getTallMut() { return &t[0]; }
+  /** Prepare SoA vectors to receive nop particles (reserve + resize). */
+  void prepareSoAForNOP(int nop) {
+    resize_SoA(nop);
+  }
   // accessors for particle with index indexPart
   //
-  int getNOP()  const { return _pcls.size(); }
-  // set particle components
-  void setU(int i, cudaParticleType in){_pcls[i].set_u(in);}
-  void setV(int i, cudaParticleType in){_pcls[i].set_v(in);}
-  void setW(int i, cudaParticleType in){_pcls[i].set_w(in);}
-  void setQ(int i, cudaParticleType in){_pcls[i].set_q(in);}
-  void setX(int i, cudaParticleType in){_pcls[i].set_x(in);}
-  void setY(int i, cudaParticleType in){_pcls[i].set_y(in);}
-  void setZ(int i, cudaParticleType in){_pcls[i].set_z(in);}
-  void setT(int i, cudaParticleType in){_pcls[i].set_t(in);}
-  // fetch particle components
-  cudaParticleType& fetchU(int i){return _pcls[i].fetch_u();}
-  cudaParticleType& fetchV(int i){return _pcls[i].fetch_v();}
-  cudaParticleType& fetchW(int i){return _pcls[i].fetch_w();}
-  cudaParticleType& fetchQ(int i){return _pcls[i].fetch_q();}
-  cudaParticleType& fetchX(int i){return _pcls[i].fetch_x();}
-  cudaParticleType& fetchY(int i){return _pcls[i].fetch_y();}
-  cudaParticleType& fetchZ(int i){return _pcls[i].fetch_z();}
-  cudaParticleType& fetchT(int i){return _pcls[i].fetch_t();}
-  // get particle components
-  cudaParticleType getU(int i)const{return _pcls[i].get_u();}
-  cudaParticleType getV(int i)const{return _pcls[i].get_v();}
-  cudaParticleType getW(int i)const{return _pcls[i].get_w();}
-  cudaParticleType getQ(int i)const{return _pcls[i].get_q();}
-  cudaParticleType getX(int i)const{return _pcls[i].get_x();}
-  cudaParticleType getY(int i)const{return _pcls[i].get_y();}
-  cudaParticleType getZ(int i)const{return _pcls[i].get_z();}
-  cudaParticleType getT(int i)const{return _pcls[i].get_t();}
+  int getNOP()  const {
+    return (storageMode == StorageMode::SoA) ? (int)u.size() : (int)_pcls.size();
+  }
+  // set particle components (delegates to active storage)
+  void setU(int i, cudaParticleType in){ if(isSoAMode()) u[i]=in; else _pcls[i].set_u(in); }
+  void setV(int i, cudaParticleType in){ if(isSoAMode()) v[i]=in; else _pcls[i].set_v(in); }
+  void setW(int i, cudaParticleType in){ if(isSoAMode()) w[i]=in; else _pcls[i].set_w(in); }
+  void setQ(int i, cudaParticleType in){ if(isSoAMode()) q[i]=in; else _pcls[i].set_q(in); }
+  void setX(int i, cudaParticleType in){ if(isSoAMode()) x[i]=in; else _pcls[i].set_x(in); }
+  void setY(int i, cudaParticleType in){ if(isSoAMode()) y[i]=in; else _pcls[i].set_y(in); }
+  void setZ(int i, cudaParticleType in){ if(isSoAMode()) z[i]=in; else _pcls[i].set_z(in); }
+  void setT(int i, cudaParticleType in){ if(isSoAMode()) t[i]=in; else _pcls[i].set_t(in); }
+  // fetch particle components (mutable reference)
+  cudaParticleType& fetchU(int i){ return isSoAMode() ? u[i] : _pcls[i].fetch_u(); }
+  cudaParticleType& fetchV(int i){ return isSoAMode() ? v[i] : _pcls[i].fetch_v(); }
+  cudaParticleType& fetchW(int i){ return isSoAMode() ? w[i] : _pcls[i].fetch_w(); }
+  cudaParticleType& fetchQ(int i){ return isSoAMode() ? q[i] : _pcls[i].fetch_q(); }
+  cudaParticleType& fetchX(int i){ return isSoAMode() ? x[i] : _pcls[i].fetch_x(); }
+  cudaParticleType& fetchY(int i){ return isSoAMode() ? y[i] : _pcls[i].fetch_y(); }
+  cudaParticleType& fetchZ(int i){ return isSoAMode() ? z[i] : _pcls[i].fetch_z(); }
+  cudaParticleType& fetchT(int i){ return isSoAMode() ? t[i] : _pcls[i].fetch_t(); }
+  // get particle components (read-only)
+  cudaParticleType getU(int i)const{ return isSoAMode() ? u[i] : _pcls[i].get_u(); }
+  cudaParticleType getV(int i)const{ return isSoAMode() ? v[i] : _pcls[i].get_v(); }
+  cudaParticleType getW(int i)const{ return isSoAMode() ? w[i] : _pcls[i].get_w(); }
+  cudaParticleType getQ(int i)const{ return isSoAMode() ? q[i] : _pcls[i].get_q(); }
+  cudaParticleType getX(int i)const{ return isSoAMode() ? x[i] : _pcls[i].get_x(); }
+  cudaParticleType getY(int i)const{ return isSoAMode() ? y[i] : _pcls[i].get_y(); }
+  cudaParticleType getZ(int i)const{ return isSoAMode() ? z[i] : _pcls[i].get_z(); }
+  cudaParticleType getT(int i)const{ return isSoAMode() ? t[i] : _pcls[i].get_t(); }
   //int get_npmax() const {return npmax;}
 
   // computed get access
@@ -292,7 +386,9 @@ protected:
   // used to generate unique particle IDs
   doubleIDgenerator pclIDgenerator;
 
+  // Legacy particleType kept for compatibility; storageMode is the authority
   ParticleType::Type particleType;
+  StorageMode storageMode;
   //
   // AoS representation
   //
@@ -301,20 +397,20 @@ protected:
   //
   // particles data
   //
-  // SoA representation
+  // SoA representation  (pinned host memory for async GPU transfers)
   //
   // velocity components
-  vector_double u;
-  vector_double v;
-  vector_double w;
+  vector_double_registered u;
+  vector_double_registered v;
+  vector_double_registered w;
   // charge
-  vector_double q;
+  vector_double_registered q;
   // position
-  vector_double x;
-  vector_double y;
-  vector_double z;
+  vector_double_registered x;
+  vector_double_registered y;
+  vector_double_registered z;
   // subcycle time
-  vector_double t;
+  vector_double_registered t;
   // indicates whether this class is for tracking particles
   //bool TrackParticleID;
   bool isTestParticle;

@@ -127,14 +127,16 @@ Particles3Dcomm::Particles3Dcomm(
   int species_number,
   CollectiveIO * col_,
   VirtualTopology3D * vct_,
-  Grid * grid_)
+  Grid * grid_,
+  StorageMode mode)
  :
   ns(species_number),
   col(col_),
   vct(vct_),
   grid(grid_),
   pclIDgenerator(),
-  particleType(ParticleType::AoS)
+  particleType(mode == StorageMode::SoA ? ParticleType::SoA : ParticleType::AoS),
+  storageMode(mode)
 {
   // communicators for particles
   //
@@ -284,7 +286,7 @@ if( !isTestParticle ){
   // // AoS particle representation
   // //
   // _pcls.reserve(initial_capacity);
-  particleType = ParticleType::AoS; // canonical representation
+  // particleType and storageMode already set in initializer list
 
   //
   // allocate arrays for sorting particles
@@ -328,29 +330,34 @@ if( !isTestParticle ){
 
 void Particles3Dcomm::reserveSpace(int nop)
 {
-  // reserve space for particles
+  // reserve space only for the active storage mode
   
   const int padded_nop = roundup_to_multiple(nop,DVECWIDTH);
-  u.reserve(padded_nop);
-  v.reserve(padded_nop);
-  w.reserve(padded_nop);
-  q.reserve(padded_nop);
-  x.reserve(padded_nop);
-  y.reserve(padded_nop);
-  z.reserve(padded_nop);
-  t.reserve(padded_nop);
-
-  // AoS
-  _pcls.reserve(padded_nop);
-
+  if (storageMode == StorageMode::SoA) {
+    u.reserve(padded_nop);
+    v.reserve(padded_nop);
+    w.reserve(padded_nop);
+    q.reserve(padded_nop);
+    x.reserve(padded_nop);
+    y.reserve(padded_nop);
+    z.reserve(padded_nop);
+    t.reserve(padded_nop);
+  } else {
+    // AoS mode: only reserve _pcls
+    _pcls.reserve(padded_nop);
+  }
 }
 
 void Particles3Dcomm::restartLoad()
 {
-  // load particles from restart file
+  // load particles from restart file into SoA vectors
   particleType = ParticleType::SoA;
   col->read_particles_restart(vct, ns, u, v, w, q, x, y, z, t);
-  convertParticlesToAoS();
+  if (storageMode == StorageMode::AoS) {
+    // AoS-mode instances need data in _pcls
+    convertParticlesToAoS();
+  }
+  // In SoA mode, data is already in place — no conversion needed.
 }
 
 // pad capacities so that aligned vectorization
@@ -362,15 +369,18 @@ void Particles3Dcomm::pad_capacities()
 {
  #pragma omp master
  {
-  _pcls.reserve(roundup_to_multiple(_pcls.size(),DVECWIDTH));
-  u.reserve(roundup_to_multiple(u.size(),DVECWIDTH));
-  v.reserve(roundup_to_multiple(v.size(),DVECWIDTH));
-  w.reserve(roundup_to_multiple(w.size(),DVECWIDTH));
-  q.reserve(roundup_to_multiple(q.size(),DVECWIDTH));
-  x.reserve(roundup_to_multiple(x.size(),DVECWIDTH));
-  y.reserve(roundup_to_multiple(y.size(),DVECWIDTH));
-  z.reserve(roundup_to_multiple(z.size(),DVECWIDTH));
-  t.reserve(roundup_to_multiple(t.size(),DVECWIDTH));
+  if (storageMode == StorageMode::SoA) {
+    u.reserve(roundup_to_multiple(u.size(),DVECWIDTH));
+    v.reserve(roundup_to_multiple(v.size(),DVECWIDTH));
+    w.reserve(roundup_to_multiple(w.size(),DVECWIDTH));
+    q.reserve(roundup_to_multiple(q.size(),DVECWIDTH));
+    x.reserve(roundup_to_multiple(x.size(),DVECWIDTH));
+    y.reserve(roundup_to_multiple(y.size(),DVECWIDTH));
+    z.reserve(roundup_to_multiple(z.size(),DVECWIDTH));
+    t.reserve(roundup_to_multiple(t.size(),DVECWIDTH));
+  } else {
+    _pcls.reserve(roundup_to_multiple(_pcls.size(),DVECWIDTH));
+  }
  }
 }
 
@@ -414,6 +424,16 @@ void Particles3Dcomm::resize_SoA(int nop)
   t.resize(nop);
   //if(is_output_thread()) dprintf("done resizing to hold %d", nop);
  }
+}
+
+// Resize the active storage (SoA or AoS) to hold nop particles.
+void Particles3Dcomm::resizeActive(int nop)
+{
+  if (storageMode == StorageMode::SoA) {
+    resize_SoA(nop);
+  } else {
+    resize_AoS(nop);
+  }
 }
 
 // returns true if particle was sent
@@ -1265,8 +1285,9 @@ int Particles3Dcomm::separate_and_send_particles()
   const int num_ids = 1;
   longid id_list[num_ids] = {0};
 
-  //timeTasks_set_communicating();
-
+  // Ensure data is in AoS format for MPI exchange.
+  // In AoS mode, _pcls is already authoritative.
+  // In SoA mode, this packs SoA → _pcls (compatibility shim).
   convertParticlesToAoS();
 
   // activate receiving
@@ -1442,12 +1463,15 @@ void Particles3Dcomm::recommunicate_particles_until_done(int min_num_iterations)
 double Particles3Dcomm::getTotalQ() {
   double localQ = 0.0;
   double totalQ = 0.0;
-  const int nop = _pcls.size();
-  #pragma omp parallel for reduction(+:localQ)
-  for (int i = 0; i < nop; i++)
-  {
-    const SpeciesParticle& pcl = _pcls[i];
-    localQ += pcl.get_q();
+  const int nop = getNOP();
+  if (isSoAMode()) {
+    #pragma omp parallel for reduction(+:localQ)
+    for (int i = 0; i < nop; i++)
+      localQ += q[i];
+  } else {
+    #pragma omp parallel for reduction(+:localQ)
+    for (int i = 0; i < nop; i++)
+      localQ += _pcls[i].get_q();
   }
   MPI_Allreduce(&localQ, &totalQ, 1, MPI_DOUBLE, MPI_SUM, mpi_comm);
   return (totalQ);
@@ -1457,16 +1481,20 @@ double Particles3Dcomm::getTotalQ() {
 double Particles3Dcomm::getKe() {
   double localKe = 0.0;
   double totalKe = 0.0;
-  const int nop = _pcls.size();
-  #pragma omp parallel for reduction(+:localKe)
-  for (int i = 0; i < nop; i++)
-  {
-    const SpeciesParticle& pcl = _pcls[i];
-    const double u = pcl.get_u();
-    const double v = pcl.get_v();
-    const double w = pcl.get_w();
-    const double q = pcl.get_q();
-    localKe += .5*(q/qom)*(u*u + v*v + w*w);
+  const int nop = getNOP();
+  if (isSoAMode()) {
+    #pragma omp parallel for reduction(+:localKe)
+    for (int i = 0; i < nop; i++) {
+      const double ui = u[i], vi = v[i], wi = w[i], qi = q[i];
+      localKe += .5*(qi/qom)*(ui*ui + vi*vi + wi*wi);
+    }
+  } else {
+    #pragma omp parallel for reduction(+:localKe)
+    for (int i = 0; i < nop; i++) {
+      const SpeciesParticle& pcl = _pcls[i];
+      const double ui = pcl.get_u(), vi = pcl.get_v(), wi = pcl.get_w(), qi = pcl.get_q();
+      localKe += .5*(qi/qom)*(ui*ui + vi*vi + wi*wi);
+    }
   }
   MPI_Allreduce(&localKe, &totalKe, 1, MPI_DOUBLE, MPI_SUM, mpi_comm);
   return (totalKe);
@@ -1481,16 +1509,20 @@ double Particles3Dcomm::getKe() {
 double Particles3Dcomm::getP() {
   double localP = 0.0;
   double totalP = 0.0;
-  const int nop = _pcls.size();
-  #pragma omp parallel for reduction(+:localP)
-  for (int i = 0; i < nop; i++)
-  {
-    const SpeciesParticle& pcl = _pcls[i];
-    const double u = pcl.get_u();
-    const double v = pcl.get_v();
-    const double w = pcl.get_w();
-    const double q = pcl.get_q();
-    localP += (q/qom)*sqrt(u*u + v*v + w*w);
+  const int nop = getNOP();
+  if (isSoAMode()) {
+    #pragma omp parallel for reduction(+:localP)
+    for (int i = 0; i < nop; i++) {
+      const double ui = u[i], vi = v[i], wi = w[i], qi = q[i];
+      localP += (qi/qom)*sqrt(ui*ui + vi*vi + wi*wi);
+    }
+  } else {
+    #pragma omp parallel for reduction(+:localP)
+    for (int i = 0; i < nop; i++) {
+      const SpeciesParticle& pcl = _pcls[i];
+      const double ui = pcl.get_u(), vi = pcl.get_v(), wi = pcl.get_w(), qi = pcl.get_q();
+      localP += (qi/qom)*sqrt(ui*ui + vi*vi + wi*wi);
+    }
   }
   MPI_Allreduce(&localP, &totalP, 1, MPI_DOUBLE, MPI_SUM, mpi_comm);
   return (totalP);
@@ -1500,15 +1532,20 @@ double Particles3Dcomm::getP() {
 double Particles3Dcomm::getMaxVelocity() {
   double localVel = 0.0;
   double maxVel = 0.0;
-  const int nop = _pcls.size();
-  #pragma omp parallel for reduction(max:localVel)
-  for (int i = 0; i < nop; i++)
-  {
-    const SpeciesParticle& pcl = _pcls[i];
-    const double u = pcl.get_u();
-    const double v = pcl.get_v();
-    const double w = pcl.get_w();
-    localVel = std::max(localVel, sqrt(u*u + v*v + w*w));
+  const int nop = getNOP();
+  if (isSoAMode()) {
+    #pragma omp parallel for reduction(max:localVel)
+    for (int i = 0; i < nop; i++) {
+      const double ui = u[i], vi = v[i], wi = w[i];
+      localVel = std::max(localVel, sqrt(ui*ui + vi*vi + wi*wi));
+    }
+  } else {
+    #pragma omp parallel for reduction(max:localVel)
+    for (int i = 0; i < nop; i++) {
+      const SpeciesParticle& pcl = _pcls[i];
+      const double ui = pcl.get_u(), vi = pcl.get_v(), wi = pcl.get_w();
+      localVel = std::max(localVel, sqrt(ui*ui + vi*vi + wi*wi));
+    }
   }
   MPI_Allreduce(&localVel, &maxVel, 1, MPI_DOUBLE, MPI_MAX, mpi_comm);
   return (maxVel);
@@ -1524,18 +1561,21 @@ long long *Particles3Dcomm::getVelocityDistribution(int nBins, double maxVel) {
   for (int i = 0; i < nBins; i++)
     f[i] = 0;
   const double dv = maxVel / nBins;
-  const int nop = _pcls.size();
+  const int nop = getNOP();
   #pragma omp parallel
   {
     // thread-local histogram to avoid atomic race conditions
     long long *f_local = new long long[nBins]();
     #pragma omp for nowait
     for (int i = 0; i < nop; i++) {
-      const SpeciesParticle& pcl = _pcls[i];
-      const double u = pcl.get_u();
-      const double v = pcl.get_v();
-      const double w = pcl.get_w();
-      const double Vel = sqrt(u*u + v*v + w*w);
+      double ui, vi, wi;
+      if (isSoAMode()) {
+        ui = u[i]; vi = v[i]; wi = w[i];
+      } else {
+        const SpeciesParticle& pcl = _pcls[i];
+        ui = pcl.get_u(); vi = pcl.get_v(); wi = pcl.get_w();
+      }
+      const double Vel = sqrt(ui*ui + vi*vi + wi*wi);
       int bin = int(floor(Vel / dv));
       if (bin >= nBins)
         f_local[nBins - 1] += 1;
@@ -1557,19 +1597,10 @@ long long *Particles3Dcomm::getVelocityDistribution(int nBins, double maxVel) {
 
 void Particles3Dcomm::sort_particles_serial()
 {
-  switch(particleType)
-  {
-    case ParticleType::synched: [[fallthrough]];
-    case ParticleType::AoS:
-      sort_particles_serial_AoS();
-      break;
-    case ParticleType::SoA:
-      convertParticlesToAoS();
-      sort_particles_serial_AoS();
-      convertParticlesToSynched();
-      break;
-    default:
-      unsupported_value_error(particleType);
+  if (storageMode == StorageMode::SoA) {
+    sort_particles_serial_SoA();
+  } else {
+    sort_particles_serial_AoS();
   }
 }
 
@@ -1656,19 +1687,10 @@ void Particles3Dcomm::sort_particles_serial_AoS()
 
 void Particles3Dcomm::sort_particles_parallel(int* cellCount, int* cellOffset)
 {
-  switch(particleType)
-  {
-    case ParticleType::synched: [[fallthrough]];
-    case ParticleType::AoS:
-      sort_particles_parallel_AoS(cellCount, cellOffset);
-      break;
-    case ParticleType::SoA:
-      convertParticlesToAoS();
-      sort_particles_parallel_AoS(cellCount, cellOffset);
-      convertParticlesToSynched();
-      break;
-    default:
-      unsupported_value_error(particleType);
+  if (storageMode == StorageMode::SoA) {
+    sort_particles_parallel_SoA(cellCount, cellOffset);
+  } else {
+    sort_particles_parallel_AoS(cellCount, cellOffset);
   }
 }
 
@@ -1896,6 +1918,139 @@ void Particles3Dcomm::sort_particles_parallel_AoS(int* globalCount,
 //}
 //#endif
 
+// ======================================================================
+// SoA-native sort — operates directly on SoA vectors, no AoS conversion.
+// ======================================================================
+
+void Particles3Dcomm::sort_particles_serial_SoA()
+{
+  const int N = getNOP();
+  if (N == 0) return;
+
+  // Temporary SoA arrays for the sorted output
+  Larray<double> u2(N), v2(N), w2(N), q2(N);
+  Larray<double> x2(N), y2(N), z2(N), t2(N);
+  u2.resize(N); v2.resize(N); w2.resize(N); q2.resize(N);
+  x2.resize(N); y2.resize(N); z2.resize(N); t2.resize(N);
+
+  numpcls_in_bucket->setall(0);
+
+  // Pass 1: count particles per cell
+  for (int pidx = 0; pidx < N; pidx++) {
+    int cx, cy, cz;
+    grid->get_safe_cell_coordinates(cx, cy, cz, x[pidx], y[pidx], z[pidx]);
+    (*numpcls_in_bucket)[cx][cy][cz]++;
+  }
+
+  // Prefix sum → bucket offsets
+  int acc = 0;
+  for (int cx = 0; cx < nxc; cx++)
+  for (int cy = 0; cy < nyc; cy++)
+  for (int cz = 0; cz < nzc; cz++) {
+    (*bucket_offset)[cx][cy][cz] = acc;
+    acc += (*numpcls_in_bucket)[cx][cy][cz];
+  }
+  assert(acc == N);
+
+  numpcls_in_bucket_now->setall(0);
+
+  // Pass 2: scatter into sorted order
+  for (int pidx = 0; pidx < N; pidx++) {
+    int cx, cy, cz;
+    grid->get_safe_cell_coordinates(cx, cy, cz, x[pidx], y[pidx], z[pidx]);
+    const int pos = (*bucket_offset)[cx][cy][cz] + (*numpcls_in_bucket_now)[cx][cy][cz]++;
+    u2[pos] = u[pidx]; v2[pos] = v[pidx]; w2[pos] = w[pidx]; q2[pos] = q[pidx];
+    x2[pos] = x[pidx]; y2[pos] = y[pidx]; z2[pos] = z[pidx]; t2[pos] = t[pidx];
+  }
+
+  // Swap into authoritative storage
+  u.swap(u2); v.swap(v2); w.swap(w2); q.swap(q2);
+  x.swap(x2); y.swap(y2); z.swap(z2); t.swap(t2);
+
+  particleType = ParticleType::SoA;
+}
+
+
+void Particles3Dcomm::sort_particles_parallel_SoA(int* globalCount, int* globalOffset)
+{
+  const int N = getNOP();
+  if (N == 0) return;
+  const int totalCells = nxc * nyc * nzc;
+  const int numThreads = omp_get_max_threads();
+
+  // Temporary SoA arrays for the sorted output
+  Larray<double> u2(N), v2(N), w2(N), q2(N);
+  Larray<double> x2(N), y2(N), z2(N), t2(N);
+  u2.resize(N); v2.resize(N); w2.resize(N); q2.resize(N);
+  x2.resize(N); y2.resize(N); z2.resize(N); t2.resize(N);
+
+  // Per-thread local counts and offsets
+  std::vector<std::vector<int>> threadLocalCounts(numThreads, std::vector<int>(totalCells, 0));
+  std::vector<std::vector<int>> threadLocalOffsets(numThreads, std::vector<int>(totalCells, 0));
+
+  std::fill(globalCount, globalCount + totalCells, 0);
+  std::fill(globalOffset, globalOffset + totalCells, 0);
+
+  #pragma omp parallel
+  {
+    int tid = omp_get_thread_num();
+    int blockSize = N / numThreads;
+    int remainder = N % numThreads;
+    int start = tid * blockSize + (tid < remainder ? tid : remainder);
+    int end = start + blockSize + (tid < remainder ? 1 : 0);
+
+    // Pass 1: local count
+    for (int pidx = start; pidx < end; pidx++) {
+      int cx, cy, cz;
+      grid->get_safe_cell_coordinates(cx, cy, cz, x[pidx], y[pidx], z[pidx]);
+      int cellIndex = cx * (nyc * nzc) + cy * nzc + cz;
+      threadLocalCounts[tid][cellIndex]++;
+    }
+    #pragma omp barrier
+    #pragma omp single
+    {
+      int acc = 0;
+      for (int cell = 0; cell < totalCells; cell++) {
+        int localSum = 0;
+        for (int t = 0; t < numThreads; t++) {
+          threadLocalOffsets[t][cell] = acc + localSum;
+          localSum += threadLocalCounts[t][cell];
+        }
+        globalCount[cell] = localSum;
+        globalOffset[cell] = acc;
+        acc += localSum;
+      }
+      assert(acc == N);
+    }
+    #pragma omp barrier
+    // Pass 2: scatter into sorted order
+    for (int pidx = start; pidx < end; pidx++) {
+      int cx, cy, cz;
+      grid->get_safe_cell_coordinates(cx, cy, cz, x[pidx], y[pidx], z[pidx]);
+      int cellIndex = cx * (nyc * nzc) + cy * nzc + cz;
+      int pos = threadLocalOffsets[tid][cellIndex]++;
+
+      u2[pos] = u[pidx]; v2[pos] = v[pidx]; w2[pos] = w[pidx]; q2[pos] = q[pidx];
+      x2[pos] = x[pidx]; y2[pos] = y[pidx]; z2[pos] = z[pidx]; t2[pos] = t[pidx];
+    }
+  }
+
+  // Swap into authoritative storage
+  u.swap(u2); v.swap(v2); w.swap(w2); q.swap(q2);
+  x.swap(x2); y.swap(y2); z.swap(z2); t.swap(t2);
+
+  particleType = ParticleType::SoA;
+}
+
+
+// ======================================================================
+// Legacy conversion shims — these are compatibility wrappers.
+// In the SoA-primary design, SoA is always authoritative for SoA-mode
+// instances, and AoS is always authoritative for AoS-mode instances.
+// The copyParticlesTo{SoA,AoS} methods remain as internal helpers
+// for sort paths and I/O that temporarily need the other representation.
+// ======================================================================
+
 // This can be called from within an omp parallel block
 void Particles3Dcomm::copyParticlesToSoA()
 {
@@ -1945,6 +2100,7 @@ void Particles3Dcomm::copyParticlesToAoS()
 {
   timeTasks_set_task(TimeTasks::TRANSPOSE_PCLS_TO_AOS);
   const int nop = u.size();
+  if(nop == 0) { _pcls.resize(0); particleType = ParticleType::synched; return; }
   if(is_output_thread()) dprintf("copying to array of structs");
   resize_AoS(nop);
  #ifndef __MIC__
@@ -1979,43 +2135,39 @@ void Particles3Dcomm::copyParticlesToAoS()
   particleType = ParticleType::synched;
 }
 
-// synched AoS and SoA conceptually implies a write-lock
-//
+// --- Compatibility shim: convertParticlesToSynched ---
+// In SoA mode: SoA is already authoritative, pack to AoS for callers that need it.
+// In AoS mode: AoS is already authoritative, pack to SoA for callers that need it.
 void Particles3Dcomm::convertParticlesToSynched()
 {
-  switch(particleType)
-  {
-    default:
-      unsupported_value_error(particleType);
-    case ParticleType::SoA:
+  if (storageMode == StorageMode::SoA) {
+    // SoA is authoritative; populate _pcls for callers that read AoS
+    if (particleType != ParticleType::synched) {
       copyParticlesToAoS();
-      break;
-    case ParticleType::AoS:
+    }
+  } else {
+    // AoS is authoritative; populate SoA for callers that read SoA
+    if (particleType != ParticleType::synched) {
       copyParticlesToSoA();
-      break;
-    case ParticleType::synched:
-      break;
+    }
   }
-  // this state conceptually implies a write-lock
   particleType = ParticleType::synched;
 }
 
 
-// defines AoS to be the authority
-// (conceptually releasing any write-lock)
-//
+// --- Compatibility shim: convertParticlesToAoS ---
+// In AoS mode: no-op (already authoritative).
+// In SoA mode: packs SoA → _pcls so AoS callers can read.
 void Particles3Dcomm::convertParticlesToAoS()
 {
-  switch(particleType)
-  {
-    default:
-      unsupported_value_error(particleType);
-    case ParticleType::SoA:
-      copyParticlesToAoS();
-      break;
-    case ParticleType::AoS:
-    case ParticleType::synched:
-      break;
+  if (storageMode == StorageMode::AoS) {
+    // Already AoS — nothing to do
+    particleType = ParticleType::AoS;
+    return;
+  }
+  // SoA mode: pack SoA to AoS if not already done
+  if (particleType == ParticleType::SoA) {
+    copyParticlesToAoS();
   }
   particleType = ParticleType::AoS;
 }
@@ -2023,36 +2175,71 @@ void Particles3Dcomm::convertParticlesToAoS()
 // check whether particles are SoA
 bool Particles3Dcomm::particlesAreSoA()const
 {
-  switch(particleType)
-  {
-    default:
-      unsupported_value_error(particleType);
-    case ParticleType::AoS:
-      return false;
-      break;
-    case ParticleType::SoA:
-    case ParticleType::synched:
-      break;
-  }
-  return true;
+  return (storageMode == StorageMode::SoA) ||
+         (particleType == ParticleType::SoA) ||
+         (particleType == ParticleType::synched);
 }
 
-// defines SoA to be the authority
-// (conceptually releasing any write-lock)
-//
+// --- Compatibility shim: convertParticlesToSoA ---
+// In SoA mode: no-op (already authoritative).
+// In AoS mode: copies _pcls → SoA vectors.
 void Particles3Dcomm::convertParticlesToSoA()
 {
-  switch(particleType)
-  {
-    default:
-      unsupported_value_error(particleType);
-    case ParticleType::AoS:
-      copyParticlesToSoA();
-      break;
-    case ParticleType::SoA:
-    case ParticleType::synched:
-      break;
+  if (storageMode == StorageMode::SoA) {
+    // Already SoA — nothing to do
+    particleType = ParticleType::SoA;
+    return;
+  }
+  // AoS mode: copy AoS to SoA if not already done
+  if (particleType == ParticleType::AoS) {
+    copyParticlesToSoA();
   }
   particleType = ParticleType::SoA;
+}
+
+// ======================================================================
+// New SoA-primary utility methods
+// ======================================================================
+
+// Pack SoA vectors into _pcls AoS buffer (e.g. for I/O).
+void Particles3Dcomm::packSoAToAoS()
+{
+  const int nop = getNOP();
+  resize_AoS(nop);
+  #pragma omp parallel for
+  for(int i = 0; i < nop; i++)
+  {
+    _pcls[i].set(u[i], v[i], w[i], q[i], x[i], y[i], z[i], t[i]);
+  }
+}
+
+// Append particles from an external AoS buffer into the active storage.
+void Particles3Dcomm::appendFromAoS(const SpeciesParticle* buf, int count)
+{
+  if (storageMode == StorageMode::SoA) {
+    // Scatter into SoA vectors
+    const int oldNop = getNOP();
+    const int newNop = oldNop + count;
+    // Ensure capacity
+    u.reserve(newNop); v.reserve(newNop); w.reserve(newNop); q.reserve(newNop);
+    x.reserve(newNop); y.reserve(newNop); z.reserve(newNop); t.reserve(newNop);
+    for (int i = 0; i < count; i++) {
+      u.push_back(buf[i].get_u());
+      v.push_back(buf[i].get_v());
+      w.push_back(buf[i].get_w());
+      q.push_back(buf[i].get_q());
+      x.push_back(buf[i].get_x());
+      y.push_back(buf[i].get_y());
+      z.push_back(buf[i].get_z());
+      t.push_back(buf[i].get_t());
+    }
+  } else {
+    // AoS mode: append directly to _pcls
+    const int oldNop = (int)_pcls.size();
+    _pcls.reserve(oldNop + count);
+    for (int i = 0; i < count; i++) {
+      _pcls.push_back(buf[i]);
+    }
+  }
 }
 

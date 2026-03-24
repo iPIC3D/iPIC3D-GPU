@@ -57,18 +57,11 @@ private:
 
     
 public:
-    /**
-     * @brief Create SoA device particle array with AoS device pclArray
-     */
-    __host__ particleArraySoACUDA(particleArrayCUDA* pclArray, cudaStream_t stream = 0);
-
     __host__ particleArraySoACUDA(): allocated(false){}
 
     __host__ particleArraySoACUDA(int nop, cudaStream_t stream = 0): nop(nop), size(nop), allocated(true){
         allocateMemory();
     }
-
-    __host__ void updateFromAoS(particleArrayCUDA* pclArray, cudaStream_t stream = 0);
 
     /**
      * @brief Borrow SoA pointers from particleArrayCUDA's persistent SoA arrays.

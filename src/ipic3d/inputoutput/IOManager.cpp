@@ -391,11 +391,7 @@ void IOManager::writeParticles(int cycle) {
 void IOManager::writeTestParticles(int cycle) {
     if (nstestpart_ == 0) return;
 
-    // Convert test particles (CPU-only, no CUDA sync needed)
-    for (int i = 0; i < nstestpart_; i++) {
-        testpart_[i].set_particleType(ParticleType::Type::AoS);
-        testpart_[i].convertParticlesToSynched();
-    }
+    // SoA data is authoritative — no conversion needed, all writers use SoA accessors
 
 #ifndef NO_HDF5
     if (outputWrapperFPP_)

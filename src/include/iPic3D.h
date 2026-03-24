@@ -158,6 +158,7 @@ namespace iPic3D {
     hashedSum**           hashedSumArrayHostPtr;      // species * 8
     exitingArray**        exitingArrayHostPtr;        // species
     fillerBuffer**        fillerBufferArrayHostPtr;   // species
+    arrayCUDA<SpeciesParticle>** incomingStagingHostPtr;  // per-species AoS staging for H→D incoming particles
     grid3DCUDA* 		      grid3DCUDAHostPtr;      // one grid, used in all specieses
     moverParameter**      moverParamHostPtr;		  // for every species
     momentParameter**     momentParamHostPtr;		  // for every species
@@ -171,6 +172,7 @@ namespace iPic3D {
     hashedSum**           hashedSumArrayCUDAPtr;      // species * 8
     exitingArray**        exitingArrayCUDAPtr;        // species
     fillerBuffer**        fillerBufferArrayCUDAPtr;   // species
+    arrayCUDA<SpeciesParticle>** incomingStagingCUDAPtr;  // per-species device copy of staging metadata
     grid3DCUDA* 		      grid3DCUDACUDAPtr;    	    // one grid, used in all specieses
     moverParameter**      moverParamCUDAPtr;		      // for every species
     momentParameter**     momentParamCUDAPtr;		      // for every species

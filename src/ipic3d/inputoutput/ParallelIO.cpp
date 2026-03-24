@@ -201,8 +201,7 @@ void WritePartclH5hut(int nspec, Grid3DCU *grid, Particles3Dcomm *part, Collecti
 
   file.OpenPartclFile(nspec, vct->getFieldComm());
   for (int i=0; i<nspec; i++){
-    // this is a hack
-    part[i].convertParticlesToSynched();
+    // SoA data is authoritative — no conversion needed
     file.WriteParticles(i, part[i].getNOP(),
                            part[i].getQall(),
                            part[i].getXall(),

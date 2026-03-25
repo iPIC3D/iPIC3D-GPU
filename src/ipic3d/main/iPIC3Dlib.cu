@@ -48,6 +48,9 @@
 #include <sstream>
 #include <chrono>
 
+// Set to 1 to enable per-phase timing printfs (launcher, await, MPI, planet, exchange TOTAL)
+#define ENABLE_SOA_TIMING 0
+
 #include "Moments.h" // for debugging
 
 #include "ExosphereIonization.h"
@@ -762,7 +765,9 @@ void c_Solver::CalculateField(int cycle) {
 /*  -------------- */
 int c_Solver::cudaLauncherAsync(const int species){
   cudaSetDevice(cudaDeviceOnNode); // a must on multi-device node
+#if ENABLE_SOA_TIMING
   auto _tL0 = std::chrono::high_resolution_clock::now();
+#endif
 
   cudaEvent_t event1, event2;
   cudaErrChk(cudaEventCreateWithFlags(&event1, cudaEventDisableTiming));
@@ -804,7 +809,9 @@ int c_Solver::cudaLauncherAsync(const int species){
   
   // Mover
   // wait to field values copied to device
+#if ENABLE_SOA_TIMING
   auto _tL1 = std::chrono::high_resolution_clock::now(); // after splitting, before mover launch
+#endif
   cudaErrChk(cudaStreamWaitEvent(streams[species], event0, 0));
   if (col->getCase()=="Dipole" || col->getCase()=="Dipole2D")
     moverSubcyclesKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
@@ -836,9 +843,13 @@ int c_Solver::cudaLauncherAsync(const int species){
 
 
   // After Mover
+#if ENABLE_SOA_TIMING
   auto _tL2 = std::chrono::high_resolution_clock::now(); // before hashedSum sync
+#endif
   cudaErrChk(cudaStreamSynchronize(streams[species+ns]));
+#if ENABLE_SOA_TIMING
   auto _tL3 = std::chrono::high_resolution_clock::now(); // after hashedSum sync
+#endif
   //cudaErrChk(cudaStreamSynchronize(streams[species]));
   int count_exiting = 0; // exiting particle number
   for(int i=0; i<departureArrayElementType::DELETE_HASHEDSUM_INDEX; i++)count_exiting += hashedSumArrayHostPtr[species][i].getSum();
@@ -877,7 +888,9 @@ int c_Solver::cudaLauncherAsync(const int species){
         planetArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
   }
 
+#if ENABLE_SOA_TIMING
   auto _tL4 = std::chrono::high_resolution_clock::now(); // before exitingKernel
+#endif
   exitingKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species], 
                 departureArrayCUDAPtr[species], exitingArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
 
@@ -905,6 +918,7 @@ int c_Solver::cudaLauncherAsync(const int species){
   cudaErrChk(cudaEventDestroy(event2));
   cudaErrChk(cudaStreamSynchronize(streams[species+ns])); // exiting D→H complete, comm buffer ready
 
+#if ENABLE_SOA_TIMING
   auto _tL5 = std::chrono::high_resolution_clock::now();
   if (MPIdata::get_rank() == 0) {
     printf("  [SoA launcher s%d: split=%.2f moverLaunch=%.2f hashedSync=%.2f "
@@ -919,6 +933,7 @@ int c_Solver::cudaLauncherAsync(const int species){
            std::chrono::duration<double, std::milli>(_tL5 - _tL0).count(),
            pclsArrayHostPtr[species]->getNOP(), count_exiting, count_deleted, count_removed_planet);
   }
+#endif
 
   return hole; // Number of exiting + deleted + planet particles
 }
@@ -991,7 +1006,9 @@ bool c_Solver::ParticlesMoverMomentAsync()
 // ═══════════════════════════════════════════════════════════════════════
 void c_Solver::processPlanetParticles()
 {
+#if ENABLE_SOA_TIMING
   auto _tP0 = std::chrono::high_resolution_clock::now();
+#endif
   // ── Step 1: Check if any planet particles exist ──
   int totalIonPlanet  = 0;
   int totalElecPlanet = 0;
@@ -1003,13 +1020,17 @@ void c_Solver::processPlanetParticles()
       totalElecPlanet += planetPclCount[i];
   }
   if (totalElecPlanet == 0) {
+#if ENABLE_SOA_TIMING
     if (MPIdata::get_rank() == 0)
       printf("  [SoA planet: skip (0 elec) %.2f ms]\n",
              std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - _tP0).count());
+#endif
     return;
   }
 
+#if ENABLE_SOA_TIMING
   auto _tP1 = std::chrono::high_resolution_clock::now();
+#endif
   // ── Step 2: Reduce ion charge on GPU (result stays on device) ──
   cudaErrChk(cudaMemsetAsync(planetIonChargeDevice, 0, sizeof(cudaParticleType), planetStream));
   for (int i = 0; i < ns; i++) {
@@ -1133,7 +1154,9 @@ void c_Solver::processPlanetParticles()
   cudaErrChk(cudaMemcpyAsync(planetSurvivorCount, planetSurvivorCountDevice,
                               planetElecSpeciesCount * sizeof(int), cudaMemcpyDeviceToHost, planetStream));
   cudaErrChk(cudaStreamSynchronize(planetStream)); // ONLY sync: need counts on host for resize + D2H
+#if ENABLE_SOA_TIMING
   auto _tP2 = std::chrono::high_resolution_clock::now();
+#endif
 
   // ── Step 9: D2H reflected particles into AoS comm buffer (appended after exiting) ──
   for (int e = 0; e < planetElecSpeciesCount; e++) {
@@ -1153,6 +1176,7 @@ void c_Solver::processPlanetParticles()
 
   // Sync to ensure all D2H are complete before MPI exchange
   cudaErrChk(cudaStreamSynchronize(planetStream));
+#if ENABLE_SOA_TIMING
   auto _tP3 = std::chrono::high_resolution_clock::now();
   if (MPIdata::get_rank() == 0) {
     printf("  [SoA planet: setup=%.2f GPU(sort+reflect+sync)=%.2f D2H=%.2f total=%.2f ms  ions=%d elec=%d]\n",
@@ -1162,23 +1186,34 @@ void c_Solver::processPlanetParticles()
            std::chrono::duration<double, std::milli>(_tP3 - _tP0).count(),
            totalIonPlanet, totalElecPlanet);
   }
+#endif
 }
 
 bool c_Solver::MoverAwaitAndPclExchange()
 {
+#if ENABLE_SOA_TIMING
   auto _t0 = std::chrono::high_resolution_clock::now();
+#endif
 
   for (int i = 0; i < ns; i++){ 
+#if ENABLE_SOA_TIMING
     auto _ta = std::chrono::high_resolution_clock::now();
+#endif
     auto x = exitingResults[i].get(); // holes
+#if ENABLE_SOA_TIMING
     auto _tb = std::chrono::high_resolution_clock::now();
+#endif
     stayedParticle[i] = pclsArrayHostPtr[i]->getNOP() - x;
+#if ENABLE_SOA_TIMING
     if (MPIdata::get_rank() == 0)
       printf("  [SoA await s%d: %.2f ms  holes=%d stayed=%d]\n", i,
              std::chrono::duration<double, std::milli>(_tb - _ta).count(), x, stayedParticle[i]);
+#endif
   }
   // exiting particles are copied back
+#if ENABLE_SOA_TIMING
   auto _t1 = std::chrono::high_resolution_clock::now();
+#endif
 
   // ── Planet processing on planetStream (blocks internally, completes before returning) ──
   const bool doPlanet = (col->getCase() == "Dipole" || col->getCase() == "Dipole2D");
@@ -1186,7 +1221,9 @@ bool c_Solver::MoverAwaitAndPclExchange()
     processPlanetParticles();
   // processPlanetParticles now handles D2H of reflected particles into SoA comm buffer
   // and syncs planetStream internally. stayedParticle is unchanged.
+#if ENABLE_SOA_TIMING
   auto _t2 = std::chrono::high_resolution_clock::now();
+#endif
 
   // ── Update host NOP (stayed particles only) and sync device metadata ──
   for (int i = 0; i < ns; i++) {
@@ -1201,15 +1238,22 @@ bool c_Solver::MoverAwaitAndPclExchange()
   // in-bounds reflected electrons stay as incoming for this rank.
   for (int i = 0; i < ns; i++)  // communicate each species
   {
+#if ENABLE_SOA_TIMING
     auto _mpi0 = std::chrono::high_resolution_clock::now();
+#endif
     particlesCommInj[i].separateAndSendParticles();
+#if ENABLE_SOA_TIMING
     auto _mpi1 = std::chrono::high_resolution_clock::now();
+#endif
     particlesCommInj[i].recommunicateParticlesUntilDone(1);
+#if ENABLE_SOA_TIMING
     auto _mpi2 = std::chrono::high_resolution_clock::now();
+#endif
     // injection
     if (moverParamHostPtr[i]->doRepopulateInjection) {
       particlesCommInj[i].repopulateParticlesOnlyInjection();
     }
+#if ENABLE_SOA_TIMING
     auto _mpi3 = std::chrono::high_resolution_clock::now();
     if (MPIdata::get_rank() == 0)
       printf("  [SoA MPI s%d: separate=%.2f recomm=%.2f inject=%.2f total=%.2f ms  commNOP=%d]\n", i,
@@ -1218,8 +1262,11 @@ bool c_Solver::MoverAwaitAndPclExchange()
              std::chrono::duration<double, std::milli>(_mpi3 - _mpi2).count(),
              std::chrono::duration<double, std::milli>(_mpi3 - _mpi0).count(),
              particlesCommInj[i].getCommNOP());
+#endif
   }
+#if ENABLE_SOA_TIMING
   auto _t3 = std::chrono::high_resolution_clock::now();
+#endif
 
   // ── Exosphere ionization: inject photoionized particles into host buffers ──
   // After this call, particlesCommInj[i].getCommNOP() includes MPI-incoming + repopulated + exosphere particles.
@@ -1227,10 +1274,12 @@ bool c_Solver::MoverAwaitAndPclExchange()
   // copy SoA data directly, update pclsArrayHostPtr metadata, sync to device, and launch
   // momentKernelNew for all new particles — so exosphere particles are handled automatically.
   injectExosphereParticles();
+#if ENABLE_SOA_TIMING
   auto _t4 = std::chrono::high_resolution_clock::now();
   if (MPIdata::get_rank() == 0)
     printf("  [SoA exosphere: %.2f ms]\n",
            std::chrono::duration<double, std::milli>(_t4 - _t3).count());
+#endif
 
   for(int i=0; i<ns; i++){
 
@@ -1284,11 +1333,14 @@ bool c_Solver::MoverAwaitAndPclExchange()
 
   }
 
+#if ENABLE_SOA_TIMING
   auto _t5a = std::chrono::high_resolution_clock::now();
+#endif
   for(int i=0; i<ns; i++){ // copy moments back to 10 densities
     copyMomentsD2H(i, streams[i]);
   }
 
+#if ENABLE_SOA_TIMING
   auto _t5 = std::chrono::high_resolution_clock::now();
   if (MPIdata::get_rank() == 0) {
     printf("  [SoA exchange TOTAL: await=%.2f planet=%.2f MPI=%.2f exosphere=%.2f "
@@ -1301,6 +1353,7 @@ bool c_Solver::MoverAwaitAndPclExchange()
            std::chrono::duration<double, std::milli>(_t5 - _t5a).count(),
            std::chrono::duration<double, std::milli>(_t5 - _t0).count());
   }
+#endif
 
   return (false);
 }

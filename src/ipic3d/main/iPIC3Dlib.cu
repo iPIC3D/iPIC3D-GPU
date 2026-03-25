@@ -238,18 +238,16 @@ int c_Solver::Init(int argc, char **argv) {
   nstestpart = col->getNsTestPart();
 
   // ===== Allocate particlesCommInj[] — MPI exchange + injection engine (SoA comm buffer) =====
-  particlesCommInj = static_cast<ParticleCommInjection*>(
-    ::operator new(sizeof(ParticleCommInjection) * ns));
+  particlesCommInj = static_cast<ParticleCommInjection*>(::operator new(sizeof(ParticleCommInjection) * ns));
   for (int i = 0; i < ns; i++)
   {
-    new (&particlesCommInj[i]) ParticleCommInjection(particlesHost[i]);
+    new(&particlesCommInj[i]) ParticleCommInjection(particlesHost[i]);
     const auto totalPcl = col->getNpcel(i) * grid->getNXN() * grid->getNYN() * grid->getNZN();
     particlesCommInj[i].reserveCommBuffer(static_cast<int>(totalPcl * 0.1));
   }
 
   if(nstestpart>0){
-    testpart = static_cast<ParticleSoAHost*>(
-      ::operator new(sizeof(ParticleSoAHost) * nstestpart));
+    testpart = static_cast<ParticleSoAHost*>(::operator new(sizeof(ParticleSoAHost) * nstestpart));
     for (int i = 0; i < nstestpart; i++)
     {
       new(&testpart[i]) ParticleSoAHost(i+ns,col,vct,grid);//species id for test particles is increased by ns
@@ -359,11 +357,12 @@ int c_Solver::initCUDA(){
 
     hashedSumArrayHostPtr = new hashedSum*[ns];
     hashedSumArrayCUDAPtr = new hashedSum*[ns];
-    // SoA exiting buffer: per-species host structs with device pointers
-    cudaErrChk(cudaHostAlloc(&exitingSoAHost, ns * sizeof(ParticleSoADevice), cudaHostAllocDefault));
-    cudaErrChk(cudaMalloc(&exitingSoACUDA, ns * sizeof(ParticleSoADevice)));
+    exitingArrayHostPtr = new exitingArray*[ns];
+    exitingArrayCUDAPtr = new exitingArray*[ns];
     fillerBufferArrayHostPtr = new fillerBuffer*[ns];
     fillerBufferArrayCUDAPtr = new fillerBuffer*[ns];
+    incomingStagingHostPtr = new arrayCUDA<SpeciesParticle>*[ns];
+    incomingStagingCUDAPtr = new arrayCUDA<SpeciesParticle>*[ns];
 
     for(int i=0; i<ns; i++){
       // the constructor will copy particles from host to device
@@ -384,11 +383,15 @@ int c_Solver::initCUDA(){
 
       hashedSumArrayCUDAPtr[i] = copyArrayToDevice(hashedSumArrayHostPtr[i], departureArrayElementType::HASHED_SUM_NUM);
       
-      // SoA exiting buffer: allocate device arrays, copy struct to device
-      allocateDeviceSoA(exitingSoAHost[i], static_cast<uint32_t>(0.1 * pclsArrayHostPtr[i]->getNOP()));
-      cudaErrChk(cudaMemcpyAsync(exitingSoACUDA + i, exitingSoAHost + i, sizeof(ParticleSoADevice), cudaMemcpyDefault, streams[i]));
+      exitingArrayHostPtr[i] = newHostPinnedObject<exitingArray>(0.1 * pclsArrayHostPtr[i]->getNOP());
+      exitingArrayCUDAPtr[i] = exitingArrayHostPtr[i]->copyToDevice();
       fillerBufferArrayHostPtr[i] = newHostPinnedObject<fillerBuffer>(0.1 * pclsArrayHostPtr[i]->getNOP());
       fillerBufferArrayCUDAPtr[i] = fillerBufferArrayHostPtr[i]->copyToDevice();
+
+      // AoS staging buffer for incoming H→D particle transfers (MPI + repopulated + exosphere).
+      // Sized at 10% of initial NOP — will be expanded dynamically if needed.
+      incomingStagingHostPtr[i] = newHostPinnedObject<arrayCUDA<SpeciesParticle>>(static_cast<uint32_t>(0.1 * pclsArrayHostPtr[i]->getNOP()));
+      incomingStagingCUDAPtr[i] = incomingStagingHostPtr[i]->copyToDevice();
 
     }
   }
@@ -489,17 +492,17 @@ int c_Solver::initCUDA(){
   {
     const bool doPlanet = (col->getCase() == "Dipole" || col->getCase() == "Dipole2D");
 
-    // Per-species planet SoA buffers (host structs with device ptrs + device copies)
-    cudaErrChk(cudaHostAlloc(&planetSoAHost, ns * sizeof(ParticleSoADevice), cudaHostAllocDefault));
-    cudaErrChk(cudaMalloc(&planetSoACUDA, ns * sizeof(ParticleSoADevice)));
-    planetPclCount = new int[ns];
+    planetArrayHostPtr = new planetArray*[ns];
+    planetArrayCUDAPtr = new planetArray*[ns];
+    planetPclCount     = new int[ns];
 
     for (int i = 0; i < ns; i++) {
       if (doPlanet) {
-        allocateDeviceSoA(planetSoAHost[i], static_cast<uint32_t>(0.05 * pclsArrayHostPtr[i]->getNOP()));
-        cudaErrChk(cudaMemcpyAsync(planetSoACUDA + i, planetSoAHost + i, sizeof(ParticleSoADevice), cudaMemcpyDefault, streams[i]));
+        planetArrayHostPtr[i] = newHostPinnedObject<planetArray>((uint32_t)(0.05 * pclsArrayHostPtr[i]->getNOP()));
+        planetArrayCUDAPtr[i] = planetArrayHostPtr[i]->copyToDevice();
       } else {
-        memset(&planetSoAHost[i], 0, sizeof(ParticleSoADevice));
+        planetArrayHostPtr[i] = nullptr;
+        planetArrayCUDAPtr[i] = nullptr;
       }
       planetPclCount[i] = 0;
     }
@@ -524,13 +527,13 @@ int c_Solver::initCUDA(){
       cudaErrChk(cudaMalloc(&planetIonChargeDevice, sizeof(cudaParticleType)));
       cudaErrChk(cudaMalloc(&planetCutoffDevice,    sizeof(int)));
 
-      // Device array of device ParticleSoADevice pointers for cross-species kernels
-      cudaErrChk(cudaMalloc(&planetSoACUDAPtrDevice, planetElecSpeciesCount * sizeof(ParticleSoADevice*)));
-      ParticleSoADevice** tmpPtrs2 = new ParticleSoADevice*[planetElecSpeciesCount];
+      // Device array of device pointers to per-electron-species planetArrays
+      cudaErrChk(cudaMalloc(&planetArrayCUDAPtrDevice, planetElecSpeciesCount * sizeof(planetArray*)));
+      planetArray** tmpPtrs = new planetArray*[planetElecSpeciesCount];
       for (int e = 0; e < planetElecSpeciesCount; e++)
-        tmpPtrs2[e] = planetSoACUDA + planetElecSpeciesMap[e];
-      cudaErrChk(cudaMemcpy(planetSoACUDAPtrDevice, tmpPtrs2, planetElecSpeciesCount * sizeof(ParticleSoADevice*), cudaMemcpyHostToDevice));
-      delete[] tmpPtrs2;
+        tmpPtrs[e] = planetArrayCUDAPtr[planetElecSpeciesMap[e]];
+      cudaErrChk(cudaMemcpy(planetArrayCUDAPtrDevice, tmpPtrs, planetElecSpeciesCount * sizeof(planetArray*), cudaMemcpyHostToDevice));
+      delete[] tmpPtrs;
 
       cudaErrChk(cudaMalloc(&planetElecOffsetsDevice, planetElecSpeciesCount * sizeof(int)));
     } else {
@@ -538,27 +541,23 @@ int c_Solver::initCUDA(){
       planetGlobalIdxBuf = nullptr;
       planetIonChargeDevice = nullptr;
       planetCutoffDevice = nullptr;
-      planetSoACUDAPtrDevice = nullptr;
+      planetArrayCUDAPtrDevice = nullptr;
       planetElecOffsetsDevice = nullptr;
     }
 
     // Persistent host/device buffers for processPlanetParticles
     const int elecCount = planetElecSpeciesCount > 0 ? planetElecSpeciesCount : 1;
     cudaErrChk(cudaHostAlloc(&planetElecOffsets, elecCount * sizeof(int), cudaHostAllocDefault));
-    cudaErrChk(cudaHostAlloc(&planetTmpPtrs, elecCount * sizeof(ParticleSoADevice*), cudaHostAllocDefault));
+    cudaErrChk(cudaHostAlloc(&planetTmpPtrs, elecCount * sizeof(planetArray*), cudaHostAllocDefault));
     cudaErrChk(cudaHostAlloc(&planetSurvivorCount, elecCount * sizeof(int), cudaHostAllocDefault));
 
     if (doPlanet) {
       cudaErrChk(cudaMalloc(&planetSurvivorCountDevice, elecCount * sizeof(int)));
       planetReflectedBufCapacity = 1024;
-      // SoA reflected output buffer (host struct + device copy)
-      allocateDeviceSoA(planetReflectedSoAHost, planetReflectedBufCapacity);
-      cudaErrChk(cudaMalloc(&planetReflectedSoACUDA, sizeof(ParticleSoADevice)));
-      cudaErrChk(cudaMemcpy(planetReflectedSoACUDA, &planetReflectedSoAHost, sizeof(ParticleSoADevice), cudaMemcpyHostToDevice));
+      cudaErrChk(cudaMalloc(&planetReflectedBuf, planetReflectedBufCapacity * sizeof(SpeciesParticle)));
     } else {
       planetSurvivorCountDevice = nullptr;
-      memset(&planetReflectedSoAHost, 0, sizeof(ParticleSoADevice));
-      planetReflectedSoACUDA = nullptr;
+      planetReflectedBuf = nullptr;
       planetReflectedBufCapacity = 0;
     }
     planetRngCycleCounter = 0;
@@ -594,8 +593,9 @@ int c_Solver::deInitCUDA(){
     deleteHostPinnedObject(pclsArrayHostPtr[i]);
     deleteHostPinnedObject(departureArrayHostPtr[i]);
     deleteHostPinnedObjectArray(hashedSumArrayHostPtr[i], departureArrayElementType::HASHED_SUM_NUM);
-    freeDeviceSoA(exitingSoAHost[i]);
+    deleteHostPinnedObject(exitingArrayHostPtr[i]);
     deleteHostPinnedObject(fillerBufferArrayHostPtr[i]);
+    deleteHostPinnedObject(incomingStagingHostPtr[i]);
 
     deleteHostPinnedObject(moverParamHostPtr[i]);
     deleteHostPinnedObject(momentParamHostPtr[i]);
@@ -606,7 +606,9 @@ int c_Solver::deInitCUDA(){
     cudaFree(pclsArrayCUDAPtr[i]);
     cudaFree(departureArrayCUDAPtr[i]);
     cudaFree(hashedSumArrayCUDAPtr[i]);
+    cudaFree(exitingArrayCUDAPtr[i]);
     cudaFree(fillerBufferArrayCUDAPtr[i]);
+    cudaFree(incomingStagingCUDAPtr[i]);
 
     cudaFree(moverParamCUDAPtr[i]);
     cudaFree(momentParamCUDAPtr[i]);
@@ -623,10 +625,12 @@ int c_Solver::deInitCUDA(){
   delete[] departureArrayCUDAPtr;
   delete[] hashedSumArrayHostPtr;
   delete[] hashedSumArrayCUDAPtr;
-  cudaFreeHost(exitingSoAHost);
-  cudaFree(exitingSoACUDA);
+  delete[] exitingArrayHostPtr;
+  delete[] exitingArrayCUDAPtr;
   delete[] fillerBufferArrayHostPtr;
   delete[] fillerBufferArrayCUDAPtr;
+  delete[] incomingStagingHostPtr;
+  delete[] incomingStagingCUDAPtr;
   delete[] moverParamHostPtr;
   delete[] moverParamCUDAPtr;
   delete[] momentParamHostPtr;
@@ -636,24 +640,24 @@ int c_Solver::deInitCUDA(){
 
   // ── Planet quasi-neutral BC cleanup ──
   for (int i = 0; i < ns; i++) {
-    if (planetSoAHost[i].u) freeDeviceSoA(planetSoAHost[i]);
+    if (planetArrayHostPtr[i]) deleteHostPinnedObject(planetArrayHostPtr[i]);
+    if (planetArrayCUDAPtr[i]) cudaFree(planetArrayCUDAPtr[i]);
   }
-  cudaFreeHost(planetSoAHost);
-  cudaFree(planetSoACUDA);
+  delete[] planetArrayHostPtr;
+  delete[] planetArrayCUDAPtr;
   delete[] planetPclCount;
   delete[] planetElecSpeciesMap;
   if (planetEnergyBuf)           cudaFree(planetEnergyBuf);
   if (planetGlobalIdxBuf)        cudaFree(planetGlobalIdxBuf);
   if (planetIonChargeDevice)     cudaFree(planetIonChargeDevice);
   if (planetCutoffDevice)        cudaFree(planetCutoffDevice);
-  if (planetSoACUDAPtrDevice)    cudaFree(planetSoACUDAPtrDevice);
+  if (planetArrayCUDAPtrDevice) cudaFree(planetArrayCUDAPtrDevice);
   if (planetElecOffsetsDevice)   cudaFree(planetElecOffsetsDevice);
   cudaFreeHost(planetElecOffsets);
   cudaFreeHost(planetTmpPtrs);
   cudaFreeHost(planetSurvivorCount);
   if (planetSurvivorCountDevice) cudaFree(planetSurvivorCountDevice);
-  if (planetReflectedSoAHost.u)  freeDeviceSoA(planetReflectedSoAHost);
-  if (planetReflectedSoACUDA)    cudaFree(planetReflectedSoACUDA);
+  if (planetReflectedBuf)        cudaFree(planetReflectedBuf);
 
 
   // delete streams
@@ -845,11 +849,11 @@ int c_Solver::cudaLauncherAsync(const int species){
   //if (count_deleted > 0){
   //  std::cout << " Particle holes myrank: "<< MPIdata::get_rank() << " species: " << species<< " hole: " << hole << " deleted: "<< count_deleted << std::endl;
   //}
-  if(count_exiting > (int)exitingSoAHost[species].capacity){ 
-    // expand the exiting SoA device buffer
-    expandDeviceSoA(exitingSoAHost[species], count_exiting * 1.5, streams[species+ns]);
-    cudaErrChk(cudaMemcpyAsync(exitingSoACUDA + species, exitingSoAHost + species, 
-                                sizeof(ParticleSoADevice), cudaMemcpyDefault, streams[species+ns]));
+  if(count_exiting > exitingArrayHostPtr[species]->getSize()){ 
+    // expand the exiting AoS device buffer
+    exitingArrayHostPtr[species]->expand(count_exiting * 1.5, streams[species+ns]);
+    cudaErrChk(cudaMemcpyAsync(exitingArrayCUDAPtr[species], exitingArrayHostPtr[species], 
+                                sizeof(exitingArray), cudaMemcpyDefault, streams[species+ns]));
   }
 
   if(hole > fillerBufferArrayHostPtr[species]->getSize()){
@@ -863,35 +867,30 @@ int c_Solver::cudaLauncherAsync(const int species){
   // departureArray[].hashedId with HOLE hashes for front-region particles.
   // planetExtractionKernel needs the original PLANET hashedId to scatter correctly.
   if (count_removed_planet > 0) {
-    if ((uint32_t)count_removed_planet > planetSoAHost[species].capacity) {
-      expandDeviceSoA(planetSoAHost[species], count_removed_planet * 1.5, streams[species+ns]);
-      cudaErrChk(cudaMemcpyAsync(planetSoACUDA + species, planetSoAHost + species,
-                                  sizeof(ParticleSoADevice), cudaMemcpyDefault, streams[species+ns]));
+    if ((uint32_t)count_removed_planet > planetArrayHostPtr[species]->getSize()) {
+      planetArrayHostPtr[species]->expand(count_removed_planet * 1.5, streams[species+ns]);
+      cudaErrChk(cudaMemcpyAsync(planetArrayCUDAPtr[species], planetArrayHostPtr[species],
+                                  sizeof(planetArray), cudaMemcpyDefault, streams[species+ns]));
     }
     planetExtractionKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species+ns]>>>(
         pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species],
-        planetSoACUDA + species, hashedSumArrayCUDAPtr[species]);
+        planetArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
   }
 
   auto _tL4 = std::chrono::high_resolution_clock::now(); // before exitingKernel
   exitingKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species], 
-                departureArrayCUDAPtr[species], exitingSoACUDA + species, hashedSumArrayCUDAPtr[species]);
+                departureArrayCUDAPtr[species], exitingArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
 
   cudaErrChk(cudaEventRecord(event2, streams[species+ns]));
 
-  // Prepare comm buffer and copy exiting particles D→H (SoA-to-SoA, pinned host)
+  // Prepare comm buffer and copy exiting particles D→H (single AoS memcpy)
   particlesCommInj[species].clearCommBuffer();
   if (count_exiting > 0) {
     particlesCommInj[species].prepareCommBufferForNOP(count_exiting);
-    const auto& soa = exitingSoAHost[species]; // host struct with device ptrs
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species].getCommUallMut(), soa.u, count_exiting*sizeof(cudaParticleType), cudaMemcpyDefault, streams[species+ns]));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species].getCommVallMut(), soa.v, count_exiting*sizeof(cudaParticleType), cudaMemcpyDefault, streams[species+ns]));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species].getCommWallMut(), soa.w, count_exiting*sizeof(cudaParticleType), cudaMemcpyDefault, streams[species+ns]));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species].getCommQallMut(), soa.q, count_exiting*sizeof(cudaParticleType), cudaMemcpyDefault, streams[species+ns]));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species].getCommXallMut(), soa.x, count_exiting*sizeof(cudaParticleType), cudaMemcpyDefault, streams[species+ns]));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species].getCommYallMut(), soa.y, count_exiting*sizeof(cudaParticleType), cudaMemcpyDefault, streams[species+ns]));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species].getCommZallMut(), soa.z, count_exiting*sizeof(cudaParticleType), cudaMemcpyDefault, streams[species+ns]));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species].getCommTallMut(), soa.t, count_exiting*sizeof(cudaParticleType), cudaMemcpyDefault, streams[species+ns]));
+    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species].getCommPclsDataMut(),
+                                exitingArrayHostPtr[species]->getArray(),
+                                count_exiting * sizeof(SpeciesParticle),
+                                cudaMemcpyDefault, streams[species+ns]));
   }
 
   // Sorting, the first cycle, x might be 0
@@ -1018,7 +1017,7 @@ void c_Solver::processPlanetParticles()
     const int blockSize = 256;
     const int gridSz = getGridSize(planetPclCount[i], blockSize);
     planetChargeReductionKernel<<<gridSz, blockSize, blockSize * sizeof(cudaParticleType), planetStream>>>(
-        planetSoACUDA + i, planetPclCount[i], planetIonChargeDevice);
+        planetArrayCUDAPtr[i], planetPclCount[i], planetIonChargeDevice);
   }
   // No host sync — ionChargeDevice is read by chargeCutoffKernel via device pointer
 
@@ -1035,12 +1034,11 @@ void c_Solver::processPlanetParticles()
     cudaErrChk(cudaMalloc(&planetGlobalIdxBuf,  planetBufCapacity * sizeof(uint32_t)));
   }
 
-  // Expand reflected SoA output buffer if needed (upper bound = totalElecPlanet)
+  // Expand reflected output buffer if needed (upper bound = totalElecPlanet)
   if (totalElecPlanet > planetReflectedBufCapacity) {
-    freeDeviceSoA(planetReflectedSoAHost);
+    if (planetReflectedBuf) cudaFree(planetReflectedBuf);
     planetReflectedBufCapacity = totalElecPlanet * 2;
-    allocateDeviceSoA(planetReflectedSoAHost, planetReflectedBufCapacity);
-    cudaErrChk(cudaMemcpy(planetReflectedSoACUDA, &planetReflectedSoAHost, sizeof(ParticleSoADevice), cudaMemcpyHostToDevice));
+    cudaErrChk(cudaMalloc(&planetReflectedBuf, planetReflectedBufCapacity * sizeof(SpeciesParticle)));
   }
 
   // ── Step 4: Compute energy per electron planet particle ──
@@ -1050,7 +1048,7 @@ void c_Solver::processPlanetParticles()
     planetElecOffsets[e] = offset;
     if (planetPclCount[specIdx] > 0) {
       planetEnergyKernel<<<getGridSize(planetPclCount[specIdx], 256), 256, 0, planetStream>>>(
-          planetSoACUDA + specIdx, planetPclCount[specIdx],
+          planetArrayCUDAPtr[specIdx], planetPclCount[specIdx],
           (cudaParticleType)col->getQOM(specIdx),
           planetEnergyBuf, planetGlobalIdxBuf,
           offset);
@@ -1064,12 +1062,12 @@ void c_Solver::processPlanetParticles()
                                 planetElecSpeciesCount * sizeof(int), cudaMemcpyHostToDevice, planetStream));
   }
 
-  // Update device array of SoA device pointers (in case pointers changed due to expand)
+  // Update device array of planetArray device pointers (in case pointers changed due to expand)
   {
     for (int e = 0; e < planetElecSpeciesCount; e++)
-      planetTmpPtrs[e] = planetSoACUDA + planetElecSpeciesMap[e];
-    cudaErrChk(cudaMemcpyAsync(planetSoACUDAPtrDevice, planetTmpPtrs,
-                                planetElecSpeciesCount * sizeof(ParticleSoADevice*), cudaMemcpyHostToDevice, planetStream));
+      planetTmpPtrs[e] = planetArrayCUDAPtr[planetElecSpeciesMap[e]];
+    cudaErrChk(cudaMemcpyAsync(planetArrayCUDAPtrDevice, planetTmpPtrs,
+                                planetElecSpeciesCount * sizeof(planetArray*), cudaMemcpyHostToDevice, planetStream));
   }
 
   // ── Step 5: Bitonic sort (descending by energy) ──
@@ -1087,7 +1085,7 @@ void c_Solver::processPlanetParticles()
   // ── Step 6: Find cutoff (result stays on device) ──
   cudaErrChk(cudaMemsetAsync(planetCutoffDevice, 0, sizeof(int), planetStream));
   chargeCutoffKernel<<<1, 1, 0, planetStream>>>(
-      planetSoACUDAPtrDevice, planetElecSpeciesCount, planetElecOffsetsDevice,
+      planetArrayCUDAPtrDevice, planetElecSpeciesCount, planetElecOffsetsDevice,
       planetGlobalIdxBuf, totalElecPlanet,
       planetIonChargeDevice, planetCutoffDevice);
   // No host sync — cutoffDevice is read by planetReflectCompactKernel via device pointer
@@ -1108,24 +1106,24 @@ void c_Solver::processPlanetParticles()
   if (reflectionType == 1) {
     // Diffuse (isotropic) scattering — matches legacy rotateAndCountParticlesInsideSphere
     planetDiffuseCompactKernel<<<getGridSize(totalElecPlanet, 256), 256, 0, planetStream>>>(
-        planetSoACUDAPtrDevice, planetElecSpeciesCount,
+        planetArrayCUDAPtrDevice, planetElecSpeciesCount,
         planetElecOffsetsDevice,
         planetGlobalIdxBuf,
         planetCutoffDevice,
         totalElecPlanet,
-        planetReflectedSoACUDA,
+        planetReflectedBuf,
         planetSurvivorCountDevice,
         originX, originY, originZ, radius, doSphere,
         planetRngCycleCounter);
   } else {
     // Specular (mirror) reflection — default
     planetReflectCompactKernel<<<getGridSize(totalElecPlanet, 256), 256, 0, planetStream>>>(
-        planetSoACUDAPtrDevice, planetElecSpeciesCount,
+        planetArrayCUDAPtrDevice, planetElecSpeciesCount,
         planetElecOffsetsDevice,
         planetGlobalIdxBuf,
         planetCutoffDevice,
         totalElecPlanet,
-        planetReflectedSoACUDA,
+        planetReflectedBuf,
         planetSurvivorCountDevice,
         originX, originY, originZ, radius, doSphere);
   }
@@ -1137,7 +1135,7 @@ void c_Solver::processPlanetParticles()
   cudaErrChk(cudaStreamSynchronize(planetStream)); // ONLY sync: need counts on host for resize + D2H
   auto _tP2 = std::chrono::high_resolution_clock::now();
 
-  // ── Step 9: D2H reflected particles directly into SoA comm buffer (appended after exiting) ──
+  // ── Step 9: D2H reflected particles into AoS comm buffer (appended after exiting) ──
   for (int e = 0; e < planetElecSpeciesCount; e++) {
     if (planetSurvivorCount[e] == 0) continue;
     int specIdx = planetElecSpeciesMap[e];
@@ -1145,17 +1143,12 @@ void c_Solver::processPlanetParticles()
     const int commOffset = particlesCommInj[specIdx].getCommNOP();
     // Grow comm buffer to accommodate reflected particles
     particlesCommInj[specIdx].prepareCommBufferForNOP(commOffset + nRefl);
-    // 8× async D→H from reflected SoA device buffer into comm buffer at offset
-    const int soaOff = planetElecOffsets[e]; // start of this species in reflected buffer
-    const auto& rSoA = planetReflectedSoAHost; // host struct with device ptrs
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[specIdx].getCommUallMut() + commOffset, rSoA.u + soaOff, nRefl*sizeof(cudaParticleType), cudaMemcpyDefault, planetStream));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[specIdx].getCommVallMut() + commOffset, rSoA.v + soaOff, nRefl*sizeof(cudaParticleType), cudaMemcpyDefault, planetStream));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[specIdx].getCommWallMut() + commOffset, rSoA.w + soaOff, nRefl*sizeof(cudaParticleType), cudaMemcpyDefault, planetStream));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[specIdx].getCommQallMut() + commOffset, rSoA.q + soaOff, nRefl*sizeof(cudaParticleType), cudaMemcpyDefault, planetStream));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[specIdx].getCommXallMut() + commOffset, rSoA.x + soaOff, nRefl*sizeof(cudaParticleType), cudaMemcpyDefault, planetStream));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[specIdx].getCommYallMut() + commOffset, rSoA.y + soaOff, nRefl*sizeof(cudaParticleType), cudaMemcpyDefault, planetStream));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[specIdx].getCommZallMut() + commOffset, rSoA.z + soaOff, nRefl*sizeof(cudaParticleType), cudaMemcpyDefault, planetStream));
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[specIdx].getCommTallMut() + commOffset, rSoA.t + soaOff, nRefl*sizeof(cudaParticleType), cudaMemcpyDefault, planetStream));
+    // Single AoS D→H from reflected device buffer into comm buffer at offset
+    cudaErrChk(cudaMemcpyAsync(
+        particlesCommInj[specIdx].getCommPclsDataMut() + commOffset,
+        planetReflectedBuf + planetElecOffsets[e],
+        nRefl * sizeof(SpeciesParticle),
+        cudaMemcpyDeviceToHost, planetStream));
   }
 
   // Sync to ensure all D2H are complete before MPI exchange
@@ -1250,25 +1243,32 @@ bool c_Solver::MoverAwaitAndPclExchange()
       departureArrayHostPtr[i]->expand(pclsArrayHostPtr[i]->getSize(), streams[i]);
       cudaErrChk(cudaMemcpyAsync(departureArrayCUDAPtr[i], departureArrayHostPtr[i], sizeof(departureArrayType), cudaMemcpyDefault, streams[i]));
     }
-    // Direct SoA H→D from comm buffer (no AoS staging or scatter kernel needed)
+    // AoS H→D via staging buffer + scatterAoSToSoAKernel
     const int incomingCount = particlesCommInj[i].getCommNOP();
+
+    if (incomingCount > 0) {
+      // Expand staging buffer if needed
+      if (static_cast<uint32_t>(incomingCount) > incomingStagingHostPtr[i]->getSize()) {
+        incomingStagingHostPtr[i]->expand(incomingCount * 1.5, streams[i]);
+        // Re-sync staging metadata to device
+        cudaErrChk(cudaMemcpyAsync(incomingStagingCUDAPtr[i], incomingStagingHostPtr[i],
+                    sizeof(arrayCUDA<SpeciesParticle>), cudaMemcpyDefault, streams[i]));
+      }
+      // Copy AoS particles from host comm buffer into the staging buffer on device
+      cudaErrChk(cudaMemcpyAsync(incomingStagingHostPtr[i]->getArray(),
+                particlesCommInj[i].getCommPclsData(),
+                incomingCount * sizeof(SpeciesParticle),
+                cudaMemcpyDefault, streams[i]));
+    }
 
     pclsArrayHostPtr[i]->setNOE(newPclNum);  // host metadata: total particles on device
     cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i], sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));  // sync metadata to device
 
-    // Copy SoA from comm buffer directly to device SoA arrays at offset
-    if (incomingCount > 0) {
-      const size_t bytes = incomingCount * sizeof(double);
-      const uint32_t offset = stayedParticle[i];
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getU() + offset, particlesCommInj[i].getCommUall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getV() + offset, particlesCommInj[i].getCommVall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getW() + offset, particlesCommInj[i].getCommWall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getQ() + offset, particlesCommInj[i].getCommQall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getX() + offset, particlesCommInj[i].getCommXall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getY() + offset, particlesCommInj[i].getCommYall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getZ() + offset, particlesCommInj[i].getCommZall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getT() + offset, particlesCommInj[i].getCommTall(), bytes, cudaMemcpyDefault, streams[i]));
-    }
+    // Scatter incoming AoS particles from staging buffer into SoA arrays
+    if (incomingCount > 0)
+      scatterAoSToSoAKernel<<<getGridSize(incomingCount, 256), 256, 0, streams[i]>>>(
+          incomingStagingHostPtr[i]->getArray(),
+          pclsArrayCUDAPtr[i], (uint32_t)stayedParticle[i], (uint32_t)incomingCount);
 
     // Compute moments for all new particles (MPI-incoming + repopulated + exosphere)
     const int momentOffset = stayedParticle[i];

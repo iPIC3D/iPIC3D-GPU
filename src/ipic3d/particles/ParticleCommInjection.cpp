@@ -3,7 +3,7 @@
  *
  * Adapts the communication, BC, and injection methods from the former
  * Particles3Dcomm + Particles3D into a standalone comm engine that
- * operates on SoA comm buffers and AoS BlockCommunicator blocks.
+ * operates on an AoS comm buffer and AoS BlockCommunicator blocks.
  */
 
 #include "ParticleCommInjection.h"
@@ -543,8 +543,8 @@ void ParticleCommInjection::apply_Zrght_BC(vector_SpeciesParticle& pcls, int sta
 
 // ========================================================================
 // separateAndSendParticles:
-//   Iterate the SoA comm buffer, convert each particle to AoS on-the-fly,
-//   send exiting particles via BlockCommunicator, remove sent ones.
+//   Iterate the AoS comm buffer, send exiting particles via
+//   BlockCommunicator, swap-remove sent ones.
 // ========================================================================
 
 int ParticleCommInjection::separateAndSendParticles()
@@ -564,11 +564,7 @@ int ParticleCommInjection::separateAndSendParticles()
   int currentIndex = 0;
 
   while (currentIndex < getCommNOP()) {
-    // Convert SoA comm buffer entry to AoS on-the-fly
-    SpeciesParticle pcl(
-      commU[currentIndex], commV[currentIndex], commW[currentIndex],
-      commQ[currentIndex], commX[currentIndex], commY[currentIndex],
-      commZ[currentIndex], commT[currentIndex]);
+    SpeciesParticle& pcl = commPcls[currentIndex];
 
     bool wasSent = sendParticleToAppropriateBuffer(pcl, sendCount);
 
@@ -592,7 +588,7 @@ int ParticleCommInjection::separateAndSendParticles()
 // ========================================================================
 // handleReceivedParticles:
 //   Receives AoS blocks from BlockCommunicators, applies BCs,
-//   scatters surviving particles into SoA comm buffer.
+//   appends surviving particles to the AoS comm buffer.
 // ========================================================================
 
 namespace PclCommMode
@@ -690,7 +686,7 @@ int ParticleCommInjection::handleReceivedParticles(int pclCommMode)
       if (__builtin_expect(wasSent, false)) {
         numPclsResent++;
       } else {
-        // Particle belongs here → scatter into SoA comm buffer
+        // Particle belongs here → append to AoS comm buffer
         appendSingleParticleToComm(pcl);
       }
     }
@@ -764,11 +760,10 @@ void ParticleCommInjection::appendFromAoS(const SpeciesParticle* buffer, int cou
   if (count <= 0) return;
   const int newTotalNOP = getCommNOP() + count;
   const int padded = roundup_to_multiple(newTotalNOP, DVECWIDTH);
-  commU.reserve(padded); commV.reserve(padded); commW.reserve(padded); commQ.reserve(padded);
-  commX.reserve(padded); commY.reserve(padded); commZ.reserve(padded); commT.reserve(padded);
-  for (int idx = 0; idx < count; idx++) {
-    appendSingleParticleToComm(buffer[idx]);
-  }
+  commPcls.reserve(padded);
+  const int oldSize = commPcls.size();
+  commPcls.resize(oldSize + count);
+  memcpy(commPcls.getList() + oldSize, buffer, count * sizeof(SpeciesParticle));
 }
 
 // ========================================================================
@@ -799,11 +794,10 @@ void ParticleCommInjection::populateCellWithParticles(
              || (posX * posY * posZ) < 0
              || sqrt(velX * velX + velY * velY + velZ * velZ) > speedOfLight_);
 
-    // Push into SoA comm buffer with generated ID
-    commU.push_back(velX); commV.push_back(velY); commW.push_back(velZ);
-    commQ.push_back(chargePerParticle);
-    commX.push_back(posX); commY.push_back(posY); commZ.push_back(posZ);
-    commT.push_back(particleIDGenerator_.generateID());
+    // Push into AoS comm buffer with generated ID
+    commPcls.push_back(SpeciesParticle(velX, velY, velZ, chargePerParticle,
+                                        posX, posY, posZ,
+                                        particleIDGenerator_.generateID()));
   }
 }
 
@@ -991,10 +985,9 @@ void ParticleCommInjection::openBCParticlesOutflow()
             injY > 0 && injY < domainLengthY_ &&
             injZ > 0 && injZ < domainLengthZ_)
         {
-          commU.push_back(injU); commV.push_back(injV); commW.push_back(injW);
-          commQ.push_back(injQ);
-          commX.push_back(injX); commY.push_back(injY); commZ.push_back(injZ);
-          commT.push_back(particleIDGenerator_.generateID());
+          commPcls.push_back(SpeciesParticle(injU, injV, injW, injQ,
+                                               injX, injY, injZ,
+                                               particleIDGenerator_.generateID()));
         }
       }
     }

@@ -3,19 +3,18 @@
  *
  * Owns:
  *  - 12 BlockCommunicators (6 send + 6 recv) for MPI AoS block exchange
- *  - SoA comm buffer (expandable pinned vectors) for particles that arrive
- *    from neighbour processes or are injected at boundaries
+ *  - AoS comm buffer (expandable pinned vector of SpeciesParticle) for
+ *    particles that arrive from neighbour processes or are injected at boundaries
  *
  * Data flow each cycle:
- *  1. GPU compacts exiting particles into SoA → D→H into commU/V/W/Q/X/Y/Z/T
- *  2. separateAndSendParticles(): iterates SoA comm buffer, converts each
- *     particle on-the-fly to AoS SpeciesParticle, sends via BlockCommunicator
+ *  1. GPU compacts exiting particles into AoS → single D→H memcpy into commPcls
+ *  2. separateAndSendParticles(): iterates AoS comm buffer, sends via BlockCommunicator
  *  3. recommunicateParticlesUntilDone(): iterative flush/recv/Allreduce loop
- *  4. handleReceivedParticles(): receives AoS blocks, applies BCs, scatters
- *     surviving particles into SoA comm buffer
+ *  4. handleReceivedParticles(): receives AoS blocks, applies BCs, appends
+ *     surviving particles to AoS comm buffer
  *  5. repopulateParticlesOnlyInjection() / openBCParticlesOutflow():
- *     inject new particles into SoA comm buffer
- *  6. Caller reads commU/V/W/Q/X/Y/Z/T for H→D upload
+ *     inject new particles into AoS comm buffer
+ *  6. Caller reads commPcls for single H→D upload + scatterAoSToSoAKernel
  *
  * No persistent storage of "all" particles — only transient exchange buffer.
  */
@@ -34,10 +33,10 @@
 #include "ParticleSoAHost.h"
 
 /**
- * @brief MPI particle exchange engine with expandable SoA comm buffer.
+ * @brief MPI particle exchange engine with expandable AoS comm buffer.
  *
  * This class does NOT own the main particle data. It owns a temporary
- * SoA buffer for particles entering/leaving the subdomain and the
+ * AoS buffer for particles entering/leaving the subdomain and the
  * BlockCommunicators that handle MPI messaging.
  */
 class ParticleCommInjection
@@ -59,63 +58,44 @@ public:
   ParticleCommInjection(const ParticleCommInjection&) = delete;
   ParticleCommInjection& operator=(const ParticleCommInjection&) = delete;
 
-  // ===== SoA comm buffer access =====
+  // ===== AoS comm buffer access =====
 
   /** Number of particles currently in the comm buffer. */
-  int getCommNOP() const { return static_cast<int>(commU.size()); }
+  int getCommNOP() const { return static_cast<int>(commPcls.size()); }
 
   /** Set logical size of comm buffer; only grows capacity, never shrinks
    *  (avoids expensive pinned-memory realloc every cycle). */
   void prepareCommBufferForNOP(int numParticles) {
-    if (numParticles > commU.capacity()) {
+    if (numParticles > commPcls.capacity()) {
       const int padded = roundup_to_multiple(
           static_cast<int>(numParticles * 1.5), DVECWIDTH);
-      commU.reserve(padded); commV.reserve(padded); commW.reserve(padded);
-      commQ.reserve(padded); commX.reserve(padded); commY.reserve(padded);
-      commZ.reserve(padded); commT.reserve(padded);
+      commPcls.reserve(padded);
     }
-    commU.setSize(numParticles); commV.setSize(numParticles); commW.setSize(numParticles);
-    commQ.setSize(numParticles); commX.setSize(numParticles); commY.setSize(numParticles);
-    commZ.setSize(numParticles); commT.setSize(numParticles);
+    commPcls.setSize(numParticles);
   }
 
   /** Clear the comm buffer (before a new cycle). Capacity is retained. */
   void clearCommBuffer() {
-    commU.setSize(0); commV.setSize(0); commW.setSize(0); commQ.setSize(0);
-    commX.setSize(0); commY.setSize(0); commZ.setSize(0); commT.setSize(0);
+    commPcls.resize(0);
   }
 
   /** Reserve space in the comm buffer (grow-only). */
   void reserveCommBuffer(int capacity) {
-    if (capacity > commU.capacity()) {
-      const int padded = roundup_to_multiple(capacity, DVECWIDTH);
-      commU.reserve(padded); commV.reserve(padded); commW.reserve(padded);
-      commQ.reserve(padded); commX.reserve(padded); commY.reserve(padded);
-      commZ.reserve(padded); commT.reserve(padded);
-    }
+    const int padded = roundup_to_multiple(capacity, DVECWIDTH);
+    commPcls.reserve(padded);
   }
 
-  // ===== Read-only SoA comm buffer pointers (for H→D upload) =====
+  // ===== AoS comm buffer pointers (for H↔D transfer) =====
 
-  const double* getCommUall() const { return &commU[0]; }
-  const double* getCommVall() const { return &commV[0]; }
-  const double* getCommWall() const { return &commW[0]; }
-  const double* getCommQall() const { return &commQ[0]; }
-  const double* getCommXall() const { return &commX[0]; }
-  const double* getCommYall() const { return &commY[0]; }
-  const double* getCommZall() const { return &commZ[0]; }
-  const double* getCommTall() const { return &commT[0]; }
+  /** Read-only AoS data pointer (for H→D upload). */
+  const SpeciesParticle* getCommPclsData() const { return const_cast<vector_SpeciesParticle_registered&>(commPcls).getList(); }
 
-  // ===== Mutable SoA comm buffer pointers (for D→H of exiting particles) =====
+  /** Mutable AoS data pointer (for D→H download of exiting particles). */
+  SpeciesParticle* getCommPclsDataMut() { return commPcls.getList(); }
 
-  double* getCommUallMut() { return &commU[0]; }
-  double* getCommVallMut() { return &commV[0]; }
-  double* getCommWallMut() { return &commW[0]; }
-  double* getCommQallMut() { return &commQ[0]; }
-  double* getCommXallMut() { return &commX[0]; }
-  double* getCommYallMut() { return &commY[0]; }
-  double* getCommZallMut() { return &commZ[0]; }
-  double* getCommTallMut() { return &commT[0]; }
+  /** Direct access to the AoS comm buffer vector. */
+  const vector_SpeciesParticle_registered& getCommPclsVec() const { return commPcls; }
+  vector_SpeciesParticle_registered& getCommPclsVec() { return commPcls; }
 
   // ===== MPI exchange engine =====
 
@@ -142,13 +122,12 @@ public:
 
   // ===== Append from external AoS (CPU-side: exosphere injection) =====
 
-  /** Scatter AoS particles into the SoA comm buffer. */
+  /** Append AoS particles to the AoS comm buffer. */
   void appendFromAoS(const SpeciesParticle* buffer, int count);
 
-  // ===== SoA comm buffer arrays (pinned host memory) — public for direct D→H memcpy =====
+  // ===== AoS comm buffer (pinned host memory) — public for direct D→H memcpy =====
 
-  vector_cudaParticleType_registered commU, commV, commW, commQ;
-  vector_cudaParticleType_registered commX, commY, commZ, commT;
+  vector_SpeciesParticle_registered commPcls;
 
 public: // BC methods (virtual for user override)
   virtual void apply_Xleft_BC(vector_SpeciesParticle& pcls, int start = 0);
@@ -183,12 +162,9 @@ private:
   bool testZleftOfDomain(const SpeciesParticle& pcl) const { return pcl.get_z() < 0.; }
   bool testZrghtOfDomain(const SpeciesParticle& pcl) const { return pcl.get_z() > domainLengthZ_; }
 
-  /** Helper: push a single particle from AoS into the SoA comm buffer. */
+  /** Helper: push a single AoS particle into the AoS comm buffer. */
   void appendSingleParticleToComm(const SpeciesParticle& pcl) {
-    commU.push_back(pcl.get_u()); commV.push_back(pcl.get_v());
-    commW.push_back(pcl.get_w()); commQ.push_back(pcl.get_q());
-    commX.push_back(pcl.get_x()); commY.push_back(pcl.get_y());
-    commZ.push_back(pcl.get_z()); commT.push_back(pcl.get_t());
+    commPcls.push_back(pcl);
   }
 
   /** Helper: populate one cell with Maxwellian particles into comm buffer. */
@@ -200,13 +176,9 @@ private:
   void deleteCommParticle(int particleIndex) {
     const int lastIndex = getCommNOP() - 1;
     if (particleIndex != lastIndex) {
-      commU[particleIndex] = commU[lastIndex]; commV[particleIndex] = commV[lastIndex];
-      commW[particleIndex] = commW[lastIndex]; commQ[particleIndex] = commQ[lastIndex];
-      commX[particleIndex] = commX[lastIndex]; commY[particleIndex] = commY[lastIndex];
-      commZ[particleIndex] = commZ[lastIndex]; commT[particleIndex] = commT[lastIndex];
+      commPcls[particleIndex] = commPcls[lastIndex];
     }
-    commU.pop_back(); commV.pop_back(); commW.pop_back(); commQ.pop_back();
-    commX.pop_back(); commY.pop_back(); commZ.pop_back(); commT.pop_back();
+    commPcls.pop_back();
   }
 
   // --- Borrowed references from ParticleSoAHost ---

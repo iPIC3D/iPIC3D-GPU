@@ -159,7 +159,8 @@ namespace iPic3D {
 	  particleArrayCUDA**   pclsArrayHostPtr;       // array of pointer, point to objects on host
     departureArrayType**  departureArrayHostPtr;  // for every species
     hashedSum**           hashedSumArrayHostPtr;      // species * 8
-    ParticleSoADevice*    exitingSoAHost;             // per-species SoA exiting buffers (host structs with device ptrs)
+    exitingArray**        exitingArrayHostPtr;        // species
+    arrayCUDA<SpeciesParticle>** incomingStagingHostPtr;  // per-species AoS staging for H→D incoming particles
     fillerBuffer**        fillerBufferArrayHostPtr;   // species
     grid3DCUDA* 		      grid3DCUDAHostPtr;      // one grid, used in all specieses
     moverParameter**      moverParamHostPtr;		  // for every species
@@ -172,7 +173,8 @@ namespace iPic3D {
     particleArrayCUDA**   pclsArrayCUDAPtr;           // array of pointer, point to pclsArray on device
     departureArrayType**  departureArrayCUDAPtr;      // for every species
     hashedSum**           hashedSumArrayCUDAPtr;      // species * 8
-    ParticleSoADevice*    exitingSoACUDA;             // device copy of exitingSoAHost (ns structs)
+    exitingArray**        exitingArrayCUDAPtr;        // species
+    arrayCUDA<SpeciesParticle>** incomingStagingCUDAPtr;  // per-species device copy of staging metadata
     fillerBuffer**        fillerBufferArrayCUDAPtr;   // species
     grid3DCUDA* 		      grid3DCUDACUDAPtr;    	    // one grid, used in all specieses
     moverParameter**      moverParamCUDAPtr;		      // for every species
@@ -217,8 +219,8 @@ namespace iPic3D {
     int* toBeMerged;
 
     //! Planet quasi-neutral BC data structures
-    ParticleSoADevice*  planetSoAHost;             // per species, host structs with device ptrs
-    ParticleSoADevice*  planetSoACUDA;             // per species, device copies
+    planetArray**       planetArrayHostPtr;      // per species, host-pinned metadata
+    planetArray**       planetArrayCUDAPtr;      // per species, device metadata
     int*                planetPclCount;           // per species, planet particle count this cycle
 
     // Cross-species planet processing buffers (device)
@@ -226,7 +228,7 @@ namespace iPic3D {
     uint32_t*           planetGlobalIdxBuf;       // encodes species + local index
     cudaParticleType*   planetIonChargeDevice;    // single-element device buffer for reduction output
     int*                planetCutoffDevice;       // single-element device buffer for cutoff index output
-    ParticleSoADevice** planetSoACUDAPtrDevice;   // device array of device ParticleSoADevice pointers (for cross-species kernels)
+    planetArray**       planetArrayCUDAPtrDevice; // device array of device pointers (for chargeCutoffKernel)
     int*                planetElecOffsetsDevice;  // device array of per-electron-species offsets
     int                 planetBufCapacity;        // current allocation size of merged buffers
     int                 planetElecSpeciesCount;   // number of electron species
@@ -234,12 +236,11 @@ namespace iPic3D {
 
     // Persistent host buffers for processPlanetParticles (avoid per-call allocation)
     int*                planetElecOffsets;         // [planetElecSpeciesCount] species offsets into merged buffers
-    ParticleSoADevice** planetTmpPtrs;             // [planetElecSpeciesCount] temp pointer array
+    planetArray**       planetTmpPtrs;             // [planetElecSpeciesCount] temp pointer array
     int*                planetSurvivorCount;       // [planetElecSpeciesCount] survivor counts per electron species (host)
     int*                planetSurvivorCountDevice; // [planetElecSpeciesCount] per-species atomic counters (device)
-    ParticleSoADevice   planetReflectedSoAHost;    // single SoA buffer with device ptrs for reflected output
-    ParticleSoADevice*  planetReflectedSoACUDA;    // device copy of planetReflectedSoAHost
-    int                 planetReflectedBufCapacity;// capacity (in particles) of planetReflectedSoA
+    SpeciesParticle*    planetReflectedBuf;        // device buffer for compact reflected particles
+    int                 planetReflectedBufCapacity;// capacity (in particles) of planetReflectedBuf
     uint32_t            planetRngCycleCounter;     // incremented each cycle for diffuse-scatter RNG seed
 
   };

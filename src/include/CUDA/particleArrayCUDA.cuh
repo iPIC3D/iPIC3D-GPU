@@ -16,8 +16,9 @@
  * All compute kernels (mover, moment, sort, merge, planet, data-analysis)
  * read and write through the SoA accessors getU(), getV(), ... getT().
  *
- * No AoS allocation.  Exiting and planet SoA staging buffers live outside
- * this class (see exitingSoAHost, planetSoAHost in c_Solver).
+ * No persistent AoS allocation.  Small AoS staging buffers for H↔D transfer
+ * of exchange / planet / exosphere particles live outside this class
+ * (see incomingStagingHostPtr, exitingArray, planetArray in c_Solver).
  */
 class particleArrayCUDA
 {
@@ -155,5 +156,21 @@ public:
         return soaCapacity;
     }
 };
+
+/**
+ * @brief Device kernel: scatter AoS particles from a staging buffer into the
+ *        main SoA arrays of a particleArrayCUDA at a given offset.
+ *
+ * Used after H→D AoS copies (incoming MPI particles, repopulated, exosphere)
+ * to populate the SoA arrays that all GPU compute kernels read from.
+ *
+ * @param aosStagingBuf  device pointer to AoS staging buffer (source)
+ * @param pclsArray      device-resident particleArrayCUDA (destination SoA)
+ * @param destOffset     first particle index in SoA to write to
+ * @param count          number of particles to scatter
+ */
+__global__ void scatterAoSToSoAKernel(const SpeciesParticle* __restrict__ aosStagingBuf,
+                                       particleArrayCUDA* pclsArray,
+                                       uint32_t destOffset, uint32_t count);
 
 #endif

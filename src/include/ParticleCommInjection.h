@@ -64,29 +64,35 @@ public:
   /** Number of particles currently in the comm buffer. */
   int getCommNOP() const { return static_cast<int>(commU.size()); }
 
-  /** Resize all comm SoA vectors to hold exactly @p numParticles. */
+  /** Set logical size of comm buffer; only grows capacity, never shrinks
+   *  (avoids expensive pinned-memory realloc every cycle). */
   void prepareCommBufferForNOP(int numParticles) {
-    const int padded = roundup_to_multiple(numParticles, DVECWIDTH);
-    commU.reserve(padded); commV.reserve(padded); commW.reserve(padded);
-    commQ.reserve(padded); commX.reserve(padded); commY.reserve(padded);
-    commZ.reserve(padded); commT.reserve(padded);
-    commU.resize(numParticles); commV.resize(numParticles); commW.resize(numParticles);
-    commQ.resize(numParticles); commX.resize(numParticles); commY.resize(numParticles);
-    commZ.resize(numParticles); commT.resize(numParticles);
+    if (numParticles > commU.capacity()) {
+      const int padded = roundup_to_multiple(
+          static_cast<int>(numParticles * 1.5), DVECWIDTH);
+      commU.reserve(padded); commV.reserve(padded); commW.reserve(padded);
+      commQ.reserve(padded); commX.reserve(padded); commY.reserve(padded);
+      commZ.reserve(padded); commT.reserve(padded);
+    }
+    commU.setSize(numParticles); commV.setSize(numParticles); commW.setSize(numParticles);
+    commQ.setSize(numParticles); commX.setSize(numParticles); commY.setSize(numParticles);
+    commZ.setSize(numParticles); commT.setSize(numParticles);
   }
 
-  /** Clear the comm buffer (before a new cycle). */
+  /** Clear the comm buffer (before a new cycle). Capacity is retained. */
   void clearCommBuffer() {
-    commU.resize(0); commV.resize(0); commW.resize(0); commQ.resize(0);
-    commX.resize(0); commY.resize(0); commZ.resize(0); commT.resize(0);
+    commU.setSize(0); commV.setSize(0); commW.setSize(0); commQ.setSize(0);
+    commX.setSize(0); commY.setSize(0); commZ.setSize(0); commT.setSize(0);
   }
 
-  /** Reserve space in the comm buffer. */
+  /** Reserve space in the comm buffer (grow-only). */
   void reserveCommBuffer(int capacity) {
-    const int padded = roundup_to_multiple(capacity, DVECWIDTH);
-    commU.reserve(padded); commV.reserve(padded); commW.reserve(padded);
-    commQ.reserve(padded); commX.reserve(padded); commY.reserve(padded);
-    commZ.reserve(padded); commT.reserve(padded);
+    if (capacity > commU.capacity()) {
+      const int padded = roundup_to_multiple(capacity, DVECWIDTH);
+      commU.reserve(padded); commV.reserve(padded); commW.reserve(padded);
+      commQ.reserve(padded); commX.reserve(padded); commY.reserve(padded);
+      commZ.reserve(padded); commT.reserve(padded);
+    }
   }
 
   // ===== Read-only SoA comm buffer pointers (for H→D upload) =====

@@ -28,7 +28,7 @@
 #include "Grid3DCU.h"
 #include "CG.h"
 #include "GMRES.h"
-#include "Particles3Dcomm.h"
+#include "ParticleSoAHost.h"
 #include "Moments.h"
 #include "Parameters.h"
 #include "ompdefs.h"

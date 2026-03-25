@@ -4,6 +4,7 @@
 #include "cudaTypeDef.cuh"
 #include "arrayCUDA.cuh"
 #include "hashedSum.cuh"
+#include "ParticleSoADevice.cuh"
 
 
 typedef struct departureArrayElement_s{
@@ -43,24 +44,62 @@ typedef struct departureArrayElement_s{
 using departureArrayElementType = departureArrayElement_t;
 using departureArrayType = arrayCUDA<departureArrayElementType>;
 
-using exitingArray = arrayCUDA<SpeciesParticle>;
-
-using planetArray = arrayCUDA<SpeciesParticle>;
-
 using fillerBuffer = arrayCUDA<int>;
 
 
-__global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
-                                exitingArray* exitingArray, hashedSum* hashedSumArray);
+/**
+ * @brief Copy exiting particles from the main SoA arrays into a compact SoA
+ *        exiting buffer, organised by direction using hashedSum offsets.
+ *        Also prepares hashedSum data for the sorting kernels.
+ */
+__global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* departureArray,
+                                ParticleSoADevice* exitingSoA, hashedSum* hashedSumArray);
 
+/**
+ * @brief Compact particles flagged PLANET into a SoA planet buffer.
+ *        Uses hashedSum[PLANET_HASHEDSUM_INDEX] for scatter indices.
+ */
 __global__ void planetExtractionKernel(particleArrayCUDA* pclsArray, departureArrayType* departureArray,
-                                planetArray* planetArr, hashedSum* hashedSumArray);
+                                ParticleSoADevice* planetSoA, hashedSum* hashedSumArray);
 
 __global__ void sortingKernel1(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
 								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int x);
 
 __global__ void sortingKernel2(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
 								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int stayedParticle);
+
+
+// ── Device SoA buffer management helpers (called from host) ──
+
+/** Allocate 8 device arrays for an SoA buffer with the given capacity. */
+inline void allocateDeviceSoA(ParticleSoADevice& soa, uint32_t capacity) {
+    soa.capacity = capacity;
+    soa.nop = 0;
+    cudaErrChk(cudaMalloc(&soa.u, capacity * sizeof(cudaParticleType)));
+    cudaErrChk(cudaMalloc(&soa.v, capacity * sizeof(cudaParticleType)));
+    cudaErrChk(cudaMalloc(&soa.w, capacity * sizeof(cudaParticleType)));
+    cudaErrChk(cudaMalloc(&soa.q, capacity * sizeof(cudaParticleType)));
+    cudaErrChk(cudaMalloc(&soa.x, capacity * sizeof(cudaParticleType)));
+    cudaErrChk(cudaMalloc(&soa.y, capacity * sizeof(cudaParticleType)));
+    cudaErrChk(cudaMalloc(&soa.z, capacity * sizeof(cudaParticleType)));
+    cudaErrChk(cudaMalloc(&soa.t, capacity * sizeof(cudaParticleType)));
+}
+
+/** Free all 8 device arrays of an SoA buffer. */
+inline void freeDeviceSoA(ParticleSoADevice& soa) {
+    cudaFree(soa.u); cudaFree(soa.v); cudaFree(soa.w); cudaFree(soa.q);
+    cudaFree(soa.x); cudaFree(soa.y); cudaFree(soa.z); cudaFree(soa.t);
+    soa = {};
+}
+
+/** Expand an SoA buffer (no data preservation — content is rebuilt each cycle).
+ *  @param stream  Stream to synchronize before freeing (ensures in-flight kernels finish). */
+inline void expandDeviceSoA(ParticleSoADevice& soa, uint32_t newCapacity, cudaStream_t stream) {
+    if (newCapacity <= soa.capacity) return;
+    cudaErrChk(cudaStreamSynchronize(stream));
+    freeDeviceSoA(soa);
+    allocateDeviceSoA(soa, newCapacity);
+}
 
 
 #endif

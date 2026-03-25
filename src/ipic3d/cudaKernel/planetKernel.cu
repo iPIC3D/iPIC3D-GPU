@@ -14,14 +14,14 @@
 constexpr cudaCommonType TWO_PI = (cudaCommonType)6.28318530717958647692;
 
 /**
- * @brief Compact all particles flagged PLANET into the planetArray (device-only).
- *        Analogous to exitingKernel but writes to a device-only buffer.
+ * @brief Compact all particles flagged PLANET into the planet SoA buffer (device-only).
+ *        Analogous to exitingKernel but writes to a device-only SoA buffer.
  *        Uses hashedSum[PLANET_HASHEDSUM_INDEX] for scatter indices.
  */
 __global__ void planetExtractionKernel(
     particleArrayCUDA* pclsArray,
     departureArrayType* departureArray,
-    planetArray* planetArr,
+    ParticleSoADevice* planetSoA,
     hashedSum* hashedSumArray)
 {
     uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -33,17 +33,15 @@ __global__ void planetExtractionKernel(
     int index = hashedSumArray[departureArrayElementType::PLANET_HASHEDSUM_INDEX]
                 .getIndex(pidx, dep.hashedId);
 
-    // Gather SoA fields into AoS SpeciesParticle for planet buffer
-    SpeciesParticle pcl;
-    pcl.set_u(pclsArray->getU()[pidx]);
-    pcl.set_v(pclsArray->getV()[pidx]);
-    pcl.set_w(pclsArray->getW()[pidx]);
-    pcl.set_q(pclsArray->getQ()[pidx]);
-    pcl.set_x(pclsArray->getX()[pidx]);
-    pcl.set_y(pclsArray->getY()[pidx]);
-    pcl.set_z(pclsArray->getZ()[pidx]);
-    pcl.set_t(pclsArray->getT()[pidx]);
-    planetArr->getArray()[index] = pcl;
+    // Direct SoA-to-SoA copy — no AoS intermediary
+    planetSoA->u[index] = pclsArray->getU()[pidx];
+    planetSoA->v[index] = pclsArray->getV()[pidx];
+    planetSoA->w[index] = pclsArray->getW()[pidx];
+    planetSoA->q[index] = pclsArray->getQ()[pidx];
+    planetSoA->x[index] = pclsArray->getX()[pidx];
+    planetSoA->y[index] = pclsArray->getY()[pidx];
+    planetSoA->z[index] = pclsArray->getZ()[pidx];
+    planetSoA->t[index] = pclsArray->getT()[pidx];
 }
 
 
@@ -52,11 +50,11 @@ __global__ void planetExtractionKernel(
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * @brief Sum |q| of all particles in one species' planetArray.
+ * @brief Sum |q| of all particles in one species' planet SoA buffer.
  *        Block-level reduction then atomicAdd into *chargeOut.
  */
 __global__ void planetChargeReductionKernel(
-    planetArray* planetArr, int count,
+    ParticleSoADevice* planetSoA, int count,
     cudaParticleType* chargeOut)
 {
     extern __shared__ cudaParticleType sdata[];
@@ -67,7 +65,7 @@ __global__ void planetChargeReductionKernel(
     // load
     cudaParticleType val = 0;
     if (gid < (uint)count) {
-        val = fabs(planetArr->getArray()[gid].get_q());
+        val = fabs(planetSoA->q[gid]);
     }
     sdata[tid] = val;
     __syncthreads();
@@ -92,7 +90,7 @@ __global__ void planetChargeReductionKernel(
  *        Energy: Ek = |q| / (2 * |qom|) * (u^2 + v^2 + w^2)
  */
 __global__ void planetEnergyKernel(
-    planetArray* planetArr, int count,
+    ParticleSoADevice* planetSoA, int count,
     cudaParticleType qom,
     cudaParticleType* energyBuf,
     uint32_t*         globalIdxBuf,
@@ -101,16 +99,14 @@ __global__ void planetEnergyKernel(
     uint gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= (uint)count) return;
 
-    const SpeciesParticle& pcl = planetArr->getArray()[gid];
-
-    const cudaParticleType u = pcl.get_u();
-    const cudaParticleType v = pcl.get_v();
-    const cudaParticleType w = pcl.get_w();
-    const cudaParticleType absq = fabs(pcl.get_q());
+    const cudaParticleType pclU = planetSoA->u[gid];
+    const cudaParticleType pclV = planetSoA->v[gid];
+    const cudaParticleType pclW = planetSoA->w[gid];
+    const cudaParticleType absq = fabs(planetSoA->q[gid]);
     const cudaParticleType mass = absq / fabs(qom);  // |q| / |q/m| = m
 
     const int idx = speciesOffset + gid;
-    energyBuf[idx]    = (cudaParticleType)0.5 * mass * (u * u + v * v + w * w);
+    energyBuf[idx]    = (cudaParticleType)0.5 * mass * (pclU * pclU + pclV * pclV + pclW * pclW);
     globalIdxBuf[idx] = (uint32_t)idx;
 }
 
@@ -191,7 +187,7 @@ __global__ void bitonicSortStepKernel(
  * @param cutoffIndex  output: first sorted index that SURVIVES (reflects)
  */
 __global__ void chargeCutoffKernel(
-    planetArray** planetArrs, int nSpecies, const int* speciesOffsets,
+    ParticleSoADevice** planetSoAArrs, int nSpecies, const int* speciesOffsets,
     const uint32_t* sortedGlobalIdx, int n,
     const cudaParticleType* ionChargeTarget,
     int* cutoffIndex)
@@ -211,8 +207,6 @@ __global__ void chargeCutoffKernel(
         uint32_t gidx = sortedGlobalIdx[i];
 
         // Decode which species and local index from gidx
-        // gidx = speciesOffset[s] + localIdx
-        // Find species by checking which offset range gidx falls in
         int localIdx = (int)gidx;
         int speciesIdx = -1;
         for (int s = 0; s < nSpecies; s++) {
@@ -226,7 +220,7 @@ __global__ void chargeCutoffKernel(
         }
         if (speciesIdx < 0) continue;  // should not happen
 
-        cudaParticleType absq = fabs(planetArrs[speciesIdx]->getArray()[localIdx].get_q());
+        cudaParticleType absq = fabs(planetSoAArrs[speciesIdx]->q[localIdx]);
         cumQ += absq;
 
         if (cumQ >= ionCharge) {
@@ -253,12 +247,12 @@ __global__ void chargeCutoffKernel(
  *        and writes it to outputBuf[speciesOffset + atomicSlot].
  */
 __global__ void planetReflectCompactKernel(
-    planetArray** planetArrs, int nElecSpecies,
+    ParticleSoADevice** planetSoAArrs, int nElecSpecies,
     const int* speciesOffsets,
     const uint32_t* sortedGlobalIdx,
     const int* cutoffDevice,
     int totalElecPlanet,
-    SpeciesParticle* outputBuf,
+    ParticleSoADevice* outputSoA,
     int* survivorCounters,
     cudaCommonType originX, cudaCommonType originY, cudaCommonType originZ,
     cudaCommonType sphereRadius, int doSphere)
@@ -292,16 +286,24 @@ __global__ void planetReflectCompactKernel(
     }
     if (speciesIdx < 0 || localIdx < 0 || localIdx >= speciesCount) return;
 
-    // Read the original planet particle
-    SpeciesParticle pcl = planetArrs[speciesIdx]->getArray()[localIdx];
+    // Read the original planet particle from SoA
+    ParticleSoADevice* srcSoA = planetSoAArrs[speciesIdx];
+    cudaCommonType pclU = srcSoA->u[localIdx];
+    cudaCommonType pclV = srcSoA->v[localIdx];
+    cudaCommonType pclW = srcSoA->w[localIdx];
+    cudaCommonType pclQ = srcSoA->q[localIdx];
+    cudaCommonType pclX = srcSoA->x[localIdx];
+    cudaCommonType pclY = srcSoA->y[localIdx];
+    cudaCommonType pclZ = srcSoA->z[localIdx];
+    cudaCommonType pclT = srcSoA->t[localIdx];
 
     // ── Reflect ──
     const cudaCommonType eps = sphereRadius * (cudaCommonType)5e-2;  // small offset to prevent sticking to surface
 
     if (doSphere == 1) { // 3D
-        const cudaCommonType dx = pcl.get_x() - originX;
-        const cudaCommonType dy = pcl.get_y() - originY;
-        const cudaCommonType dz = pcl.get_z() - originZ;
+        const cudaCommonType dx = pclX - originX;
+        const cudaCommonType dy = pclY - originY;
+        const cudaCommonType dz = pclZ - originZ;
         cudaCommonType r  = sqrt(dx * dx + dy * dy + dz * dz);
         if (r < (cudaCommonType)1e-30) r = (cudaCommonType)1e-30;
         const cudaCommonType invr = (cudaCommonType)1.0 / r;
@@ -310,18 +312,18 @@ __global__ void planetReflectCompactKernel(
         const cudaCommonType ny = dy * invr;
         const cudaCommonType nz = dz * invr;
 
-        const cudaCommonType vdotn = pcl.get_u() * nx + pcl.get_v() * ny + pcl.get_w() * nz;
-        pcl.set_u(0, pcl.get_u() - (cudaCommonType)2.0 * vdotn * nx);
-        pcl.set_u(1, pcl.get_v() - (cudaCommonType)2.0 * vdotn * ny);
-        pcl.set_u(2, pcl.get_w() - (cudaCommonType)2.0 * vdotn * nz);
+        const cudaCommonType vdotn = pclU * nx + pclV * ny + pclW * nz;
+        pclU = pclU - (cudaCommonType)2.0 * vdotn * nx;
+        pclV = pclV - (cudaCommonType)2.0 * vdotn * ny;
+        pclW = pclW - (cudaCommonType)2.0 * vdotn * nz;
 
-        pcl.set_x(0, originX + (sphereRadius + eps) * nx);
-        pcl.set_x(1, originY + (sphereRadius + eps) * ny);
-        pcl.set_x(2, originZ + (sphereRadius + eps) * nz);
+        pclX = originX + (sphereRadius + eps) * nx;
+        pclY = originY + (sphereRadius + eps) * ny;
+        pclZ = originZ + (sphereRadius + eps) * nz;
 
     } else if (doSphere == 2) { // 2D (XZ plane)
-        const cudaCommonType dx = pcl.get_x() - originX;
-        const cudaCommonType dz = pcl.get_z() - originZ;
+        const cudaCommonType dx = pclX - originX;
+        const cudaCommonType dz = pclZ - originZ;
         cudaCommonType r  = sqrt(dx * dx + dz * dz);
         if (r < (cudaCommonType)1e-30) r = (cudaCommonType)1e-30;
         const cudaCommonType invr = (cudaCommonType)1.0 / r;
@@ -329,20 +331,26 @@ __global__ void planetReflectCompactKernel(
         const cudaCommonType nx = dx * invr;
         const cudaCommonType nz = dz * invr;
 
-        const cudaCommonType vdotn = pcl.get_u() * nx + pcl.get_w() * nz;
-        pcl.set_u(0, pcl.get_u() - (cudaCommonType)2.0 * vdotn * nx);
-        pcl.set_u(2, pcl.get_w() - (cudaCommonType)2.0 * vdotn * nz);
+        const cudaCommonType vdotn = pclU * nx + pclW * nz;
+        pclU = pclU - (cudaCommonType)2.0 * vdotn * nx;
+        pclW = pclW - (cudaCommonType)2.0 * vdotn * nz;
 
-        pcl.set_x(0, originX + (sphereRadius + eps) * nx);
-        pcl.set_x(2, originZ + (sphereRadius + eps) * nz);
+        pclX = originX + (sphereRadius + eps) * nx;
+        pclZ = originZ + (sphereRadius + eps) * nz;
     }
 
-    // ── Compact: atomicAdd to get a write slot in the output buffer ──
+    // ── Compact: atomicAdd to get a write slot in the SoA output buffer ──
     int mySlot = atomicAdd(&survivorCounters[speciesIdx], 1);
-    int outOffset = speciesOffsets[speciesIdx];
+    int writeIdx = speciesOffsets[speciesIdx] + mySlot;
 
-    memcpy(outputBuf + outOffset + mySlot,
-           &pcl, sizeof(SpeciesParticle));
+    outputSoA->u[writeIdx] = pclU;
+    outputSoA->v[writeIdx] = pclV;
+    outputSoA->w[writeIdx] = pclW;
+    outputSoA->q[writeIdx] = pclQ;
+    outputSoA->x[writeIdx] = pclX;
+    outputSoA->y[writeIdx] = pclY;
+    outputSoA->z[writeIdx] = pclZ;
+    outputSoA->t[writeIdx] = pclT;
 }
 
 
@@ -401,12 +409,12 @@ __device__ inline cudaCommonType planetRngUniform(uint32_t& state)
  * @param rngSeedBase  base seed for the per-thread PRNG (e.g. cycle number)
  */
 __global__ void planetDiffuseCompactKernel(
-    planetArray** planetArrs, int nElecSpecies,
+    ParticleSoADevice** planetSoAArrs, int nElecSpecies,
     const int* speciesOffsets,
     const uint32_t* sortedGlobalIdx,
     const int* cutoffDevice,
     int totalElecPlanet,
-    SpeciesParticle* outputBuf,
+    ParticleSoADevice* outputSoA,
     int* survivorCounters,
     cudaCommonType originX, cudaCommonType originY, cudaCommonType originZ,
     cudaCommonType sphereRadius, int doSphere,
@@ -441,39 +449,32 @@ __global__ void planetDiffuseCompactKernel(
     }
     if (speciesIdx < 0 || localIdx < 0 || localIdx >= speciesCount) return;
 
-    // Read the original planet particle
-    SpeciesParticle pcl = planetArrs[speciesIdx]->getArray()[localIdx];
+    // Read the original planet particle from SoA
+    ParticleSoADevice* srcSoA = planetSoAArrs[speciesIdx];
+    cudaCommonType pclU = srcSoA->u[localIdx];
+    cudaCommonType pclV = srcSoA->v[localIdx];
+    cudaCommonType pclW = srcSoA->w[localIdx];
+    cudaCommonType pclQ = srcSoA->q[localIdx];
+    cudaCommonType pclX = srcSoA->x[localIdx];
+    cudaCommonType pclY = srcSoA->y[localIdx];
+    cudaCommonType pclZ = srcSoA->z[localIdx];
+    cudaCommonType pclT = srcSoA->t[localIdx];
 
     // Compute original speed (invariant)
-    const cudaCommonType uold = pcl.get_u();
-    const cudaCommonType vold = pcl.get_v();
-    const cudaCommonType wold = pcl.get_w();
-    const cudaCommonType Vmod = sqrt(uold * uold + vold * vold + wold * wold);
+    const cudaCommonType Vmod = sqrt(pclU * pclU + pclV * pclV + pclW * pclW);
 
     // ── Initialise per-thread RNG ──
-    // Weyl-sequence seed: unique per (cycle, sortedIdx) pair, then warmed
-    // with one xorshift round.  Guard against the zero fixed-point of
-    // xorshift32 (hash(0) == 0 would lock the PRNG to 0 forever).
     uint32_t rngState = rngSeedBase ^ (uint32_t)((uint32_t)sortedIdx * 2654435761u + 1u);
     rngState = planetRngHash(rngState);
     if (rngState == 0u) rngState = 1u;  // xorshift32 absorbs at 0
 
-    // ── Diffuse (isotropic) scatter on outward hemisphere ──
-    //
-    // Strategy (branch-free, no rejection):
-    //   1. Sample cosTheta_local ~ Uniform(0,1)  →  hemisphere w.r.t. local z
-    //      This gives  cosθ ∈ (0,1)  which is uniform on the outward hemisphere.
-    //   2. Sample phi ~ Uniform(0, 2π)
-    //   3. Build velocity in local frame  (local z = outward normal)
-    //   4. Rotate local frame → global frame via orthonormal basis (t1, t2, n)
-    //
     const cudaCommonType eps = sphereRadius * (cudaCommonType)5e-2;
 
 
     if (doSphere == 1) { // ── 3D ──
-        const cudaCommonType dx = pcl.get_x() - originX;
-        const cudaCommonType dy = pcl.get_y() - originY;
-        const cudaCommonType dz = pcl.get_z() - originZ;
+        const cudaCommonType dx = pclX - originX;
+        const cudaCommonType dy = pclY - originY;
+        const cudaCommonType dz = pclZ - originZ;
         cudaCommonType r = sqrt(dx * dx + dy * dy + dz * dz);
         if (r < (cudaCommonType)1e-30) r = (cudaCommonType)1e-30;
         const cudaCommonType invr = (cudaCommonType)1.0 / r;
@@ -484,7 +485,7 @@ __global__ void planetDiffuseCompactKernel(
         const cudaCommonType nz = dz * invr;
 
         // Random direction on the outward hemisphere (no rejection)
-        const cudaCommonType cosTheta = planetRngUniform(rngState);          // (0,1) → upper hemisphere
+        const cudaCommonType cosTheta = planetRngUniform(rngState);
         const cudaCommonType sinTheta = sqrt((cudaCommonType)1.0 - cosTheta * cosTheta);
         const cudaCommonType phi = TWO_PI * planetRngUniform(rngState);
         const cudaCommonType cphi = cos(phi);
@@ -496,17 +497,14 @@ __global__ void planetDiffuseCompactKernel(
         const cudaCommonType vl_z = Vmod * cosTheta;
 
         // Build an orthonormal basis (t1, t2, n).
-        // Choose t1 perpendicular to n; pick the axis least aligned with n.
         cudaCommonType t1x, t1y, t1z;
         if (fabs(nx) < (cudaCommonType)0.9) {
-            // t1 = cross(n, x-hat) = (0, nz, -ny), then normalise
             const cudaCommonType len = sqrt(nz * nz + ny * ny);
             const cudaCommonType invLen = (cudaCommonType)1.0 / len;
             t1x = (cudaCommonType)0.0;
             t1y =  nz * invLen;
             t1z = -ny * invLen;
         } else {
-            // t1 = cross(n, y-hat) = (-nz, 0, nx), then normalise
             const cudaCommonType len = sqrt(nz * nz + nx * nx);
             const cudaCommonType invLen = (cudaCommonType)1.0 / len;
             t1x = -nz * invLen;
@@ -519,17 +517,17 @@ __global__ void planetDiffuseCompactKernel(
         const cudaCommonType t2z = nx * t1y - ny * t1x;
 
         // Rotate to global frame:  v = vl_x * t1 + vl_y * t2 + vl_z * n
-        pcl.set_u(0, vl_x * t1x + vl_y * t2x + vl_z * nx);
-        pcl.set_u(1, vl_x * t1y + vl_y * t2y + vl_z * ny);
-        pcl.set_u(2, vl_x * t1z + vl_y * t2z + vl_z * nz);
+        pclU = vl_x * t1x + vl_y * t2x + vl_z * nx;
+        pclV = vl_x * t1y + vl_y * t2y + vl_z * ny;
+        pclW = vl_x * t1z + vl_y * t2z + vl_z * nz;
 
-        pcl.set_x(0, originX + (sphereRadius + eps) * nx);
-        pcl.set_x(1, originY + (sphereRadius + eps) * ny);
-        pcl.set_x(2, originZ + (sphereRadius + eps) * nz);
+        pclX = originX + (sphereRadius + eps) * nx;
+        pclY = originY + (sphereRadius + eps) * ny;
+        pclZ = originZ + (sphereRadius + eps) * nz;
 
     } else if (doSphere == 2) { // ── 2D (XZ plane) ──
-        const cudaCommonType dx = pcl.get_x() - originX;
-        const cudaCommonType dz = pcl.get_z() - originZ;
+        const cudaCommonType dx = pclX - originX;
+        const cudaCommonType dz = pclZ - originZ;
         cudaCommonType r = sqrt(dx * dx + dz * dz);
         if (r < (cudaCommonType)1e-30) r = (cudaCommonType)1e-30;
         const cudaCommonType invr = (cudaCommonType)1.0 / r;
@@ -537,26 +535,27 @@ __global__ void planetDiffuseCompactKernel(
         const cudaCommonType nx = dx * invr;
         const cudaCommonType nz = dz * invr;
 
-        // Direct hemisphere sampling in 2D (no rejection):
-        // Sample angle α ∈ (-π/2, +π/2) relative to outward normal
         const cudaCommonType alpha = ((cudaCommonType)3.14159265358979323846)
                                      * (planetRngUniform(rngState) - (cudaCommonType)0.5);
         const cudaCommonType ca = cos(alpha);
         const cudaCommonType sa = sin(alpha);
-        // Rotate normal by α :  v = Vmod * ( ca * n  +  sa * t )
-        //   where  t = (-nz, nx)  is the tangent
-        pcl.set_u(0, Vmod * (ca * nx - sa * nz));
-        pcl.set_u(2, Vmod * (ca * nz + sa * nx));
-        // v (y-component) is preserved, unlike legacy code which zeroed it
+        pclU = Vmod * (ca * nx - sa * nz);
+        pclW = Vmod * (ca * nz + sa * nx);
 
-        pcl.set_x(0, originX + (sphereRadius + eps) * nx);
-        pcl.set_x(2, originZ + (sphereRadius + eps) * nz);
+        pclX = originX + (sphereRadius + eps) * nx;
+        pclZ = originZ + (sphereRadius + eps) * nz;
     }
 
-    // ── Compact: atomicAdd to get a write slot in the output buffer ──
+    // ── Compact: atomicAdd to get a write slot in the SoA output buffer ──
     int mySlot = atomicAdd(&survivorCounters[speciesIdx], 1);
-    int outOffset = speciesOffsets[speciesIdx];
+    int writeIdx = speciesOffsets[speciesIdx] + mySlot;
 
-    memcpy(outputBuf + outOffset + mySlot,
-           &pcl, sizeof(SpeciesParticle));
+    outputSoA->u[writeIdx] = pclU;
+    outputSoA->v[writeIdx] = pclV;
+    outputSoA->w[writeIdx] = pclW;
+    outputSoA->q[writeIdx] = pclQ;
+    outputSoA->x[writeIdx] = pclX;
+    outputSoA->y[writeIdx] = pclY;
+    outputSoA->z[writeIdx] = pclZ;
+    outputSoA->t[writeIdx] = pclT;
 }

@@ -4,7 +4,7 @@
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
-#include "Particles3D.h"
+#include "ParticleSoAHost.h"
 #include "Collective.h"
 
 #include "mpi.h"
@@ -22,8 +22,8 @@ using namespace std;
 
 void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag, int sample,
                                     Collective* col_in, VCtopology3D* vct_in, Grid3DCU* grid_in,
-                                    EMfields3D* EMf_in, Particles3D* outputPart_in, int ns_in,
-                                    Particles3D* testpart_in, int nstestpart_in) {
+                                    EMfields3D* EMf_in, ParticleSoAHost* outputPart_in, int ns_in,
+                                    ParticleSoAHost* testpart_in, int nstestpart_in) {
 
     if (open) {
         closeOutputFiles();

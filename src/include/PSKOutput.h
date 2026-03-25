@@ -35,7 +35,7 @@ developers: D. Burgess, June/July 2006
 
 #include "errors.h"
 #include "PSKException.h"
-#include "Particles3Dcomm.h"
+#include "ParticleSoAHost.h"
 #include "Field.h"
 #include "Collective.h"
 #include "VCtopology3D.h"

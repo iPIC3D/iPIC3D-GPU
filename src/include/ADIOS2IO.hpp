@@ -13,7 +13,7 @@
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
 #include "Collective.h"
-#include "Particles3D.h"
+#include "ParticleSoAHost.h"
 
 #include "adios2.h"
 
@@ -68,9 +68,9 @@ private:
     VCtopology3D *vct;
     Grid3DCU *grid;
     EMfields3D *EMf;
-    Particles3D *part; // now we only copy from the CPU buffer
+    ParticleSoAHost *part; // now we only copy from the CPU buffer
     // particleArrayCUDA **pclsArrayHostPtr;
-    Particles3D *testpart;
+    ParticleSoAHost *testpart;
     int ns;
     int nstestpart;
     
@@ -101,8 +101,8 @@ public:
  */
 void initOutputFiles(string fieldTag, string particleTag, int sample,
                      Collective* col, VCtopology3D* vct, Grid3DCU* grid,
-                     EMfields3D* EMf, Particles3D* outputPart, int ns,
-                     Particles3D* testpart, int nstestpart);
+                     EMfields3D* EMf, ParticleSoAHost* outputPart, int ns,
+                     ParticleSoAHost* testpart, int nstestpart);
 
 /**
  * @brief Append the output data to the output files, the interface 

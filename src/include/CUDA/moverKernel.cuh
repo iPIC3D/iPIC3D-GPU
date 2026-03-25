@@ -1,7 +1,7 @@
 #ifndef _MOVERKERNEL_CUH_
 #define _MOVERKERNEL_CUH_
 
-#include "Particles3D.h"
+#include "ParticleSoAHost.h"
 #include "cudaTypeDef.cuh"
 #include "particleArrayCUDA.cuh"
 #include "EMfields3D.h"
@@ -63,21 +63,27 @@ public: // common parameter
 public:
 
 
-    __host__ moverParameter(Particles3D* p3D, VirtualTopology3D* vct)
-        : dt(p3D->dt), qom(p3D->qom), c(p3D->c), NiterMover(p3D->NiterMover), DFIELD_3or4(::DFIELD_3or4),
-        umax(p3D->umax), umin(p3D->umin), vmax(p3D->vmax), vmin(p3D->vmin), wmax(p3D->wmax), wmin(p3D->wmin)
+    __host__ moverParameter(ParticleSoAHost* pclHost, VirtualTopology3D* vct)
+        : dt(pclHost->timeStep_), qom(pclHost->chargeOverMass_), c(pclHost->speedOfLight_),
+        NiterMover(pclHost->numMoverIterations_), DFIELD_3or4(::DFIELD_3or4),
+        umax(pclHost->velocityCapMaxX_), umin(pclHost->velocityCapMinX_),
+        vmax(pclHost->velocityCapMaxY_), vmin(pclHost->velocityCapMinY_),
+        wmax(pclHost->velocityCapMaxZ_), wmin(pclHost->velocityCapMinZ_)
     {
         // create the particle array, stream 0
-        pclsArray = particleArrayCUDA(p3D).copyToDevice();
-        departureArray = departureArrayType(p3D->getNOP() * 1.5).copyToDevice();
+        pclsArray = particleArrayCUDA(pclHost).copyToDevice();
+        departureArray = departureArrayType(pclHost->getNOP() * 1.5).copyToDevice();
 
     }
 
     //! @param pclsArrayCUDAPtr It should be a device pointer
-    __host__ moverParameter(Particles3D* p3D, particleArrayCUDA* pclsArrayCUDAPtr, 
+    __host__ moverParameter(ParticleSoAHost* pclHost, particleArrayCUDA* pclsArrayCUDAPtr, 
                             departureArrayType* departureArrayCUDAPtr, hashedSum* hashedSumArrayCUDAPtr)
-        : dt(p3D->dt), qom(p3D->qom), c(p3D->c), NiterMover(p3D->NiterMover), DFIELD_3or4(::DFIELD_3or4),
-        umax(p3D->umax), umin(p3D->umin), vmax(p3D->vmax), vmin(p3D->vmin), wmax(p3D->wmax), wmin(p3D->wmin)
+        : dt(pclHost->timeStep_), qom(pclHost->chargeOverMass_), c(pclHost->speedOfLight_),
+        NiterMover(pclHost->numMoverIterations_), DFIELD_3or4(::DFIELD_3or4),
+        umax(pclHost->velocityCapMaxX_), umin(pclHost->velocityCapMinX_),
+        vmax(pclHost->velocityCapMaxY_), vmin(pclHost->velocityCapMinY_),
+        wmax(pclHost->velocityCapMaxZ_), wmin(pclHost->velocityCapMinZ_)
     {
         // create the particle array, stream 0
         pclsArray = pclsArrayCUDAPtr;

@@ -12,7 +12,7 @@
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
-#include "Particles3D.h"
+#include "ParticleSoAHost.h"
 #include "Alloc.h"         // newArr3, newArr4, delArr3, delArr4
 #include "ParallelIO.h"    // free VTK/H5hut/PHDF5 write functions
 #include "debug.h"         // eprintf, warning_printf
@@ -66,8 +66,8 @@ IOManager::~IOManager() {
 // ---------------------------------------------------------------------------
 
 void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
-                     EMfields3D* EMf, Particles3D* outputPart, int ns,
-                     Particles3D* testpart, int nstestpart, int first_cycle)
+                     EMfields3D* EMf, ParticleSoAHost* outputPart, int ns,
+                     ParticleSoAHost* testpart, int nstestpart, int first_cycle)
 {
     // Store non-owning pointers
     col_         = col;

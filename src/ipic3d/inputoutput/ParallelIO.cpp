@@ -23,11 +23,12 @@
 
 #include "ParallelIO.h"
 #include "MPIdata.h"
+#include "debug.h"
 #include "TimeTasks.h"
 #include "Collective.h"
 #include "Grid3DCU.h"
 #include "VCtopology3D.h"
-#include "Particles3D.h"
+#include "ParticleSoAHost.h"
 #include "EMfields3D.h"
 #include "math.h"
 #include <algorithm>
@@ -36,7 +37,7 @@
 #include <sstream>
 
 /*! Function used to write the EM fields using the parallel HDF5 library */
-void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, Particles3Dcomm *part, CollectiveIO *col, VCtopology3D *vct, int cycle){
+void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, ParticleSoAHost *part, CollectiveIO *col, VCtopology3D *vct, int cycle){
 
 #ifdef PHDF5
   timeTasks_set_task(TimeTasks::WRITE_FIELDS);
@@ -185,7 +186,7 @@ void WriteFieldsH5hut(int nspec, Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *
 }
 
 /*! Function to write the particles using the H5hut library. */
-void WritePartclH5hut(int nspec, Grid3DCU *grid, Particles3Dcomm *part, CollectiveIO *col, VCtopology3D *vct, int cycle){
+void WritePartclH5hut(int nspec, Grid3DCU *grid, ParticleSoAHost *part, CollectiveIO *col, VCtopology3D *vct, int cycle){
 #ifdef USEH5HUT
   timeTasks_set_task(TimeTasks::WRITE_PARTICLES);
 
@@ -225,7 +226,7 @@ void WritePartclH5hut(int nspec, Grid3DCU *grid, Particles3Dcomm *part, Collecti
 }
 
 #if 0
-void ReadPartclH5hut(int nspec, Particles3Dcomm *part, Collective *col, VCtopology3D *vct, Grid3DCU *grid){
+void ReadPartclH5hut(int nspec, ParticleSoAHost *part, Collective *col, VCtopology3D *vct, Grid3DCU *grid){
 #ifdef USEH5HUT
 
   H5input infile;
@@ -1533,7 +1534,7 @@ void ByteSwap(unsigned char * b, int n)
    }
 }
 
-void WriteTestPclsVTK(int nspec, Grid3DCU *grid, Particles3D *testpart, EMfields3D *EMf,
+void WriteTestPclsVTK(int nspec, Grid3DCU *grid, ParticleSoAHost *testpart, EMfields3D *EMf,
 		CollectiveIO *col, VCtopology3D *vct, const string & tag, int cycle,MPI_Request *testpartMPIReq, MPI_File *fh){
 	/* the below is nonblocking collective IO
 	 * const int nop = testpart[0].getNOP();

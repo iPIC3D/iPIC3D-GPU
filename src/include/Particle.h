@@ -28,21 +28,6 @@
 //
 #define AoS_PCLS_AT_A_TIME 2
 
-namespace ParticleType
-{
-  enum Type
-  {
-    AoS = 0,
-    SoA,
-    synched
-  };
-}
-
-// StorageMode: controls which layout is the primary (authoritative) storage
-// in Particles3Dcomm. SoA is the default for compute/init/output containers;
-// AoS is used only for MPI exchange buffers that need SpeciesParticle packing.
-enum class StorageMode { SoA, AoS };
-
 
 template <class T>
 class Larray;

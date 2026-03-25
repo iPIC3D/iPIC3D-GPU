@@ -55,20 +55,35 @@ int main(int argc, char **argv) {
     DA.startAnalysis(i);
     KCode.CalculateField(i); // E field
     DA.waitForAnalysis();
+    auto t_field = std::chrono::high_resolution_clock::now();
 
     KCode.ParticlesMoverMomentAsync(); // launch Mover and Moment kernels
     // some spare CPU cycles
     KCode.WriteOutput(i);
+    auto t_mover = std::chrono::high_resolution_clock::now();
 
     KCode.MoverAwaitAndPclExchange();
+    auto t_exchange = std::chrono::high_resolution_clock::now();
+
     KCode.CalculateB(i); 
+    auto t_bfield = std::chrono::high_resolution_clock::now();
+
     KCode.MomentsAwait(); 
+    auto t_moments = std::chrono::high_resolution_clock::now();
 
     KCode.outputCopyAsync(i); // copy output data to host, for next output
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed = end - start;
-    if (KCode.get_myrank() == 0)
-      std::cout<< "Execution time cycle: "<< elapsed.count() << " ms" <<std::endl;
+    if (KCode.get_myrank() == 0) {
+      std::cout<< "Execution time cycle: "<< elapsed.count() << " ms"
+               << "  [field=" << std::chrono::duration<double, std::milli>(t_field - start).count()
+               << " mover+out=" << std::chrono::duration<double, std::milli>(t_mover - t_field).count()
+               << " exchange=" << std::chrono::duration<double, std::milli>(t_exchange - t_mover).count()
+               << " B=" << std::chrono::duration<double, std::milli>(t_bfield - t_exchange).count()
+               << " moments=" << std::chrono::duration<double, std::milli>(t_moments - t_bfield).count()
+               << " outCopy=" << std::chrono::duration<double, std::milli>(end - t_moments).count()
+               << "]" << std::endl;
+    }
 
 #ifdef LOG_TASKS_TOTAL_TIME
     timeTasks.print_cycle_times(i); // print out total time for all tasks

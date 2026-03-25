@@ -8,22 +8,21 @@
 
 
 /**
- * @brief   Copy the exiting particles of the species to ExitingBuffer. Launch (nop) threads.
- * @details By the end of Mover, the DepartureArray has been prepared, host allocates the ExitingBuffer according 
- *          to the Hashed SumUp value for each direction.
- *          This kernel is responsible for moving the exiting particles in the pclArray into the ExitingBuffer,
- *          according to the DepartureArray.  
- *          The exiting particles in ExitingBuffer are orginaized in their destinations, with random order adopted from hashedSum.
- *          
- *          This kernel is also responsible for preparing the 2 hashedSum for SortingKernel1 and SortingKernel2. It will modify the 
- *          elements of the departure array.
- *          
- * @param exitingArray The buffer used for exiting particles for 6 directions, the size and distriburtion are decided by the 6 hashedSum
- * @param hashedSumArray 9 hashedSum, 6 from the Mover, 1 for the deleted, 2 for Sorting.
- * 
+ * @brief   Copy the exiting particles of the species to the SoA exiting buffer. Launch (nop) threads.
+ * @details By the end of Mover, the DepartureArray has been prepared, host allocates the SoA exiting buffer
+ *          according to the Hashed SumUp value for each direction.
+ *          This kernel is responsible for moving the exiting particles from the main SoA arrays into the
+ *          SoA exiting buffer, according to the DepartureArray.
+ *          The exiting particles are organised by destination, with random order adopted from hashedSum.
+ *
+ *          This kernel is also responsible for preparing the 2 hashedSum for SortingKernel1 and SortingKernel2.
+ *          It will modify the elements of the departure array.
+ *
+ * @param exitingSoA  SoA buffer for exiting particles (8 device arrays), sized by the 6 hashedSum
+ * @param hashedSumArray 10 hashedSum, 6 from the Mover, 1 for deleted, 1 for planet, 2 for Sorting.
  */
 __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
-                                exitingArray* exitingArray, hashedSum* hashedSumArray){
+                                ParticleSoADevice* exitingSoA, hashedSum* hashedSumArray){
                                     
     uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
     if(pidx >= pclsArray->getNOP())return;
@@ -39,7 +38,7 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
     // return the stayed particles in the front part
     if(pidx < (pclsArray->getNOP()-x) && departureElement->dest == 0)return; 
     
-    // Exiting particles — gather from SoA into AoS for MPI transport
+    // Exiting particles — direct SoA-to-SoA copy (no AoS packing)
     if(departureElement->dest > 0 && departureElement->dest < departureArrayElementType::DELETE){ 
 
         int index = 0;
@@ -49,17 +48,15 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
         }
         // index in its direction
         index += hashedSumArray[departureElement->dest-1].getIndex(pidx, departureElement->hashedId);
-        // Pack SoA fields into AoS SpeciesParticle for MPI
-        SpeciesParticle pcl;
-        pcl.set_u(pclsArray->getU()[pidx]);
-        pcl.set_v(pclsArray->getV()[pidx]);
-        pcl.set_w(pclsArray->getW()[pidx]);
-        pcl.set_q(pclsArray->getQ()[pidx]);
-        pcl.set_x(pclsArray->getX()[pidx]);
-        pcl.set_y(pclsArray->getY()[pidx]);
-        pcl.set_z(pclsArray->getZ()[pidx]);
-        pcl.set_t(pclsArray->getT()[pidx]);
-        exitingArray->getArray()[index] = pcl;
+        // Direct SoA copy — no AoS intermediary
+        exitingSoA->u[index] = pclsArray->getU()[pidx];
+        exitingSoA->v[index] = pclsArray->getV()[pidx];
+        exitingSoA->w[index] = pclsArray->getW()[pidx];
+        exitingSoA->q[index] = pclsArray->getQ()[pidx];
+        exitingSoA->x[index] = pclsArray->getX()[pidx];
+        exitingSoA->y[index] = pclsArray->getY()[pidx];
+        exitingSoA->z[index] = pclsArray->getZ()[pidx];
+        exitingSoA->t[index] = pclsArray->getT()[pidx];
     }
 
     // holes
@@ -75,7 +72,6 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* 
     }
 
 }
-
 
 
 

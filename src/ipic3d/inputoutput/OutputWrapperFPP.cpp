@@ -24,16 +24,16 @@
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
-#include "Particles3D.h"
+#include "ParticleSoAHost.h"
 
 void OutputWrapperFPP::init_output_files(
 	    Collective    *col,
 	    VCtopology3D  *vct,
 	    Grid3DCU      *grid,
 	    EMfields3D    *EMf,
-	    Particles3D   *part,
+	    ParticleSoAHost   *part,
 	    int 		  ns,
-	    Particles3D   *testpart,
+	    ParticleSoAHost   *testpart,
 	    int 		  nstestpart)
 {
 #ifndef NO_HDF5

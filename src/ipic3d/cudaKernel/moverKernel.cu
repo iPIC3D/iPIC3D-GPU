@@ -13,7 +13,7 @@
 #include "ipicdefs.h"
 #include "TimeTasks.h"
 #include "parallel.h"
-#include "Particles3D.h"
+#include "ParticleSoAHost.h"
 
 #include "mic_particles.h"
 #include "debug.h"

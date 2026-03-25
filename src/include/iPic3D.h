@@ -45,6 +45,8 @@ using std::string;
 #include "planetKernel.cuh"
 #include "threadPool.hpp"
 #include "ExosphereIonization.h"
+#include "ParticleSoAHost.h"
+#include "ParticleCommInjection.h"
 
 #include <fstream>
 
@@ -71,7 +73,8 @@ namespace iPic3D {
       vct(0),
       grid(0),
       EMf(0),
-      part(0),
+      particlesCommInj(0),
+      particlesHost(0),
       ioManager(0),
       Ke(0),
       BulkEnergy(0),
@@ -127,9 +130,9 @@ namespace iPic3D {
     VCtopology3D  *vct; // mpi topology 
     Grid3DCU      *grid; // 3d cartesion grid, local grid
     EMfields3D    *EMf; // 
-    Particles3D   *part; // only used for particle exchange during the simulation
-    Particles3D   *outputPart; // buffers for all particle copy back, registered to IOManager
-    Particles3D   *testpart;
+    ParticleCommInjection *particlesCommInj; // MPI exchange + injection engine (per species)
+    ParticleSoAHost *particlesHost; // lightweight SoA host mirror (no communicator)
+    ParticleSoAHost *testpart;
     ExosphereIonization *exosphereIonization; // exosphere photoionization source (CPU sampling)
     int numSolarWindSpecies;                     // cached: col->getNumSolarWindSpecies()
     int numPlanetarySpecies;                     // cached: ns - numSolarWindSpecies
@@ -156,9 +159,8 @@ namespace iPic3D {
 	  particleArrayCUDA**   pclsArrayHostPtr;       // array of pointer, point to objects on host
     departureArrayType**  departureArrayHostPtr;  // for every species
     hashedSum**           hashedSumArrayHostPtr;      // species * 8
-    exitingArray**        exitingArrayHostPtr;        // species
+    ParticleSoADevice*    exitingSoAHost;             // per-species SoA exiting buffers (host structs with device ptrs)
     fillerBuffer**        fillerBufferArrayHostPtr;   // species
-    arrayCUDA<SpeciesParticle>** incomingStagingHostPtr;  // per-species AoS staging for H→D incoming particles
     grid3DCUDA* 		      grid3DCUDAHostPtr;      // one grid, used in all specieses
     moverParameter**      moverParamHostPtr;		  // for every species
     momentParameter**     momentParamHostPtr;		  // for every species
@@ -170,9 +172,8 @@ namespace iPic3D {
     particleArrayCUDA**   pclsArrayCUDAPtr;           // array of pointer, point to pclsArray on device
     departureArrayType**  departureArrayCUDAPtr;      // for every species
     hashedSum**           hashedSumArrayCUDAPtr;      // species * 8
-    exitingArray**        exitingArrayCUDAPtr;        // species
+    ParticleSoADevice*    exitingSoACUDA;             // device copy of exitingSoAHost (ns structs)
     fillerBuffer**        fillerBufferArrayCUDAPtr;   // species
-    arrayCUDA<SpeciesParticle>** incomingStagingCUDAPtr;  // per-species device copy of staging metadata
     grid3DCUDA* 		      grid3DCUDACUDAPtr;    	    // one grid, used in all specieses
     moverParameter**      moverParamCUDAPtr;		      // for every species
     momentParameter**     momentParamCUDAPtr;		      // for every species
@@ -216,8 +217,8 @@ namespace iPic3D {
     int* toBeMerged;
 
     //! Planet quasi-neutral BC data structures
-    planetArray**       planetArrayHostPtr;      // per species, host-pinned metadata
-    planetArray**       planetArrayCUDAPtr;      // per species, device metadata
+    ParticleSoADevice*  planetSoAHost;             // per species, host structs with device ptrs
+    ParticleSoADevice*  planetSoACUDA;             // per species, device copies
     int*                planetPclCount;           // per species, planet particle count this cycle
 
     // Cross-species planet processing buffers (device)
@@ -225,7 +226,7 @@ namespace iPic3D {
     uint32_t*           planetGlobalIdxBuf;       // encodes species + local index
     cudaParticleType*   planetIonChargeDevice;    // single-element device buffer for reduction output
     int*                planetCutoffDevice;       // single-element device buffer for cutoff index output
-    planetArray**       planetArrayCUDAPtrDevice; // device array of device pointers (for chargeCutoffKernel)
+    ParticleSoADevice** planetSoACUDAPtrDevice;   // device array of device ParticleSoADevice pointers (for cross-species kernels)
     int*                planetElecOffsetsDevice;  // device array of per-electron-species offsets
     int                 planetBufCapacity;        // current allocation size of merged buffers
     int                 planetElecSpeciesCount;   // number of electron species
@@ -233,11 +234,12 @@ namespace iPic3D {
 
     // Persistent host buffers for processPlanetParticles (avoid per-call allocation)
     int*                planetElecOffsets;         // [planetElecSpeciesCount] species offsets into merged buffers
-    planetArray**       planetTmpPtrs;             // [planetElecSpeciesCount] temp pointer array
+    ParticleSoADevice** planetTmpPtrs;             // [planetElecSpeciesCount] temp pointer array
     int*                planetSurvivorCount;       // [planetElecSpeciesCount] survivor counts per electron species (host)
     int*                planetSurvivorCountDevice; // [planetElecSpeciesCount] per-species atomic counters (device)
-    SpeciesParticle*    planetReflectedBuf;        // device buffer for compact reflected particles
-    int                 planetReflectedBufCapacity;// capacity (in particles) of planetReflectedBuf
+    ParticleSoADevice   planetReflectedSoAHost;    // single SoA buffer with device ptrs for reflected output
+    ParticleSoADevice*  planetReflectedSoACUDA;    // device copy of planetReflectedSoAHost
+    int                 planetReflectedBufCapacity;// capacity (in particles) of planetReflectedSoA
     uint32_t            planetRngCycleCounter;     // incremented each cycle for diffuse-scatter RNG seed
 
   };

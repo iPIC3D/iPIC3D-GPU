@@ -9,7 +9,7 @@
 #include "Grid3DCU.h"
 #include "CG.h"
 #include "GMRES.h"
-#include "Particles3Dcomm.h"
+#include "ParticleSoAHost.h"
 #include "Moments.h"
 #include "Parameters.h"
 #include "ompdefs.h"
@@ -20,7 +20,6 @@
 #include "ipicmath.h" // for roundup_to_multiple
 #include "Alloc.h"
 #include "asserts.h"
-#include "Particles3D.h"
 
 #include "cudaTypeDef.cuh"
 #include "momentKernel.cuh"

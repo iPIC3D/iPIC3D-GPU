@@ -56,8 +56,8 @@ public:
      * The pointers are stored but NOT owned — the caller (c_Solver) keeps ownership.
      */
     void init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
-              EMfields3D* EMf, ParticleSoAHost* outputPart, int ns,
-              ParticleSoAHost* testpart, int nstestpart, int first_cycle);
+              EMfields3D* EMf, ParticleSoAHost** outputPart, int ns,
+              ParticleSoAHost** testpart, int nstestpart, int first_cycle);
 
     // ---- write methods (no cycle-gating — caller decides when to call) ----
 
@@ -161,8 +161,8 @@ private:
     VCtopology3D* vct_        = nullptr;
     Grid3DCU*     grid_       = nullptr;
     EMfields3D*   EMf_        = nullptr;
-    ParticleSoAHost*  outputPart_ = nullptr;
-    ParticleSoAHost*  testpart_   = nullptr;
+    ParticleSoAHost**  outputPart_ = nullptr;
+    ParticleSoAHost**  testpart_   = nullptr;
     int ns_        = 0;
     int nstestpart_= 0;
     int first_cycle_   = 0;

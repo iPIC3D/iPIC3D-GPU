@@ -22,8 +22,8 @@ using namespace std;
 
 void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag, int sample,
                                     Collective* col_in, VCtopology3D* vct_in, Grid3DCU* grid_in,
-                                    EMfields3D* EMf_in, ParticleSoAHost* outputPart_in, int ns_in,
-                                    ParticleSoAHost* testpart_in, int nstestpart_in) {
+                                    EMfields3D* EMf_in, ParticleSoAHost** outputPart_in, int ns_in,
+                                    ParticleSoAHost** testpart_in, int nstestpart_in) {
 
     if (open) {
         closeOutputFiles();

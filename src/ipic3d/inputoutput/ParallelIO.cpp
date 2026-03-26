@@ -37,7 +37,7 @@
 #include <sstream>
 
 /*! Function used to write the EM fields using the parallel HDF5 library */
-void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, ParticleSoAHost *part, CollectiveIO *col, VCtopology3D *vct, int cycle){
+void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, ParticleSoAHost **part, CollectiveIO *col, VCtopology3D *vct, int cycle){
 
 #ifdef PHDF5
   timeTasks_set_task(TimeTasks::WRITE_FIELDS);
@@ -186,7 +186,7 @@ void WriteFieldsH5hut(int nspec, Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *
 }
 
 /*! Function to write the particles using the H5hut library. */
-void WritePartclH5hut(int nspec, Grid3DCU *grid, ParticleSoAHost *part, CollectiveIO *col, VCtopology3D *vct, int cycle){
+void WritePartclH5hut(int nspec, Grid3DCU *grid, ParticleSoAHost **part, CollectiveIO *col, VCtopology3D *vct, int cycle){
 #ifdef USEH5HUT
   timeTasks_set_task(TimeTasks::WRITE_PARTICLES);
 
@@ -203,14 +203,14 @@ void WritePartclH5hut(int nspec, Grid3DCU *grid, ParticleSoAHost *part, Collecti
   file.OpenPartclFile(nspec, vct->getFieldComm());
   for (int i=0; i<nspec; i++){
     // SoA data is authoritative — no conversion needed
-    file.WriteParticles(i, part[i].getNOP(),
-                           part[i].getQall(),
-                           part[i].getXall(),
-                           part[i].getYall(),
-                           part[i].getZall(),
-                           part[i].getUall(),
-                           part[i].getVall(),
-                           part[i].getWall(),
+    file.WriteParticles(i, part[i]->getNOP(),
+                           part[i]->getQall(),
+                           part[i]->getXall(),
+                           part[i]->getYall(),
+                           part[i]->getZall(),
+                           part[i]->getUall(),
+                           part[i]->getVall(),
+                           part[i]->getWall(),
                            vct->getFieldComm());
   }
   file.ClosePartclFile();
@@ -226,7 +226,7 @@ void WritePartclH5hut(int nspec, Grid3DCU *grid, ParticleSoAHost *part, Collecti
 }
 
 #if 0
-void ReadPartclH5hut(int nspec, ParticleSoAHost *part, Collective *col, VCtopology3D *vct, Grid3DCU *grid){
+void ReadPartclH5hut(int nspec, ParticleSoAHost **part, Collective *col, VCtopology3D *vct, Grid3DCU *grid){
 #ifdef USEH5HUT
 
   H5input infile;
@@ -238,15 +238,15 @@ void ReadPartclH5hut(int nspec, ParticleSoAHost *part, Collective *col, VCtopolo
   infile.ReadParticles(vct->getCartesian_rank(), vct->getNproc(), vct->getDims(), L, vct->getFieldComm());
 
   for (int s = 0; s < nspec; s++){
-    part[s].allocate(s, infile.GetNp(s), col, vct, grid);
+    part[s]->allocate(s, infile.GetNp(s), col, vct, grid);
 
-    infile.DumpPartclX(part[s].getXref(), s);
-    infile.DumpPartclY(part[s].getYref(), s);
-    infile.DumpPartclZ(part[s].getZref(), s);
-    infile.DumpPartclU(part[s].getUref(), s);
-    infile.DumpPartclV(part[s].getVref(), s);
-    infile.DumpPartclW(part[s].getWref(), s);
-    infile.DumpPartclQ(part[s].getQref(), s);
+    infile.DumpPartclX(part[s]->getXref(), s);
+    infile.DumpPartclY(part[s]->getYref(), s);
+    infile.DumpPartclZ(part[s]->getZref(), s);
+    infile.DumpPartclU(part[s]->getUref(), s);
+    infile.DumpPartclV(part[s]->getVref(), s);
+    infile.DumpPartclW(part[s]->getWref(), s);
+    infile.DumpPartclQ(part[s]->getQref(), s);
   }
   infile.ClosePartclFile();
 
@@ -1534,7 +1534,7 @@ void ByteSwap(unsigned char * b, int n)
    }
 }
 
-void WriteTestPclsVTK(int nspec, Grid3DCU *grid, ParticleSoAHost *testpart, EMfields3D *EMf,
+void WriteTestPclsVTK(int nspec, Grid3DCU *grid, ParticleSoAHost **testpart, EMfields3D *EMf,
 		CollectiveIO *col, VCtopology3D *vct, const string & tag, int cycle,MPI_Request *testpartMPIReq, MPI_File *fh){
 	/* the below is nonblocking collective IO
 	 * const int nop = testpart[0].getNOP();
@@ -1712,14 +1712,14 @@ void WriteTestPclsVTK(int nspec, Grid3DCU *grid, ParticleSoAHost *testpart, EMfi
 					"		</Points>\n"
 					"	</Piece>\n"
 					"	</UnstructuredGrid>\n"
-					"</VTKFile>", (EMf->isLittleEndian() ?"LittleEndian":"BigEndian"),testpart[is].getNOP());
+					"</VTKFile>", (EMf->isLittleEndian() ?"LittleEndian":"BigEndian"),testpart[is]->getNOP());
 
 	int nelem = strlen(header);
 	int charsize=sizeof(char);
 	MPI_Offset disp = nelem*charsize;
 
 	ostringstream filename;
-	filename << col->getSaveDirName() << "/" << col->getSimName() << "_testparticle"<< testpart[is].get_species_num() << "_cycle" << cycle << ".vtu";
+	filename << col->getSaveDirName() << "/" << col->getSimName() << "_testparticle"<< testpart[is]->get_species_num() << "_cycle" << cycle << ".vtu";
 	MPI_File_open(vct->getFieldComm(),filename.str().c_str(), MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, fh);
 
 	MPI_File_set_view(*fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL);

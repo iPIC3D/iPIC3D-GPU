@@ -89,17 +89,15 @@ c_Solver::~c_Solver()
   if(particlesCommInj) // exchange particles
   {
     for (int i = 0; i < ns; i++)
-    {
-      particlesCommInj[i].~ParticleCommInjection();
-    }
-    free(particlesCommInj);
+      delete particlesCommInj[i];
+    delete[] particlesCommInj;
   }
 
   if(particlesHost) // lightweight SoA host mirror
   {
     for (int i = 0; i < ns; i++)
-      particlesHost[i].~ParticleSoAHost();
-    ::operator delete(particlesHost);
+      delete particlesHost[i];
+    delete[] particlesHost;
   }
 
 #ifdef USE_CATALYST
@@ -205,18 +203,17 @@ int c_Solver::Init(int argc, char **argv) {
   }
 
   // ===== Allocate particlesHost[] — lightweight SoA host mirror (no communicator) =====
-  particlesHost = static_cast<ParticleSoAHost*>(
-    ::operator new(sizeof(ParticleSoAHost) * ns));
+  particlesHost = new ParticleSoAHost*[ns];
   for (int i = 0; i < ns; i++)
   {
-    new (&particlesHost[i]) ParticleSoAHost(i, col, vct, grid);
+    particlesHost[i] = new ParticleSoAHost(i, col, vct, grid);
     const auto totalPcl = col->getNpcel(i) * grid->getNXN() * grid->getNYN() * grid->getNZN();
 
     if (col->getRestart_status() == 0) {
-      particlesHost[i].reserveSpace(totalPcl);
-      particlesHost[i].clearParticles();
+      particlesHost[i]->reserveSpace(totalPcl);
+      particlesHost[i]->clearParticles();
     } else { // restart
-      particlesHost[i].restartLoad();
+      particlesHost[i]->restartLoad();
     }
   }
 
@@ -224,37 +221,37 @@ int c_Solver::Init(int argc, char **argv) {
   if (restart_status == 0) {
     for (int i = 0; i < ns; i++)
     {
-      if      (col->getCase()=="ForceFree")        particlesHost[i].force_free(EMf);
+      if      (col->getCase()=="ForceFree")        particlesHost[i]->force_free(EMf);
 #ifdef BATSRUS
       else if (col->getCase()=="BATSRUS")          eprintf("BATSRUS not supported on ParticleSoAHost");
 #endif
-      else if (col->getCase()=="NullPoints")       particlesHost[i].maxwellianNullPoints(EMf);
-      else if (col->getCase()=="TaylorGreen")      particlesHost[i].maxwellianNullPoints(EMf);
-      else if (col->getCase()=="GEMDoubleHarris")  particlesHost[i].maxwellianDoubleHarris(EMf);
-      else if (col->getCase()=="HumpPert")         particlesHost[i].maxwellianHumpPerturbation(EMf);
-      else                                         particlesHost[i].maxwellian(EMf);
-      particlesHost[i].reserve_remaining_particle_IDs();
+      else if (col->getCase()=="NullPoints")       particlesHost[i]->maxwellianNullPoints(EMf);
+      else if (col->getCase()=="TaylorGreen")      particlesHost[i]->maxwellianNullPoints(EMf);
+      else if (col->getCase()=="GEMDoubleHarris")  particlesHost[i]->maxwellianDoubleHarris(EMf);
+      else if (col->getCase()=="HumpPert")         particlesHost[i]->maxwellianHumpPerturbation(EMf);
+      else                                         particlesHost[i]->maxwellian(EMf);
+      particlesHost[i]->reserve_remaining_particle_IDs();
     }
   }
 
   //allocate test particles if any
   nstestpart = col->getNsTestPart();
 
-  // ===== Allocate particlesCommInj[] — MPI exchange + injection engine (SoA comm buffer) =====
-  particlesCommInj = static_cast<ParticleCommInjection*>(::operator new(sizeof(ParticleCommInjection) * ns));
+  // ===== Allocate particlesCommInj[] — MPI exchange + injection engine (AoS comm buffer) =====
+  particlesCommInj = new ParticleCommInjection*[ns];
   for (int i = 0; i < ns; i++)
   {
-    new(&particlesCommInj[i]) ParticleCommInjection(particlesHost[i]);
+    particlesCommInj[i] = new ParticleCommInjection(*particlesHost[i]);
     const auto totalPcl = col->getNpcel(i) * grid->getNXN() * grid->getNYN() * grid->getNZN();
-    particlesCommInj[i].reserveCommBuffer(static_cast<int>(totalPcl * 0.1));
+    particlesCommInj[i]->reserveCommBuffer(static_cast<int>(totalPcl * 0.1));
   }
 
   if(nstestpart>0){
-    testpart = static_cast<ParticleSoAHost*>(::operator new(sizeof(ParticleSoAHost) * nstestpart));
+    testpart = new ParticleSoAHost*[nstestpart];
     for (int i = 0; i < nstestpart; i++)
     {
-      new(&testpart[i]) ParticleSoAHost(i+ns,col,vct,grid);//species id for test particles is increased by ns
-      testpart[i].pitch_angle_energy(EMf);
+      testpart[i] = new ParticleSoAHost(i+ns,col,vct,grid);//species id for test particles is increased by ns
+      testpart[i]->pitch_angle_energy(EMf);
     }
   }
 
@@ -369,7 +366,7 @@ int c_Solver::initCUDA(){
 
     for(int i=0; i<ns; i++){
       // the constructor will copy particles from host to device
-      pclsArrayHostPtr[i] = newHostPinnedObject<particleArrayCUDA>(particlesHost+i, 1.4, streams[i]); // use the oputputPart as the initial pcls
+      pclsArrayHostPtr[i] = newHostPinnedObject<particleArrayCUDA>(particlesHost[i], 1.4, streams[i]); // use the oputputPart as the initial pcls
       pclsArrayHostPtr[i]->setInitialNOP(pclsArrayHostPtr[i]->getNOP());
       pclsArrayCUDAPtr[i] = pclsArrayHostPtr[i]->copyToDevice();
 
@@ -408,19 +405,19 @@ int c_Solver::initCUDA(){
   moverParamHostPtr = new moverParameter*[ns];
   moverParamCUDAPtr = new moverParameter*[ns];
   for(int i=0; i<ns; i++){
-    moverParamHostPtr[i] = newHostPinnedObject<moverParameter>(particlesHost+i, pclsArrayCUDAPtr[i], departureArrayCUDAPtr[i], hashedSumArrayCUDAPtr[i]);
+    moverParamHostPtr[i] = newHostPinnedObject<moverParameter>(particlesHost[i], pclsArrayCUDAPtr[i], departureArrayCUDAPtr[i], hashedSumArrayCUDAPtr[i]);
 
     // init the moverParam for OpenBC, repopulateInjection, sphere
-    particlesHost[i].openbc_particles_outflowInfo(&moverParamHostPtr[i]->doOpenBC, moverParamHostPtr[i]->applyOpenBC, moverParamHostPtr[i]->deleteBoundary, moverParamHostPtr[i]->openBoundary);
+    particlesHost[i]->openbc_particles_outflowInfo(&moverParamHostPtr[i]->doOpenBC, moverParamHostPtr[i]->applyOpenBC, moverParamHostPtr[i]->deleteBoundary, moverParamHostPtr[i]->openBoundary);
     moverParamHostPtr[i]->appendCountAtomic = 0;
 
     // GPU-side EXIT BC: particles exiting via an EXIT face are marked DELETE
     // on the GPU to avoid sending them through MPI exchange at all.
     // Only applies on boundary ranks (where the neighbor is MPI_PROC_NULL).
-    particlesHost[i].fillExitBCFlags(moverParamHostPtr[i]->isExitBC);
+    particlesHost[i]->fillExitBCFlags(moverParamHostPtr[i]->isExitBC);
 
     if(col->getRHOinject(i)>0.0)
-    particlesHost[i].repopulate_particlesInfo(&moverParamHostPtr[i]->doRepopulateInjection, moverParamHostPtr[i]->doRepopulateInjectionSide, moverParamHostPtr[i]->repopulateBoundary);
+    particlesHost[i]->repopulate_particlesInfo(&moverParamHostPtr[i]->doRepopulateInjection, moverParamHostPtr[i]->doRepopulateInjectionSide, moverParamHostPtr[i]->repopulateBoundary);
     else moverParamHostPtr[i]->doRepopulateInjection = false;
 
     if (col->getCase()=="Dipole") {
@@ -897,10 +894,10 @@ int c_Solver::cudaLauncherAsync(const int species){
   cudaErrChk(cudaEventRecord(event2, streams[species+ns]));
 
   // Prepare comm buffer and copy exiting particles D→H (single AoS memcpy)
-  particlesCommInj[species].clearCommBuffer();
+  particlesCommInj[species]->clearCommBuffer();
   if (count_exiting > 0) {
-    particlesCommInj[species].prepareCommBufferForNOP(count_exiting);
-    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species].getCommPclsDataMut(),
+    particlesCommInj[species]->prepareCommBufferForNOP(count_exiting);
+    cudaErrChk(cudaMemcpyAsync(particlesCommInj[species]->getCommPclsDataMut(),
                                 exitingArrayHostPtr[species]->getArray(),
                                 count_exiting * sizeof(SpeciesParticle),
                                 cudaMemcpyDefault, streams[species+ns]));
@@ -967,7 +964,7 @@ bool c_Solver::ParticlesMoverMomentAsync()
 
     cudaErrChk(cudaStreamSynchronize(streams[i])); // wait for the D→H SoA copy
     // sort (SoA-native — no AoS conversion)
-    particlesHost[i].sort_particles_parallel(cellCountHostPtr, cellOffsetHostPtr);
+    particlesHost[i]->sort_particles_parallel(cellCountHostPtr, cellOffsetHostPtr);
 
     const int totalCells = grid->getNXC() * grid->getNYC() * grid->getNZC();
     cudaErrChk(cudaMemcpyAsync(cellCountCUDAPtr, cellCountHostPtr, totalCells*sizeof(int), cudaMemcpyDefault, streams[i]));
@@ -977,14 +974,14 @@ bool c_Solver::ParticlesMoverMomentAsync()
     const uint32_t mergeNop = pclsArrayHostPtr[i]->getNOP();
     if (mergeNop > 0) {
       const size_t bytes = mergeNop * sizeof(double);
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getU(), particlesHost[i].getUall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getV(), particlesHost[i].getVall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getW(), particlesHost[i].getWall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getQ(), particlesHost[i].getQall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getX(), particlesHost[i].getXall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getY(), particlesHost[i].getYall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getZ(), particlesHost[i].getZall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getT(), particlesHost[i].getParticleIDall(), bytes, cudaMemcpyDefault, streams[i]));
+      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getU(), particlesHost[i]->getUall(), bytes, cudaMemcpyDefault, streams[i]));
+      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getV(), particlesHost[i]->getVall(), bytes, cudaMemcpyDefault, streams[i]));
+      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getW(), particlesHost[i]->getWall(), bytes, cudaMemcpyDefault, streams[i]));
+      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getQ(), particlesHost[i]->getQall(), bytes, cudaMemcpyDefault, streams[i]));
+      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getX(), particlesHost[i]->getXall(), bytes, cudaMemcpyDefault, streams[i]));
+      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getY(), particlesHost[i]->getYall(), bytes, cudaMemcpyDefault, streams[i]));
+      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getZ(), particlesHost[i]->getZall(), bytes, cudaMemcpyDefault, streams[i]));
+      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getT(), particlesHost[i]->getParticleIDall(), bytes, cudaMemcpyDefault, streams[i]));
     }
 
     // merge
@@ -1163,12 +1160,12 @@ void c_Solver::processPlanetParticles()
     if (planetSurvivorCount[e] == 0) continue;
     int specIdx = planetElecSpeciesMap[e];
     const int nRefl = planetSurvivorCount[e];
-    const int commOffset = particlesCommInj[specIdx].getCommNOP();
+    const int commOffset = particlesCommInj[specIdx]->getCommNOP();
     // Grow comm buffer to accommodate reflected particles
-    particlesCommInj[specIdx].prepareCommBufferForNOP(commOffset + nRefl);
+    particlesCommInj[specIdx]->prepareCommBufferForNOP(commOffset + nRefl);
     // Single AoS D→H from reflected device buffer into comm buffer at offset
     cudaErrChk(cudaMemcpyAsync(
-        particlesCommInj[specIdx].getCommPclsDataMut() + commOffset,
+        particlesCommInj[specIdx]->getCommPclsDataMut() + commOffset,
         planetReflectedBuf + planetElecOffsets[e],
         nRefl * sizeof(SpeciesParticle),
         cudaMemcpyDeviceToHost, planetStream));
@@ -1219,7 +1216,7 @@ bool c_Solver::MoverAwaitAndPclExchange()
   const bool doPlanet = (col->getCase() == "Dipole" || col->getCase() == "Dipole2D");
   if (doPlanet)
     processPlanetParticles();
-  // processPlanetParticles now handles D2H of reflected particles into SoA comm buffer
+  // processPlanetParticles now handles D2H of reflected particles into AoS comm buffer
   // and syncs planetStream internally. stayedParticle is unchanged.
 #if ENABLE_SOA_TIMING
   auto _t2 = std::chrono::high_resolution_clock::now();
@@ -1233,7 +1230,7 @@ bool c_Solver::MoverAwaitAndPclExchange()
   }
 
   // ── MPI exchange on CPU ──
-  // particlesCommInj[i] SoA comm buffer now contains exiting particles + reflected planet electrons.
+  // particlesCommInj[i] AoS comm buffer now contains exiting particles + reflected planet electrons.
   // separateAndSendParticles routes out-of-bounds particles to the correct neighbor;
   // in-bounds reflected electrons stay as incoming for this rank.
   for (int i = 0; i < ns; i++)  // communicate each species
@@ -1241,17 +1238,17 @@ bool c_Solver::MoverAwaitAndPclExchange()
 #if ENABLE_SOA_TIMING
     auto _mpi0 = std::chrono::high_resolution_clock::now();
 #endif
-    particlesCommInj[i].separateAndSendParticles();
+    particlesCommInj[i]->separateAndSendParticles();
 #if ENABLE_SOA_TIMING
     auto _mpi1 = std::chrono::high_resolution_clock::now();
 #endif
-    particlesCommInj[i].recommunicateParticlesUntilDone(1);
+    particlesCommInj[i]->recommunicateParticlesUntilDone(1);
 #if ENABLE_SOA_TIMING
     auto _mpi2 = std::chrono::high_resolution_clock::now();
 #endif
     // injection
     if (moverParamHostPtr[i]->doRepopulateInjection) {
-      particlesCommInj[i].repopulateParticlesOnlyInjection();
+      particlesCommInj[i]->repopulateParticlesOnlyInjection();
     }
 #if ENABLE_SOA_TIMING
     auto _mpi3 = std::chrono::high_resolution_clock::now();
@@ -1261,7 +1258,7 @@ bool c_Solver::MoverAwaitAndPclExchange()
              std::chrono::duration<double, std::milli>(_mpi2 - _mpi1).count(),
              std::chrono::duration<double, std::milli>(_mpi3 - _mpi2).count(),
              std::chrono::duration<double, std::milli>(_mpi3 - _mpi0).count(),
-             particlesCommInj[i].getCommNOP());
+             particlesCommInj[i]->getCommNOP());
 #endif
   }
 #if ENABLE_SOA_TIMING
@@ -1284,7 +1281,7 @@ bool c_Solver::MoverAwaitAndPclExchange()
   for(int i=0; i<ns; i++){
 
     // Total particles on device = stayed (from mover) + new (MPI + repopulated + exosphere)
-    auto newPclNum = stayedParticle[i] + particlesCommInj[i].getCommNOP();
+    auto newPclNum = stayedParticle[i] + particlesCommInj[i]->getCommNOP();
 
     // now the host array contains the entering particles
     if((newPclNum * 1.2) >= pclsArrayHostPtr[i]->getSize()){ // not enough size, expand the device array size
@@ -1293,7 +1290,7 @@ bool c_Solver::MoverAwaitAndPclExchange()
       cudaErrChk(cudaMemcpyAsync(departureArrayCUDAPtr[i], departureArrayHostPtr[i], sizeof(departureArrayType), cudaMemcpyDefault, streams[i]));
     }
     // AoS H→D via staging buffer + scatterAoSToSoAKernel
-    const int incomingCount = particlesCommInj[i].getCommNOP();
+    const int incomingCount = particlesCommInj[i]->getCommNOP();
 
     if (incomingCount > 0) {
       // Expand staging buffer if needed
@@ -1305,7 +1302,7 @@ bool c_Solver::MoverAwaitAndPclExchange()
       }
       // Copy AoS particles from host comm buffer into the staging buffer on device
       cudaErrChk(cudaMemcpyAsync(incomingStagingHostPtr[i]->getArray(),
-                particlesCommInj[i].getCommPclsData(),
+                particlesCommInj[i]->getCommPclsData(),
                 incomingCount * sizeof(SpeciesParticle),
                 cudaMemcpyDefault, streams[i]));
     }
@@ -1399,19 +1396,19 @@ void c_Solver::MomentsAwait() {
 
       // Ensure host SoA vectors have enough capacity
       const uint32_t mergeNopCopy = pclsArrayHostPtr[i]->getNOP();
-      particlesHost[i].prepareSoAForNOP(mergeNopCopy);
+      particlesHost[i]->prepareSoAForNOP(mergeNopCopy);
 
       // Direct GPU SoA → host SoA (no AoS intermediary)
       if (mergeNopCopy > 0) {
         const size_t bytes = mergeNopCopy * sizeof(double);
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i].getUallMut(), pclsArrayHostPtr[i]->getU(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i].getVallMut(), pclsArrayHostPtr[i]->getV(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i].getWallMut(), pclsArrayHostPtr[i]->getW(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i].getQallMut(), pclsArrayHostPtr[i]->getQ(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i].getXallMut(), pclsArrayHostPtr[i]->getX(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i].getYallMut(), pclsArrayHostPtr[i]->getY(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i].getZallMut(), pclsArrayHostPtr[i]->getZ(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i].getTallMut(), pclsArrayHostPtr[i]->getT(), bytes, cudaMemcpyDefault, streams[i]));
+        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getUallMut(), pclsArrayHostPtr[i]->getU(), bytes, cudaMemcpyDefault, streams[i]));
+        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getVallMut(), pclsArrayHostPtr[i]->getV(), bytes, cudaMemcpyDefault, streams[i]));
+        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getWallMut(), pclsArrayHostPtr[i]->getW(), bytes, cudaMemcpyDefault, streams[i]));
+        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getQallMut(), pclsArrayHostPtr[i]->getQ(), bytes, cudaMemcpyDefault, streams[i]));
+        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getXallMut(), pclsArrayHostPtr[i]->getX(), bytes, cudaMemcpyDefault, streams[i]));
+        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getYallMut(), pclsArrayHostPtr[i]->getY(), bytes, cudaMemcpyDefault, streams[i]));
+        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getZallMut(), pclsArrayHostPtr[i]->getZ(), bytes, cudaMemcpyDefault, streams[i]));
+        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getTallMut(), pclsArrayHostPtr[i]->getT(), bytes, cudaMemcpyDefault, streams[i]));
       }
     }
   }
@@ -1501,18 +1498,18 @@ void c_Solver::outputCopyAsync(int cycle) { // -1 to enable
     for (int i = 0; i < ns; i++) {
       const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
       // Prepare host SoA vectors to receive nop particles
-      particlesHost[i].prepareSoAForNOP(nop);
+      particlesHost[i]->prepareSoAForNOP(nop);
       if (nop == 0) continue;
       const size_t bytes = nop * sizeof(double);
       // Direct GPU SoA → host SoA: 8 async copies, no AoS intermediary
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i].getUallMut(), pclsArrayHostPtr[i]->getU(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i].getVallMut(), pclsArrayHostPtr[i]->getV(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i].getWallMut(), pclsArrayHostPtr[i]->getW(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i].getQallMut(), pclsArrayHostPtr[i]->getQ(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i].getXallMut(), pclsArrayHostPtr[i]->getX(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i].getYallMut(), pclsArrayHostPtr[i]->getY(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i].getZallMut(), pclsArrayHostPtr[i]->getZ(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i].getTallMut(), pclsArrayHostPtr[i]->getT(), bytes, cudaMemcpyDefault, streams[0]));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getUallMut(), pclsArrayHostPtr[i]->getU(), bytes, cudaMemcpyDefault, streams[0]));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getVallMut(), pclsArrayHostPtr[i]->getV(), bytes, cudaMemcpyDefault, streams[0]));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getWallMut(), pclsArrayHostPtr[i]->getW(), bytes, cudaMemcpyDefault, streams[0]));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getQallMut(), pclsArrayHostPtr[i]->getQ(), bytes, cudaMemcpyDefault, streams[0]));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getXallMut(), pclsArrayHostPtr[i]->getX(), bytes, cudaMemcpyDefault, streams[0]));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getYallMut(), pclsArrayHostPtr[i]->getY(), bytes, cudaMemcpyDefault, streams[0]));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getZallMut(), pclsArrayHostPtr[i]->getZ(), bytes, cudaMemcpyDefault, streams[0]));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getTallMut(), pclsArrayHostPtr[i]->getT(), bytes, cudaMemcpyDefault, streams[0]));
     }
     cudaErrChk(cudaEventRecord(eventOutputCopy, streams[0]));
   }
@@ -1528,12 +1525,12 @@ void c_Solver::WriteConserved(int cycle) {
     TOTmomentum = 0.0;
     double TOTcharge = 0.0;
     for (int is = 0; is < ns; is++) {
-      Ke[is] = particlesHost[is].getKe();
+      Ke[is] = particlesHost[is]->getKe();
       BulkEnergy[is] = EMf->getBulkEnergy(is);
       TOTenergy += Ke[is];
-      momentum[is] = particlesHost[is].getP();
+      momentum[is] = particlesHost[is]->getP();
       TOTmomentum += momentum[is];
-      Qtot[is] = particlesHost[is].getTotalQ();
+      Qtot[is] = particlesHost[is]->getTotalQ();
       TOTcharge += Qtot[is];
     }
     if (myrank == (nprocs-1)) {
@@ -1578,8 +1575,8 @@ void c_Solver::WriteVelocityDistribution(int cycle)
   //if(cycle % col->getVelocityDistributionOutputCycle() == 0)
   {
     for (int is = 0; is < ns; is++) {
-      double maxVel = particlesHost[is].getMaxVelocity();
-      long long *VelocityDist = particlesHost[is].getVelocityDistribution(nDistributionBins, maxVel);
+      double maxVel = particlesHost[is]->getMaxVelocity();
+      long long *VelocityDist = particlesHost[is]->getVelocityDistribution(nDistributionBins, maxVel);
       if (myrank == 0) {
         ofstream my_file(ds.c_str(), fstream::app);
         my_file << cycle << "\t" << is << "\t" << maxVel;
@@ -1645,17 +1642,17 @@ void c_Solver::Finalize() {
 void c_Solver::sortParticles() {
 
   for(int species_idx=0; species_idx<ns; species_idx++)
-    particlesHost[species_idx].sort_particles_serial();
+    particlesHost[species_idx]->sort_particles_serial();
 
 }
 
 void c_Solver::pad_particle_capacities()
 {
   for (int i = 0; i < ns; i++)
-    particlesHost[i].padCapacities();
+    particlesHost[i]->padCapacities();
 
   for (int i = 0; i < nstestpart; i++)
-    testpart[i].padCapacities();
+    testpart[i]->padCapacities();
 }
 
 // No-op: particle data is always SoA.
@@ -1686,7 +1683,7 @@ int c_Solver::LastCycle() {
  *
  * For each planetary species (index >= numSolarWindSpecies), this method samples
  * new macro-particles from the Chamberlain neutral density profile via
- * ExosphereIonization, then appends them to the SoA comm buffer particlesCommInj[i].
+ * ExosphereIonization, then appends them to the AoS comm buffer particlesCommInj[i].
  * The particles will be copied to the GPU by the subsequent H2D transfer.
  *
  * Memory-aware injection: before sampling, the method queries GPU free memory
@@ -1742,7 +1739,7 @@ void c_Solver::injectExosphereParticles()
   }
 
   // Enqueue one task per planetary species.
-  // Each task: (1) samples particles via thread-safe RNG, (2) appends to particlesCommInj[i] SoA comm buffer.
+  // Each task: (1) samples particles via thread-safe RNG, (2) appends to particlesCommInj[i] AoS comm buffer.
   // No shared mutable state between tasks — safe for concurrent execution.
   // numSolarWindSpecies, numPlanetarySpecies, and exosphereTaskFutures are persistent
   // class members initialized once in Init() — no per-call recomputation or allocation.
@@ -1759,9 +1756,9 @@ void c_Solver::injectExosphereParticles()
 
         if (exosphereParticles.empty()) return;
 
-        // Append exosphere particles to SoA comm buffer (after MPI-incoming + repopulated)
+        // Append exosphere particles to AoS comm buffer (after MPI-incoming + repopulated)
         // Each task operates on its own particlesCommInj[i] — no cross-species contention.
-        particlesCommInj[i].appendFromAoS(exosphereParticles.data(),
+        particlesCommInj[i]->appendFromAoS(exosphereParticles.data(),
                                           static_cast<int>(exosphereParticles.size()));
       })
     );

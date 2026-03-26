@@ -73,8 +73,8 @@ namespace iPic3D {
       vct(0),
       grid(0),
       EMf(0),
-      particlesCommInj(0),
-      particlesHost(0),
+      particlesCommInj(nullptr),
+      particlesHost(nullptr),
       ioManager(0),
       Ke(0),
       BulkEnergy(0),
@@ -130,9 +130,9 @@ namespace iPic3D {
     VCtopology3D  *vct; // mpi topology 
     Grid3DCU      *grid; // 3d cartesion grid, local grid
     EMfields3D    *EMf; // 
-    ParticleCommInjection *particlesCommInj; // MPI exchange + injection engine (per species)
-    ParticleSoAHost *particlesHost; // lightweight SoA host mirror (no communicator)
-    ParticleSoAHost *testpart;
+    ParticleCommInjection **particlesCommInj; // MPI exchange + injection engine (per species)
+    ParticleSoAHost **particlesHost; // lightweight SoA host mirror (no communicator)
+    ParticleSoAHost **testpart;
     ExosphereIonization *exosphereIonization; // exosphere photoionization source (CPU sampling)
     int numSolarWindSpecies;                     // cached: col->getNumSolarWindSpecies()
     int numPlanetarySpecies;                     // cached: ns - numSolarWindSpecies

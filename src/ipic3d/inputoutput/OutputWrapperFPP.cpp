@@ -31,9 +31,9 @@ void OutputWrapperFPP::init_output_files(
 	    VCtopology3D  *vct,
 	    Grid3DCU      *grid,
 	    EMfields3D    *EMf,
-	    ParticleSoAHost   *part,
+	    ParticleSoAHost   **part,
 	    int 		  ns,
-	    ParticleSoAHost   *testpart,
+	    ParticleSoAHost   **testpart,
 	    int 		  nstestpart)
 {
 #ifndef NO_HDF5
@@ -51,10 +51,10 @@ void OutputWrapperFPP::init_output_files(
     hdf5_agent.set_simulation_pointers(EMf, grid, vct, col);
 
     for (int i = 0; i < ns; ++i){
-      hdf5_agent.set_simulation_pointers_part(&part[i]);
+      hdf5_agent.set_simulation_pointers_part(part[i]);
     }
     for (int i = 0; i < nstestpart; ++i){
-      hdf5_agent.set_simulation_pointers_part(&testpart[i]);
+      hdf5_agent.set_simulation_pointers_part(testpart[i]);
     }
 
     // Add the HDF5 output agent to the Output Manager's list

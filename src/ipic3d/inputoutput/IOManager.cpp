@@ -66,8 +66,8 @@ IOManager::~IOManager() {
 // ---------------------------------------------------------------------------
 
 void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
-                     EMfields3D* EMf, ParticleSoAHost* outputPart, int ns,
-                     ParticleSoAHost* testpart, int nstestpart, int first_cycle)
+                     EMfields3D* EMf, ParticleSoAHost** outputPart, int ns,
+                     ParticleSoAHost** testpart, int nstestpart, int first_cycle)
 {
     // Store non-owning pointers
     col_         = col;

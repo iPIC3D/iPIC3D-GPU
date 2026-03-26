@@ -52,9 +52,9 @@ class OutputWrapperFPP
     VCtopology3D  *vct,
     Grid3DCU      *grid,
     EMfields3D    *EMf,
-    ParticleSoAHost   *part,
+    ParticleSoAHost   **part,
     int 		  ns,
-    ParticleSoAHost   *testpart,
+    ParticleSoAHost   **testpart,
     int 		  nstestpart);
   void append_output(const char* tag, int cycle);
   void append_output(const char* tag, int cycle, int sample);

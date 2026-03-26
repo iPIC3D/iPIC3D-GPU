@@ -68,9 +68,9 @@ private:
     VCtopology3D *vct;
     Grid3DCU *grid;
     EMfields3D *EMf;
-    ParticleSoAHost *part; // now we only copy from the CPU buffer
+    ParticleSoAHost **part; // now we only copy from the CPU buffer
     // particleArrayCUDA **pclsArrayHostPtr;
-    ParticleSoAHost *testpart;
+    ParticleSoAHost **testpart;
     int ns;
     int nstestpart;
     
@@ -101,8 +101,8 @@ public:
  */
 void initOutputFiles(string fieldTag, string particleTag, int sample,
                      Collective* col, VCtopology3D* vct, Grid3DCU* grid,
-                     EMfields3D* EMf, ParticleSoAHost* outputPart, int ns,
-                     ParticleSoAHost* testpart, int nstestpart);
+                     EMfields3D* EMf, ParticleSoAHost** outputPart, int ns,
+                     ParticleSoAHost** testpart, int nstestpart);
 
 /**
  * @brief Append the output data to the output files, the interface 
@@ -282,49 +282,49 @@ void _pressure(adios2::IO &io, adios2::Engine &engine){
 */
 void _particlePosition(adios2::IO &io, adios2::Engine &engine){
     for (int i = 0; i < ns; i++) {
-        const unsigned long sizeNOP = static_cast<unsigned long>(part[i].getNOP());
+        const unsigned long sizeNOP = static_cast<unsigned long>(part[i]->getNOP());
 
         auto x = _variableHelper<cudaCommonType>(io, "part" + std::to_string(i) + "PositionX", {sizeNOP}, {0}, {sizeNOP});
         auto y = _variableHelper<cudaCommonType>(io, "part" + std::to_string(i) + "PositionY", {sizeNOP}, {0}, {sizeNOP});
         auto z = _variableHelper<cudaCommonType>(io, "part" + std::to_string(i) + "PositionZ", {sizeNOP}, {0}, {sizeNOP});
 
-        engine.Put<cudaCommonType>(x, part[i].getXall(), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(y, part[i].getYall(), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(z, part[i].getZall(), adios2::Mode::Deferred);
+        engine.Put<cudaCommonType>(x, part[i]->getXall(), adios2::Mode::Deferred);
+        engine.Put<cudaCommonType>(y, part[i]->getYall(), adios2::Mode::Deferred);
+        engine.Put<cudaCommonType>(z, part[i]->getZall(), adios2::Mode::Deferred);
     }
 }
 
 void _particleVelocity(adios2::IO &io, adios2::Engine &engine){
     for (int i = 0; i < ns; i++) {
-        const unsigned long sizeNOP = static_cast<unsigned long>(part[i].getNOP());
+        const unsigned long sizeNOP = static_cast<unsigned long>(part[i]->getNOP());
 
         auto u = _variableHelper<cudaCommonType>(io, "part" + std::to_string(i) + "VelocityU", {sizeNOP}, {0}, {sizeNOP});
         auto v = _variableHelper<cudaCommonType>(io, "part" + std::to_string(i) + "VelocityV", {sizeNOP}, {0}, {sizeNOP});
         auto w = _variableHelper<cudaCommonType>(io, "part" + std::to_string(i) + "VelocityW", {sizeNOP}, {0}, {sizeNOP});
 
-        engine.Put<cudaCommonType>(u, part[i].getUall(), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(v, part[i].getVall(), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(w, part[i].getWall(), adios2::Mode::Deferred);
+        engine.Put<cudaCommonType>(u, part[i]->getUall(), adios2::Mode::Deferred);
+        engine.Put<cudaCommonType>(v, part[i]->getVall(), adios2::Mode::Deferred);
+        engine.Put<cudaCommonType>(w, part[i]->getWall(), adios2::Mode::Deferred);
     }
 }
 
 void _particleCharge(adios2::IO &io, adios2::Engine &engine){
     for (int i = 0; i < ns; i++) {
-        const unsigned long sizeNOP = static_cast<unsigned long>(part[i].getNOP());
+        const unsigned long sizeNOP = static_cast<unsigned long>(part[i]->getNOP());
 
         auto var = _variableHelper<cudaCommonType>(io, "part" + std::to_string(i) + "charge", {sizeNOP}, {0}, {sizeNOP});
 
-        engine.Put<cudaCommonType>(var, part[i].getQall(), adios2::Mode::Deferred);
+        engine.Put<cudaCommonType>(var, part[i]->getQall(), adios2::Mode::Deferred);
     }
 }
 
 void _particleID(adios2::IO &io, adios2::Engine &engine){
     for (int i = 0; i < ns; i++) {
-        const unsigned long sizeNOP = static_cast<unsigned long>(part[i].getNOP());
+        const unsigned long sizeNOP = static_cast<unsigned long>(part[i]->getNOP());
 
         auto var = _variableHelper<cudaCommonType>(io, "part" + std::to_string(i) + "ID", {sizeNOP}, {0}, {sizeNOP});
 
-        engine.Put<cudaCommonType>(var, part[i].getParticleIDall(), adios2::Mode::Deferred);
+        engine.Put<cudaCommonType>(var, part[i]->getParticleIDall(), adios2::Mode::Deferred);
     }
 }
 

@@ -41,6 +41,7 @@ using std::string;
 #include "momentKernel.cuh"
 #include "particleArrayCUDA.cuh"
 #include "gridCUDA.cuh"
+#include "cellSortBuffers.cuh"
 #include "particleExchange.cuh"
 #include "planetKernel.cuh"
 #include "threadPool.hpp"
@@ -96,6 +97,7 @@ namespace iPic3D {
     bool MoverAwaitAndPclExchange();
     void processPlanetParticles();
     void injectExosphereParticles();
+    void SortParticlesGPU();
     void CalculateB(int cycle);
     void MomentsAwait();
 
@@ -168,6 +170,8 @@ namespace iPic3D {
 
     int* cellCountHostPtr;
     int* cellOffsetHostPtr;
+
+    CellSorter* cellSorters;  // per-species GPU cell sorter (counting sort)
     
 	//! CUDA pointers of objects, have been copied to device
     particleArrayCUDA**   pclsArrayCUDAPtr;           // array of pointer, point to pclsArray on device

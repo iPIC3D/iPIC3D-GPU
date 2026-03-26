@@ -485,6 +485,13 @@ int c_Solver::initCUDA(){
   cudaErrChk(cudaMalloc(&cellCountCUDAPtr, sizeof(int) * grid->getNXC() * grid->getNYC() * grid->getNZC()));
   cudaErrChk(cudaMalloc(&cellOffsetCUDAPtr, sizeof(int) * grid->getNXC() * grid->getNYC() * grid->getNZC()));
 
+  // ── Cell sorter (counting sort) per species ──
+  cellSorters = new CellSorter[ns];
+  for (int i = 0; i < ns; i++) {
+    cellSorters[i].init(*grid3DCUDAHostPtr,
+                        pclsArrayHostPtr[i]->getCapacity(),
+                        streams[i]);
+  }
 
   dataAnalysis::dataAnalysisPipeline::createOutputDirectory(myrank, ns, vct);
 
@@ -659,6 +666,9 @@ int c_Solver::deInitCUDA(){
   if (planetSurvivorCountDevice) cudaFree(planetSurvivorCountDevice);
   if (planetReflectedBuf)        cudaFree(planetReflectedBuf);
 
+  // ── Cell sorters cleanup ──
+  for (int i = 0; i < ns; i++) cellSorters[i].free();
+  delete[] cellSorters;
 
   // delete streams
   for(int i=0; i<ns*2; i++)cudaStreamDestroy(streams[i]);
@@ -1644,6 +1654,31 @@ void c_Solver::sortParticles() {
   for(int species_idx=0; species_idx<ns; species_idx++)
     particlesHost[species_idx]->sort_particles_serial();
 
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// GPU cell-based counting sort for all species
+// ────────────────────────────────────────────────────────────────────────────
+void c_Solver::SortParticlesGPU() {
+
+  for (int i = 0; i < ns; i++) {
+    const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
+    if (nop == 0) continue;
+
+    cellSorters[i].sort(pclsArrayHostPtr[i],
+                        grid3DCUDACUDAPtr,
+                        nop,           // sort all particles
+                        streams[i]);
+
+    // Re-sync the host object to device (SoA pointers were swapped on host)
+    cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
+                                sizeof(particleArrayCUDA),
+                                cudaMemcpyDefault, streams[i]));
+  }
+
+  // Wait for all species to finish before proceeding
+  for (int i = 0; i < ns; i++)
+    cudaErrChk(cudaStreamSynchronize(streams[i]));
 }
 
 void c_Solver::pad_particle_capacities()

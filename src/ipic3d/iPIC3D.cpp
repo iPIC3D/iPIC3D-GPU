@@ -65,6 +65,9 @@ int main(int argc, char **argv) {
     KCode.MoverAwaitAndPclExchange();
     auto t_exchange = std::chrono::high_resolution_clock::now();
 
+    KCode.SortParticlesGPU();
+    auto t_sort = std::chrono::high_resolution_clock::now();
+
     KCode.CalculateB(i); 
     auto t_bfield = std::chrono::high_resolution_clock::now();
 
@@ -79,7 +82,8 @@ int main(int argc, char **argv) {
                << "  [field=" << std::chrono::duration<double, std::milli>(t_field - start).count()
                << " mover+out=" << std::chrono::duration<double, std::milli>(t_mover - t_field).count()
                << " exchange=" << std::chrono::duration<double, std::milli>(t_exchange - t_mover).count()
-               << " B=" << std::chrono::duration<double, std::milli>(t_bfield - t_exchange).count()
+               << " sort=" << std::chrono::duration<double, std::milli>(t_sort - t_exchange).count()
+               << " B=" << std::chrono::duration<double, std::milli>(t_bfield - t_sort).count()
                << " moments=" << std::chrono::duration<double, std::milli>(t_moments - t_bfield).count()
                << " outCopy=" << std::chrono::duration<double, std::milli>(end - t_moments).count()
                << "]" << std::endl;

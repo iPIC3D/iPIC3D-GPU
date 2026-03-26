@@ -1,12 +1,9 @@
 
 #include "cudaTypeDef.cuh"
 #include "velocityHistogram.cuh"
-#include "particleArraySoACUDA.cuh"
 
 namespace velocityHistogram
 {
-
-using namespace particleArraySoA;
 
 
 __global__ void histogramKernel3D(const int nop, const histogramTypeIn *d1, const histogramTypeIn *d2, const histogramTypeIn *d3, 

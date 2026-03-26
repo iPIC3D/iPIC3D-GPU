@@ -6,7 +6,7 @@
 
 #include "Particle.h"
 #include "particleArrayCUDA.cuh"
-#include "particleArraySoACUDA.cuh"
+#include "particleArraySoAView.cuh"
 
 #include <iostream>
 #include <fstream>
@@ -222,7 +222,7 @@ using histogramTypeOut = cudaTypeSingle;
 using velocityHistogramCUDA2D = histogram::histogramCUDA<histogramTypeIn, 2, histogramTypeOut>;
 using velocityHistogramCUDA3D = histogram::histogramCUDA<histogramTypeIn, 3, histogramTypeOut>;
 
-using velocitySoA = particleArraySoA::particleArraySoACUDA<histogramTypeIn, 0, 3>;
+using velocitySoA = particleArraySoAView<histogramTypeIn, 4>;
 
 using namespace DAConfig;
 

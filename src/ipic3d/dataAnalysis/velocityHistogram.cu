@@ -1,5 +1,5 @@
 #include "velocityHistogram.cuh"
-#include "particleArraySoACUDA.cuh"
+#include "particleArraySoAView.cuh"
 
 #include <iostream>
 #include "cudaTypeDef.cuh"
@@ -19,7 +19,6 @@ __global__ void histogramKernel3D(const int nop, const histogramTypeIn *d1, cons
 
 
 __host__ void velocityHistogram3D::init(velocitySoA* pclArray, const int species, cudaStream_t stream){
-    using namespace particleArraySoA;
 
     getRange(pclArray, species, stream);
     histogramHostPtr->setHistogram(minArray, maxArray, binThisDim);
@@ -35,7 +34,7 @@ __host__ void velocityHistogram3D::init(velocitySoA* pclArray, const int species
     if(binNum % tileSize != 0) throw std::runtime_error("Adjust histogram resolution to multiply of tile ...");
 
     histogramKernel3D<<<getGridSize((int)pclArray->getNOP() / 128, 512), 512, sharedMemSize, stream>>>
-        (pclArray->getNOP(), pclArray->getElement(U), pclArray->getElement(V), pclArray->getElement(W), pclArray->getElement(Q),
+        (pclArray->getNOP(), pclArray->getElement(0), pclArray->getElement(1), pclArray->getElement(2), pclArray->getElement(3),
         histogramCUDAPtr);
 
 }

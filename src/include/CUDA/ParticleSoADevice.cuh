@@ -11,16 +11,16 @@
  * No ownership semantics: the owning container (particleArrayCUDA) manages allocation.
  */
 struct ParticleSoADevice {
-    cudaParticleType* u;    // velocity x
-    cudaParticleType* v;    // velocity y
-    cudaParticleType* w;    // velocity z
-    cudaParticleType* q;    // charge
-    cudaParticleType* x;    // position x
-    cudaParticleType* y;    // position y
-    cudaParticleType* z;    // position z
-    cudaParticleType* t;    // subcycle time / particle ID
-    uint32_t nop;           // current number of particles
-    uint32_t capacity;      // allocated capacity (elements per field)
+    cudaPclType_U* u;    // velocity x
+    cudaPclType_V* v;    // velocity y
+    cudaPclType_W* w;    // velocity z
+    cudaPclType_Q* q;    // charge
+    cudaPclType_X* x;    // position x
+    cudaPclType_Y* y;    // position y
+    cudaPclType_Z* z;    // position z
+    cudaPclType_T* t;    // subcycle time / particle ID
+    uint32_t nop;        // current number of particles
+    uint32_t capacity;   // allocated capacity (elements per field)
 };
 
 static constexpr int PARTICLE_SOA_NUM_FIELDS = 8;

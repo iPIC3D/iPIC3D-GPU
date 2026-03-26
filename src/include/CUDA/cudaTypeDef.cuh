@@ -28,6 +28,16 @@ using cudaParticleType = cudaTypeDouble;
 using cudaFieldType = cudaTypeDouble; // type for the field array from host to device
 using cudaMomentType = cudaTypeDouble; // MUST be DOUBLE now, type for the moment array from device to host
 
+// ── Per-field particle types (all default to double; change individually for mixed precision) ──
+using cudaPclType_U = cudaTypeDouble;  // velocity x
+using cudaPclType_V = cudaTypeDouble;  // velocity y
+using cudaPclType_W = cudaTypeDouble;  // velocity z
+using cudaPclType_Q = cudaTypeDouble;  // charge
+using cudaPclType_X = cudaTypeDouble;  // position x
+using cudaPclType_Y = cudaTypeDouble;  // position y
+using cudaPclType_Z = cudaTypeDouble;  // position z
+using cudaPclType_T = cudaTypeDouble;  // subcycle time / particle ID
+
 template <class T, int dim2, int dim3, int dim4>
 using cudaTypeArray4 = T (*)[dim2][dim3][dim4];
 

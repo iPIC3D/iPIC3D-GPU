@@ -20,7 +20,7 @@
 #include "dataAnalysisConfig.cuh"
 #include "GMM/cudaGMMUtility.cuh"
 #include "GMM/cudaGMM.cuh"
-#include "particleArraySoACUDA.cuh"
+#include "particleArraySoAView.cuh"
 #include "velocityHistogram.cuh"
 
 
@@ -30,7 +30,7 @@ namespace dataAnalysis
 {
 
 using namespace iPic3D;
-using velocitySoA = particleArraySoA::particleArraySoACUDA<cudaParticleType, 0, 3>;
+using velocitySoA = particleArraySoAView<cudaParticleType, 4>;
 using GMMType = cudaParticleType;
 using weightType = velocityHistogram::histogramTypeOut;
 
@@ -357,7 +357,7 @@ int dataAnalysisPipelineImpl::analysisEntre(int cycle){
     for(int i = 0; i < ns; i++){
         if constexpr (VELOCITY_HISTOGRAM_ENABLE) {
             // Borrow SoA pointers from particleArrayCUDA (zero-copy, no kernel)
-            velocitySoACUDA->updateFromSoA(pclsArrayHostPtr[i]);
+            velocitySoACUDA->borrowFrom(pclsArrayHostPtr[i]);
 
             // histogram
             auto histogramSpeciesOutputPath = HistogramSubDomainOutputPath + "species" + std::to_string(i) + "_";

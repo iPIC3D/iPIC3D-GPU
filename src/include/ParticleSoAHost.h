@@ -103,25 +103,25 @@ public:
 
   // ===== Read-only SoA bulk accessors =====
 
-  const double* getUall()          const { return &u[0]; }
-  const double* getVall()          const { return &v[0]; }
-  const double* getWall()          const { return &w[0]; }
-  const double* getQall()          const { return &q[0]; }
-  const double* getXall()          const { return &x[0]; }
-  const double* getYall()          const { return &y[0]; }
-  const double* getZall()          const { return &z[0]; }
-  const double* getParticleIDall() const { return &t[0]; }
+  const cudaPclType_U* getUall()          const { return &u[0]; }
+  const cudaPclType_V* getVall()          const { return &v[0]; }
+  const cudaPclType_W* getWall()          const { return &w[0]; }
+  const cudaPclType_Q* getQall()          const { return &q[0]; }
+  const cudaPclType_X* getXall()          const { return &x[0]; }
+  const cudaPclType_Y* getYall()          const { return &y[0]; }
+  const cudaPclType_Z* getZall()          const { return &z[0]; }
+  const cudaPclType_T* getParticleIDall() const { return &t[0]; }
 
   // ===== Mutable SoA bulk pointers (targets for cudaMemcpyAsync D->H) =====
 
-  double* getUallMut() { return &u[0]; }
-  double* getVallMut() { return &v[0]; }
-  double* getWallMut() { return &w[0]; }
-  double* getQallMut() { return &q[0]; }
-  double* getXallMut() { return &x[0]; }
-  double* getYallMut() { return &y[0]; }
-  double* getZallMut() { return &z[0]; }
-  double* getTallMut() { return &t[0]; }
+  cudaPclType_U* getUallMut() { return &u[0]; }
+  cudaPclType_V* getVallMut() { return &v[0]; }
+  cudaPclType_W* getWallMut() { return &w[0]; }
+  cudaPclType_Q* getQallMut() { return &q[0]; }
+  cudaPclType_X* getXallMut() { return &x[0]; }
+  cudaPclType_Y* getYallMut() { return &y[0]; }
+  cudaPclType_Z* getZallMut() { return &z[0]; }
+  cudaPclType_T* getTallMut() { return &t[0]; }
 
   // ===== Per-element accessors (used by PSKOutput / IO backends) =====
 
@@ -332,8 +332,17 @@ public:
   MPI_Comm                  getMpiComm()        const { return mpiComm_; }
 
   // ===== SoA data arrays (pinned host memory) — public for direct D→H memcpy =====
+  // Each field uses its own per-field type from cudaTypeDef.cuh so that
+  // host and device storage types match for direct memcpy.
 
-  vector_cudaParticleType_registered u, v, w, q, x, y, z, t;
+  LarrayRegistered<cudaPclType_U> u;
+  LarrayRegistered<cudaPclType_V> v;
+  LarrayRegistered<cudaPclType_W> w;
+  LarrayRegistered<cudaPclType_Q> q;
+  LarrayRegistered<cudaPclType_X> x;
+  LarrayRegistered<cudaPclType_Y> y;
+  LarrayRegistered<cudaPclType_Z> z;
+  LarrayRegistered<cudaPclType_T> t;
 
 private:
 

@@ -1,5 +1,5 @@
-#include "particleArraySoACUDA.cuh"
 #include "particleArrayCUDA.cuh"
+#include "particleArraySoAView.cuh"
 #include "cudaTypeDef.cuh"
 
 
@@ -28,36 +28,18 @@ __global__ void scatterAoSToSoAKernel(const SpeciesParticle* __restrict__ aosSta
 }
 
 
-namespace particleArraySoA{
+// ── particleArraySoAView::borrowFrom — needs complete particleArrayCUDA ──
 
-
-template<typename T, int startElement, int stopElement>
-__host__ void particleArraySoACUDA<T, startElement, stopElement>::updateFromSoA(particleArrayCUDA* pclArray){
-    // Free any previously owned memory
-    if (allocated) {
-        freeMemory();
-        allocated = false;
-    }
-
+template<>
+__host__ void particleArraySoAView<cudaParticleType, 4>::borrowFrom(particleArrayCUDA* pclArray) {
+    if (owning) { freeMemory(); owning = false; }
     nop = pclArray->getNOP();
-    size = 0; // non-owning view — no owned capacity
-
-    // Borrow device pointers from particleArrayCUDA's persistent SoA
-    cudaParticleType* soaPtrs[8] = {
-        pclArray->getU(), pclArray->getV(), pclArray->getW(), pclArray->getQ(),
-        pclArray->getX(), pclArray->getY(), pclArray->getZ(), pclArray->getT()
-    };
-    for (int i = startElement; i <= stopElement; i++) {
-        elementPtr[i] = soaPtrs[i];
-    }
+    ptrs[0] = pclArray->getU();
+    ptrs[1] = pclArray->getV();
+    ptrs[2] = pclArray->getW();
+    ptrs[3] = pclArray->getQ();
 }
 
-
-template class particleArraySoA::particleArraySoACUDA<cudaParticleType>;
-template class particleArraySoA::particleArraySoACUDA<cudaParticleType, 0, 2>;
-template class particleArraySoA::particleArraySoACUDA<cudaParticleType, 0, 3>;
-                            
-} // namespace particleArraySoA
 
 
 

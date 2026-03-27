@@ -133,6 +133,12 @@ struct CellSorter {
     int  num_cells   = 0;
     bool initialized = false;
 
+    // ── Pending state between enqueueSortAsync() and finishSort() ──
+    uint32_t           pending_num_to_sort = 0;
+    uint32_t           pending_nop         = 0;
+    particleArrayCUDA* pending_hostPtr     = nullptr;
+    bool               sort_pending        = false;
+
     // ── One-time initialization ──
     __host__ void init(const grid3DCUDA& grid, uint32_t initial_capacity, cudaStream_t s) {
         num_cells = grid.nxc * grid.nyc * grid.nzc;
@@ -142,19 +148,41 @@ struct CellSorter {
         initialized = true;
     }
 
-    // ── Sort particles[0 .. num_to_sort-1] by cell index ──
+    // ── Phase A: Resize buffers (MUST be called with no kernels in flight) ──
     //
-    // Particles[num_to_sort .. nop-1] are preserved in-place via an identity
-    // copy in the scatter kernel.
+    // Ensures sort buffers and scratch can hold the current particle count.
+    // May call cudaMalloc/cudaFree — caller MUST guarantee no concurrent
+    // kernel is using these buffers.
+    __host__ void prepareBuffers(particleArrayCUDA* hostPtr, cudaStream_t s);
+
+    // ── Phase B: Enqueue sort stages 1-3 (non-blocking) ──
     //
-    // num_to_sort: number of particles to sort (must be <= hostPtr->getNOP())
-    // If num_to_sort == 0, returns immediately.
+    // Enqueues histogram, prefix sum, and sorted-indices kernels on stream s.
+    // Returns immediately (~20μs host time). Caller may overlap CPU work
+    // (e.g. MPI exchange) while the GPU processes these stages.
     //
-    // Implementation is in cellSortKernel.cu (forward-declared here).
+    // prepareBuffers() MUST have been called first.
+    __host__ void enqueueSortAsync(particleArrayCUDA* hostPtr,
+                                   const grid3DCUDA*  deviceGrid,
+                                   uint32_t           num_to_sort,
+                                   cudaStream_t       s);
+
+    // ── Phase C: Complete sort (sync + scatter + pointer swap) ──
+    //
+    // Synchronizes stream s (waits for stages 1-3), then runs stage 4
+    // (scatter per SoA array + cycling pointer swap on host).
+    // After return, SoA pointers in hostPtr->getSoA() are updated.
+    __host__ void finishSort(cudaStream_t s);
+
+    // ── Convenience: all 3 phases in sequence (backward compat) ──
     __host__ void sort(particleArrayCUDA* hostPtr,
                        const grid3DCUDA*  deviceGrid,
                        uint32_t           num_to_sort,
                        cudaStream_t       s);
+
+    // ── Accessors for the cell-aware moment kernel ──
+    __host__ const int* getCellStartOffsets() const { return buffers.cell_start_offsets; }
+    __host__ int        getNumCells()         const { return num_cells; }
 
     // ── Release GPU memory ──
     __host__ void free() {

@@ -6,6 +6,7 @@
 
 #include "iPic3D.h"
 #include "VCtopology3D.h"
+#include "dataAnalysisConfig.cuh"
 
 
 
@@ -21,6 +22,13 @@ private:
 public:
 
     dataAnalysisPipeline(iPic3D::c_Solver& KCode);
+
+    // returns true if this cycle triggers data analysis
+    static bool isAnalysisCycle(int cycle) {
+        return DAConfig::DATA_ANALYSIS_ENABLED
+            && DAConfig::DATA_ANALYSIS_EVERY_CYCLE > 0
+            && (cycle % DAConfig::DATA_ANALYSIS_EVERY_CYCLE == 0);
+    }
 
     // create the output directory
     static void createOutputDirectory(int myrank, int ns, VirtualTopology3D* vct);

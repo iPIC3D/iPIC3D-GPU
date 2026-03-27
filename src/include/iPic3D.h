@@ -98,6 +98,7 @@ namespace iPic3D {
     void processPlanetParticles();
     void injectExosphereParticles();
     void SortParticlesGPU();
+    void sortAllSpecies();
     void CalculateB(int cycle);
     void MomentsAwait();
 

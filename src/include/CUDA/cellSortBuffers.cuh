@@ -180,8 +180,9 @@ struct CellSorter {
                        uint32_t           num_to_sort,
                        cudaStream_t       s);
 
-    // ── Accessors for the cell-aware moment kernel ──
+    // ── Accessors for the cell-aware moment kernel / merging kernel ──
     __host__ const int* getCellStartOffsets() const { return buffers.cell_start_offsets; }
+    __host__ int*       getCellCounts()       const { return buffers.cell_counts; }
     __host__ int        getNumCells()         const { return num_cells; }
 
     // ── Release GPU memory ──

@@ -71,6 +71,13 @@
 #include "Adaptor.h"
 #endif
 
+// set to true to enable particle merging, false to disable. Note that the merging process is not fully optimized yet, so it might cause performance drop if enabled. Use with caution.
+constexpr bool PARTICLE_MERGING = false;
+// set to true to enable particle splitting 
+constexpr bool PARTICLE_SPLITTING = false; 
+ 
+
+
 using namespace iPic3D;
 //MPIdata* iPic3D::c_Solver::mpi=0;
 
@@ -787,7 +794,6 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   // splitting
   //std::cout << "myrank: "<<MPIdata::get_rank() <<" pclsArrayHostPtr[species]->getInitialNOP(): " << pclsArrayHostPtr[species]->getInitialNOP() <<
   //          " pclsArrayHostPtr[species]->getNOP() " << pclsArrayHostPtr[species]->getNOP() << std::endl;
-  constexpr bool PARTICLE_SPLITTING = false; // set to true to enable particle splitting
   if constexpr(PARTICLE_SPLITTING)
   {
     if(pclsArrayHostPtr[species]->getNOP() < 0.95 * pclsArrayHostPtr[species]->getInitialNOP()){
@@ -985,33 +991,26 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle)
     const auto& i = mergeIdx;
     std::cout << " Particle merging myrank: "<< MPIdata::get_rank() << " species: " << i << std::endl;
 
-    cudaErrChk(cudaStreamSynchronize(streams[i])); // wait for the D→H SoA copy
-    // sort (SoA-native — no AoS conversion)
-    particlesHost[i]->sort_particles_parallel(cellCountHostPtr, cellOffsetHostPtr);
-
-    const int totalCells = grid->getNXC() * grid->getNYC() * grid->getNZC();
-    cudaErrChk(cudaMemcpyAsync(cellCountCUDAPtr, cellCountHostPtr, totalCells*sizeof(int), cudaMemcpyDefault, streams[i]));
-    cudaErrChk(cudaMemcpyAsync(cellOffsetCUDAPtr, cellOffsetHostPtr, totalCells*sizeof(int), cudaMemcpyDefault, streams[i]));
-
-    // Direct host SoA → GPU SoA upload (no AoS intermediary)
+    // GPU cell sort — all NOP particles (merge requires cell ordering)
     const uint32_t mergeNop = pclsArrayHostPtr[i]->getNOP();
-    if (mergeNop > 0) {
-      const size_t bytes = mergeNop * sizeof(double);
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getU(), particlesHost[i]->getUall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getV(), particlesHost[i]->getVall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getW(), particlesHost[i]->getWall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getQ(), particlesHost[i]->getQall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getX(), particlesHost[i]->getXall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getY(), particlesHost[i]->getYall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getZ(), particlesHost[i]->getZall(), bytes, cudaMemcpyDefault, streams[i]));
-      cudaErrChk(cudaMemcpyAsync(pclsArrayHostPtr[i]->getT(), particlesHost[i]->getParticleIDall(), bytes, cudaMemcpyDefault, streams[i]));
-    }
+    cudaErrChk(cudaStreamSynchronize(streams[i]));  // ensure no kernels in flight
+    cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
+    cellSorters[i].enqueueSortAsync(pclsArrayHostPtr[i], grid3DCUDACUDAPtr,
+                                     mergeNop, streams[i]);
+    cellSorters[i].finishSort(streams[i]);
+    // Re-sync SoA pointers to device (sort did a pointer swap on host)
+    cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
+                                sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
 
-    // merge
-    mergingKernel<<<getGridSize(totalCells * WARP_SIZE, 256), 256, 0, streams[i]>>>(cellOffsetCUDAPtr, cellCountCUDAPtr, 
+    // Merging kernel using CellSorter's device buffers
+    const int totalCells = cellSorters[i].getNumCells();
+    mergingKernel<<<getGridSize(totalCells * WARP_SIZE, 256), 256, 0, streams[i]>>>(
+        const_cast<int*>(cellSorters[i].getCellStartOffsets()),
+        cellSorters[i].getCellCounts(),
         grid3DCUDACUDAPtr, pclsArrayCUDAPtr[i], departureArrayCUDAPtr[i]);
 
-    exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i, doMomentsInLauncher);
+    // Treat merge species as unsorted cycle: momentKernelStayed runs in launcher
+    exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i, true);
 
     toBeMerged[2 * i + 1] = 0;
     mergeIdx = -1; // merged
@@ -1486,7 +1485,6 @@ void c_Solver::MomentsAwait() {
   // synchronize
   cudaErrChk(cudaDeviceSynchronize());
 
-  constexpr bool PARTICLE_MERGING = false; // set to true to enable particle merging, false to disable. Note that the merging process is not fully optimized yet, so it might cause performance drop if enabled. Use with caution.
   if constexpr(PARTICLE_MERGING)
   {
     // check which one to merge
@@ -1509,24 +1507,8 @@ void c_Solver::MomentsAwait() {
     }
 
     if (mergeIdx >= 0 && mergeIdx < ns){
-      const auto& i = mergeIdx; 
-
-      // Ensure host SoA vectors have enough capacity
-      const uint32_t mergeNopCopy = pclsArrayHostPtr[i]->getNOP();
-      particlesHost[i]->prepareSoAForNOP(mergeNopCopy);
-
-      // Direct GPU SoA → host SoA (no AoS intermediary)
-      if (mergeNopCopy > 0) {
-        const size_t bytes = mergeNopCopy * sizeof(double);
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getUallMut(), pclsArrayHostPtr[i]->getU(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getVallMut(), pclsArrayHostPtr[i]->getV(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getWallMut(), pclsArrayHostPtr[i]->getW(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getQallMut(), pclsArrayHostPtr[i]->getQ(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getXallMut(), pclsArrayHostPtr[i]->getX(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getYallMut(), pclsArrayHostPtr[i]->getY(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getZallMut(), pclsArrayHostPtr[i]->getZ(), bytes, cudaMemcpyDefault, streams[i]));
-        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getTallMut(), pclsArrayHostPtr[i]->getT(), bytes, cudaMemcpyDefault, streams[i]));
-      }
+      // GPU sort + merge happens in ParticlesMoverMomentAsync — no D→H needed here.
+      // Just record that this species is scheduled for merging.
     }
   }
   else
@@ -1771,6 +1753,34 @@ void c_Solver::sortParticles() {
 void c_Solver::SortParticlesGPU() {
   // No-op: sorting is now performed inside MoverAwaitAndPclExchange
   // (Phases 3B–3F) using the split enqueueSortAsync/finishSort API.
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sortAllSpecies — Full GPU counting sort for ALL species.
+// Called before data-analysis cycles so that analysis kernels observe
+// particles in cell-sorted order.  This is independent of the mover's
+// sortThisCycle_ flag and can run on any cycle.
+// ────────────────────────────────────────────────────────────────────────────
+void c_Solver::sortAllSpecies() {
+  for (int i = 0; i < ns; i++) {
+    // Ensure no kernels are in flight on this species' stream
+    cudaErrChk(cudaStreamSynchronize(streams[i]));
+
+    const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
+    cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
+    cellSorters[i].enqueueSortAsync(pclsArrayHostPtr[i], grid3DCUDACUDAPtr,
+                                     nop, streams[i]);
+    cellSorters[i].finishSort(streams[i]);
+
+    // Re-sync host struct to device (SoA pointers were swapped on host)
+    cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
+                                sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
+  }
+
+  // Barrier: all species fully sorted before returning
+  for (int i = 0; i < ns; i++) {
+    cudaErrChk(cudaStreamSynchronize(streams[i]));
+  }
 }
 
 void c_Solver::pad_particle_capacities()

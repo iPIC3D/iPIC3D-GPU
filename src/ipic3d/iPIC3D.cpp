@@ -52,6 +52,11 @@ int main(int argc, char **argv) {
 
     KCode.writeParticleNum(i);
 
+    // Sort all species on GPU before data-analysis cycles
+    if (dataAnalysis::dataAnalysisPipeline::isAnalysisCycle(i)) {
+      KCode.sortAllSpecies();
+    }
+
     DA.startAnalysis(i);
     KCode.CalculateField(i); // E field
     DA.waitForAnalysis();

@@ -165,6 +165,28 @@ public:
 
     }
 
+    // Extract cell indices only (no weights), using the same clamping as
+    // get_safe_cell_and_weights.  Used by the cell sorter to guarantee that
+    // sorted-cell assignment matches the mover/moment interpolation cell.
+    __host__ __device__ void get_safe_cell(
+    cudaParticleType xpos, cudaParticleType ypos, cudaParticleType zpos,
+    int &cx, int& cy, int& cz)const
+    {
+    const cudaParticleType rel_xpos = xpos - xStart_g;
+    const cudaParticleType rel_ypos = ypos - yStart_g;
+    const cudaParticleType rel_zpos = zpos - zStart_g;
+    cudaParticleType cx_pos = rel_xpos * invdx;
+    cudaParticleType cy_pos = rel_ypos * invdy;
+    cudaParticleType cz_pos = rel_zpos * invdz;
+    if(suppress_runaway_particle_instability)
+        make_grid_position_safe(cx_pos,cy_pos,cz_pos);
+    cx = int(floor(cx_pos));
+    cy = int(floor(cy_pos));
+    cz = int(floor(cz_pos));
+    if(!suppress_runaway_particle_instability)
+        make_cell_coordinates_safe(cx,cy,cz);
+    }
+
     __host__ __device__ void get_safe_cell_and_weights(
     cudaParticleType xpos, cudaParticleType ypos, cudaParticleType zpos,
     int &cx, int& cy, int& cz,

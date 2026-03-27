@@ -13,14 +13,19 @@
 // ============================================================================
 
 #include "cellSortBuffers.cuh"
-#include <cstdio>  // fprintf for fatal prefix-sum overflow
+#include <vector>
+#include <cmath>
+#include <cstdio>
 
 // ============================================================================
 // Device helper: position → flat cell index
 // ============================================================================
 //
-// Reproduces the same cell computation as grid3DCUDA::get_safe_cell_and_weights
-// but skips the interpolation weights.
+// Delegates to grid3DCUDA::get_safe_cell() so that the cell assignment is
+// *exactly* the same as in the mover (get_safe_cell_and_weights) and moment
+// kernels.  In particular this picks up the NaN-safe floating-point clamping
+// (make_grid_position_safe) that runs before floor() when
+// suppress_runaway_particle_instability is true.
 //
 // Linearization: cx + cy * nxc + cz * nxc * nyc   (x-fastest)
 // Domain: guarded cells [0, nxc) × [0, nyc) × [0, nzc)
@@ -29,22 +34,8 @@ __device__ __forceinline__
 int compute_cell_idx(cudaPclType_X xp, cudaPclType_Y yp, cudaPclType_Z zp,
                      const grid3DCUDA* g)
 {
-    cudaParticleType cx_pos = (xp - g->xStart_g) * g->invdx;
-    cudaParticleType cy_pos = (yp - g->yStart_g) * g->invdy;
-    cudaParticleType cz_pos = (zp - g->zStart_g) * g->invdz;
-
-    int cx = int(floor(cx_pos));
-    int cy = int(floor(cy_pos));
-    int cz = int(floor(cz_pos));
-
-    // Clamp to guarded domain — matches make_cell_coordinates_safe
-    if (cx < 0)          cx = 0;
-    if (cy < 0)          cy = 0;
-    if (cz < 0)          cz = 0;
-    if (cx >= g->nxc)    cx = g->nxc - 1;
-    if (cy >= g->nyc)    cy = g->nyc - 1;
-    if (cz >= g->nzc)    cz = g->nzc - 1;
-
+    int cx, cy, cz;
+    g->get_safe_cell(xp, yp, zp, cx, cy, cz);
     return cx + cy * g->nxc + cz * g->nxc * g->nyc;
 }
 
@@ -471,9 +462,36 @@ __host__ void CellSorter::sort(
 
     // Ensure buffers are large enough
     buffers.ensure_capacity(nop, s);
-    scratch.ensure_capacity(nop * sizeof(double));
+    // Use capacity (not nop) because after the pointer-swap cycle scratch.ptr
+    // becomes one of the SoA field buffers.  All SoA fields must be able to
+    // hold up to soa.capacity elements so that future particle additions
+    // (MPI exchange, injection) don't overflow the swapped-in buffer.
+    const uint32_t cap = hostPtr->getCapacity();
+    scratch.ensure_capacity(cap * sizeof(double));
 
     ParticleSoADevice* soa = hostPtr->getSoA();
+
+    // ══════ DEBUG VALIDATION (compile-time toggle) ══════
+    // Set to true to enable per-stage stream syncs + host-side validation.
+    // WARNING: adds 4 extra cudaStreamSynchronize barriers — use only for debugging.
+    constexpr bool SORT_DEBUG = false;
+
+    double pre_sum_x = 0.0;
+    if constexpr (SORT_DEBUG) {
+        // Sync stream so we can safely read device data
+        cudaErrChk(cudaStreamSynchronize(s));
+        // Sum of x positions before sort (partial: first min(nop,256) particles)
+        const int ncheck = (nop < 256u) ? nop : 256;
+        std::vector<double> hx(ncheck);
+        cudaErrChk(cudaMemcpy(hx.data(), soa->x, ncheck * sizeof(double), cudaMemcpyDefault));
+        for (int k = 0; k < ncheck; k++) pre_sum_x += hx[k];
+        printf("[SORT_DEBUG] nop=%u  num_to_sort=%u  num_cells=%d  cap=%u\n",
+               nop, num_to_sort, num_cells, cap);
+        printf("[SORT_DEBUG] SoA ptrs: u=%p v=%p w=%p q=%p x=%p y=%p z=%p t=%p  scratch=%p\n",
+               (void*)soa->u, (void*)soa->v, (void*)soa->w, (void*)soa->q,
+               (void*)soa->x, (void*)soa->y, (void*)soa->z, (void*)soa->t,
+               scratch.ptr);
+    }
 
     // ── Stage 1: Histogram ──
     buffers.zero_async(s);
@@ -481,10 +499,55 @@ __host__ void CellSorter::sort(
         soa->x, soa->y, soa->z,
         buffers.cell_counts, deviceGrid, num_cells, num_to_sort, s);
 
-    // ── Stage 2: Prefix sum ──
+    if constexpr (SORT_DEBUG) {
+        cudaErrChk(cudaStreamSynchronize(s));
+        cudaErrChk(cudaPeekAtLastError());
+        // Verify histogram sums to num_to_sort
+        std::vector<int> h_counts(num_cells);
+        cudaErrChk(cudaMemcpy(h_counts.data(), buffers.cell_counts,
+                              num_cells * sizeof(int), cudaMemcpyDefault));
+        long long histsum = 0;
+        int negcount = 0;
+        for (int k = 0; k < num_cells; k++) {
+            histsum += h_counts[k];
+            if (h_counts[k] < 0) negcount++;
+        }
+        if (histsum != (long long)num_to_sort || negcount > 0)
+            printf("[SORT_DEBUG] HISTOGRAM BUG: sum(cell_counts)=%lld  expected=%u  neg=%d\n",
+                   histsum, num_to_sort, negcount);
+        else
+            printf("[SORT_DEBUG] Histogram OK: sum=%lld\n", histsum);
+    }
+
+    // ── Stage 2: Prefix sum (Blelloch scan) ──
     launch_cell_sort_prefix_sum(
         buffers.cell_offsets, buffers.cell_counts,
-        buffers.block_sums, num_cells, s);
+        buffers.block_sums,
+        num_cells, s);
+
+    if constexpr (SORT_DEBUG) {
+        cudaErrChk(cudaStreamSynchronize(s));
+        cudaErrChk(cudaPeekAtLastError());
+        // Verify prefix sum: offsets[0]==0, offsets[last]+counts[last]==num_to_sort
+        std::vector<int> h_offsets(num_cells);
+        std::vector<int> h_counts(num_cells);
+        cudaErrChk(cudaMemcpy(h_offsets.data(), buffers.cell_offsets,
+                              num_cells * sizeof(int), cudaMemcpyDefault));
+        cudaErrChk(cudaMemcpy(h_counts.data(), buffers.cell_counts,
+                              num_cells * sizeof(int), cudaMemcpyDefault));
+        bool ps_ok = (h_offsets[0] == 0) &&
+                     (h_offsets[num_cells-1] + h_counts[num_cells-1] == (int)num_to_sort);
+        // Check monotonicity
+        bool mono = true;
+        for (int k = 1; k < num_cells; k++) {
+            if (h_offsets[k] < h_offsets[k-1]) { mono = false; break; }
+        }
+        if (!ps_ok || !mono)
+            printf("[SORT_DEBUG] PREFIX SUM BUG: offsets[0]=%d  last_offset+last_count=%d  expected=%u  mono=%d\n",
+                   h_offsets[0], h_offsets[num_cells-1] + h_counts[num_cells-1], num_to_sort, mono);
+        else
+            printf("[SORT_DEBUG] Prefix sum OK\n");
+    }
 
     // Preserve prefix sum
     cudaErrChk(cudaMemcpyAsync(
@@ -496,34 +559,88 @@ __host__ void CellSorter::sort(
         buffers.sorted_indices, buffers.cell_offsets,
         soa->x, soa->y, soa->z, deviceGrid, num_to_sort, s);
 
+    if constexpr (SORT_DEBUG) {
+        cudaErrChk(cudaStreamSynchronize(s));
+        cudaErrChk(cudaPeekAtLastError());
+        // Verify sorted_indices: all in [0, nop), no duplicates (via seen-bitmap)
+        std::vector<unsigned int> h_idx(num_to_sort);
+        cudaErrChk(cudaMemcpy(h_idx.data(), buffers.sorted_indices,
+                              num_to_sort * sizeof(unsigned int), cudaMemcpyDefault));
+        int oob = 0;
+        unsigned int maxidx = 0;
+        std::vector<uint8_t> seen(nop, 0);
+        int dups = 0;
+        for (uint32_t k = 0; k < num_to_sort; k++) {
+            unsigned int v = h_idx[k];
+            if (v >= nop) { oob++; }
+            else {
+                if (seen[v]) dups++;
+                seen[v] = 1;
+            }
+            if (v > maxidx) maxidx = v;
+        }
+        if (oob > 0 || dups > 0)
+            printf("[SORT_DEBUG] SORTED_INDICES BUG: oob=%d dups=%d maxidx=%u nop=%u\n",
+                   oob, dups, maxidx, nop);
+        else
+            printf("[SORT_DEBUG] Sorted indices OK: max=%u\n", maxidx);
+    }
+
     // ── Stage 4: Sequential scatter-and-swap for all 8 SoA arrays ──
     //
     // scatter_and_swap: scatter field into scratch, then exchange pointers.
     // Stream ordering guarantees the scatter completes before the next kernel
     // reads from the (now-swapped) scratch allocation.
     //
+    // ── Required barrier ──
+    // The SCATTER_AND_SWAP below modifies host-pinned memory (soa->u, etc.)
+    // that a prior cudaMemcpyAsync H2D (e.g. the struct sync in
+    // MoverAwaitAndPclExchange) may still be reading via DMA.  Stream
+    // ordering only sequences GPU-side execution; the host is free to race
+    // ahead.  This single sync ensures all prior DMA reads from the host
+    // struct have completed before we mutate the SoA pointer fields.
+    cudaErrChk(cudaStreamSynchronize(s));
+
     const unsigned int* idx = buffers.sorted_indices;
 
-    // Lambda-like macro to avoid repeating the pattern 8 times.
-    // We scatter src → scratch, then std::swap the two pointers.
-    #define SCATTER_AND_SWAP(field_ptr)                                      \
-    do {                                                                      \
-        using FT = std::remove_pointer_t<decltype(field_ptr)>;                \
-        launch_cell_sort_scatter_partial<FT>(                                 \
-            scratch.as<FT>(), field_ptr, idx, num_to_sort, nop, s);           \
-        FT* tmp = scratch.as<FT>();                                           \
-        scratch.ptr = static_cast<void*>(field_ptr);                          \
-        field_ptr = tmp;                                                      \
-    } while (0)
+    // Scatter field_ptr → scratch, then swap the two pointers so that
+    // scratch now points to the old (unsorted) allocation and field_ptr
+    // points to the freshly-sorted data.
+    auto scatter_and_swap = [&](auto*& field_ptr) {
+        using FT = std::remove_pointer_t<std::remove_reference_t<decltype(*field_ptr)>>;
+        launch_cell_sort_scatter_partial<FT>(static_cast<FT*>(scratch.ptr), field_ptr, idx, num_to_sort, nop, s);
+        // Exchange: field_ptr <- scratch (sorted), scratch <- field_ptr (old)
+        field_ptr = static_cast<FT*>(std::exchange(scratch.ptr, static_cast<void*>(field_ptr)));
+    };
 
-    SCATTER_AND_SWAP(soa->u);
-    SCATTER_AND_SWAP(soa->v);
-    SCATTER_AND_SWAP(soa->w);
-    SCATTER_AND_SWAP(soa->q);
-    SCATTER_AND_SWAP(soa->x);
-    SCATTER_AND_SWAP(soa->y);
-    SCATTER_AND_SWAP(soa->z);
-    SCATTER_AND_SWAP(soa->t);
+    scatter_and_swap(soa->u);
+    scatter_and_swap(soa->v);
+    scatter_and_swap(soa->w);
+    scatter_and_swap(soa->q);
+    scatter_and_swap(soa->x);
+    scatter_and_swap(soa->y);
+    scatter_and_swap(soa->z);
+    scatter_and_swap(soa->t);
 
-    #undef SCATTER_AND_SWAP
+    if constexpr (SORT_DEBUG) {
+        cudaErrChk(cudaStreamSynchronize(s));
+        cudaErrChk(cudaPeekAtLastError());
+        // Verify x positions after sort: same partial sum
+        const int ncheck = (nop < 256u) ? nop : 256;
+        std::vector<double> hx(ncheck);
+        cudaErrChk(cudaMemcpy(hx.data(), soa->x, ncheck * sizeof(double), cudaMemcpyDefault));
+        double post_sum_x = 0.0;
+        for (int k = 0; k < ncheck; k++) post_sum_x += hx[k];
+        // After sort, the first 256 particles are in different cells, so partial sum WILL differ.
+        // But we can check for NaN or unreasonable values.
+        int nan_count = 0;
+        for (int k = 0; k < ncheck; k++)
+            if (std::isnan(hx[k]) || std::isinf(hx[k])) nan_count++;
+        printf("[SORT_DEBUG] Post-sort x[0..%d]: pre_partial_sum=%.6e  post_partial_sum=%.6e  NaN/Inf=%d\n",
+               ncheck-1, pre_sum_x, post_sum_x, nan_count);
+        printf("[SORT_DEBUG] Post-sort SoA ptrs: u=%p v=%p w=%p q=%p x=%p y=%p z=%p t=%p  scratch=%p\n",
+               (void*)soa->u, (void*)soa->v, (void*)soa->w, (void*)soa->q,
+               (void*)soa->x, (void*)soa->y, (void*)soa->z, (void*)soa->t,
+               scratch.ptr);
+    }
 }

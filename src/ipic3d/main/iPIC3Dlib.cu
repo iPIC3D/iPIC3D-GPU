@@ -1675,10 +1675,6 @@ void c_Solver::SortParticlesGPU() {
                                 sizeof(particleArrayCUDA),
                                 cudaMemcpyDefault, streams[i]));
   }
-
-  // Wait for all species to finish before proceeding
-  for (int i = 0; i < ns; i++)
-    cudaErrChk(cudaStreamSynchronize(streams[i]));
 }
 
 void c_Solver::pad_particle_capacities()

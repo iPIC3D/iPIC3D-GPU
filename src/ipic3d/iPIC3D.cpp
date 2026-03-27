@@ -66,6 +66,7 @@ int main(int argc, char **argv) {
     auto t_exchange = std::chrono::high_resolution_clock::now();
 
     KCode.SortParticlesGPU();
+
     auto t_sort = std::chrono::high_resolution_clock::now();
 
     KCode.CalculateB(i); 

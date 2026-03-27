@@ -136,19 +136,27 @@ public:
         uint32_t newCap = roundUpSoA(targetSize);
         uint32_t nop = soa.nop;
 
-        auto expandField = [&](auto*& field) {
-            using FT = std::remove_pointer_t<std::decay_t<decltype(field)>>;
-            FT* newPtr = nullptr;
-            cudaErrChk(cudaMalloc(&newPtr, newCap * sizeof(FT)));
+        // Batch 2 fields at a time: malloc pair -> enqueue both copies -> sync -> free old pair -> repeat for next pair.
+        // Peak overhead = 2 extra field buffers
+        auto expandPair = [&](auto*& fieldA, auto*& fieldB) {
+            using FA = std::remove_pointer_t<std::decay_t<decltype(fieldA)>>;
+            using FB = std::remove_pointer_t<std::decay_t<decltype(fieldB)>>;
+            FA* newA = nullptr;
+            FB* newB = nullptr;
+            cudaErrChk(cudaMalloc(&newA, newCap * sizeof(FA)));
+            cudaErrChk(cudaMalloc(&newB, newCap * sizeof(FB)));
             if (nop > 0) {
-                cudaErrChk(cudaMemcpyAsync(newPtr, field, nop * sizeof(FT), cudaMemcpyDefault, deviceStream));
+                cudaErrChk(cudaMemcpyAsync(newA, fieldA, nop * sizeof(FA), cudaMemcpyDefault, deviceStream));
+                cudaErrChk(cudaMemcpyAsync(newB, fieldB, nop * sizeof(FB), cudaMemcpyDefault, deviceStream));
             }
             cudaErrChk(cudaStreamSynchronize(deviceStream));
-            cudaFree(field);
-            field = newPtr;
+            cudaFree(fieldA); fieldA = newA;
+            cudaFree(fieldB); fieldB = newB;
         };
-        expandField(soa.u); expandField(soa.v); expandField(soa.w); expandField(soa.q);
-        expandField(soa.x); expandField(soa.y); expandField(soa.z); expandField(soa.t);
+        expandPair(soa.u, soa.v);   // group 1: u, v
+        expandPair(soa.w, soa.q);   // group 2: w, q
+        expandPair(soa.x, soa.y);   // group 3: x, y
+        expandPair(soa.z, soa.t);   // group 4: z, t
 
         soa.capacity = newCap;
         return soa.capacity;

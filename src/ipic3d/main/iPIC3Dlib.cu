@@ -486,6 +486,8 @@ int c_Solver::initCUDA(){
   cudaErrChk(cudaMalloc(&cellOffsetCUDAPtr, sizeof(int) * grid->getNXC() * grid->getNYC() * grid->getNZC()));
 
   // ── Cell sorter (counting sort) per species ──
+  sortingCycle_ = col->getSortingCycle();
+  sortThisCycle_ = false;
   cellSorters = new CellSorter[ns];
   for (int i = 0; i < ns; i++) {
     cellSorters[i].init(*grid3DCUDAHostPtr,
@@ -770,7 +772,7 @@ void c_Solver::CalculateField(int cycle) {
 /*  -------------- */
 /*!  Particle mover */
 /*  -------------- */
-int c_Solver::cudaLauncherAsync(const int species){
+int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLauncher){
   cudaSetDevice(cudaDeviceOnNode); // a must on multi-device node
 #if ENABLE_SOA_TIMING
   auto _tL0 = std::chrono::high_resolution_clock::now();
@@ -825,8 +827,15 @@ int c_Solver::cudaLauncherAsync(const int species){
     moverKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
   
   cudaErrChk(cudaEventRecord(event1, streams[species]));
-  // NOTE: momentKernelStayed REMOVED — moments are now computed after sorting
-  // in MoverAwaitAndPclExchange via cellAwareMomentKernel.
+  // Unsorted pipeline: compute moments for stayed particles right after mover
+  // (overlaps with hashedSum D2H + exitingKernel on streams[species+ns]).
+  // Sorted pipeline: moments deferred to MoverAwaitAndPclExchange after sort.
+  if (doMomentsInLauncher) {
+    const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
+    cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[species], 0, gridSize*10*sizeof(cudaMomentType), streams[species]));
+    momentKernelStayed<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(
+        &(moverParamCUDAPtr[species]->appendCountAtomic), momentParamCUDAPtr[species], grid3DCUDACUDAPtr, momentsCUDAPtr[species]);
+  }
 
   // Copy 8 hashedSums to host: 6 directions + delete + planet (XLOW..PLANET)
   cudaErrChk(cudaStreamWaitEvent(streams[species+ns], event1, 0));
@@ -942,11 +951,18 @@ int c_Solver::cudaLauncherAsync(const int species){
   return hole; // Number of exiting + deleted + planet particles
 }
 
-bool c_Solver::ParticlesMoverMomentAsync()
+bool c_Solver::ParticlesMoverMomentAsync(int cycle)
 {
   // move all species of particles
   
   timeTasks_set_main_task(TimeTasks::PARTICLES);
+
+  // Decide whether to sort this cycle
+  sortThisCycle_ = (sortingCycle_ > 0) && (cycle % sortingCycle_ == 0);
+  const bool doMomentsInLauncher = !sortThisCycle_;
+  if (MPIdata::get_rank() == 0)
+    printf("  [Cycle %d] Particle sorting: %s\n", cycle, sortThisCycle_ ? "ON" : "OFF");
+
   // Should change this to add background field
   //EMf->set_fieldForPcls();
   EMf->set_fieldForPclsToCenter(fieldForPclHostPtr);
@@ -959,7 +975,7 @@ bool c_Solver::ParticlesMoverMomentAsync()
 
   for(int i=0; i<ns; i++){
     if (i != mergeIdx){
-      exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i);
+      exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i, doMomentsInLauncher);
       toBeMerged[2 * i + 1] +=1;
     }
   }
@@ -995,7 +1011,7 @@ bool c_Solver::ParticlesMoverMomentAsync()
     mergingKernel<<<getGridSize(totalCells * WARP_SIZE, 256), 256, 0, streams[i]>>>(cellOffsetCUDAPtr, cellCountCUDAPtr, 
         grid3DCUDACUDAPtr, pclsArrayCUDAPtr[i], departureArrayCUDAPtr[i]);
 
-    exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i);
+    exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i, doMomentsInLauncher);
 
     toBeMerged[2 * i + 1] = 0;
     mergeIdx = -1; // merged
@@ -1193,7 +1209,7 @@ void c_Solver::processPlanetParticles()
 #endif
 }
 
-bool c_Solver::MoverAwaitAndPclExchange()
+bool c_Solver::MoverAwaitAndPclExchange(int cycle)
 {
 #if ENABLE_SOA_TIMING
   auto _t0 = std::chrono::high_resolution_clock::now();
@@ -1233,26 +1249,34 @@ bool c_Solver::MoverAwaitAndPclExchange()
   //  Phase 3B: Sync all streams → update NOP → prepare sort buffers
   //  SAFE: after this sync, no GPU kernels are in flight for any species.
   //  We can safely resize sort buffers (which may cudaMalloc/cudaFree).
+  //  SORTED PIPELINE ONLY — unsorted pipeline skips sorting entirely.
   // ═══════════════════════════════════════════════════════════════════════
-  for (int i = 0; i < ns; i++) {
-    // Update host NOP to stayed count (compacted prefix only)
-    pclsArrayHostPtr[i]->setNOE(stayedParticle[i]);
-    // Sync stream to ensure mover+compaction kernels have completed
-    cudaErrChk(cudaStreamSynchronize(streams[i]));
-    // Resize sort buffers if needed (may cudaMalloc/cudaFree — safe: no kernels)
-    cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
-  }
+  if (sortThisCycle_) {
+    for (int i = 0; i < ns; i++) {
+      // Update host NOP to stayed count (compacted prefix only)
+      pclsArrayHostPtr[i]->setNOE(stayedParticle[i]);
+      // Sync stream to ensure mover+compaction kernels have completed
+      cudaErrChk(cudaStreamSynchronize(streams[i]));
+      // Resize sort buffers if needed (may cudaMalloc/cudaFree — safe: no kernels)
+      cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
+    }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 3C: Enqueue sort stages 1-3 for all species (non-blocking)
-  //  GPU processes histogram + prefix sum + sorted indices while CPU
-  //  proceeds to MPI exchange below.
-  // ═══════════════════════════════════════════════════════════════════════
-  for (int i = 0; i < ns; i++) {
-    cellSorters[i].enqueueSortAsync(pclsArrayHostPtr[i],
-                                     grid3DCUDACUDAPtr,
-                                     stayedParticle[i],  // sort only stayed prefix
-                                     streams[i]);
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Phase 3C: Enqueue sort stages 1-3 for all species (non-blocking)
+    //  GPU processes histogram + prefix sum + sorted indices while CPU
+    //  proceeds to MPI exchange below.
+    // ═══════════════════════════════════════════════════════════════════════
+    for (int i = 0; i < ns; i++) {
+      cellSorters[i].enqueueSortAsync(pclsArrayHostPtr[i],
+                                       grid3DCUDACUDAPtr,
+                                       stayedParticle[i],  // sort only stayed prefix
+                                       streams[i]);
+    }
+  } else {
+    // Unsorted pipeline: just update NOP (no sort prep needed)
+    for (int i = 0; i < ns; i++) {
+      pclsArrayHostPtr[i]->setNOE(stayedParticle[i]);
+    }
   }
 #if ENABLE_SOA_TIMING
   auto _t2b = std::chrono::high_resolution_clock::now();
@@ -1304,21 +1328,30 @@ bool c_Solver::MoverAwaitAndPclExchange()
   // ═══════════════════════════════════════════════════════════════════════
   //  Phase 3E: Finish sort (sync + stage 4 scatter/swap) for all species
   //  After this, SoA pointers in hostPtr are updated (sorted data).
+  //  SORTED PIPELINE ONLY.
   // ═══════════════════════════════════════════════════════════════════════
-  for (int i = 0; i < ns; i++) {
-    cellSorters[i].finishSort(streams[i]);
-    // Re-sync host struct to device (SoA pointers were swapped on host)
-    cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
-                                sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
-  }
+  if (sortThisCycle_) {
+    for (int i = 0; i < ns; i++) {
+      cellSorters[i].finishSort(streams[i]);
+      // Re-sync host struct to device (SoA pointers were swapped on host)
+      cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
+                                  sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
+    }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 3F: Sync all streams — ensures stage 4 scatter is FULLY done
-  //  SAFE: after this, no GPU kernels are running. We can expand() safely
-  //  (which does cudaMalloc + cudaMemcpy + cudaFree on SoA buffers).
-  // ═══════════════════════════════════════════════════════════════════════
-  for (int i = 0; i < ns; i++) {
-    cudaErrChk(cudaStreamSynchronize(streams[i]));
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Phase 3F: Sync all streams — ensures stage 4 scatter is FULLY done
+    //  SAFE: after this, no GPU kernels are running. We can expand() safely
+    //  (which does cudaMalloc + cudaMemcpy + cudaFree on SoA buffers).
+    // ═══════════════════════════════════════════════════════════════════════
+    for (int i = 0; i < ns; i++) {
+      cudaErrChk(cudaStreamSynchronize(streams[i]));
+    }
+  } else {
+    // Unsorted pipeline: sync all streams so mover+compaction kernels finish
+    // before we expand() or launch momentKernelNew below.
+    for (int i = 0; i < ns; i++) {
+      cudaErrChk(cudaStreamSynchronize(streams[i]));
+    }
   }
 #if ENABLE_SOA_TIMING
   auto _t4b = std::chrono::high_resolution_clock::now();
@@ -1368,30 +1401,38 @@ bool c_Solver::MoverAwaitAndPclExchange()
           incomingStagingHostPtr[i]->getArray(),
           pclsArrayCUDAPtr[i], (uint32_t)stayedParticle[i], (uint32_t)incomingCount);
 
-    // ── Zero moments array ──
-    cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[i], 0,
-                                momentGridSize * 10 * sizeof(cudaMomentType), streams[i]));
+    // ── Moments: sorted vs unsorted pipeline ──
+    if (sortThisCycle_) {
+      // SORTED: zero moments, then cell-aware kernel for sorted prefix + flat kernel for tail
+      cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[i], 0,
+                                  momentGridSize * 10 * sizeof(cudaMomentType), streams[i]));
 
-    // ── Cell-aware moment kernel for sorted prefix [0, stayedParticle[i]) ──
-    const uint32_t numSorted = stayedParticle[i];
-    if (numSorted > 0) {
-      const int numCells = cellSorters[i].getNumCells();
-      const int warps = numCells;
-      const int threads = warps * 32;
-      cellAwareMomentKernel<<<getGridSize(threads, 256), 256, 0, streams[i]>>>(
-          cellSorters[i].getCellStartOffsets(),
-          numCells,
-          numSorted,
-          pclsArrayCUDAPtr[i],
-          grid3DCUDACUDAPtr,
-          momentsCUDAPtr[i]);
+      const uint32_t numSorted = stayedParticle[i];
+      if (numSorted > 0) {
+        const int numCells = cellSorters[i].getNumCells();
+        const int warps = numCells;
+        const int threads = warps * 32;
+        cellAwareMomentKernel<<<getGridSize(threads, 256), 256, 0, streams[i]>>>(
+            cellSorters[i].getCellStartOffsets(),
+            numCells,
+            numSorted,
+            pclsArrayCUDAPtr[i],
+            grid3DCUDACUDAPtr,
+            momentsCUDAPtr[i]);
+      }
+
+      const int tailCount = newPclNum - stayedParticle[i];
+      if (tailCount > 0)
+        momentKernelNew<<<getGridSize(tailCount, 128), 128, 0, streams[i]>>>(
+            momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
+    } else {
+      // UNSORTED: momentKernelStayed already ran in cudaLauncherAsync (covered [0, stayed)).
+      // Only need momentKernelNew for the incoming tail [stayed, newPclNum).
+      const int tailCount = newPclNum - stayedParticle[i];
+      if (tailCount > 0)
+        momentKernelNew<<<getGridSize(tailCount, 128), 128, 0, streams[i]>>>(
+            momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
     }
-
-    // ── Flat moment kernel for unsorted tail [stayedParticle[i], newPclNum) ──
-    const int tailCount = newPclNum - stayedParticle[i];
-    if (tailCount > 0)
-      momentKernelNew<<<getGridSize(tailCount, 128), 128, 0, streams[i]>>>(
-          momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
 
     // ── Reset hashedSum + departureArray ──
     for (int j = 0; j < departureArrayElementType::HASHED_SUM_NUM; j++)

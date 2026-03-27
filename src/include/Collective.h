@@ -208,6 +208,7 @@ class Collective
     int getTestParticlesOutputCycle()const{ return (TestParticlesOutputCycle); }
     int getRestartOutputCycle()const{ return (RestartOutputCycle); }
     int getDiagnosticsOutputCycle()const{ return (DiagnosticsOutputCycle); }
+    int getSortingCycle()const{ return (SortingCycle); }
     bool getCallFinalize()const{ return (CallFinalize); }
     bool particle_output_is_off()const;
     bool testparticle_output_is_off()const;
@@ -369,6 +370,8 @@ class Collective
     int PoissonCorrectionCycle;
     string divBCorrection;
     int divBCorrectionCycle;
+    /*! Sort particles every SortingCycle cycles (0=disabled) */
+    int SortingCycle;
     /*! TrackParticleID */
     //bool *TrackParticleID;
     /*! SaveDirName */

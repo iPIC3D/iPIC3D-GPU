@@ -92,9 +92,9 @@ namespace iPic3D {
     
     void CalculateMoments();
     void CalculateField(int cycle);
-    int cudaLauncherAsync(int species);
-    bool ParticlesMoverMomentAsync();
-    bool MoverAwaitAndPclExchange();
+    int cudaLauncherAsync(int species, bool doMomentsInLauncher);
+    bool ParticlesMoverMomentAsync(int cycle);
+    bool MoverAwaitAndPclExchange(int cycle);
     void processPlanetParticles();
     void injectExosphereParticles();
     void SortParticlesGPU();
@@ -172,6 +172,9 @@ namespace iPic3D {
     int* cellOffsetHostPtr;
 
     CellSorter* cellSorters;  // per-species GPU cell sorter (counting sort)
+
+    int  sortingCycle_;    // cached from col->getSortingCycle() (0=disabled)
+    bool sortThisCycle_;   // true when this cycle uses the sorted pipeline
     
 	//! CUDA pointers of objects, have been copied to device
     particleArrayCUDA**   pclsArrayCUDAPtr;           // array of pointer, point to pclsArray on device

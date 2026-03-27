@@ -191,6 +191,7 @@ void Collective::ReadInput(string inputfile) {
     testPartFlushCycle = config.read < int >("TestParticlesOutputCycle",10);
     RestartOutputCycle = config.read < int >("RestartOutputCycle",5000);
     DiagnosticsOutputCycle = config.read < int >("DiagnosticsOutputCycle", FieldOutputCycle);
+    SortingCycle = config.read < int >("SortingCycle", 0);
     ParaviewScriptPath     =   config.read <string>("ParaviewScriptPath", "");
     CallFinalize = config.read < bool >("CallFinalize", true);
   }

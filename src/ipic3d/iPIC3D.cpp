@@ -57,12 +57,12 @@ int main(int argc, char **argv) {
     DA.waitForAnalysis();
     auto t_field = std::chrono::high_resolution_clock::now();
 
-    KCode.ParticlesMoverMomentAsync(); // launch Mover kernels (moments computed post-sort)
+    KCode.ParticlesMoverMomentAsync(i); // launch Mover kernels (moments computed post-sort)
     // some spare CPU cycles
     KCode.WriteOutput(i);
     auto t_mover = std::chrono::high_resolution_clock::now();
 
-    KCode.MoverAwaitAndPclExchange(); // includes sort + moments
+    KCode.MoverAwaitAndPclExchange(i); // includes sort + moments
     auto t_exchange = std::chrono::high_resolution_clock::now();
 
     KCode.CalculateB(i); 

@@ -18,7 +18,7 @@ if(NOT HIP_ON) # CUDA
 
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
 
-elseif() # HIP
+else() # HIP
   find_package(HIP REQUIRED)
   enable_language(HIP)
   message(STATUS "Using HIP environment.")

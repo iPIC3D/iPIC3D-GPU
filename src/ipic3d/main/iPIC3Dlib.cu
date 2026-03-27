@@ -1410,7 +1410,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
       if (numSorted > 0) {
         const int numCells = cellSorters[i].getNumCells();
         const int warps = numCells;
-        const int threads = warps * 32;
+        const int threads = warps * WARP_SIZE;
         cellAwareMomentKernel<<<getGridSize(threads, 256), 256, 0, streams[i]>>>(
             cellSorters[i].getCellStartOffsets(),
             numCells,

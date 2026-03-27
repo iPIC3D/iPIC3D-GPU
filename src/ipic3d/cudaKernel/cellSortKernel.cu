@@ -47,21 +47,21 @@ int compute_cell_idx(cudaPclType_X xp, cudaPclType_Y yp, cudaPclType_Z zp,
 // Uses ballot + shfl to aggregate threads with the same cell index,
 // so only one atomicAdd per unique value per warp.
 //
-static constexpr int SORT_WARP_SIZE = 32;
+// Note: WARP_SIZE and warp_mask_t are defined in cudaTypeDef.cuh for portability.
 
 __device__ __forceinline__
 void warp_aggregated_atomic_inc(int* histogram, int cell)
 {
-    const unsigned int active = __activemask();
-    const int lane = threadIdx.x & (SORT_WARP_SIZE - 1);
-    unsigned int remaining = active;
+    const warp_mask_t active = __activemask();
+    const int lane = threadIdx.x & (WARP_SIZE - 1);
+    warp_mask_t remaining = active;
 
     while (remaining != 0) {
         int leader = __ffs(remaining) - 1;
         int leader_cell = __shfl_sync(active, cell, leader);
-        unsigned int match = __ballot_sync(active, cell == leader_cell) & remaining;
+        warp_mask_t match = __ballot_sync(active, cell == leader_cell) & remaining;
         if (lane == leader) {
-            atomicAdd(&histogram[leader_cell], __popc(match));
+            atomicAdd(&histogram[leader_cell], warp_popcount(match));
         }
         remaining &= ~match;
     }
@@ -241,13 +241,12 @@ __global__ void cell_sort_prefix_sum_phase1_kernel(
 
     // Block total via warp reduction
     int local_sum = val1 + val2;
-    for (int off = SORT_WARP_SIZE / 2; off > 0; off >>= 1)
-        local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, off);
+    local_sum = warp_reduce_sum(local_sum);
 
-    constexpr int num_warps = SORT_SCAN_BLOCK_SIZE / SORT_WARP_SIZE;
+    constexpr int num_warps = SORT_SCAN_BLOCK_SIZE / WARP_SIZE;
     __shared__ int warp_sums[num_warps];
-    int warp_id = tid / SORT_WARP_SIZE;
-    int lane    = tid & (SORT_WARP_SIZE - 1);
+    int warp_id = tid / WARP_SIZE;
+    int lane    = tid & (WARP_SIZE - 1);
     if (lane == 0) warp_sums[warp_id] = local_sum;
     __syncthreads();
 
@@ -255,7 +254,7 @@ __global__ void cell_sort_prefix_sum_phase1_kernel(
     if (tid < num_warps) {
         local_sum = warp_sums[tid];
         for (int off = num_warps / 2; off > 0; off >>= 1)
-            local_sum += __shfl_down_sync((1u << num_warps) - 1, local_sum, off);
+            local_sum += __shfl_down_sync(static_cast<warp_mask_t>((1ull << num_warps) - 1), local_sum, off);
         if (tid == 0) block_total = local_sum;
     }
     __syncthreads();

@@ -260,7 +260,7 @@ __global__ void momentKernelNew(momentParameter* momentParam,
 // single atomicAdd per (moment, node) pair — 80 atomicAdds per CELL instead
 // of 80 per particle.
 //
-// Launch: <<<(num_cells * 32 + blockDim - 1) / blockDim, blockDim>>>
+// Launch: <<<(num_cells * WARP_SIZE + blockDim - 1) / blockDim, blockDim>>>
 //
 __global__ void cellAwareMomentKernel(
     const int*                    __restrict__ cell_start_offsets,
@@ -270,10 +270,9 @@ __global__ void cellAwareMomentKernel(
     grid3DCUDA*                   grid,
     cudaTypeArray1<cudaMomentType> moments)
 {
-    constexpr int WARP_SZ = 32;
     const int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const int warp_id    = global_tid / WARP_SZ;   // one warp per cell
-    const int lane       = global_tid & (WARP_SZ - 1);
+    const int warp_id    = global_tid / WARP_SIZE;   // one warp per cell
+    const int lane       = global_tid & (WARP_SIZE - 1);
 
     if (warp_id >= num_cells) return;
 
@@ -342,7 +341,7 @@ __global__ void cellAwareMomentKernel(
     const commonType* __restrict__ pq = pclsArray->getQ();
 
     // ── Process particles in warp-sized batches ──
-    for (int batch = 0; batch < cell_count; batch += WARP_SZ) {
+    for (int batch = 0; batch < cell_count; batch += WARP_SIZE) {
         const int local_idx = batch + lane;
         const bool active = local_idx < cell_count;
         const int pidx = cell_begin + local_idx;
@@ -406,12 +405,7 @@ __global__ void cellAwareMomentKernel(
         for (int m = 0; m < 10; m++) {
             for (int c = 0; c < 8; c++) {
                 commonType val = vm[m] * wt[c];
-                // 5-step warp reduction
-                val += __shfl_down_sync(0xFFFFFFFF, val, 16);
-                val += __shfl_down_sync(0xFFFFFFFF, val, 8);
-                val += __shfl_down_sync(0xFFFFFFFF, val, 4);
-                val += __shfl_down_sync(0xFFFFFFFF, val, 2);
-                val += __shfl_down_sync(0xFFFFFFFF, val, 1);
+                val = warp_reduce_sum(val);
                 if (lane == 0)
                     atomicAdd(&moments[oneDensity * m + posIndex[c]], val);
             }

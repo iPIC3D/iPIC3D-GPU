@@ -77,9 +77,14 @@
 #define cudaLaunchKernel hipLaunchKernelGGL
 
 
+// Memory Info
+#define cudaMemGetInfo hipMemGetInfo
+
 // warp primitive
 #define __shfl_down_sync(x, y, z) __shfl_down(y, z)
 #define __shfl_sync(x, y, z) __shfl(y, z)
+#define __ballot_sync(mask, predicate) __ballot(predicate)
+#define __activemask() __ballot(1)
 
 
 

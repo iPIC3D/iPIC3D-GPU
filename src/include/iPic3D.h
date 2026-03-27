@@ -55,6 +55,22 @@ class IOManager;   // modular I/O manager (see IOManager.h)
 
 namespace iPic3D {
   class c_Solver;
+
+  // Simulation case types — resolved once from the input-file string in Init()
+  enum class CaseType {
+    GEMnoPert,
+    ForceFree,
+    GEM,
+    GEMDoubleHarris,
+    BATSRUS,
+    Dipole,
+    Dipole2D,
+    NullPoints,
+    TaylorGreen,
+    HumpPert,
+    RandomCase,
+    Default         // unknown string → default initialisation
+  };
 }
 
 namespace dataAnalysis {
@@ -97,7 +113,6 @@ namespace iPic3D {
     bool MoverAwaitAndPclExchange(int cycle);
     void processPlanetParticles();
     void injectExosphereParticles();
-    void SortParticlesGPU();
     void sortAllSpecies();
     void CalculateB(int cycle);
     void MomentsAwait();
@@ -119,9 +134,6 @@ namespace iPic3D {
 
   private:
     void pad_particle_capacities();
-    void convertParticlesToSoA();
-    void convertParticlesToAoS();
-    void convertOutputParticlesToSynched();
     void sortParticles();
     void copyMomentsD2H(int species, cudaStream_t stream);
     void registerMomentsPinnedMemory(int species);
@@ -176,6 +188,9 @@ namespace iPic3D {
 
     int  sortingCycle_;    // cached from col->getSortingCycle() (0=disabled)
     bool sortThisCycle_;   // true when this cycle uses the sorted pipeline
+
+    CaseType caseType_;  // resolved once in Init() from col->getCase()
+    bool     doPlanet_;  // true when caseType_ is Dipole or Dipole2D
     
 	//! CUDA pointers of objects, have been copied to device
     particleArrayCUDA**   pclsArrayCUDAPtr;           // array of pointer, point to pclsArray on device

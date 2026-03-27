@@ -75,10 +75,36 @@
 constexpr bool PARTICLE_MERGING = false;
 // set to true to enable particle splitting 
 constexpr bool PARTICLE_SPLITTING = false; 
- 
 
+// ── Named constants (replace scattered magic numbers) ──
+constexpr double INITIAL_CAPACITY_FACTOR = 1.4;   // SoA array initial over-allocation
+constexpr double AUX_BUFFER_FRACTION     = 0.1;   // exiting/filler/staging as fraction of NOP
+constexpr double PLANET_BUFFER_FRACTION  = 0.05;  // planet array initial fraction of NOP
+constexpr double EXPAND_GROWTH_FACTOR    = 1.5;   // growth factor when expanding arrays
+constexpr double EXPAND_THRESHOLD_FACTOR = 1.2;   // trigger expand when NOP * this >= capacity
+constexpr double SPLIT_THRESHOLD         = 0.95;  // split when NOP < this * initialNOP
+constexpr double MERGE_THRESHOLD         = 1.05;  // merge when NOP > this * initialNOP
+constexpr int    DEFAULT_BLOCK_SIZE      = 256;    // default CUDA block size
+constexpr int    SMALL_BLOCK_SIZE        = 128;    // smaller CUDA block size (sorting kernels)
+constexpr int    INITIAL_PLANET_BUF_CAP  = 1024;   // initial planet cross-species buffer capacity
 
 using namespace iPic3D;
+
+// ── Resolve input-file case string to CaseType enum ──
+static CaseType parseCaseType(const std::string& s) {
+  if (s == "GEMnoPert")       return CaseType::GEMnoPert;
+  if (s == "ForceFree")       return CaseType::ForceFree;
+  if (s == "GEM")             return CaseType::GEM;
+  if (s == "GEMDoubleHarris") return CaseType::GEMDoubleHarris;
+  if (s == "BATSRUS")         return CaseType::BATSRUS;
+  if (s == "Dipole")          return CaseType::Dipole;
+  if (s == "Dipole2D")        return CaseType::Dipole2D;
+  if (s == "NullPoints")      return CaseType::NullPoints;
+  if (s == "TaylorGreen")     return CaseType::TaylorGreen;
+  if (s == "HumpPert")        return CaseType::HumpPert;
+  if (s == "RandomCase")      return CaseType::RandomCase;
+  return CaseType::Default;
+}
 //MPIdata* iPic3D::c_Solver::mpi=0;
 
 
@@ -180,33 +206,39 @@ int c_Solver::Init(int argc, char **argv) {
   grid = new Grid3DCU(col, vct);  // Create the local grid
   EMf = new EMfields3D(col, grid, vct);  // Create Electromagnetic Fields Object
 
-  if      (col->getCase()=="GEMnoPert") 		EMf->initGEMnoPert();
-  else if (col->getCase()=="ForceFree") 		EMf->initForceFree();
-  else if (col->getCase()=="GEM")       		EMf->initGEM();
-  else if (col->getCase()=="GEMDoubleHarris")  	        EMf->initGEMDoubleHarris();
+  // Resolve case string once and store as enum + derived flags
+  caseType_ = parseCaseType(col->getCase());
+  doPlanet_ = (caseType_ == CaseType::Dipole || caseType_ == CaseType::Dipole2D);
+
+  switch (caseType_) {
+    case CaseType::GEMnoPert:       EMf->initGEMnoPert(); break;
+    case CaseType::ForceFree:       EMf->initForceFree(); break;
+    case CaseType::GEM:             EMf->initGEM(); break;
+    case CaseType::GEMDoubleHarris: EMf->initGEMDoubleHarris(); break;
 #ifdef BATSRUS
-  else if (col->getCase()=="BATSRUS")   		EMf->initBATSRUS();
+    case CaseType::BATSRUS:         EMf->initBATSRUS(); break;
 #endif
-  else if (col->getCase()=="Dipole")    		EMf->initDipole();
-  else if (col->getCase()=="Dipole2D")  		EMf->initDipole2D();
-  else if (col->getCase()=="NullPoints")             	EMf->initNullPoints();
-  else if (col->getCase()=="TaylorGreen")               EMf->initTaylorGreen();
-  else if (col->getCase()=="HumpPert")                  EMf->initHumpPerturbation();
-  else if (col->getCase()=="RandomCase") {
-    EMf->initRandomField();
-    if (myrank==0) {
-      cout << "Case is " << col->getCase() <<"\n";
-      cout <<"total # of particle per cell is " << col->getNpcel(0) << "\n";
-    }
-  }
-  else {
-    if (myrank==0) {
-      cout << " =========================================================== " << endl;
-      cout << " WARNING: The case '" << col->getCase() << "' was not recognized. " << endl;
-      cout << "          Runing simulation with the default initialization. " << endl;
-      cout << " =========================================================== " << endl;
-    }
-    EMf->init();
+    case CaseType::Dipole:          EMf->initDipole(); break;
+    case CaseType::Dipole2D:        EMf->initDipole2D(); break;
+    case CaseType::NullPoints:      EMf->initNullPoints(); break;
+    case CaseType::TaylorGreen:     EMf->initTaylorGreen(); break;
+    case CaseType::HumpPert:        EMf->initHumpPerturbation(); break;
+    case CaseType::RandomCase:
+      EMf->initRandomField();
+      if (myrank==0) {
+        cout << "Case is " << col->getCase() <<"\n";
+        cout <<"total # of particle per cell is " << col->getNpcel(0) << "\n";
+      }
+      break;
+    default:
+      if (myrank==0) {
+        cout << " =========================================================== " << endl;
+        cout << " WARNING: The case '" << col->getCase() << "' was not recognized. " << endl;
+        cout << "          Runing simulation with the default initialization. " << endl;
+        cout << " =========================================================== " << endl;
+      }
+      EMf->init();
+      break;
   }
 
   // ===== Allocate particlesHost[] — lightweight SoA host mirror (no communicator) =====
@@ -228,15 +260,17 @@ int c_Solver::Init(int argc, char **argv) {
   if (restart_status == 0) {
     for (int i = 0; i < ns; i++)
     {
-      if      (col->getCase()=="ForceFree")        particlesHost[i]->force_free(EMf);
+      switch (caseType_) {
+        case CaseType::ForceFree:       particlesHost[i]->force_free(EMf); break;
 #ifdef BATSRUS
-      else if (col->getCase()=="BATSRUS")          eprintf("BATSRUS not supported on ParticleSoAHost");
+        case CaseType::BATSRUS:         eprintf("BATSRUS not supported on ParticleSoAHost"); break;
 #endif
-      else if (col->getCase()=="NullPoints")       particlesHost[i]->maxwellianNullPoints(EMf);
-      else if (col->getCase()=="TaylorGreen")      particlesHost[i]->maxwellianNullPoints(EMf);
-      else if (col->getCase()=="GEMDoubleHarris")  particlesHost[i]->maxwellianDoubleHarris(EMf);
-      else if (col->getCase()=="HumpPert")         particlesHost[i]->maxwellianHumpPerturbation(EMf);
-      else                                         particlesHost[i]->maxwellian(EMf);
+        case CaseType::NullPoints:      particlesHost[i]->maxwellianNullPoints(EMf); break;
+        case CaseType::TaylorGreen:     particlesHost[i]->maxwellianNullPoints(EMf); break;
+        case CaseType::GEMDoubleHarris: particlesHost[i]->maxwellianDoubleHarris(EMf); break;
+        case CaseType::HumpPert:        particlesHost[i]->maxwellianHumpPerturbation(EMf); break;
+        default:                        particlesHost[i]->maxwellian(EMf); break;
+      }
       particlesHost[i]->reserve_remaining_particle_IDs();
     }
   }
@@ -250,7 +284,7 @@ int c_Solver::Init(int argc, char **argv) {
   {
     particlesCommInj[i] = new ParticleCommInjection(*particlesHost[i]);
     const auto totalPcl = col->getNpcel(i) * grid->getNXN() * grid->getNYN() * grid->getNZN();
-    particlesCommInj[i]->reserveCommBuffer(static_cast<int>(totalPcl * 0.1));
+    particlesCommInj[i]->reserveCommBuffer(static_cast<int>(totalPcl * AUX_BUFFER_FRACTION));
   }
 
   if(nstestpart>0){
@@ -373,7 +407,7 @@ int c_Solver::initCUDA(){
 
     for(int i=0; i<ns; i++){
       // the constructor will copy particles from host to device
-      pclsArrayHostPtr[i] = newHostPinnedObject<particleArrayCUDA>(particlesHost[i], 1.4, streams[i]); // use the oputputPart as the initial pcls
+      pclsArrayHostPtr[i] = newHostPinnedObject<particleArrayCUDA>(particlesHost[i], INITIAL_CAPACITY_FACTOR, streams[i]);
       pclsArrayHostPtr[i]->setInitialNOP(pclsArrayHostPtr[i]->getNOP());
       pclsArrayCUDAPtr[i] = pclsArrayHostPtr[i]->copyToDevice();
 
@@ -390,14 +424,14 @@ int c_Solver::initCUDA(){
 
       hashedSumArrayCUDAPtr[i] = copyArrayToDevice(hashedSumArrayHostPtr[i], departureArrayElementType::HASHED_SUM_NUM);
       
-      exitingArrayHostPtr[i] = newHostPinnedObject<exitingArray>(0.1 * pclsArrayHostPtr[i]->getNOP());
+      exitingArrayHostPtr[i] = newHostPinnedObject<exitingArray>(AUX_BUFFER_FRACTION * pclsArrayHostPtr[i]->getNOP());
       exitingArrayCUDAPtr[i] = exitingArrayHostPtr[i]->copyToDevice();
-      fillerBufferArrayHostPtr[i] = newHostPinnedObject<fillerBuffer>(0.1 * pclsArrayHostPtr[i]->getNOP());
+      fillerBufferArrayHostPtr[i] = newHostPinnedObject<fillerBuffer>(AUX_BUFFER_FRACTION * pclsArrayHostPtr[i]->getNOP());
       fillerBufferArrayCUDAPtr[i] = fillerBufferArrayHostPtr[i]->copyToDevice();
 
       // AoS staging buffer for incoming H→D particle transfers (MPI + repopulated + exosphere).
       // Sized at 10% of initial NOP — will be expanded dynamically if needed.
-      incomingStagingHostPtr[i] = newHostPinnedObject<arrayCUDA<SpeciesParticle>>(static_cast<uint32_t>(0.1 * pclsArrayHostPtr[i]->getNOP()));
+      incomingStagingHostPtr[i] = newHostPinnedObject<arrayCUDA<SpeciesParticle>>(static_cast<uint32_t>(AUX_BUFFER_FRACTION * pclsArrayHostPtr[i]->getNOP()));
       incomingStagingCUDAPtr[i] = incomingStagingHostPtr[i]->copyToDevice();
 
     }
@@ -427,13 +461,13 @@ int c_Solver::initCUDA(){
     particlesHost[i]->repopulate_particlesInfo(&moverParamHostPtr[i]->doRepopulateInjection, moverParamHostPtr[i]->doRepopulateInjectionSide, moverParamHostPtr[i]->repopulateBoundary);
     else moverParamHostPtr[i]->doRepopulateInjection = false;
 
-    if (col->getCase()=="Dipole") {
+    if (caseType_ == CaseType::Dipole) {
       moverParamHostPtr[i]->doSphere = 1;
       moverParamHostPtr[i]->sphereOrigin[0] = col->getx_center_planet();
       moverParamHostPtr[i]->sphereOrigin[1] = col->gety_center_planet();
       moverParamHostPtr[i]->sphereOrigin[2] = col->getz_center_planet();
       moverParamHostPtr[i]->sphereRadius = col->getL_square();
-    } else if (col->getCase()=="Dipole2D") {
+    } else if (caseType_ == CaseType::Dipole2D) {
       moverParamHostPtr[i]->doSphere = 2;
       moverParamHostPtr[i]->sphereOrigin[0] = col->getx_center_planet();
       moverParamHostPtr[i]->sphereOrigin[1] = 0.0;
@@ -506,15 +540,13 @@ int c_Solver::initCUDA(){
 
   // ── Planet quasi-neutral BC allocations ──
   {
-    const bool doPlanet = (col->getCase() == "Dipole" || col->getCase() == "Dipole2D");
-
     planetArrayHostPtr = new planetArray*[ns];
     planetArrayCUDAPtr = new planetArray*[ns];
     planetPclCount     = new int[ns];
 
     for (int i = 0; i < ns; i++) {
-      if (doPlanet) {
-        planetArrayHostPtr[i] = newHostPinnedObject<planetArray>((uint32_t)(0.05 * pclsArrayHostPtr[i]->getNOP()));
+      if (doPlanet_) {
+        planetArrayHostPtr[i] = newHostPinnedObject<planetArray>((uint32_t)(PLANET_BUFFER_FRACTION * pclsArrayHostPtr[i]->getNOP()));
         planetArrayCUDAPtr[i] = planetArrayHostPtr[i]->copyToDevice();
       } else {
         planetArrayHostPtr[i] = nullptr;
@@ -536,8 +568,8 @@ int c_Solver::initCUDA(){
     }
 
     // Cross-species device buffers
-    planetBufCapacity = doPlanet ? 1024 : 0;
-    if (doPlanet) {
+    planetBufCapacity = doPlanet_ ? INITIAL_PLANET_BUF_CAP : 0;
+    if (doPlanet_) {
       cudaErrChk(cudaMalloc(&planetEnergyBuf,    planetBufCapacity * sizeof(cudaParticleType)));
       cudaErrChk(cudaMalloc(&planetGlobalIdxBuf,  planetBufCapacity * sizeof(uint32_t)));
       cudaErrChk(cudaMalloc(&planetIonChargeDevice, sizeof(cudaParticleType)));
@@ -567,9 +599,9 @@ int c_Solver::initCUDA(){
     cudaErrChk(cudaHostAlloc(&planetTmpPtrs, elecCount * sizeof(planetArray*), cudaHostAllocDefault));
     cudaErrChk(cudaHostAlloc(&planetSurvivorCount, elecCount * sizeof(int), cudaHostAllocDefault));
 
-    if (doPlanet) {
+    if (doPlanet_) {
       cudaErrChk(cudaMalloc(&planetSurvivorCountDevice, elecCount * sizeof(int)));
-      planetReflectedBufCapacity = 1024;
+      planetReflectedBufCapacity = INITIAL_PLANET_BUF_CAP;
       cudaErrChk(cudaMalloc(&planetReflectedBuf, planetReflectedBufCapacity * sizeof(SpeciesParticle)));
     } else {
       planetSurvivorCountDevice = nullptr;
@@ -756,7 +788,7 @@ void c_Solver::CalculateMoments() {
     cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[i], 0, gridSize*10*sizeof(cudaMomentType), streams[i]));  // set moments to 0
     // copy the particles to device---- already there...by initliazation or Mover
     // launch the moment kernel
-    momentKernelNew<<<(pclsArrayHostPtr[i]->getNOP()/256 + 1), 256, 0, streams[i] >>>(momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], 0);
+    momentKernelNew<<<(pclsArrayHostPtr[i]->getNOP()/DEFAULT_BLOCK_SIZE + 1), DEFAULT_BLOCK_SIZE, 0, streams[i] >>>(momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], 0);
     copyMomentsD2H(i, streams[i]);
   }
 
@@ -796,12 +828,12 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   //          " pclsArrayHostPtr[species]->getNOP() " << pclsArrayHostPtr[species]->getNOP() << std::endl;
   if constexpr(PARTICLE_SPLITTING)
   {
-    if(pclsArrayHostPtr[species]->getNOP() < 0.95 * pclsArrayHostPtr[species]->getInitialNOP()){
+    if(pclsArrayHostPtr[species]->getNOP() < SPLIT_THRESHOLD * pclsArrayHostPtr[species]->getInitialNOP()){
       const uint32_t deltaPcl = pclsArrayHostPtr[species]->getInitialNOP() - pclsArrayHostPtr[species]->getNOP();
       if(deltaPcl < pclsArrayHostPtr[species]->getNOP()){
         std::cout << "Particle splitting basic myrank: "<< MPIdata::get_rank() << " species " << species <<" number particles: " << pclsArrayHostPtr[species]->getNOP() <<
                   " delta: " << deltaPcl <<std::endl;
-        particleSplittingKernel<false><<<getGridSize((int)deltaPcl, 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], grid3DCUDACUDAPtr);
+        particleSplittingKernel<false><<<getGridSize((int)deltaPcl, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(moverParamCUDAPtr[species], grid3DCUDACUDAPtr);
         pclsArrayHostPtr[species]->setNOE(pclsArrayHostPtr[species]->getInitialNOP());
         cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[species], pclsArrayHostPtr[species], sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[species]));
         //cudaErrChk(cudaStreamSynchronize(streams[species+ns]));
@@ -812,7 +844,7 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
         const int splittingTimes = deltaPcl / pclsArrayHostPtr[species]->getNOP();
         std::cout << "Particle splitting multipleTimesKernel myrank: "<< MPIdata::get_rank() << " species " << species <<" number particles: " << pclsArrayHostPtr[species]->getNOP() <<
                   " delta: " << deltaPcl <<std::endl;
-        particleSplittingKernel<true><<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], grid3DCUDACUDAPtr);
+        particleSplittingKernel<true><<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(moverParamCUDAPtr[species], grid3DCUDACUDAPtr);
         pclsArrayHostPtr[species]->setNOE( (splittingTimes + 1) * pclsArrayHostPtr[species]->getNOP());
         cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[species], pclsArrayHostPtr[species], sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[species]));
         
@@ -827,10 +859,10 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   auto _tL1 = std::chrono::high_resolution_clock::now(); // after splitting, before mover launch
 #endif
   cudaErrChk(cudaStreamWaitEvent(streams[species], event0, 0));
-  if (col->getCase()=="Dipole" || col->getCase()=="Dipole2D")
-    moverSubcyclesKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+  if (doPlanet_)
+    moverSubcyclesKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
   else
-    moverKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+    moverKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
   
   cudaErrChk(cudaEventRecord(event1, streams[species]));
   // Unsorted pipeline: compute moments for stayed particles right after mover
@@ -839,7 +871,7 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   if (doMomentsInLauncher) {
     const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
     cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[species], 0, gridSize*10*sizeof(cudaMomentType), streams[species]));
-    momentKernelStayed<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species]>>>(
+    momentKernelStayed<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
         &(moverParamCUDAPtr[species]->appendCountAtomic), momentParamCUDAPtr[species], grid3DCUDACUDAPtr, momentsCUDAPtr[species]);
   }
 
@@ -881,14 +913,14 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   //}
   if(count_exiting > exitingArrayHostPtr[species]->getSize()){ 
     // expand the exiting AoS device buffer
-    exitingArrayHostPtr[species]->expand(count_exiting * 1.5, streams[species+ns]);
+    exitingArrayHostPtr[species]->expand(count_exiting * EXPAND_GROWTH_FACTOR, streams[species+ns]);
     cudaErrChk(cudaMemcpyAsync(exitingArrayCUDAPtr[species], exitingArrayHostPtr[species], 
                                 sizeof(exitingArray), cudaMemcpyDefault, streams[species+ns]));
   }
 
   if(hole > fillerBufferArrayHostPtr[species]->getSize()){
     // prepare the fillerBuffer
-    fillerBufferArrayHostPtr[species]->expand(hole * 1.5, streams[species+ns]);
+    fillerBufferArrayHostPtr[species]->expand(hole * EXPAND_GROWTH_FACTOR, streams[species+ns]);
     cudaErrChk(cudaMemcpyAsync(fillerBufferArrayCUDAPtr[species], fillerBufferArrayHostPtr[species], 
                                 sizeof(fillerBuffer), cudaMemcpyDefault, streams[species+ns]));
   }
@@ -898,11 +930,11 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   // planetExtractionKernel needs the original PLANET hashedId to scatter correctly.
   if (count_removed_planet > 0) {
     if ((uint32_t)count_removed_planet > planetArrayHostPtr[species]->getSize()) {
-      planetArrayHostPtr[species]->expand(count_removed_planet * 1.5, streams[species+ns]);
+      planetArrayHostPtr[species]->expand(count_removed_planet * EXPAND_GROWTH_FACTOR, streams[species+ns]);
       cudaErrChk(cudaMemcpyAsync(planetArrayCUDAPtr[species], planetArrayHostPtr[species],
                                   sizeof(planetArray), cudaMemcpyDefault, streams[species+ns]));
     }
-    planetExtractionKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species+ns]>>>(
+    planetExtractionKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species+ns]>>>(
         pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species],
         planetArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
   }
@@ -910,7 +942,7 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
 #if ENABLE_SOA_TIMING
   auto _tL4 = std::chrono::high_resolution_clock::now(); // before exitingKernel
 #endif
-  exitingKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), 256), 256, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species], 
+  exitingKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species], 
                 departureArrayCUDAPtr[species], exitingArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
 
   cudaErrChk(cudaEventRecord(event2, streams[species+ns]));
@@ -928,9 +960,9 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   // Sorting, the first cycle, x might be 0
   cudaErrChk(cudaStreamWaitEvent(streams[species], event2, 0));
   if (hole > 0) 
-  sortingKernel1<<<getGridSize(hole, 128), 128, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
+  sortingKernel1<<<getGridSize(hole, SMALL_BLOCK_SIZE), SMALL_BLOCK_SIZE, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
                                                           fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+departureArrayElementType::FILLER_HASHEDSUM_INDEX, hole);
-  sortingKernel2<<<getGridSize((int)(pclsArrayHostPtr[species]->getNOP()-hole), 256), 256, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
+  sortingKernel2<<<getGridSize((int)(pclsArrayHostPtr[species]->getNOP()-hole), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
                                                           fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+departureArrayElementType::HOLE_HASHEDSUM_INDEX, pclsArrayHostPtr[species]->getNOP()-hole);
 
   cudaErrChk(cudaEventDestroy(event1));
@@ -1004,7 +1036,7 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle)
 
     // Merging kernel using CellSorter's device buffers
     const int totalCells = cellSorters[i].getNumCells();
-    mergingKernel<<<getGridSize(totalCells * WARP_SIZE, 256), 256, 0, streams[i]>>>(
+    mergingKernel<<<getGridSize(totalCells * WARP_SIZE, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
         const_cast<int*>(cellSorters[i].getCellStartOffsets()),
         cellSorters[i].getCellCounts(),
         grid3DCUDACUDAPtr, pclsArrayCUDAPtr[i], departureArrayCUDAPtr[i]);
@@ -1054,7 +1086,7 @@ void c_Solver::processPlanetParticles()
   cudaErrChk(cudaMemsetAsync(planetIonChargeDevice, 0, sizeof(cudaParticleType), planetStream));
   for (int i = 0; i < ns; i++) {
     if (col->getQOM(i) <= 0 || planetPclCount[i] == 0) continue;
-    const int blockSize = 256;
+    const int blockSize = DEFAULT_BLOCK_SIZE;
     const int gridSz = getGridSize(planetPclCount[i], blockSize);
     planetChargeReductionKernel<<<gridSz, blockSize, blockSize * sizeof(cudaParticleType), planetStream>>>(
         planetArrayCUDAPtr[i], planetPclCount[i], planetIonChargeDevice);
@@ -1087,7 +1119,7 @@ void c_Solver::processPlanetParticles()
     int specIdx = planetElecSpeciesMap[e];
     planetElecOffsets[e] = offset;
     if (planetPclCount[specIdx] > 0) {
-      planetEnergyKernel<<<getGridSize(planetPclCount[specIdx], 256), 256, 0, planetStream>>>(
+      planetEnergyKernel<<<getGridSize(planetPclCount[specIdx], DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
           planetArrayCUDAPtr[specIdx], planetPclCount[specIdx],
           (cudaParticleType)col->getQOM(specIdx),
           planetEnergyBuf, planetGlobalIdxBuf,
@@ -1112,12 +1144,12 @@ void c_Solver::processPlanetParticles()
 
   // ── Step 5: Bitonic sort (descending by energy) ──
   if (nPad > totalElecPlanet) {
-    bitonicPadKernel<<<getGridSize(nPad - totalElecPlanet, 256), 256, 0, planetStream>>>(
+    bitonicPadKernel<<<getGridSize(nPad - totalElecPlanet, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
         planetEnergyBuf, planetGlobalIdxBuf, totalElecPlanet, nPad);
   }
   for (int k = 2; k <= nPad; k <<= 1) {
     for (int j = k >> 1; j > 0; j >>= 1) {
-      bitonicSortStepKernel<<<getGridSize(nPad, 256), 256, 0, planetStream>>>(
+      bitonicSortStepKernel<<<getGridSize(nPad, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
           planetEnergyBuf, planetGlobalIdxBuf, j, k, nPad);
     }
   }
@@ -1145,7 +1177,7 @@ void c_Solver::processPlanetParticles()
   const int reflectionType = col->getPlanetReflectionType();
   if (reflectionType == 1) {
     // Diffuse (isotropic) scattering — matches legacy rotateAndCountParticlesInsideSphere
-    planetDiffuseCompactKernel<<<getGridSize(totalElecPlanet, 256), 256, 0, planetStream>>>(
+    planetDiffuseCompactKernel<<<getGridSize(totalElecPlanet, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
         planetArrayCUDAPtrDevice, planetElecSpeciesCount,
         planetElecOffsetsDevice,
         planetGlobalIdxBuf,
@@ -1157,7 +1189,7 @@ void c_Solver::processPlanetParticles()
         planetRngCycleCounter);
   } else {
     // Specular (mirror) reflection — default
-    planetReflectCompactKernel<<<getGridSize(totalElecPlanet, 256), 256, 0, planetStream>>>(
+    planetReflectCompactKernel<<<getGridSize(totalElecPlanet, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
         planetArrayCUDAPtrDevice, planetElecSpeciesCount,
         planetElecOffsetsDevice,
         planetGlobalIdxBuf,
@@ -1237,8 +1269,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
 #endif
 
   // ── Planet processing on planetStream (blocks internally, completes before returning) ──
-  const bool doPlanet = (col->getCase() == "Dipole" || col->getCase() == "Dipole2D");
-  if (doPlanet)
+  if (doPlanet_)
     processPlanetParticles();
 #if ENABLE_SOA_TIMING
   auto _t2 = std::chrono::high_resolution_clock::now();
@@ -1369,8 +1400,8 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
 
     // ── Expand SoA arrays if needed (may cudaMalloc + cudaFree) ──
     // SAFE: Phase 3F sync guarantees no kernels are using these buffers.
-    if ((newPclNum * 1.2) >= pclsArrayHostPtr[i]->getSize()) {
-      pclsArrayHostPtr[i]->expand(newPclNum * 1.5, streams[i]);
+    if ((newPclNum * EXPAND_THRESHOLD_FACTOR) >= pclsArrayHostPtr[i]->getSize()) {
+      pclsArrayHostPtr[i]->expand(newPclNum * EXPAND_GROWTH_FACTOR, streams[i]);
       departureArrayHostPtr[i]->expand(pclsArrayHostPtr[i]->getSize(), streams[i]);
       cudaErrChk(cudaMemcpyAsync(departureArrayCUDAPtr[i], departureArrayHostPtr[i], sizeof(departureArrayType), cudaMemcpyDefault, streams[i]));
     }
@@ -1379,7 +1410,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
     const int incomingCount = particlesCommInj[i]->getCommNOP();
     if (incomingCount > 0) {
       if (static_cast<uint32_t>(incomingCount) > incomingStagingHostPtr[i]->getSize()) {
-        incomingStagingHostPtr[i]->expand(incomingCount * 1.5, streams[i]);
+        incomingStagingHostPtr[i]->expand(incomingCount * EXPAND_GROWTH_FACTOR, streams[i]);
         cudaErrChk(cudaMemcpyAsync(incomingStagingCUDAPtr[i], incomingStagingHostPtr[i],
                     sizeof(arrayCUDA<SpeciesParticle>), cudaMemcpyDefault, streams[i]));
       }
@@ -1396,7 +1427,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
 
     // ── Scatter incoming AoS → SoA at offset=stayedParticle[i] ──
     if (incomingCount > 0)
-      scatterAoSToSoAKernel<<<getGridSize(incomingCount, 256), 256, 0, streams[i]>>>(
+      scatterAoSToSoAKernel<<<getGridSize(incomingCount, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
           incomingStagingHostPtr[i]->getArray(),
           pclsArrayCUDAPtr[i], (uint32_t)stayedParticle[i], (uint32_t)incomingCount);
 
@@ -1411,7 +1442,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
         const int numCells = cellSorters[i].getNumCells();
         const int warps = numCells;
         const int threads = warps * WARP_SIZE;
-        cellAwareMomentKernel<<<getGridSize(threads, 256), 256, 0, streams[i]>>>(
+        cellAwareMomentKernel<<<getGridSize(threads, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
             cellSorters[i].getCellStartOffsets(),
             numCells,
             numSorted,
@@ -1422,14 +1453,14 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
 
       const int tailCount = newPclNum - stayedParticle[i];
       if (tailCount > 0)
-        momentKernelNew<<<getGridSize(tailCount, 128), 128, 0, streams[i]>>>(
+        momentKernelNew<<<getGridSize(tailCount, SMALL_BLOCK_SIZE), SMALL_BLOCK_SIZE, 0, streams[i]>>>(
             momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
     } else {
       // UNSORTED: momentKernelStayed already ran in cudaLauncherAsync (covered [0, stayed)).
       // Only need momentKernelNew for the incoming tail [stayed, newPclNum).
       const int tailCount = newPclNum - stayedParticle[i];
       if (tailCount > 0)
-        momentKernelNew<<<getGridSize(tailCount, 128), 128, 0, streams[i]>>>(
+        momentKernelNew<<<getGridSize(tailCount, SMALL_BLOCK_SIZE), SMALL_BLOCK_SIZE, 0, streams[i]>>>(
             momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
     }
 
@@ -1489,7 +1520,7 @@ void c_Solver::MomentsAwait() {
   {
     // check which one to merge
     for(int i = 0; i < ns; i++) {
-      if(pclsArrayHostPtr[i]->getNOP() > 1.05 * pclsArrayHostPtr[i]->getInitialNOP()) {
+      if(pclsArrayHostPtr[i]->getNOP() > MERGE_THRESHOLD * pclsArrayHostPtr[i]->getInitialNOP()) {
         toBeMerged[2 * i] = 1;
       }
       else{
@@ -1523,10 +1554,10 @@ void c_Solver::MomentsAwait() {
 
   EMf->setZeroDerivedMoments();
   // Fill with constant charge the planet
-  if (col->getCase()=="Dipole") {
+  if (caseType_ == CaseType::Dipole) {
     EMf->ConstantChargePlanet(col->getL_square(),col->getx_center_planet(),col->gety_center_planet(),col->getz_center_planet());
-  }else if(col->getCase()=="Dipole2D") {
-	EMf->ConstantChargePlanet2DPlaneXZ(col->getL_square(),col->getx_center_planet(),col->getz_center_planet());
+  } else if (caseType_ == CaseType::Dipole2D) {
+    EMf->ConstantChargePlanet2DPlaneXZ(col->getL_square(),col->getx_center_planet(),col->getz_center_planet());
   }
   // Set a constant charge in the OpenBC boundaries
   //EMf->ConstantChargeOpenBC();
@@ -1725,7 +1756,6 @@ void c_Solver::Finalize() {
   {
     outputCopyAsync(-1);
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
-    convertOutputParticlesToSynched();
     ioManager->writeRestart((col->getNcycles() + first_cycle) - 1);
   }
 
@@ -1743,16 +1773,6 @@ void c_Solver::sortParticles() {
   for(int species_idx=0; species_idx<ns; species_idx++)
     particlesHost[species_idx]->sort_particles_serial();
 
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// GPU cell-based counting sort for all species
-// DEPRECATED: sorting is now integrated into MoverAwaitAndPclExchange.
-// Kept for backward compatibility only — should not be called in the main loop.
-// ────────────────────────────────────────────────────────────────────────────
-void c_Solver::SortParticlesGPU() {
-  // No-op: sorting is now performed inside MoverAwaitAndPclExchange
-  // (Phases 3B–3F) using the split enqueueSortAsync/finishSort API.
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1790,24 +1810,6 @@ void c_Solver::pad_particle_capacities()
 
   for (int i = 0; i < nstestpart; i++)
     testpart[i]->padCapacities();
-}
-
-// No-op: particle data is always SoA.
-void c_Solver::convertParticlesToSoA()
-{
-}
-
-// No-op: particle data is always SoA.
-void c_Solver::convertParticlesToAoS()
-{
-}
-
-// All I/O reads SoA vectors directly — no conversion needed for SoA-mode instances.
-// Kept for backward compat but is now a no-op for the normal output path.
-void c_Solver::convertOutputParticlesToSynched()
-{
-  // No-op: SoA-mode particlesHost/testpart already have authoritative data in SoA vectors.
-  // All I/O writers use getXall()/getUall() which read SoA directly.
 }
 
 

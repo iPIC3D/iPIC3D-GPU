@@ -27,7 +27,8 @@ private:
      * @return Rounded element count aligned to `sizeUnit`.
      */
     commonInt roundUpToSizeUnit(commonInt size){
-        return size + sizeUnit - (size % sizeUnit);
+        commonInt rem = size % sizeUnit;
+        return rem == 0 ? size : size + sizeUnit - rem;
     }
 
 protected:

@@ -560,10 +560,12 @@ int c_Solver::initCUDA(){
   sortingCycle_ = col->getSortingCycle();
   sortThisCycle_ = false;
   cellSorters = new CellSorter[ns];
-  for (int i = 0; i < ns; i++) {
-    cellSorters[i].init(*grid3DCUDAHostPtr,
-                        pclsArrayHostPtr[i]->getCapacity(),
-                        streams[i]);
+  if (sortingCycle_ > 0) {
+    for (int i = 0; i < ns; i++) {
+      cellSorters[i].init(*grid3DCUDAHostPtr,
+                          pclsArrayHostPtr[i]->getCapacity(),
+                          streams[i]);
+    }
   }
 
   dataAnalysis::dataAnalysisPipeline::createOutputDirectory(myrank, ns, vct);

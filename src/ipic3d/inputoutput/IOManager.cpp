@@ -5,6 +5,7 @@
 
 #include "IOManager.h"
 #include "Collective.h"
+#include "OutputTagConfig.h"
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
@@ -41,17 +42,11 @@ IOManager::~IOManager() {
 #endif
     // Free VTK write buffers (delArr needs the first two dimensions).
     // Note: the original code never freed these; this fixes that leak.
-    if (fieldwritebuffer_ && localWriteNz_ > 0) {
-        int dim0 = (fieldBackend_ == FieldBackend::NBCVTK)
-                       ? localWriteNz_ * 4
-                       : localWriteNz_;
-        delArr4(fieldwritebuffer_, dim0, localWriteNy_, localWriteNx_);
+    if (fieldwritebuffer_ && fieldBufDim0_ > 0) {
+        delArr4(fieldwritebuffer_, fieldBufDim0_, localWriteNy_, localWriteNx_);
     }
-    if (momentwritebuffer_ && localWriteNz_ > 0) {
-        int dim0 = (fieldBackend_ == FieldBackend::NBCVTK)
-                       ? localWriteNz_ * 14
-                       : localWriteNz_;
-        delArr3(momentwritebuffer_, dim0, localWriteNy_);
+    if (momentwritebuffer_ && momentBufDim0_ > 0) {
+        delArr3(momentwritebuffer_, momentBufDim0_, localWriteNy_);
     }
 }
 
@@ -179,26 +174,43 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
     localWriteNz_ = grid->getNZN() - 3 + (vct->isZupper() ? 1 : 0);
 
     if (!col->field_output_is_off()) {
-        // Check whether FieldOutputTag requests total charge density
-        bool fieldTagHasRho = (col->getFieldOutputTag().find("rho") != string::npos);
+        const OutputTagConfig &cfg = col->getOutputConfig();
 
         if (fieldBackend_ == FieldBackend::PVTK) {
-            if (!col->getFieldOutputTag().empty())
+            // Vector buffer needed for B, E, and J vector writes
+            if (cfg.needsAnyField()) {
+                fieldBufDim0_ = localWriteNz_;
                 fieldwritebuffer_ = newArr4(float,
-                    localWriteNz_, localWriteNy_, localWriteNx_, 3);
-            if (!col->getMomentsOutputTag().empty() || fieldTagHasRho)
+                    fieldBufDim0_, localWriteNy_, localWriteNx_, 3);
+            }
+            // Scalar buffer needed for rho, pressure tensor
+            if (cfg.needsAnyMoments()) {
+                momentBufDim0_ = localWriteNz_;
                 momentwritebuffer_ = newArr3(float,
-                    localWriteNz_, localWriteNy_, localWriteNx_);
+                    momentBufDim0_, localWriteNy_, localWriteNx_);
+            }
         }
         else if (fieldBackend_ == FieldBackend::NBCVTK) {
             fieldreqcounter_  = 0;
             momentreqcounter_ = 0;
-            if (!col->getFieldOutputTag().empty())
+            int nFieldWrites  = cfg.countFieldWrites();
+            int nMomentWrites = cfg.countMomentWrites();
+            if (nFieldWrites > 0) {
+                fieldBufDim0_ = localWriteNz_ * nFieldWrites;
                 fieldwritebuffer_ = newArr4(float,
-                    localWriteNz_*4, localWriteNy_, localWriteNx_, 3);
-            if (!col->getMomentsOutputTag().empty())
+                    fieldBufDim0_, localWriteNy_, localWriteNx_, 3);
+                fieldreqArr_.resize(nFieldWrites);
+                fieldfhArr_.resize(nFieldWrites);
+                fieldstsArr_.resize(nFieldWrites);
+            }
+            if (nMomentWrites > 0) {
+                momentBufDim0_ = localWriteNz_ * nMomentWrites;
                 momentwritebuffer_ = newArr3(float,
-                    localWriteNz_*14, localWriteNy_, localWriteNx_);
+                    momentBufDim0_, localWriteNy_, localWriteNx_);
+                momentreqArr_.resize(nMomentWrites);
+                momentfhArr_.resize(nMomentWrites);
+                momentstsArr_.resize(nMomentWrites);
+            }
         }
     }
 }
@@ -207,12 +219,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
 
 void IOManager::writeFields(int cycle) {
 
-    // Check whether FieldOutputTag requests total charge density ("rho")
-    const bool fieldTagHasRho =
-        (col_->getFieldOutputTag().find("rho") != string::npos);
-
-    // Print backend warning only once (first output cycle)
-    static bool rhoWarningPrinted = false;
+    const OutputTagConfig &cfg = col_->getOutputConfig();
 
     switch (fieldBackend_) {
 
@@ -226,30 +233,24 @@ void IOManager::writeFields(int cycle) {
             outputWrapperFPP_->append_output(
                 col_->getMomentsOutputTag().c_str(), cycle);
 #endif
-        if (fieldTagHasRho && !rhoWarningPrinted && vct_->getCartesian_rank() == 0) {
-            printf("WARNING: total rho output (FieldOutputTag=rho) "
-                   "is not implemented for SHDF5 backend.\n");
-            rhoWarningPrinted = true;
-        }
         break;
 
     // Blocking collective MPI-IO VTK.
     case FieldBackend::PVTK:
-        if (!col_->getFieldOutputTag().empty())
+        if (cfg.needsAnyField())
             WriteFieldsVTK(grid_, EMf_, col_, vct_,
                            col_->getFieldOutputTag(), cycle, fieldwritebuffer_);
-        if (!col_->getMomentsOutputTag().empty())
+        if (cfg.needsAnyMoments())
             WriteMomentsVTK(grid_, EMf_, col_, vct_,
                             col_->getMomentsOutputTag(), cycle, momentwritebuffer_);
-        // Write total charge density if requested via FieldOutputTag
-        if (fieldTagHasRho && momentwritebuffer_)
-            WriteRhoTotalVTK(grid_, EMf_, col_, vct_, cycle, momentwritebuffer_);
+        if ((!cfg.JSpecies.empty() || cfg.writeJTot) && fieldwritebuffer_)
+            WriteMomentsJVTK(grid_, EMf_, col_, vct_, cycle, fieldwritebuffer_);
         break;
 
     // Non-blocking collective MPI-IO VTK.
     case FieldBackend::NBCVTK:
         // Complete any pending writes from the previous cycle
-        if (!col_->getFieldOutputTag().empty()) {
+        if (!fieldreqArr_.empty()) {
             if (fieldreqcounter_ > 0) {
                 for (int si = 0; si < fieldreqcounter_; si++) {
                     int ec = MPI_File_write_all_end(
@@ -269,10 +270,10 @@ void IOManager::writeFields(int cycle) {
             }
             fieldreqcounter_ = WriteFieldsVTKNonblk(
                 grid_, EMf_, col_, vct_, cycle,
-                fieldwritebuffer_, fieldreqArr_, fieldfhArr_);
+                fieldwritebuffer_, fieldreqArr_.data(), fieldfhArr_.data());
         }
 
-        if (!col_->getMomentsOutputTag().empty()) {
+        if (!momentreqArr_.empty()) {
             if (momentreqcounter_ > 0) {
                 for (int si = 0; si < momentreqcounter_; si++) {
                     int ec = MPI_File_write_all_end(
@@ -292,12 +293,7 @@ void IOManager::writeFields(int cycle) {
             }
             momentreqcounter_ = WriteMomentsVTKNonblk(
                 grid_, EMf_, col_, vct_, cycle,
-                momentwritebuffer_, momentreqArr_, momentfhArr_);
-        }
-        if (fieldTagHasRho && !rhoWarningPrinted && vct_->getCartesian_rank() == 0) {
-            printf("WARNING: total rho output (FieldOutputTag=rho) "
-                   "is not implemented for NBCVTK backend.\n");
-            rhoWarningPrinted = true;
+                momentwritebuffer_, momentreqArr_.data(), momentfhArr_.data());
         }
         break;
 
@@ -306,11 +302,6 @@ void IOManager::writeFields(int cycle) {
 #ifndef NO_HDF5
         WriteOutputParallel(grid_, EMf_, outputPart_, col_, vct_, cycle);
 #endif
-        if (fieldTagHasRho && !rhoWarningPrinted && vct_->getCartesian_rank() == 0) {
-            printf("WARNING: total rho output (FieldOutputTag=rho) "
-                   "is not implemented for PARALLEL_HDF5 backend.\n");
-            rhoWarningPrinted = true;
-        }
         break;
 
     // H5hut.
@@ -318,11 +309,6 @@ void IOManager::writeFields(int cycle) {
 #ifndef NO_HDF5
         WriteFieldsH5hut(ns_, grid_, EMf_, col_, vct_, cycle);
 #endif
-        if (fieldTagHasRho && !rhoWarningPrinted && vct_->getCartesian_rank() == 0) {
-            printf("WARNING: total rho output (FieldOutputTag=rho) "
-                   "is not implemented for H5HUT backend.\n");
-            rhoWarningPrinted = true;
-        }
         break;
 
     // ADIOS2 field output.
@@ -330,11 +316,6 @@ void IOManager::writeFields(int cycle) {
 #ifdef USE_ADIOS2
         adiosManager_->appendFieldOutput(cycle);
 #endif
-        if (fieldTagHasRho && !rhoWarningPrinted && vct_->getCartesian_rank() == 0) {
-            printf("WARNING: total rho output (FieldOutputTag=rho) "
-                   "is not implemented for ADIOS2 backend.\n");
-            rhoWarningPrinted = true;
-        }
         break;
 
     case FieldBackend::NONE:

@@ -47,15 +47,15 @@ void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, ParticleSoAHost **part
 
 /**************MPI_IO*********************/
 int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,int cycle,
-			float**** fieldwritebuffer,MPI_Request requestArr[4],MPI_File fhArr[4]);
+			float**** fieldwritebuffer,MPI_Request requestArr[],MPI_File fhArr[]);
 
 int WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,int cycle,
-			float*** momentswritebuffer,MPI_Request requestArr[14],MPI_File fhArr[14]);
+			float*** momentswritebuffer,MPI_Request requestArr[],MPI_File fhArr[]);
 
 void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & tag, int cycle);
 void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & tag, int cycle,float**** fieldwritebuffer);
 void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & tag, int cycle,float***  momentswritebuffer);
-void WriteRhoTotalVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle, float*** momentswritebuffer);
+void WriteMomentsJVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle, float**** fieldwritebuffer);
 void WriteTestPclsVTK(int nspec, Grid3DCU *grid, ParticleSoAHost **part, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & tag, int cycle, MPI_Request *testpartMPIReq, MPI_File *fh);
 void ByteSwap(unsigned char * b, int n);
 #endif

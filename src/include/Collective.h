@@ -36,6 +36,7 @@
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "aligned_vector.h"
+#include "OutputTagConfig.h"
 
 class ConfigFile;
 using namespace std;
@@ -193,6 +194,7 @@ class Collective
     string getWriteMethod()const{ return (wmethod); }
     string getFieldOutputTag()const{return FieldOutputTag;}
     string getMomentsOutputTag()const{return MomentsOutputTag;}
+    const OutputTagConfig& getOutputConfig()const{return outputConfig_;}
     string getPclOutputTag()const{return ParticlesOutputTag;}
     string getPoissonCorrection()const{ return (PoissonCorrection); }
     int getPoissonCorrectionCycle()const{ return (PoissonCorrectionCycle); }
@@ -465,6 +467,7 @@ class Collective
     int FieldOutputCycle;
     string  FieldOutputTag;
     string  MomentsOutputTag;
+    OutputTagConfig outputConfig_;
     /*! Output for particles */
     int ParticlesOutputCycle;
     string ParticlesOutputTag;

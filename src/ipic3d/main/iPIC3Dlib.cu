@@ -1630,6 +1630,9 @@ void c_Solver::MomentsAwait() {
   //EMf->ConstantChargeOpenBC();
   // Accumulate species moments into total moments.
   EMf->sumOverSpecies();
+  // Accumulate species currents into total J if needed for output.
+  if (col->getOutputConfig().needsJTotComputation())
+    EMf->sumOverSpeciesJ();
   // Interpolate nodal densities to cell centers.
   EMf->interpDensitiesN2C();
   // Compute the hat quantities required by the implicit field solve.

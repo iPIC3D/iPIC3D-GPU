@@ -187,6 +187,7 @@ void Collective::ReadInput(string inputfile) {
     FieldOutputTag     =   config.read <string>("FieldOutputTag","");
     ParticlesOutputTag =   config.read <string>("ParticlesOutputTag","");
     MomentsOutputTag   =   config.read <string>("MomentsOutputTag","");
+    outputConfig_ = parseOutputTags(FieldOutputTag, MomentsOutputTag, ns);
     TestParticlesOutputCycle = config.read < int >("TestPartOutputCycle",0);
     testPartFlushCycle = config.read < int >("TestParticlesOutputCycle",10);
     RestartOutputCycle = config.read < int >("RestartOutputCycle",5000);

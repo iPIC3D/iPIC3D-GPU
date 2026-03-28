@@ -13,6 +13,7 @@
 #include "arraysfwd.h"        // arr3_double, array4_double
 #include "aligned_vector.h"   // vector_double
 #include <string>
+#include <vector>
 
 #ifndef NO_MPI
 #include "mpi.h"
@@ -187,15 +188,19 @@ private:
     int localWriteNy_ = 0;
     int localWriteNz_ = 0;
 
-    // NBCVTK non-blocking state
-    MPI_Request fieldreqArr_[4]   = {};
-    MPI_File    fieldfhArr_[4]    = {};
-    MPI_Status  fieldstsArr_[4]   = {};
+    // Allocated first-dimension sizes for VTK write buffers (for deallocation)
+    int fieldBufDim0_  = 0;
+    int momentBufDim0_ = 0;
+
+    // NBCVTK non-blocking state (dynamically sized based on OutputTagConfig)
+    std::vector<MPI_Request> fieldreqArr_;
+    std::vector<MPI_File>    fieldfhArr_;
+    std::vector<MPI_Status>  fieldstsArr_;
     int         fieldreqcounter_  = 0;
 
-    MPI_Request momentreqArr_[14]  = {};
-    MPI_File    momentfhArr_[14]   = {};
-    MPI_Status  momentstsArr_[14]  = {};
+    std::vector<MPI_Request> momentreqArr_;
+    std::vector<MPI_File>    momentfhArr_;
+    std::vector<MPI_Status>  momentstsArr_;
     int         momentreqcounter_  = 0;
 
     // ======= Registered non-owning pointers =======

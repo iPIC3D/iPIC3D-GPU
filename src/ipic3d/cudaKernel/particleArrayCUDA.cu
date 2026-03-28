@@ -2,12 +2,18 @@
 #include "particleArraySoAView.cuh"
 #include "cudaTypeDef.cuh"
 
+// ======= AoS to SoA scatter =======
 
-// ── Runtime AoS→SoA scatter kernel (used after H→D AoS copies) ──
-//
-// Reads from an *external* AoS staging buffer on device, writes into the
-// SoA arrays of pclsArray at [destOffset .. destOffset+count-1].
-// The staging buffer indices are [0 .. count-1].
+/**
+ * @brief Scatter an external device-side AoS staging buffer into the solver SoA layout.
+ *
+ * The kernel writes `count` particles from `aosStagingBuf[0..count-1]` into
+ * `pclsArray[destOffset..destOffset+count-1]`.
+ * @param aosStagingBuf Device AoS input buffer.
+ * @param pclsArray Destination particle SoA buffer.
+ * @param destOffset First destination index in `pclsArray`.
+ * @param count Number of particles to scatter.
+ */
 
 __global__ void scatterAoSToSoAKernel(const SpeciesParticle* __restrict__ aosStagingBuf,
                                        particleArrayCUDA* pclsArray,
@@ -27,8 +33,7 @@ __global__ void scatterAoSToSoAKernel(const SpeciesParticle* __restrict__ aosSta
     pclsArray->getT()[pidx] = pcl.get_t();
 }
 
-
-// ── particleArraySoAView::borrowFrom — needs complete particleArrayCUDA ──
+// ======= SoA view borrowing =======
 
 template<>
 __host__ void particleArraySoAView<cudaParticleType, 4>::borrowFrom(particleArrayCUDA* pclArray) {
@@ -39,8 +44,6 @@ __host__ void particleArraySoAView<cudaParticleType, 4>::borrowFrom(particleArra
     ptrs[2] = pclArray->getW();
     ptrs[3] = pclArray->getQ();
 }
-
-
 
 
 

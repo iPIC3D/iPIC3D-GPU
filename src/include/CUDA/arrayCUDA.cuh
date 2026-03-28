@@ -21,7 +21,11 @@ private:
 
     const bool onHeap;
 
-    //! @brief make the size times of the sizeUnit, round up
+    /**
+     * @brief Round a requested element count up to the internal allocation quantum.
+     * @param size Requested element count.
+     * @return Rounded element count aligned to `sizeUnit`.
+     */
     commonInt roundUpToSizeUnit(commonInt size){
         return size + sizeUnit - (size % sizeUnit);
     }
@@ -32,7 +36,8 @@ protected:
 public: // con-de-structor
 
     /**
-     * @brief create new empty array on device memory
+     * @brief Create an empty device array with reserved capacity.
+     * @param requiredSize Requested capacity in elements.
      */
     __host__ arrayCUDA(commonInt requiredSize): onHeap(false), numberOfElement(0){
         arraySize = roundUpToSizeUnit(requiredSize);
@@ -40,7 +45,9 @@ public: // con-de-structor
     }
 
     /**
-     * @brief create array from host array, then copy
+     * @brief Create a device array from host data.
+     * @param hostArrayPtr Host pointer holding the source elements.
+     * @param size Number of valid source elements.
      */
     __host__ arrayCUDA(const T* hostArrayPtr, commonInt size): onHeap(false), numberOfElement(size){
         arraySize = roundUpToSizeUnit(size);
@@ -51,7 +58,10 @@ public: // con-de-structor
     }
 
     /**
-     * @brief create array from host array, but bigger allocation for future
+     * @brief Create a device array from host data with extra spare capacity.
+     * @param hostArrayPtr Host pointer holding the source elements.
+     * @param size Number of valid source elements.
+     * @param expandIndex Capacity growth factor applied before allocation.
      */
     __host__ arrayCUDA(const T* hostArrayPtr, commonInt size, cudaTypeSingle expandIndex): onHeap(false), numberOfElement(size){
         size = size * expandIndex;
@@ -92,7 +102,11 @@ public: // utilities
         return numberOfElement++;
     }
 
-    //! @brief expand the array, must be bigger than original size
+    /**
+     * @brief Expand the device allocation if `targetedSize` exceeds current capacity.
+     * @param targetedSize Requested capacity in elements.
+     * @return Final allocated capacity.
+     */
     __host__ commonInt expand(commonInt targetedSize){
         if(targetedSize <= arraySize) return arraySize;
 
@@ -105,7 +119,12 @@ public: // utilities
         
         return arraySize;
     }
-    //! @brief expand the array, must be bigger than original size
+    /**
+     * @brief Expand the device allocation using an explicit CUDA stream.
+     * @param targetedSize Requested capacity in elements.
+     * @param s CUDA stream used for the copy and synchronization.
+     * @return Final allocated capacity.
+     */
     __host__ commonInt expand(commonInt targetedSize, cudaStream_t s){
         if(targetedSize <= arraySize) return arraySize;
         arraySize = roundUpToSizeUnit(targetedSize);
@@ -118,7 +137,11 @@ public: // utilities
         return arraySize;
     }
 
-    //! @brief resize the array, must be bigger than number of element
+    /**
+     * @brief Resize the device allocation while preserving the current element count.
+     * @param targetedSize Requested capacity in elements.
+     * @return Final allocated capacity.
+     */
     __host__ commonInt resize(commonInt targetedSize){
         if(targetedSize <= numberOfElement) return arraySize;
 

@@ -5,15 +5,19 @@
 #include "particleArrayCUDA.cuh"
 #include "particleExchange.cuh"
 
+// ======= Particle compaction helpers =======
 
 /**
- * @brief 	Prepare the filler buffer, making it compact. Launch (x) thread.
- * @details The exiting particles have been copied to exitingBuffer, they left the pclArray many holes.
- * 			
- * 			
- * @param fillerBuffer  Used for storing the index of the stayed particles in between (nop-x) to (nop-1)
- * @param hashedSumArray it contains 1 hashedSum instance, prepared in exitingKernel. 
- * 							For the filler particles in rear part.
+ * @brief Record the stayed particles from the rear filler region.
+ *
+ * The rear `x` entries of the SoA buffer may contain particles that can be
+ * moved forward to fill front-side holes. This kernel collects those source
+ * indices into the filler buffer.
+ * @param pclsArray Particle SoA buffer being compacted.
+ * @param departureArray Per-particle destination metadata.
+ * @param fillerBuffer Buffer receiving source indices for reusable rear particles.
+ * @param hashedSumArray Prefix-sum helpers for filler-buffer indexing.
+ * @param x Number of rear entries to inspect.
  */
 __global__ void sortingKernel1(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
 								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int x){
@@ -32,19 +36,17 @@ __global__ void sortingKernel1(particleArrayCUDA* pclsArray, departureArrayType*
 
 
 }
-
-
-
-
-
 /**
- * @brief 	Fill the many holes in pclArray, making it compact. Launch (nop -x) thread.
- * @details Sorting2 has to be Launched after Moment kernel.
- * 			The indexes of the filler particles have been recorded into the filler buffer in the previous Sorting1Kernel
- * 			
- * @param fillerBuffer  Used for storing the index of the stayed particles in between (nop-x) to (nop-1)
- * @param hashedSumArray it contains 1 hashedSum instance, prepared in exitingKernel. 
- * 							For the exiting particles in front part.
+ * @brief Fill front-side holes in the SoA buffer using the recorded filler indices.
+ *
+ * This is the second stage of the GPU compaction path. It reads the source
+ * indices produced by `sortingKernel1()` and copies those particles into the
+ * deleted or exiting slots in the front stayed-particle range.
+ * @param pclsArray Particle SoA buffer being compacted.
+ * @param departureArray Per-particle destination metadata.
+ * @param fillerBuffer Buffer containing source indices from the rear region.
+ * @param hashedSumArray Prefix-sum helpers for hole indexing.
+ * @param stayedParticle Number of front entries that remain in the compacted range.
  */
 __global__ void sortingKernel2(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
 								fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int stayedParticle){
@@ -70,8 +72,6 @@ __global__ void sortingKernel2(particleArrayCUDA* pclsArray, departureArrayType*
 
 
 }
-
-
 
 
 

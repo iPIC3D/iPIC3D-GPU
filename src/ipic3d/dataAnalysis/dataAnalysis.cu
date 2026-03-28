@@ -349,6 +349,8 @@ int dataAnalysisPipelineImpl::GMMAnalysisSpecies(const int cycle, const int spec
  * @details procesures in this function should be executed in sequence, the order of the analysis should be defined here
  *          But the procedures can launch other threads to do the analysis
  *          Also this function is a friend function of c_Solver, resources in the c_Slover should be dispatched here
+ * @param cycle Simulation cycle being analyzed.
+ * @return `0` on success.
  */
 int dataAnalysisPipelineImpl::analysisEntre(int cycle){
     cudaErrChk(cudaSetDevice(deviceOnNode));
@@ -380,6 +382,7 @@ int dataAnalysisPipelineImpl::analysisEntre(int cycle){
 
 /**
  * @brief start all the analysis registered here
+ * @param cycle Simulation cycle to analyze.
  */
 void dataAnalysisPipelineImpl::startAnalysis(int cycle){
 
@@ -417,6 +420,7 @@ int dataAnalysisPipelineImpl::checkAnalysis(){
 
 /**
  * @brief wait for the analysis to be done, blocking
+ * @return `0` after all queued analysis work has completed.
  */
 int dataAnalysisPipelineImpl::waitForAnalysis(){
 
@@ -433,6 +437,9 @@ int dataAnalysisPipelineImpl::waitForAnalysis(){
 
 /**
  * @brief create output directory for the data analysis, controlled by dataAnalysisConfig.cuh
+ * @param myrank MPI rank used to create rank-local paths.
+ * @param ns Number of species included in the analysis output.
+ * @param vct MPI topology used for subdomain-coordinate metadata.
  */
 void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns, VirtualTopology3D* vct){ // output path for data analysis
     if constexpr (DATA_ANALYSIS_ENABLED == false){
@@ -532,7 +539,6 @@ dataAnalysisPipeline::~dataAnalysisPipeline() {
 }
     
 } // namespace dataAnalysis
-
 
 
 

@@ -513,7 +513,15 @@ void phys2solver(double *vectSolver, const arr3_double vectPhys1, const arr3_dou
       }
     }
 }
-/*! Calculate Electric field with the implicit solver: the Maxwell solver method is called here */
+/**
+ * @brief Advance the electric field using the implicit Maxwell solve.
+ *
+ * This routine performs optional divergence cleaning, builds the Maxwell
+ * right-hand side, solves the linear system, smooths the resulting field,
+ * and refreshes boundary/ghost values needed by interpolation.
+ *
+ * @param cycle Current simulation cycle.
+ */
 void EMfields3D::calculateE(int cycle)
 {
   const Collective *col = &get_col();
@@ -1474,6 +1482,14 @@ void EMfields3D::ConstantChargeOpenBC()
   }
 }
 
+/**
+ * @brief Impose the constant-charge planet model inside the 3D spherical mask.
+ *
+ * @param R Planet radius.
+ * @param x_center Planet-center x coordinate.
+ * @param y_center Planet-center y coordinate.
+ * @param z_center Planet-center z coordinate.
+ */
 void EMfields3D::ConstantChargePlanet(double R,
                                       double x_center, double y_center, double z_center)
 {
@@ -1510,6 +1526,13 @@ void EMfields3D::ConstantChargePlanet(double R,
   }
 }
 
+/**
+ * @brief Impose the constant-charge planet model inside the 2D XZ-plane mask.
+ *
+ * @param R Planet radius.
+ * @param x_center Planet-center x coordinate.
+ * @param z_center Planet-center z coordinate.
+ */
 void EMfields3D::ConstantChargePlanet2DPlaneXZ(double R, double x_center, double z_center)
 {
   const Grid *grid = &get_grid();
@@ -1539,10 +1562,9 @@ void EMfields3D::ConstantChargePlanet2DPlaneXZ(double R, double x_center, double
   }
 }
 
-/*! Populate the field data used to push particles */
-//
-//
-//
+/**
+ * @brief Populate the legacy nodal particle-field buffer.
+ */
 void EMfields3D::set_fieldForPcls()
 {
 #pragma omp parallel for collapse(3)
@@ -1560,13 +1582,12 @@ void EMfields3D::set_fieldForPcls()
 }
 
 /**
- * @brief field for a cell, optimized for GPU memory access
- * @details each cell has 6 fields on 8 grid points
- *        for this GPU optimized buffer, store data from 4 grid points in this cell
- *        which can be used by it self and the next cell
- *        the overhead is smaller than 3 times of the original buffer
+ * @brief Pack a GPU-friendly field buffer for particle pushing.
  *
- * @param fieldForPclsOnCenter field buffer for particles, (nxn-1)*(nyn-1)*(nzn)*4*6
+ * Each XY cell stores the four corner nodes needed by the mover for one Z slab.
+ * Every packed entry contains six values per corner: `(Bx, By, Bz, Ex, Ey, Ez)`.
+ *
+ * @param fieldForPclsOnCenter Output buffer with shape `(nxn-1)*(nyn-1)*nzn*4*6`.
  */
 void EMfields3D::set_fieldForPclsToCenter(cudaFieldType *fieldForPclsOnCenter)
 {
@@ -1610,7 +1631,14 @@ void EMfields3D::set_fieldForPclsToCenter(cudaFieldType *fieldForPclsOnCenter)
       }
 }
 
-/*! Calculate Magnetic field with the implicit solver: calculate B defined on nodes With E(n+ theta) computed, the magnetic field is evaluated from Faraday's law */
+/**
+ * @brief Advance the magnetic field from the updated electric field.
+ *
+ * With `E(n + theta)` already available, the magnetic field is updated from
+ * Faraday's law and then communicated/interpolated as needed.
+ *
+ * @param cycle Current simulation cycle.
+ */
 void EMfields3D::calculateB(int cycle)
 {
   const Collective *col = &get_col();
@@ -1840,7 +1868,9 @@ void EMfields3D::AddPerturbation(double deltaBoB, double kx, double ky, double E
   grid->interpN2C(Bzc, Bzn);
 }
 
-/*! Calculate hat rho hat, Jx hat, Jy hat, Jz hat */
+/**
+ * @brief Compute the hat quantities used by the implicit field solve.
+ */
 void EMfields3D::calculateHatFunctions()
 {
   const VirtualTopology3D *vct = &get_vct();
@@ -1900,13 +1930,22 @@ void EMfields3D::PoissonImage(double *image, double *vector)
   // move from physical space to krylov space
   phys2solver(image, poissonIm, nxc, nyc, nzc);
 }
-/*! interpolate charge density and pressure density from node to center */
+/**
+ * @brief Interpolate nodal charge density to cell centers.
+ */
 void EMfields3D::interpDensitiesN2C()
 {
   // do we need communication or not really?
   get_grid().interpN2C(rhoc, rhon);
 }
-/*! communicate ghost for grid -> Particles interpolation */
+/**
+ * @brief Communicate one species' primary moments for particle-to-grid reduction.
+ *
+ * Shared-node contributions are summed first, non-periodic boundaries are
+ * adjusted, and then the ghost nodes are repopulated.
+ *
+ * @param ns Species index whose primary moments are being communicated.
+ */
 void EMfields3D::communicateGhostP2G(int ns)
 {
   // interpolate adding common nodes among processors
@@ -1974,6 +2013,9 @@ void EMfields3D::communicateGhostP2G(int ns)
 //   // receive and parse communication
 // }
 
+/**
+ * @brief Zero the aggregate moments derived from the per-species primary moments.
+ */
 void EMfields3D::setZeroDerivedMoments()
 {
   for (int i = 0; i < nxn; i++)
@@ -2026,7 +2068,9 @@ void EMfields3D::setZeroDensities()
   setZeroPrimaryMoments();
 }
 
-/*!SPECIES: Sum the charge density of different species on NODES */
+/**
+ * @brief Sum nodal charge density over all species.
+ */
 void EMfields3D::sumOverSpecies()
 {
   for (int is = 0; is < ns; is++)
@@ -2036,7 +2080,9 @@ void EMfields3D::sumOverSpecies()
           rhon[i][j][k] += rhons[is][i][j][k];
 }
 
-/*!SPECIES: Sum current density for different species */
+/**
+ * @brief Sum nodal current density over all species.
+ */
 void EMfields3D::sumOverSpeciesJ()
 {
   for (int is = 0; is < ns; is++)
@@ -3239,7 +3285,9 @@ void EMfields3D::initEM_rotate(double B, double theta)
     grid->interpN2C(rhocs, is, rhons);
 }
 
-/*! initiliaze EM for GEM challange */
+/**
+ * @brief Initialize the standard GEM challenge field configuration.
+ */
 void EMfields3D::initGEM()
 {
   const VirtualTopology3D *vct = &get_vct();
@@ -4026,7 +4074,9 @@ void EMfields3D::initGEMnoPert()
   }
 }
 
-// new init, random problem
+/**
+ * @brief Initialize the random-field test configuration.
+ */
 void EMfields3D::initRandomField()
 {
   const VirtualTopology3D *vct = &get_vct();
@@ -4169,7 +4219,9 @@ void EMfields3D::initRandomField()
   delArr2(modes_seed, 7);
 }
 
-/*! Init Force Free (JxB=0) */
+/**
+ * @brief Initialize the force-free equilibrium configuration.
+ */
 void EMfields3D::initForceFree()
 {
   const VirtualTopology3D *vct = &get_vct();
@@ -4285,7 +4337,9 @@ void EMfields3D::initBEAM(double x_center, double y_center, double z_center,
   }
 }
 
-/*! Initialise a combination of magnetic dipoles */
+/**
+ * @brief Initialize the 3D magnetic-dipole planetary configuration.
+ */
 void EMfields3D::initDipole()
 {
   const Collective *col = &get_col();
@@ -4391,7 +4445,9 @@ void EMfields3D::initDipole()
   }
 }
 
-/*! Initialise a 2D magnetic dipoles according to paper L.K.S Two-way coupling of a global Hall ....*/
+/**
+ * @brief Initialize the 2D magnetic-dipole planetary configuration.
+ */
 void EMfields3D::initDipole2D()
 {
   const Collective *col = &get_col();
@@ -4502,7 +4558,9 @@ void EMfields3D::initDipole2D()
 }
 
 #ifdef BATSRUS
-/*! initiliaze EM for GEM challange */
+/**
+ * @brief Initialize fields from BATSRUS data.
+ */
 void EMfields3D::initBATSRUS()
 {
   const Collective *col = &get_col();

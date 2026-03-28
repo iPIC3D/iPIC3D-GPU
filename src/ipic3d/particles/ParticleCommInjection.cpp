@@ -541,12 +541,15 @@ void ParticleCommInjection::apply_Zrght_BC(vector_SpeciesParticle& pcls, int sta
   }
 }
 
-// ========================================================================
-// separateAndSendParticles:
-//   Iterate the AoS comm buffer, send exiting particles via
-//   BlockCommunicator, swap-remove sent ones.
-// ========================================================================
-
+/**
+ * @brief Send exiting particles from the AoS communication buffer to neighbours.
+ *
+ * The method iterates the current communication buffer, forwards particles to
+ * the appropriate `BlockCommunicator`, and swap-removes the particles that
+ * were successfully queued for sending.
+ *
+ * @return Number of particles removed from the local communication buffer.
+ */
 int ParticleCommInjection::separateAndSendParticles()
 {
   // activate receiving
@@ -585,11 +588,7 @@ int ParticleCommInjection::separateAndSendParticles()
   return numPclsSent;
 }
 
-// ========================================================================
-// handleReceivedParticles:
-//   Receives AoS blocks from BlockCommunicators, applies BCs,
-//   appends surviving particles to the AoS comm buffer.
-// ========================================================================
+// ======= Receive and post-process MPI particle blocks =======
 
 namespace PclCommMode
 {
@@ -600,6 +599,15 @@ namespace PclCommMode
   };
 }
 
+/**
+ * @brief Receive incoming particle blocks, apply boundary conditions, and keep survivors.
+ *
+ * Surviving particles are appended to the AoS communication buffer; particles
+ * that still belong to other ranks are re-sent through the communicator layer.
+ *
+ * @param pclCommMode Bitmask controlling BC handling and debug printing.
+ * @return Number of particles re-sent to a different rank.
+ */
 int ParticleCommInjection::handleReceivedParticles(int pclCommMode)
 {
   using namespace PclCommMode;
@@ -707,10 +715,15 @@ int ParticleCommInjection::handleReceivedParticles(int pclCommMode)
   return numPclsResent;
 }
 
-// ========================================================================
-// recommunicateParticlesUntilDone: iterative MPI exchange loop
-// ========================================================================
-
+/**
+ * @brief Iterate particle exchange until no particles remain in transit.
+ *
+ * The first `minNumIterations` iterations run unconditionally. After that, the
+ * method switches to a global-allreduce termination check and stops once every
+ * rank reports zero forwarded particles.
+ *
+ * @param minNumIterations Minimum number of exchange iterations before convergence checks.
+ */
 void ParticleCommInjection::recommunicateParticlesUntilDone(int minNumIterations)
 {
   assert_gt(minNumIterations, 0);
@@ -751,10 +764,12 @@ void ParticleCommInjection::recommunicateParticlesUntilDone(int minNumIterations
   }
 }
 
-// ========================================================================
-// Append from external AoS buffer (CPU-side: exosphere injection)
-// ========================================================================
-
+/**
+ * @brief Append externally generated AoS particles to the communication buffer.
+ *
+ * @param buffer Pointer to the input AoS particle buffer.
+ * @param count Number of particles to append from @p buffer.
+ */
 void ParticleCommInjection::appendFromAoS(const SpeciesParticle* buffer, int count)
 {
   if (count <= 0) return;
@@ -766,9 +781,7 @@ void ParticleCommInjection::appendFromAoS(const SpeciesParticle* buffer, int cou
   memcpy(commPcls.getList() + oldSize, buffer, count * sizeof(SpeciesParticle));
 }
 
-// ========================================================================
-// Helper: populate one cell with Maxwellian particles into comm buffer
-// ========================================================================
+// ======= Reemission helper =======
 
 void ParticleCommInjection::populateCellWithParticles(
   int cellIndexX, int cellIndexY, int cellIndexZ,
@@ -801,11 +814,12 @@ void ParticleCommInjection::populateCellWithParticles(
   }
 }
 
-// ========================================================================
-// repopulateParticlesOnlyInjection: inject Maxwellian particles at
-// REEMISSION boundaries into the comm buffer
-// ========================================================================
-
+/**
+ * @brief Inject reemitted Maxwellian particles at REEMISSION boundaries.
+ *
+ * New particles are written directly into the AoS communication buffer so the
+ * solver can append them to the GPU SoA tail in the normal incoming-particle path.
+ */
 void ParticleCommInjection::repopulateParticlesOnlyInjection()
 {
   using namespace BCparticles;

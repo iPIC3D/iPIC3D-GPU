@@ -54,6 +54,9 @@ private:
 public:
     /**
      * @brief Construct from ParticleSoAHost — direct SoA H→D.
+     * @param pSoA Source host-side SoA container.
+     * @param expand Capacity growth factor applied to the initial allocation.
+     * @param deviceStream CUDA stream used for the initial H2D copies.
      */
     __host__ particleArrayCUDA(ParticleSoAHost* pSoA, cudaTypeSingle expand = 1.2, cudaStream_t deviceStream = 0)
         : initialNOP(0)
@@ -83,6 +86,10 @@ public:
         freeSoA();
     }
 
+    /**
+     * @brief Copy this host-side metadata object to device memory.
+     * @return Device pointer to the copied metadata object.
+     */
     __host__ particleArrayCUDA* copyToDevice() {
         particleArrayCUDA* ptr = nullptr;
         cudaErrChk(cudaMalloc((void**)&ptr, sizeof(particleArrayCUDA)));
@@ -129,8 +136,12 @@ public:
     __host__ void assignStream(cudaStream_t s) { stream = s; }
     __host__ cudaStream_t getStream() const { return stream; }
 
-    // ── Expand: grows SoA allocations only ──
-
+    /**
+     * @brief Expand the SoA capacity while preserving the existing particles.
+     * @param targetSize Requested capacity in elements.
+     * @param deviceStream CUDA stream used for the staged field copies.
+     * @return Final allocated SoA capacity.
+     */
     __host__ uint32_t expand(uint32_t targetSize, cudaStream_t deviceStream) {
         if (targetSize <= soa.capacity) return soa.capacity;
         uint32_t newCap = roundUpSoA(targetSize);

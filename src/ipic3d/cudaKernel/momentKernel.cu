@@ -30,15 +30,19 @@
 using commonType = cudaTypeDouble; // calculation type
 
 
+// ======= Particle-based moment deposition =======
+
 /**
- * @brief moment kernel, one particle per thread
- * @details the moment kernel should be launched in species
- *          if these're 4 species, launch 4 times in different streams
- * 
- * @param grid 
- * @param _pcls the particles of a species
- * @param moments array4, [x][y][z][density], 
- *                  here[nxn][nyn][nzn][10], must be 0 before kernel launch
+ * @brief Deposit moments for the stayed-particle prefix plus newly appended particles.
+ *
+ * The kernel iterates with a grid-stride loop over the active particle range
+ * and atomically accumulates the 10 velocity moments onto the surrounding
+ * eight nodes.
+ *
+ * @param appendCount Device pointer to the number of appended particles.
+ * @param momentParam Device-side moment parameter bundle for one species.
+ * @param grid Device-side grid descriptor.
+ * @param moments Packed moment output buffer for this species.
  */
 __global__ void momentKernelStayed(const uint32_t* appendCount, momentParameter* momentParam,
                                 grid3DCUDA* grid,
@@ -52,9 +56,9 @@ __global__ void momentKernelStayed(const uint32_t* appendCount, momentParameter*
 
     for(uint pidx = tidx; pidx < totPcl; pidx += gridSize )
     {
-        if(momentParam->departureArray->getArray()[pidx].dest != 0)continue; // return the exiting particles, which are out of current domian
+        if(momentParam->departureArray->getArray()[pidx].dest != 0)continue; // skip particles already marked for departure
 
-        // can be const
+        // Cache grid metrics locally for the deposition arithmetic.
         const commonType& inv_dx = grid->invdx;
         const commonType& inv_dy = grid->invdy;
         const commonType& inv_dz = grid->invdz;
@@ -85,7 +89,7 @@ __global__ void momentKernelStayed(const uint32_t* appendCount, momentParameter*
         velmoments[1] = ui; // momentum density
         velmoments[2] = vi;
         velmoments[3] = wi;
-        velmoments[4] = uui; // second time momentum
+        velmoments[4] = uui; // second-order moments
         velmoments[5] = uvi;
         velmoments[6] = uwi;
         velmoments[7] = vvi;
@@ -116,7 +120,7 @@ __global__ void momentKernelStayed(const uint32_t* appendCount, momentParameter*
         const commonType weight01 = weight0 * eta1;
         const commonType weight10 = weight1 * eta0;
         const commonType weight11 = weight1 * eta1;
-        commonType weights[8]; // put the invVOL here
+        commonType weights[8];
         weights[0] = weight00 * zeta0 * grid->invVOL; // weight000
         weights[1] = weight00 * zeta1 * grid->invVOL; // weight001
         weights[2] = weight01 * zeta0 * grid->invVOL; // weight010
@@ -144,9 +148,15 @@ __global__ void momentKernelStayed(const uint32_t* appendCount, momentParameter*
         }
     }
 }
-
-
-
+/**
+ * @brief Deposit moments for the unsorted tail appended after compaction.
+ *
+ * @param momentParam Device-side moment parameter bundle for one species.
+ * @param grid Device-side grid descriptor.
+ * @param moments Packed moment output buffer for this species.
+ * @param stayedParticle Number of already-compacted stayed particles at the
+ *        front of the SoA buffer.
+ */
 __global__ void momentKernelNew(momentParameter* momentParam,
                                 grid3DCUDA* grid,
                                 cudaTypeArray1<cudaMomentType> moments,
@@ -157,7 +167,7 @@ __global__ void momentKernelNew(momentParameter* momentParam,
     auto pclsArray = momentParam->pclsArray;
     if(pidx >= pclsArray->getNOP())return;
 
-    // can be shared
+    // Cache grid metrics locally for the deposition arithmetic.
     const commonType inv_dx = 1.0 / grid->dx;
     const commonType inv_dy = 1.0 / grid->dy;
     const commonType inv_dz = 1.0 / grid->dz;
@@ -188,7 +198,7 @@ __global__ void momentKernelNew(momentParameter* momentParam,
     velmoments[1] = ui; // momentum density
     velmoments[2] = vi;
     velmoments[3] = wi;
-    velmoments[4] = uui; // second time momentum
+    velmoments[4] = uui; // second-order moments
     velmoments[5] = uvi;
     velmoments[6] = uwi;
     velmoments[7] = vvi;
@@ -219,7 +229,7 @@ __global__ void momentKernelNew(momentParameter* momentParam,
     const commonType weight01 = weight0 * eta1;
     const commonType weight10 = weight1 * eta0;
     const commonType weight11 = weight1 * eta1;
-    commonType weights[8]; // put the invVOL here
+    commonType weights[8];
     weights[0] = weight00 * zeta0 * grid->invVOL; // weight000
     weights[1] = weight00 * zeta1 * grid->invVOL; // weight001
     weights[2] = weight01 * zeta0 * grid->invVOL; // weight010
@@ -250,18 +260,23 @@ __global__ void momentKernelNew(momentParameter* momentParam,
 }
 
 
-// ============================================================================
-// Cell-aware moment kernel for sorted particles (warp-per-cell)
-// ============================================================================
-//
-// One warp processes all particles in one cell.  Particles are contiguous in
-// the sorted SoA prefix at indices [cell_start_offsets[cell], cell_end).
-// Per-particle contributions are warp-reduced via __shfl_down_sync before a
-// single atomicAdd per (moment, node) pair — 80 atomicAdds per CELL instead
-// of 80 per particle.
-//
-// Launch: <<<(num_cells * WARP_SIZE + blockDim - 1) / blockDim, blockDim>>>
-//
+// ======= Cell-aware sorted moment deposition =======
+
+/**
+ * @brief Deposit moments from the cell-sorted SoA prefix with one warp per cell.
+ *
+ * Particles belonging to one cell are assumed contiguous in
+ * `cell_start_offsets`. Contributions are reduced within the warp so the
+ * kernel performs one atomic add per `(moment, node)` pair instead of one
+ * per particle contribution.
+ *
+ * @param cell_start_offsets Device array of per-cell particle-start offsets.
+ * @param num_cells Number of populated cells in the sorted prefix.
+ * @param num_to_sort Number of particles in the sorted prefix.
+ * @param pclsArray Device-side particle SoA container.
+ * @param grid Device-side grid descriptor.
+ * @param moments Packed moment output buffer for this species.
+ */
 __global__ void cellAwareMomentKernel(
     const int*                    __restrict__ cell_start_offsets,
     int                           num_cells,
@@ -284,7 +299,7 @@ __global__ void cellAwareMomentKernel(
     const int cell_count = cell_end - cell_begin;
     if (cell_count <= 0) return;
 
-    // ── Recover node indices from flat cell index ──
+    // Recover node indices from the flat cell index.
     const int nxc = grid->nxc;
     const int nyc = grid->nyc;
     const int nxn = grid->nxn;
@@ -313,7 +328,7 @@ __global__ void cellAwareMomentKernel(
     posIndex[6] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy-1, iz  );
     posIndex[7] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy-1, iz-1);
 
-    // ── Grid constants for weight computation ──
+    // Cache grid constants used by the weight computation.
     const commonType inv_vol = grid->invVOL;
     const commonType _dx     = grid->dx;
     const commonType _dy     = grid->dy;
@@ -340,7 +355,7 @@ __global__ void cellAwareMomentKernel(
     const commonType* __restrict__ pw = pclsArray->getW();
     const commonType* __restrict__ pq = pclsArray->getQ();
 
-    // ── Process particles in warp-sized batches ──
+    // Process particles in warp-sized batches.
     for (int batch = 0; batch < cell_count; batch += WARP_SIZE) {
         const int local_idx = batch + lane;
         const bool active = local_idx < cell_count;
@@ -372,7 +387,7 @@ __global__ void cellAwareMomentKernel(
         const commonType vm8  = vi * wi;
         const commonType vm9  = wi * wi;
 
-        // Trilinear weights — exact same arithmetic as momentKernelStayed
+        // Trilinear weights using the same arithmetic as momentKernelStayed.
         const commonType xi0   = xpcl - xn_lo;
         const commonType xi1   = xn_hi - xpcl;
         const commonType eta0  = ypcl - yn_lo;
@@ -412,4 +427,3 @@ __global__ void cellAwareMomentKernel(
         }
     }
 }
-

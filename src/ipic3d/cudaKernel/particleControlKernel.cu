@@ -7,17 +7,20 @@
 #include "particleArrayCUDA.cuh"
 #include "particleExchange.cuh"
 
+// ======= Merge kernel =======
 
 /**
-* @brief Merging kernel, merging particle pairs with similar velocity in the same cell
-*
-* @param cellOffsetList absolute Offset of the cells in the pclArray, the pclArray must be sorted
-* @param cellBinCountList Number of particles in each cell
-* @param grid Pointer to the grid structure
-* @param pcl Pointer to the particle array
-* @param departureArray Pointer to the departure array, for delete mark
-* @details one warp for each cell
-*/
+ * @brief Merge close-velocity particle pairs inside a cell-sorted SoA buffer.
+ *
+ * Each warp owns one cell. The kernel looks for the closest not-yet-deleted
+ * partner for each lead particle, merges charges and phase-space coordinates
+ * conservatively, and marks the absorbed particle for deletion.
+ * @param cellOffsetList Per-cell starting offsets in the sorted particle buffer.
+ * @param cellBinCountList Per-cell particle counts.
+ * @param grid Device grid metadata used to compute cell statistics.
+ * @param pclArray Cell-sorted particle SoA buffer.
+ * @param departureArray Per-particle destination metadata used for deletion flags.
+ */
 __global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList, grid3DCUDA* grid, particleArrayCUDA* pclArray, departureArrayType* departureArray) {
 
     const uint pid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -45,7 +48,7 @@ __global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList, grid3D
 
     const int initialPIC = pclArray->getInitialNOP() / ((grid->nxc-2) * (grid->nyc-2) * (grid->nzc-2));
 
-    if(numPIC <= initialPIC) return; // no merging if less than 32 particles in the cell
+    if(numPIC <= initialPIC) return; // already at or below the target occupancy
 
     int cellMergeCount = 0; // number of particles merged in this cell
 
@@ -142,10 +145,17 @@ __global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList, grid3D
 
 using commonType = cudaParticleType;
 
-// Particle number control 
+// ======= Particle splitting kernels =======
 
-// Particle splitting kernel to use when the number of particles to be generated is < number available particles
-// launch the kernel with number of threads = deltaPcl --> each thread splits a particle randomly choosen
+/**
+ * @brief Split a subset of particles when fewer new particles are needed than currently exist.
+ *
+ * The launch uses `deltaPcl` threads. Each thread selects one source particle,
+ * halves its charge, offsets the original and clone within the same cell, and
+ * writes the new particle at the end of the SoA buffer.
+ * @param moverParam Mover context holding the particle buffer to expand.
+ * @param grid Device grid metadata used to keep daughter particles in-cell.
+ */
 template <>
 __global__ void particleSplittingKernel<false>(moverParameter* moverParam, grid3DCUDA* grid)
 {   
@@ -217,7 +227,7 @@ __global__ void particleSplittingKernel<false>(moverParameter* moverParam, grid3
     soaY[pidx] = y0 - delta;
     soaZ[pidx] = z0 - delta;
 
-    // update weights — halve charge for both
+    // Update charge consistently for both daughter particles.
     const auto q = soaQ[pidx]; 
     soaQ[pidx] = 0.5 * q;
 
@@ -238,13 +248,14 @@ __global__ void particleSplittingKernel<false>(moverParameter* moverParam, grid3
     soaZ[index] = z0 + delta;
     soaT[index] = 114515.0;
 }
-
-
-
-
-// Particle splitting kernel to use when the number of particles to be generated is > number available particles
-// launch the kernel with number of threads = pclsArray->getNOP() --> each thread splits a particle splittingTimes times
-
+/**
+ * @brief Split every existing particle multiple times when the deficit exceeds the current population.
+ *
+ * Each thread repeatedly clones the particle it owns until the requested
+ * particle deficit has been filled.
+ * @param moverParam Mover context holding the particle buffer to expand.
+ * @param grid Device grid metadata used to keep daughter particles in-cell.
+ */
 template <>
 __global__ void particleSplittingKernel<true>(moverParameter* moverParam, grid3DCUDA* grid)
 {  
@@ -310,7 +321,7 @@ __global__ void particleSplittingKernel<true>(moverParameter* moverParam, grid3D
         soaY[pidx] = y0 - delta;
         soaZ[pidx] = z0 - delta;
 
-        // update weights — halve charge for both
+        // Update charge consistently for both daughter particles.
         const auto q = soaQ[pidx]; 
         soaQ[pidx] = 0.5 * q;
 

@@ -103,6 +103,8 @@ public:
    * @brief Iterate the comm buffer, send exiting particles to neighbours.
    * Removes sent particles from the buffer (swap-remove) and returns the
    * number of particles sent.
+   *
+   * @return Number of particles sent out of the local comm buffer.
    */
   int separateAndSendParticles();
 
@@ -122,7 +124,12 @@ public:
 
   // ===== Append from external AoS (CPU-side: exosphere injection) =====
 
-  /** Append AoS particles to the AoS comm buffer. */
+  /**
+   * @brief Append AoS particles to the AoS comm buffer.
+   *
+   * @param buffer Pointer to the input AoS particle array.
+   * @param count Number of particles to append from @p buffer.
+   */
   void appendFromAoS(const SpeciesParticle* buffer, int count);
 
   // ===== AoS comm buffer (pinned host memory) — public for direct D→H memcpy =====
@@ -130,11 +137,47 @@ public:
   vector_SpeciesParticle_registered commPcls;
 
 public: // BC methods (virtual for user override)
+  /**
+   * @brief Apply the left-X boundary condition to particles in place.
+   *
+   * @param pcls Particle list to modify.
+   * @param start Start index of the subrange to process.
+   */
   virtual void apply_Xleft_BC(vector_SpeciesParticle& pcls, int start = 0);
+  /**
+   * @brief Apply the left-Y boundary condition to particles in place.
+   *
+   * @param pcls Particle list to modify.
+   * @param start Start index of the subrange to process.
+   */
   virtual void apply_Yleft_BC(vector_SpeciesParticle& pcls, int start = 0);
+  /**
+   * @brief Apply the left-Z boundary condition to particles in place.
+   *
+   * @param pcls Particle list to modify.
+   * @param start Start index of the subrange to process.
+   */
   virtual void apply_Zleft_BC(vector_SpeciesParticle& pcls, int start = 0);
+  /**
+   * @brief Apply the right-X boundary condition to particles in place.
+   *
+   * @param pcls Particle list to modify.
+   * @param start Start index of the subrange to process.
+   */
   virtual void apply_Xrght_BC(vector_SpeciesParticle& pcls, int start = 0);
+  /**
+   * @brief Apply the right-Y boundary condition to particles in place.
+   *
+   * @param pcls Particle list to modify.
+   * @param start Start index of the subrange to process.
+   */
   virtual void apply_Yrght_BC(vector_SpeciesParticle& pcls, int start = 0);
+  /**
+   * @brief Apply the right-Z boundary condition to particles in place.
+   *
+   * @param pcls Particle list to modify.
+   * @param start Start index of the subrange to process.
+   */
   virtual void apply_Zrght_BC(vector_SpeciesParticle& pcls, int start = 0);
 
 private:

@@ -31,9 +31,17 @@ constexpr cudaTypeDouble PC_err_2 = 1E-12;  // square of error tolerance
 
 __device__ constexpr bool cap_velocity() { return false; }
 
-// ====== Inline helper functions for mover kernels ======
+// ======= Inline mover helpers =======
 
-// Mark particle for deletion and register in the departure hashed sum.
+/**
+ * @brief Mark a particle for deletion and register it in the delete hashed sum.
+ *
+ * The particle state itself is left untouched; only the departure metadata is
+ * updated so later compaction and communication stages can remove it safely.
+ *
+ * @param moverParam Device-side mover parameter bundle.
+ * @param pidx Particle index in the species SoA buffer.
+ */
 __device__ __forceinline__ void markForDeletion(
     moverParameter *moverParam, uint32_t pidx)
 {
@@ -42,10 +50,21 @@ __device__ __forceinline__ void markForDeletion(
         moverParam->hashedSumArray[departureArrayElementType::DELETE_HASHEDSUM_INDEX].add(pidx);
 }
 
-// Cap particle velocity to v2max = 0.9999^2.
-// Operates on register references — caller keeps velocity in registers.
-// Rescales finite superluminal velocities; marks NaN/Inf for deletion.
-// Returns true if the particle was deleted (caller should return).
+/**
+ * @brief Clamp finite superluminal velocities and delete non-finite particles.
+ *
+ * Operates on register-resident velocity components. Finite velocities with
+ * |v/c| above the safety cap are rescaled back below it; NaN and Inf values
+ * are marked for deletion because they would poison later gamma and moment
+ * calculations.
+ *
+ * @param ufinal In-out x-velocity component.
+ * @param vfinal In-out y-velocity component.
+ * @param wfinal In-out z-velocity component.
+ * @param moverParam Device-side mover parameter bundle.
+ * @param pidx Particle index in the species SoA buffer.
+ * @return True if the particle was deleted and the caller should return.
+ */
 __device__ __forceinline__ bool capVelocityOrDelete(
     commonType& ufinal, commonType& vfinal, commonType& wfinal,
     moverParameter *moverParam, uint32_t pidx)
@@ -66,9 +85,23 @@ __device__ __forceinline__ bool capVelocityOrDelete(
     return false;
 }
 
-// Sample nFields components of the EM field at position (x,y,z).
-// Fills weights[8], updates cell coordinates (cx,cy,cz), and writes
-// sampled_field[0..nFields-1] with interpolated values.
+/**
+ * @brief Interpolate particle fields from the packed node-centered field buffer.
+ *
+ * Updates the owning cell indices and trilinear weights, then accumulates the
+ * first @p nFields components into @p sampled_field.
+ *
+ * @param x Particle x position.
+ * @param y Particle y position.
+ * @param z Particle z position.
+ * @param grid Device-side grid descriptor.
+ * @param fieldForPcls Packed field buffer consumed by the mover.
+ * @param weights Output trilinear weights for the enclosing cell.
+ * @param cx Output cell index in x.
+ * @param cy Output cell index in y.
+ * @param cz Output cell index in z.
+ * @param sampled_field Output sampled field values.
+ */
 template <int nFields>
 __device__ __forceinline__ void sampleFieldsAtPosition(
     commonType x, commonType y, commonType z,
@@ -87,7 +120,20 @@ __device__ __forceinline__ void sampleFieldsAtPosition(
             sampled_field[i] += weights[c] * fieldForPcls[previousIndex * 24 + c * 6 + i];
 }
 
-// Compute predictor-corrector convergence error (relative squared velocity change).
+/**
+ * @brief Compute the predictor-corrector convergence metric.
+ *
+ * The return value is the relative squared change between two successive
+ * average-velocity estimates.
+ *
+ * @param uavg Current averaged x velocity.
+ * @param vavg Current averaged y velocity.
+ * @param wavg Current averaged z velocity.
+ * @param uavg_old Previous averaged x velocity.
+ * @param vavg_old Previous averaged y velocity.
+ * @param wavg_old Previous averaged z velocity.
+ * @return Relative squared change between successive averaged velocities.
+ */
 __device__ __forceinline__ commonType computePCError(
     commonType uavg, commonType vavg, commonType wavg,
     commonType uavg_old, commonType vavg_old, commonType wavg_old)
@@ -98,13 +144,21 @@ __device__ __forceinline__ commonType computePCError(
            (uavg_old * uavg_old + vavg_old * vavg_old + wavg_old * wavg_old);
 }
 
-// ====== End inline helper functions ======
+// ======= End inline mover helpers =======
 
-// __host__ __device__ void get_field_components_for_cell(
-//     const cudaFieldType *field_components[8],
-//     cudaTypeArray1<cudaFieldType> fieldForPcls, grid3DCUDA *grid,
-//     int cx, int cy, int cz);
-
+/**
+ * @brief Classify a moved particle and update its departure metadata.
+ *
+ * @param xpcl Particle x position after the mover.
+ * @param ypcl Particle y position after the mover.
+ * @param zpcl Particle z position after the mover.
+ * @param pclsArray Device-side particle SoA container.
+ * @param pidx Particle index in the species SoA buffer.
+ * @param moverParam Device-side mover parameter bundle.
+ * @param departureArray Device-side departure metadata array.
+ * @param grid Device-side grid descriptor.
+ * @param hashedSumArray Device-side hashed-sum buckets for departure compaction.
+ */
 __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl, commonType zpcl,
                                     particleArrayCUDA* pclsArray, uint32_t pidx,
                                     moverParameter *moverParam,
@@ -112,6 +166,17 @@ __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl, commonTy
                                     grid3DCUDA* grid, 
                                     hashedSum* hashedSumArray);
 
+/**
+ * @brief Advance one particle over the full solver time step with the standard mover.
+ *
+ * The kernel performs the predictor-corrector push, clamps or deletes invalid
+ * velocities, writes the final SoA state, and classifies the particle for
+ * staying, exchange, deletion, or planet handling.
+ *
+ * @param moverParam Device-side mover parameter bundle for one species.
+ * @param fieldForPcls Packed mover field buffer.
+ * @param grid Device-side grid descriptor.
+ */
 __global__ void moverKernel(moverParameter *moverParam,
                             cudaTypeArray1<cudaFieldType> fieldForPcls,
                             grid3DCUDA *grid)
@@ -225,11 +290,17 @@ __global__ void moverKernel(moverParameter *moverParam,
     
 }
 
-
-
-
-
-// select kernel in /src/ipic3d/main/iPIC3Dlib.cu
+/**
+ * @brief Advance one particle with adaptive subcycling based on local magnetic field strength.
+ *
+ * The full step is split into smaller substeps when the local gyrofrequency is
+ * large. State is kept in registers across the subcycle loop and written back
+ * only once at the end.
+ *
+ * @param moverParam Device-side mover parameter bundle for one species.
+ * @param fieldForPcls Packed mover field buffer.
+ * @param grid Device-side grid descriptor.
+ */
 __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         cudaTypeArray1<cudaFieldType> fieldForPcls,
         grid3DCUDA *grid)
@@ -246,7 +317,7 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         return;
     }
 
-    // Load particle state from SoA into registers — kept in registers across all subcycles
+    // Load particle state from SoA and keep it in registers across all subcycles.
     commonType cur_x = pclsArray->getX()[pidx];
     commonType cur_y = pclsArray->getY()[pidx];
     commonType cur_z = pclsArray->getZ()[pidx];
@@ -285,7 +356,7 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
         }
     }
 
-    //start subcycling — all state kept in registers
+    // Start subcycling; keep the state in registers across the loop.
     for(int cyc_cnt = 0; cyc_cnt < sub_cycles; cyc_cnt++)
     {
         const commonType xorig = cur_x;
@@ -418,6 +489,27 @@ __global__ void moverSubcyclesKernel(moverParameter *moverParam,
 
 }
 
+// ======= Boundary classification helpers =======
+
+/**
+ * @brief Apply open-boundary outflow logic and optionally append a translated duplicate.
+ *
+ * When a particle crosses an open-boundary layer, the original particle can be
+ * deleted while a translated duplicate is appended and immediately classified
+ * for exchange on the opposite side.
+ *
+ * @param xpcl Particle x position after the mover.
+ * @param ypcl Particle y position after the mover.
+ * @param zpcl Particle z position after the mover.
+ * @param pclsArray Device-side particle SoA container.
+ * @param pidx Particle index in the species SoA buffer.
+ * @param moverParam Device-side mover parameter bundle.
+ * @param departureArray Device-side departure metadata array.
+ * @param grid Device-side grid descriptor.
+ * @param hashedSumArray Device-side hashed-sum buckets for departure compaction.
+ * @return Departure destination for the original particle, or 0 when this
+ *         helper does not claim it.
+ */
 __device__ uint32_t deleteAppendOpenBCOutflow(commonType xpcl, commonType ypcl, commonType zpcl,
     particleArrayCUDA* pclsArray, uint32_t pidx,
     moverParameter *moverParam, departureArrayType* departureArray, grid3DCUDA* grid, hashedSum* hashedSumArray) {
@@ -468,7 +560,7 @@ __device__ uint32_t deleteAppendOpenBCOutflow(commonType xpcl, commonType ypcl, 
                 if (index >= pclsArray->getSize()) {
                     printf("Memory overflow in open boundary outflow (index=%u, size=%u)\n",
                            index, pclsArray->getSize());
-                    // Cannot append — drop this duplicate and mark the original
+                    // Cannot append: drop this duplicate and mark the original
                     // particle for deletion so it doesn't corrupt hashed sums.
                     return departureArrayElementType::DELETE;
                 }
@@ -524,6 +616,16 @@ __device__ uint32_t deleteAppendOpenBCOutflow(commonType xpcl, commonType ypcl, 
 
 }
 
+/**
+ * @brief Delete particles that enter repopulation-injection depletion layers.
+ *
+ * @param xpcl Particle x position after the mover.
+ * @param ypcl Particle y position after the mover.
+ * @param zpcl Particle z position after the mover.
+ * @param moverParam Device-side mover parameter bundle.
+ * @param grid Device-side grid descriptor.
+ * @return `DELETE` when the particle should be removed, otherwise 0.
+ */
 __device__ uint32_t deleteRepopulateInjection(commonType xpcl, commonType ypcl, commonType zpcl,
     moverParameter *moverParam, grid3DCUDA *grid) {
     if (!moverParam->doRepopulateInjection) return 0;
@@ -546,6 +648,19 @@ __device__ uint32_t deleteRepopulateInjection(commonType xpcl, commonType ypcl, 
 
 }
 
+/**
+ * @brief Tag particles that crossed into the absorbing planet region.
+ *
+ * Supports both the full 3D sphere and the 2D XZ-plane circle used by the
+ * dipole-2D configuration.
+ *
+ * @param xpcl Particle x position after the mover.
+ * @param ypcl Particle y position after the mover.
+ * @param zpcl Particle z position after the mover.
+ * @param moverParam Device-side mover parameter bundle.
+ * @param grid Device-side grid descriptor.
+ * @return `PLANET` when the particle is inside the body, otherwise 0.
+ */
 __device__ uint32_t deleteInsideSphere(commonType xpcl, commonType ypcl, commonType zpcl,
     moverParameter *moverParam, grid3DCUDA *grid) {
     
@@ -577,8 +692,25 @@ __device__ uint32_t deleteInsideSphere(commonType xpcl, commonType ypcl, commonT
     return 0;
 
 }
+// ======= Departure classification =======
 
-
+/**
+ * @brief Finalize departure metadata for one moved particle.
+ *
+ * The routine applies, in order, open-boundary outflow handling, repopulation
+ * injection deletion, planet absorption, and regular domain-exit checks. Any
+ * non-staying destination is registered in the matching hashed-sum bucket.
+ *
+ * @param xpcl Particle x position after the mover.
+ * @param ypcl Particle y position after the mover.
+ * @param zpcl Particle z position after the mover.
+ * @param pclsArray Device-side particle SoA container.
+ * @param pidx Particle index in the species SoA buffer.
+ * @param moverParam Device-side mover parameter bundle.
+ * @param departureArray Device-side departure metadata array.
+ * @param grid Device-side grid descriptor.
+ * @param hashedSumArray Device-side hashed-sum buckets for departure compaction.
+ */
 __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl, commonType zpcl,
     particleArrayCUDA* pclsArray, uint32_t pidx,
     moverParameter *moverParam, departureArrayType* departureArray, grid3DCUDA* grid, hashedSum* hashedSumArray){

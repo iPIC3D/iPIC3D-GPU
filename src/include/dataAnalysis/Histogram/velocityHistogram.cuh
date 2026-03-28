@@ -268,14 +268,18 @@ private:
 
     /**
      * @brief get the Max and Min value of the given value set
+     * @param pclArray Borrowed velocity SoA view for one species.
+     * @param species Species index, used for output metadata.
+     * @param stream CUDA stream used by the reduction kernels.
+     * @return `0` on success.
      */
     int getRange(velocitySoA* pclArray, const int species, cudaStream_t stream);
 
 public:
 
     /**
+     * @brief Construct a velocity histogram accumulator.
      * @param initSize the initial size of the histogram buffer, in elements
-     * @param path the path to store the output file, directory
      */
     velocityHistogram3D(int initSize) {
 
@@ -311,6 +315,9 @@ public:
     /**
      * @brief Initiate the kernels for histograming, launch the kernels
      * @details It can be invoked after Moment in the main loop, for the output and solver are on CPU
+     * @param pclArray Borrowed velocity SoA view for one species.
+     * @param species Species index, used for output naming and metadata.
+     * @param stream CUDA stream used by the histogram kernels.
      */
     void init(velocitySoA* pclArray, const int species, cudaStream_t stream = 0);
 
@@ -318,6 +325,7 @@ public:
      * @brief Wait for the histogram data to be ready, copy the data to host
      * @details It should be invoked after a previous Init, after this, can use getVelocityHistogramCUDAArray to get the data
      *         writeToFile has the same effect
+     * @param stream CUDA stream used for the pending device-to-host copy.
      */
     void copyHistogramToHost(cudaStream_t stream = 0){        
         histogramHostPtr->copyHistogramAsync(stream);

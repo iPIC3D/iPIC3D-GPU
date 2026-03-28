@@ -1,10 +1,6 @@
-/*
- * IOManager.cpp - Modular I/O manager implementation for iPIC3D
- *
- * Each write*() method dispatches to the selected backend.
- * Backend-specific code is isolated behind its own preprocessor guard,
- * so compiling without HDF5 or ADIOS2 simply disables those paths —
- * no entanglement between unrelated backends.
+/**
+ * @file IOManager.cpp
+ * @brief Modular I/O manager implementation for iPIC3D.
  */
 
 #include "IOManager.h"
@@ -32,9 +28,7 @@
 
 using std::string;
 
-// ---------------------------------------------------------------------------
-// Construction / Destruction
-// ---------------------------------------------------------------------------
+// ======= Construction and destruction =======
 
 IOManager::IOManager() = default;
 
@@ -45,8 +39,8 @@ IOManager::~IOManager() {
 #ifdef USE_ADIOS2
     delete adiosManager_;
 #endif
-    // Free VTK write buffers (delArr needs the first two dimensions). 
-    // Note: the original code never freed these — this fixes that leak.
+    // Free VTK write buffers (delArr needs the first two dimensions).
+    // Note: the original code never freed these; this fixes that leak.
     if (fieldwritebuffer_ && localWriteNz_ > 0) {
         int dim0 = (fieldBackend_ == FieldBackend::NBCVTK)
                        ? localWriteNz_ * 4
@@ -61,9 +55,7 @@ IOManager::~IOManager() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Initialisation
-// ---------------------------------------------------------------------------
+// ======= Initialization =======
 
 void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
                      EMfields3D* EMf, ParticleSoAHost** outputPart, int ns,
@@ -83,7 +75,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
 
     const string writeMethod = col->getWriteMethod();
 
-    // ---- 1. Determine FIELD backend from WriteMethod ----
+    // Step 1: determine the field backend from WriteMethod.
     if      (writeMethod == "shdf5")  fieldBackend_ = FieldBackend::SHDF5;
     else if (writeMethod == "pvtk")   fieldBackend_ = FieldBackend::PVTK;
     else if (writeMethod == "nbcvtk") fieldBackend_ = FieldBackend::NBCVTK;
@@ -97,7 +89,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
         fieldBackend_ = FieldBackend::NONE;
     }
 
-    // ---- 2. Determine PARTICLE backend ----
+    // Step 2: determine the particle backend.
 #ifdef USE_ADIOS2
     particleBackend_ = ParticleBackend::ADIOS2;
 #else
@@ -107,14 +99,14 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
         particleBackend_ = ParticleBackend::SHDF5;
 #endif
 
-    // ---- 3. Determine RESTART backend ----
+    // Step 3: determine the restart backend.
 #ifdef USE_ADIOS2
     restartBackend_ = RestartBackend::ADIOS2;
 #else
     restartBackend_ = RestartBackend::SHDF5;
 #endif
 
-    // ---- 4. Validate backend availability against compile flags ----
+    // Step 4: validate backend availability against compile flags.
 #ifdef NO_HDF5
     if (fieldBackend_ == FieldBackend::SHDF5 ||
         fieldBackend_ == FieldBackend::PARALLEL_HDF5 ||
@@ -146,14 +138,14 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
     }
 #endif
 
-    // ---- 5. Create HDF5 backend (OutputWrapperFPP) if any path needs it ----
+    // ======= HDF5 backend setup =======
 #ifndef NO_HDF5
     {
         bool needHDF5 = false;
         if (fieldBackend_ == FieldBackend::SHDF5)       needHDF5 = true;
         if (particleBackend_ == ParticleBackend::SHDF5)  needHDF5 = true;
         if (restartBackend_ == RestartBackend::SHDF5)    needHDF5 = true;
-        // PHDF5 and H5hut use free functions — no OutputWrapperFPP needed
+        // PHDF5 and H5hut use free functions; no OutputWrapperFPP is needed.
 
         if (needHDF5) {
             outputWrapperFPP_ = new OutputWrapperFPP;
@@ -163,7 +155,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
     }
 #endif
 
-    // ---- 6. Create ADIOS2 backend if any path needs it ----
+    // ======= ADIOS2 backend setup =======
 #ifdef USE_ADIOS2
     if (particleBackend_ == ParticleBackend::ADIOS2 ||
         restartBackend_  == RestartBackend::ADIOS2  ||
@@ -180,7 +172,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
     }
 #endif
 
-    // ---- 7. Allocate VTK write buffers if needed ----
+    // ======= VTK write-buffer setup =======
     // Compute local write sizes: interior nodes + boundary node for upper processes
     localWriteNx_ = grid->getNXN() - 3 + (vct->isXupper() ? 1 : 0);
     localWriteNy_ = grid->getNYN() - 3 + (vct->isYupper() ? 1 : 0);
@@ -211,9 +203,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Field output
-// ---------------------------------------------------------------------------
+// ======= Field output =======
 
 void IOManager::writeFields(int cycle) {
 
@@ -226,7 +216,7 @@ void IOManager::writeFields(int cycle) {
 
     switch (fieldBackend_) {
 
-    // -- Serial HDF5 (one file per process) --
+    // Serial HDF5 (one file per process).
     case FieldBackend::SHDF5:
 #ifndef NO_HDF5
         if (!col_->getFieldOutputTag().empty())
@@ -243,7 +233,7 @@ void IOManager::writeFields(int cycle) {
         }
         break;
 
-    // -- Blocking collective MPI-IO VTK --
+    // Blocking collective MPI-IO VTK.
     case FieldBackend::PVTK:
         if (!col_->getFieldOutputTag().empty())
             WriteFieldsVTK(grid_, EMf_, col_, vct_,
@@ -256,7 +246,7 @@ void IOManager::writeFields(int cycle) {
             WriteRhoTotalVTK(grid_, EMf_, col_, vct_, cycle, momentwritebuffer_);
         break;
 
-    // -- Non-blocking collective MPI-IO VTK --
+    // Non-blocking collective MPI-IO VTK.
     case FieldBackend::NBCVTK:
         // Complete any pending writes from the previous cycle
         if (!col_->getFieldOutputTag().empty()) {
@@ -311,7 +301,7 @@ void IOManager::writeFields(int cycle) {
         }
         break;
 
-    // -- Parallel HDF5 --
+    // Parallel HDF5.
     case FieldBackend::PARALLEL_HDF5:
 #ifndef NO_HDF5
         WriteOutputParallel(grid_, EMf_, outputPart_, col_, vct_, cycle);
@@ -323,7 +313,7 @@ void IOManager::writeFields(int cycle) {
         }
         break;
 
-    // -- H5hut --
+    // H5hut.
     case FieldBackend::H5HUT:
 #ifndef NO_HDF5
         WriteFieldsH5hut(ns_, grid_, EMf_, col_, vct_, cycle);
@@ -335,7 +325,7 @@ void IOManager::writeFields(int cycle) {
         }
         break;
 
-    // -- ADIOS2 field output --
+    // ADIOS2 field output.
     case FieldBackend::ADIOS2:
 #ifdef USE_ADIOS2
         adiosManager_->appendFieldOutput(cycle);
@@ -352,9 +342,7 @@ void IOManager::writeFields(int cycle) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Particle output
-// ---------------------------------------------------------------------------
+// ======= Particle output =======
 
 void IOManager::writeParticles(int cycle) {
     switch (particleBackend_) {
@@ -384,14 +372,12 @@ void IOManager::writeParticles(int cycle) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test-particle output (currently HDF5-only)
-// ---------------------------------------------------------------------------
+// ======= Test-particle output =======
 
 void IOManager::writeTestParticles(int cycle) {
     if (nstestpart_ == 0) return;
 
-    // SoA data is authoritative — no conversion needed, all writers use SoA accessors
+    // SoA data is authoritative; no conversion is needed because all writers use SoA accessors.
 
 #ifndef NO_HDF5
     if (outputWrapperFPP_)
@@ -400,9 +386,7 @@ void IOManager::writeTestParticles(int cycle) {
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// Restart output
-// ---------------------------------------------------------------------------
+// ======= Restart output =======
 
 void IOManager::writeRestart(int cycle) {
     switch (restartBackend_) {
@@ -425,9 +409,7 @@ void IOManager::writeRestart(int cycle) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Restart reading (delegates to RestartReader)
-// ---------------------------------------------------------------------------
+// ======= Restart reading =======
 
 void IOManager::readFieldRestart(
     const VCtopology3D* vct, const Grid3DCU* grid,
@@ -452,21 +434,17 @@ void IOManager::readParticlesRestart(
         col_->getRestartDirName(), col_->getLast_cycle());
 }
 
-// ---------------------------------------------------------------------------
-// Finalise
-// ---------------------------------------------------------------------------
+// ======= Finalization =======
 
 void IOManager::finalize() {
 #ifdef USE_ADIOS2
     if (adiosManager_)
         adiosManager_->closeOutputFiles();
 #endif
-    // OutputWrapperFPP has no explicit close — destructor handles cleanup.
+    // OutputWrapperFPP has no explicit close; the destructor handles cleanup.
 }
 
-// ---------------------------------------------------------------------------
-// Scheduling query
-// ---------------------------------------------------------------------------
+// ======= Scheduling query =======
 
 bool IOManager::needsParticleSync(int cycle) const {
     if (restart_cycle_ > 0 && cycle % restart_cycle_ == 0)

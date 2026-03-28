@@ -146,13 +146,32 @@ __host__ inline T* copyArrayToDevice(T* objectOnHost, int numberOfElement, cudaS
 ////////////////////////////////// One dimenstion to high dim index
 
 /**
- * @brief turn 3-dim index to one dim index
+ * @brief Convert a 3D index tuple to a flat row-major index.
+ * @param dim1 Extent of the first dimension.
+ * @param dim2 Extent of the second dimension.
+ * @param dim3 Extent of the third dimension.
+ * @param index1 Index along the first dimension.
+ * @param index2 Index along the second dimension.
+ * @param index3 Index along the third dimension.
+ * @return Flattened row-major index.
  */
 __host__ __device__ inline uint32_t toOneDimIndex(uint32_t dim1, uint32_t dim2, uint32_t dim3,
                                      uint32_t index1, uint32_t index2, uint32_t index3){
     return (index1*dim2*dim3 + index2*dim3 + index3);
 }
 
+/**
+ * @brief Convert a 4D index tuple to a flat row-major index.
+ * @param dim1 Extent of the first dimension.
+ * @param dim2 Extent of the second dimension.
+ * @param dim3 Extent of the third dimension.
+ * @param dim4 Extent of the fourth dimension.
+ * @param index1 Index along the first dimension.
+ * @param index2 Index along the second dimension.
+ * @param index3 Index along the third dimension.
+ * @param index4 Index along the fourth dimension.
+ * @return Flattened row-major index.
+ */
 __host__ __device__ inline uint32_t toOneDimIndex(uint32_t dim1, uint32_t dim2, uint32_t dim3, uint32_t dim4,
                                          uint32_t index1, uint32_t index2, uint32_t index3, uint32_t index4){
     return (index1*dim2*dim3*dim4 + index2*dim3*dim4 + index3*dim4 + index4);

@@ -48,7 +48,9 @@
 #include <sstream>
 #include <chrono>
 
-// Set to 1 to enable per-phase timing printfs (launcher, await, MPI, planet, exchange TOTAL)
+// ======= Timing Debugging =======
+// Set to 1 to enable per-phase timing printfs
+// (launcher, await, MPI, planet, exchange total).
 #define ENABLE_SOA_TIMING 0
 
 #include "Moments.h" // for debugging
@@ -71,12 +73,14 @@
 #include "Adaptor.h"
 #endif
 
-// set to true to enable particle merging, false to disable. Note that the merging process is not fully optimized yet, so it might cause performance drop if enabled. Use with caution.
+// ======= Particle Count Control =======
+// Set to true to enable particle merging.
+// The current implementation is functional but not fully optimized.
 constexpr bool PARTICLE_MERGING = false;
-// set to true to enable particle splitting 
+// Set to true to enable particle splitting.
 constexpr bool PARTICLE_SPLITTING = false; 
 
-// ── Named constants (replace scattered magic numbers) ──
+// ======= Solver Constants =======
 constexpr double INITIAL_CAPACITY_FACTOR = 1.4;   // SoA array initial over-allocation
 constexpr double AUX_BUFFER_FRACTION     = 0.1;   // exiting/filler/staging as fraction of NOP
 constexpr double PLANET_BUFFER_FRACTION  = 0.05;  // planet array initial fraction of NOP
@@ -90,7 +94,14 @@ constexpr int    INITIAL_PLANET_BUF_CAP  = 1024;   // initial planet cross-speci
 
 using namespace iPic3D;
 
-// ── Resolve input-file case string to CaseType enum ──
+/**
+ * @brief Convert the input-file case string into the internal CaseType enum.
+ *
+ * This centralizes case parsing so the solver can branch on a stable enum
+ * instead of repeatedly comparing strings throughout the runtime path.
+ * @param s Case string read from the input configuration.
+ * @return Parsed solver case identifier.
+ */
 static CaseType parseCaseType(const std::string& s) {
   if (s == "GEMnoPert")       return CaseType::GEMnoPert;
   if (s == "ForceFree")       return CaseType::ForceFree;
@@ -106,9 +117,12 @@ static CaseType parseCaseType(const std::string& s) {
   return CaseType::Default;
 }
 //MPIdata* iPic3D::c_Solver::mpi=0;
-
-
-
+/**
+ * @brief Destroy the solver and release host-side runtime objects.
+ *
+ * GPU allocations are released separately in deInitCUDA(). This destructor
+ * handles the remaining owning pointers managed by c_Solver.
+ */
 c_Solver::~c_Solver()
 {
   delete col; // configuration parameters ("collectiveIO")
@@ -144,6 +158,16 @@ c_Solver::~c_Solver()
   delete my_clock;
 }
 
+/**
+ * @brief Initialize MPI-side solver state, host particle containers, and GPU data.
+ *
+ * This method owns the full startup sequence: input parsing, topology and grid
+ * construction, field initialization, particle initialization or restart load,
+ * I/O backend setup, and final CUDA-side allocation.
+ * @param argc Command-line argument count forwarded to `Collective`.
+ * @param argv Command-line argument vector forwarded to `Collective`.
+ * @return `0` on success, nonzero on initialization failure.
+ */
 int c_Solver::Init(int argc, char **argv) {
   #if defined(__MIC__)
   assert_eq(DVECWIDTH,8);
@@ -241,7 +265,7 @@ int c_Solver::Init(int argc, char **argv) {
       break;
   }
 
-  // ===== Allocate particlesHost[] — lightweight SoA host mirror (no communicator) =====
+  // ======= Allocate particlesHost[]: lightweight SoA host mirrors =======
   particlesHost = new ParticleSoAHost*[ns];
   for (int i = 0; i < ns; i++)
   {
@@ -275,10 +299,10 @@ int c_Solver::Init(int argc, char **argv) {
     }
   }
 
-  //allocate test particles if any
+  // ======= Allocate test particles, if configured =======
   nstestpart = col->getNsTestPart();
 
-  // ===== Allocate particlesCommInj[] — MPI exchange + injection engine (AoS comm buffer) =====
+  // ======= Allocate particlesCommInj[]: MPI exchange + injection engine =======
   particlesCommInj = new ParticleCommInjection*[ns];
   for (int i = 0; i < ns; i++)
   {
@@ -296,7 +320,7 @@ int c_Solver::Init(int argc, char **argv) {
     }
   }
 
-  // ---- Initialise modular I/O manager ----
+  // ======= Initialize modular I/O manager =======
   ioManager = new IOManager;
   if (Parameters::get_doWriteOutput() || restart_cycle > 0 || col->getCallFinalize()) {
       ioManager->init(col, vct, grid, EMf, particlesHost, ns, testpart, nstestpart, first_cycle);
@@ -315,7 +339,7 @@ int c_Solver::Init(int argc, char **argv) {
 
   Qremoved = new double[ns];
 
-  // ── Exosphere ionization source ──
+  // ======= Exosphere ionization source =======
   numSolarWindSpecies = col->getNumSolarWindSpecies();
   numPlanetarySpecies = ns - numSolarWindSpecies;
   if (col->getEnableExosphereInjection() && numPlanetarySpecies > 0) {
@@ -354,11 +378,14 @@ int c_Solver::Init(int argc, char **argv) {
 }
 
 /**
- * @brief CUDA initilaize 
+ * @brief Allocate and initialize all CUDA-side solver resources.
+ *
+ * This includes stream creation, particle/moment/device metadata allocation,
+ * pinned host registrations, sorting buffers, and planet-boundary workspaces.
  */
 int c_Solver::initCUDA(){
 
-  // Set device for this MPI process
+  // ======= Select the GPU assigned to this MPI rank =======
   {
     MPI_Comm sharedComm; int sharedRank, sharedSize; int deviceOnNode;
     MPI_Comm_split_type(MPIdata::get_PicGlobalComm(), MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &sharedComm); 
@@ -384,13 +411,12 @@ int c_Solver::initCUDA(){
     cout << "[*]GPU assignment: shared comm size: " << sharedSize << " GPU device on the node: " << deviceOnNode << endl;
 #endif
   }
-  
-	// init the streams according to the species
+  // ======= Create per-species streams and async launcher state =======
   streams = new cudaStream_t[ns*2]; stayedParticle = new int[ns]; exitingResults = new std::future<int>[ns];
   for(int i=0; i<ns; i++){ cudaErrChk(cudaStreamCreate(streams+i)); cudaErrChk(cudaStreamCreate(streams+i+ns)); stayedParticle[i] = 0; }
   cudaErrChk(cudaStreamCreate(&planetStream));
-	{ 
-    // init arrays on device, pointers are device pointer, copied
+  {
+    // ======= Allocate device-resident particle containers and staging buffers =======
     pclsArrayHostPtr = new particleArrayCUDA*[ns];
     pclsArrayCUDAPtr = new particleArrayCUDA*[ns];
     departureArrayHostPtr = new departureArrayType*[ns];
@@ -406,7 +432,7 @@ int c_Solver::initCUDA(){
     incomingStagingCUDAPtr = new arrayCUDA<SpeciesParticle>*[ns];
 
     for(int i=0; i<ns; i++){
-      // the constructor will copy particles from host to device
+      // particleArrayCUDA performs the initial SoA H2D copy in its constructor
       pclsArrayHostPtr[i] = newHostPinnedObject<particleArrayCUDA>(particlesHost[i], INITIAL_CAPACITY_FACTOR, streams[i]);
       pclsArrayHostPtr[i]->setInitialNOP(pclsArrayHostPtr[i]->getNOP());
       pclsArrayCUDAPtr[i] = pclsArrayHostPtr[i]->copyToDevice();
@@ -429,26 +455,28 @@ int c_Solver::initCUDA(){
       fillerBufferArrayHostPtr[i] = newHostPinnedObject<fillerBuffer>(AUX_BUFFER_FRACTION * pclsArrayHostPtr[i]->getNOP());
       fillerBufferArrayCUDAPtr[i] = fillerBufferArrayHostPtr[i]->copyToDevice();
 
-      // AoS staging buffer for incoming H→D particle transfers (MPI + repopulated + exosphere).
-      // Sized at 10% of initial NOP — will be expanded dynamically if needed.
+      // AoS staging buffer for incoming H2D particle transfers
+      // (MPI exchange, repopulated particles, and exosphere injection).
+      // Sized from the initial NOP and expanded on demand.
       incomingStagingHostPtr[i] = newHostPinnedObject<arrayCUDA<SpeciesParticle>>(static_cast<uint32_t>(AUX_BUFFER_FRACTION * pclsArrayHostPtr[i]->getNOP()));
       incomingStagingCUDAPtr[i] = incomingStagingHostPtr[i]->copyToDevice();
 
     }
   }
 
-  // one grid for all species
+  // ======= Allocate one shared device grid descriptor =======
   grid3DCUDAHostPtr = newHostPinnedObject<grid3DCUDA>(grid);
   grid3DCUDACUDAPtr = copyToDevice(grid3DCUDAHostPtr, 0);
 
 
-  // kernelParams — scalar species parameters come from particlesHost (ParticleSoAHost)
+  // ======= Build per-species mover parameters =======
+  // Scalar species parameters are copied from ParticleSoAHost.
   moverParamHostPtr = new moverParameter*[ns];
   moverParamCUDAPtr = new moverParameter*[ns];
   for(int i=0; i<ns; i++){
     moverParamHostPtr[i] = newHostPinnedObject<moverParameter>(particlesHost[i], pclsArrayCUDAPtr[i], departureArrayCUDAPtr[i], hashedSumArrayCUDAPtr[i]);
 
-    // init the moverParam for OpenBC, repopulateInjection, sphere
+    // Initialize mover flags for open boundaries, repopulation, and planet handling.
     particlesHost[i]->openbc_particles_outflowInfo(&moverParamHostPtr[i]->doOpenBC, moverParamHostPtr[i]->applyOpenBC, moverParamHostPtr[i]->deleteBoundary, moverParamHostPtr[i]->openBoundary);
     moverParamHostPtr[i]->appendCountAtomic = 0;
 
@@ -489,13 +517,13 @@ int c_Solver::initCUDA(){
 
 
 
-  // simple device buffer, allocate one dimension array on device memory
+  // ======= Allocate device moment buffers =======
   auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
   momentsCUDAPtr = new cudaTypeArray1<cudaMomentType>[ns];
   //for(int i=0; i<ns; i++)cudaMallocAsync(&(momentsCUDAPtr[i]), gridSize*10*sizeof(cudaMomentType), streams[i]);
   for(int i=0; i<ns; i++)cudaMalloc(&(momentsCUDAPtr[i]), gridSize*10*sizeof(cudaMomentType));
 
-  { // register the 10 densities to host pinned memory
+  { // Register the 10 host-side moment arrays per species as pinned memory.
     for(int i=0; i<ns; i++)
       registerMomentsPinnedMemory(i);
   }
@@ -513,7 +541,7 @@ int c_Solver::initCUDA(){
   cudaErrChk(cudaEventCreateWithFlags(&event0, cudaEventDisableTiming));
   cudaErrChk(cudaEventCreateWithFlags(&eventOutputCopy, cudaEventDisableTiming|cudaEventBlockingSync));
 
-  // merging
+  // ======= Allocate merge bookkeeping =======
   toBeMerged = new int[2 * ns];
   for(int i=0;i<2*ns;i++){
     toBeMerged[i] = 0;
@@ -526,7 +554,7 @@ int c_Solver::initCUDA(){
   cudaErrChk(cudaMalloc(&cellCountCUDAPtr, sizeof(int) * grid->getNXC() * grid->getNYC() * grid->getNZC()));
   cudaErrChk(cudaMalloc(&cellOffsetCUDAPtr, sizeof(int) * grid->getNXC() * grid->getNYC() * grid->getNZC()));
 
-  // ── Cell sorter (counting sort) per species ──
+  // ======= Initialize per-species cell sorters =======
   sortingCycle_ = col->getSortingCycle();
   sortThisCycle_ = false;
   cellSorters = new CellSorter[ns];
@@ -538,7 +566,7 @@ int c_Solver::initCUDA(){
 
   dataAnalysis::dataAnalysisPipeline::createOutputDirectory(myrank, ns, vct);
 
-  // ── Planet quasi-neutral BC allocations ──
+  // ======= Allocate planet quasi-neutral boundary-condition buffers =======
   {
     planetArrayHostPtr = new planetArray*[ns];
     planetArrayCUDAPtr = new planetArray*[ns];
@@ -555,7 +583,7 @@ int c_Solver::initCUDA(){
       planetPclCount[i] = 0;
     }
 
-    // Build electron species map
+    // Build the compact map from electron-subset index to global species index.
     planetElecSpeciesCount = 0;
     for (int i = 0; i < ns; i++)
       if (col->getQOM(i) < 0) planetElecSpeciesCount++;
@@ -567,7 +595,7 @@ int c_Solver::initCUDA(){
         if (col->getQOM(i) < 0) planetElecSpeciesMap[idx++] = i;
     }
 
-    // Cross-species device buffers
+    // Cross-species device buffers.
     planetBufCapacity = doPlanet_ ? INITIAL_PLANET_BUF_CAP : 0;
     if (doPlanet_) {
       cudaErrChk(cudaMalloc(&planetEnergyBuf,    planetBufCapacity * sizeof(cudaParticleType)));
@@ -575,7 +603,7 @@ int c_Solver::initCUDA(){
       cudaErrChk(cudaMalloc(&planetIonChargeDevice, sizeof(cudaParticleType)));
       cudaErrChk(cudaMalloc(&planetCutoffDevice,    sizeof(int)));
 
-      // Device array of device pointers to per-electron-species planetArrays
+      // Device array of per-electron-species planetArray device pointers.
       cudaErrChk(cudaMalloc(&planetArrayCUDAPtrDevice, planetElecSpeciesCount * sizeof(planetArray*)));
       planetArray** tmpPtrs = new planetArray*[planetElecSpeciesCount];
       for (int e = 0; e < planetElecSpeciesCount; e++)
@@ -593,7 +621,7 @@ int c_Solver::initCUDA(){
       planetElecOffsetsDevice = nullptr;
     }
 
-    // Persistent host/device buffers for processPlanetParticles
+    // Persistent buffers reused by processPlanetParticles().
     const int elecCount = planetElecSpeciesCount > 0 ? planetElecSpeciesCount : 1;
     cudaErrChk(cudaHostAlloc(&planetElecOffsets, elecCount * sizeof(int), cudaHostAllocDefault));
     cudaErrChk(cudaHostAlloc(&planetTmpPtrs, elecCount * sizeof(planetArray*), cudaHostAllocDefault));
@@ -620,6 +648,12 @@ int c_Solver::initCUDA(){
 }
 
 
+/**
+ * @brief Release all CUDA-side resources owned by the solver.
+ *
+ * This mirrors initCUDA(): streams, device descriptors, pinned registrations,
+ * sort buffers, and planet-boundary workspaces are all torn down here.
+ */
 int c_Solver::deInitCUDA(){
 
   cudaEventDestroy(event0);
@@ -633,10 +667,10 @@ int c_Solver::deInitCUDA(){
   cudaFree(fieldForPclCUDAPtr);
   cudaFreeHost(fieldForPclHostPtr);
 
-  // release device objects
+  // ======= Release per-species host/device objects =======
   for(int i=0; i<ns; i++){
 
-    // ==================  delete host object, deconstruct ==================
+    // Destroy host-pinned wrapper objects.
 
     deleteHostPinnedObject(pclsArrayHostPtr[i]);
     deleteHostPinnedObject(departureArrayHostPtr[i]);
@@ -648,8 +682,7 @@ int c_Solver::deInitCUDA(){
     deleteHostPinnedObject(moverParamHostPtr[i]);
     deleteHostPinnedObject(momentParamHostPtr[i]);
 
-
-    // ==================  cudaFree device object mem ==================
+    // Release device-side object storage.
 
     cudaFree(pclsArrayCUDAPtr[i]);
     cudaFree(departureArrayCUDAPtr[i]);
@@ -666,7 +699,7 @@ int c_Solver::deInitCUDA(){
   }
 
 
-  // delete ptr arrays
+  // ======= Release pointer arrays and bookkeeping =======
   delete[] pclsArrayHostPtr;
   delete[] pclsArrayCUDAPtr;
   delete[] departureArrayHostPtr;
@@ -686,7 +719,7 @@ int c_Solver::deInitCUDA(){
   delete[] momentsCUDAPtr;
   delete[] toBeMerged;
 
-  // ── Planet quasi-neutral BC cleanup ──
+  // ======= Release planet quasi-neutral boundary-condition buffers =======
   for (int i = 0; i < ns; i++) {
     if (planetArrayHostPtr[i]) deleteHostPinnedObject(planetArrayHostPtr[i]);
     if (planetArrayCUDAPtr[i]) cudaFree(planetArrayCUDAPtr[i]);
@@ -707,18 +740,18 @@ int c_Solver::deInitCUDA(){
   if (planetSurvivorCountDevice) cudaFree(planetSurvivorCountDevice);
   if (planetReflectedBuf)        cudaFree(planetReflectedBuf);
 
-  // ── Cell sorters cleanup ──
+  // ======= Release cell sorters =======
   for (int i = 0; i < ns; i++) cellSorters[i].free();
   delete[] cellSorters;
 
-  // delete streams
+  // ======= Destroy streams =======
   for(int i=0; i<ns*2; i++)cudaStreamDestroy(streams[i]);
   cudaStreamDestroy(planetStream);
   delete[] streams;
   delete[] stayedParticle;
   delete[] exitingResults;
 
-  { // unregister the pinned mem
+  { // Unregister the host-side pinned moment arrays.
     for (int i = 0; i < ns; i++)
       unregisterMomentsPinnedMemory(i);
   }
@@ -727,9 +760,14 @@ int c_Solver::deInitCUDA(){
 }
 
 
-// ---------------------------------------------------------------------------
-// CUDA helper: async-copy 10 moment arrays from device to host for one species
-// ---------------------------------------------------------------------------
+/**
+ * @brief Asynchronously copy one species' 10 moment arrays from device to host.
+ *
+ * The destination buffers are the corresponding EMfields3D host arrays for the
+ * species. Callers are responsible for synchronizing the stream later.
+ * @param species Species index whose moment arrays are copied.
+ * @param stream CUDA stream that carries the asynchronous copies.
+ */
 void c_Solver::copyMomentsD2H(int species, cudaStream_t stream) {
   const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
   cudaErrChk(cudaMemcpyAsync((void*)&(EMf->getRHOns().get(species,0,0,0)),  momentsCUDAPtr[species]+0*gridSize, gridSize*sizeof(cudaMomentType), cudaMemcpyDefault, stream));
@@ -744,9 +782,13 @@ void c_Solver::copyMomentsD2H(int species, cudaStream_t stream) {
   cudaErrChk(cudaMemcpyAsync((void*)&(EMf->getpZZsn().get(species,0,0,0)),  momentsCUDAPtr[species]+9*gridSize, gridSize*sizeof(cudaMomentType), cudaMemcpyDefault, stream));
 }
 
-// ---------------------------------------------------------------------------
-// CUDA helper: register 10 moment arrays as pinned memory for one species
-// ---------------------------------------------------------------------------
+/**
+ * @brief Register one species' host-side moment arrays as pinned memory.
+ *
+ * Pinning these buffers enables faster asynchronous D2H copies from the CUDA
+ * moment buffers into the EMfields3D storage used by the field solver.
+ * @param species Species index whose host moment arrays are pinned.
+ */
 void c_Solver::registerMomentsPinnedMemory(int species) {
   const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
   cudaErrChk(cudaHostRegister((void*)&(EMf->getRHOns().get(species,0,0,0)), gridSize*sizeof(cudaCommonType), cudaHostRegisterDefault));
@@ -761,9 +803,10 @@ void c_Solver::registerMomentsPinnedMemory(int species) {
   cudaErrChk(cudaHostRegister((void*)&(EMf->getpZZsn().get(species,0,0,0)), gridSize*sizeof(cudaCommonType), cudaHostRegisterDefault));
 }
 
-// ---------------------------------------------------------------------------
-// CUDA helper: unregister 10 moment arrays from pinned memory for one species
-// ---------------------------------------------------------------------------
+/**
+ * @brief Unregister one species' host-side moment arrays from pinned memory.
+ * @param species Species index whose host moment arrays are unpinned.
+ */
 void c_Solver::unregisterMomentsPinnedMemory(int species) {
   cudaErrChk(cudaHostUnregister((void*)&(EMf->getRHOns().get(species,0,0,0))));
   cudaErrChk(cudaHostUnregister((void*)&(EMf->getJxs().get(species,0,0,0))));
@@ -778,41 +821,55 @@ void c_Solver::unregisterMomentsPinnedMemory(int species) {
 }
 
 
+/**
+ * @brief Recompute all particle moments directly from the current GPU particle state.
+ *
+ * This path zeroes the device moment buffers, launches the full moment kernel
+ * for every species, copies the results back to host field arrays, and then
+ * waits for completion via MomentsAwait().
+ */
 void c_Solver::CalculateMoments() {
 
   // timeTasks_set_main_task(TimeTasks::MOMENTS);
 
-  // sum moments
   auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
   for(int i=0; i<ns; i++){
-    cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[i], 0, gridSize*10*sizeof(cudaMomentType), streams[i]));  // set moments to 0
-    // copy the particles to device---- already there...by initliazation or Mover
-    // launch the moment kernel
+    cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[i], 0, gridSize*10*sizeof(cudaMomentType), streams[i]));
+    // Particle data is already resident on the device; only the kernel launch is needed here.
     momentKernelNew<<<(pclsArrayHostPtr[i]->getNOP()/DEFAULT_BLOCK_SIZE + 1), DEFAULT_BLOCK_SIZE, 0, streams[i] >>>(momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], 0);
     copyMomentsD2H(i, streams[i]);
   }
 
-  // synchronize
+  // Synchronize all species before the field-side ghost exchange and reductions.
   MomentsAwait();
 
 }
 
 
-//! MAXWELL SOLVER for Efield
+/**
+ * @brief Advance the electric field solver for one cycle.
+ * @param cycle Simulation cycle being advanced.
+ */
 void c_Solver::CalculateField(int cycle) {
   timeTasks_set_main_task(TimeTasks::FIELDS);
 
   // calculate the E field
   EMf->calculateE(cycle);
 }
-
-
-
-/*  -------------- */
-/*!  Particle mover */
-/*  -------------- */
+/**
+ * @brief Launch the asynchronous GPU mover pipeline for one species.
+ *
+ * The method advances particles, extracts exit/planet populations, compacts the
+ * stayed prefix, prepares the CPU-side communication buffer, and optionally
+ * accumulates moments for the stayed particles in the unsorted pipeline.
+ *
+ * @param species Species index to advance.
+ * @param doMomentsInLauncher Whether the stayed-prefix moments are accumulated here.
+ * @return Number of particles removed from the stayed prefix
+ *         (MPI exiting + deleted + planet-removed).
+ */
 int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLauncher){
-  cudaSetDevice(cudaDeviceOnNode); // a must on multi-device node
+  cudaSetDevice(cudaDeviceOnNode); // Required when multiple MPI ranks share a node.
 #if ENABLE_SOA_TIMING
   auto _tL0 = std::chrono::high_resolution_clock::now();
 #endif
@@ -821,9 +878,7 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   cudaErrChk(cudaEventCreateWithFlags(&event1, cudaEventDisableTiming));
   cudaErrChk(cudaEventCreateWithFlags(&event2, cudaEventDisableTiming));
 
-  
-  // particle number control 
-  // splitting
+  // ======= Particle count control: optional splitting =======
   //std::cout << "myrank: "<<MPIdata::get_rank() <<" pclsArrayHostPtr[species]->getInitialNOP(): " << pclsArrayHostPtr[species]->getInitialNOP() <<
   //          " pclsArrayHostPtr[species]->getNOP() " << pclsArrayHostPtr[species]->getNOP() << std::endl;
   if constexpr(PARTICLE_SPLITTING)
@@ -853,8 +908,7 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
     }
   }
   
-  // Mover
-  // wait to field values copied to device
+  // ======= Launch mover kernels after field data is available =======
 #if ENABLE_SOA_TIMING
   auto _tL1 = std::chrono::high_resolution_clock::now(); // after splitting, before mover launch
 #endif
@@ -893,7 +947,7 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   }
 
 
-  // After Mover
+  // ======= Host-side accounting after mover completion =======
 #if ENABLE_SOA_TIMING
   auto _tL2 = std::chrono::high_resolution_clock::now(); // before hashedSum sync
 #endif
@@ -912,20 +966,20 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   //  std::cout << " Particle holes myrank: "<< MPIdata::get_rank() << " species: " << species<< " hole: " << hole << " deleted: "<< count_deleted << std::endl;
   //}
   if(count_exiting > exitingArrayHostPtr[species]->getSize()){ 
-    // expand the exiting AoS device buffer
+    // Expand the exiting AoS buffer before extracting particles into it.
     exitingArrayHostPtr[species]->expand(count_exiting * EXPAND_GROWTH_FACTOR, streams[species+ns]);
     cudaErrChk(cudaMemcpyAsync(exitingArrayCUDAPtr[species], exitingArrayHostPtr[species], 
                                 sizeof(exitingArray), cudaMemcpyDefault, streams[species+ns]));
   }
 
   if(hole > fillerBufferArrayHostPtr[species]->getSize()){
-    // prepare the fillerBuffer
+    // Expand the filler buffer used by the compaction/sorting kernels.
     fillerBufferArrayHostPtr[species]->expand(hole * EXPAND_GROWTH_FACTOR, streams[species+ns]);
     cudaErrChk(cudaMemcpyAsync(fillerBufferArrayCUDAPtr[species], fillerBufferArrayHostPtr[species], 
                                 sizeof(fillerBuffer), cudaMemcpyDefault, streams[species+ns]));
   }
 
-  // Planet extraction — MUST run before exitingKernel, which overwrites
+  // Planet extraction must run before exitingKernel, which overwrites
   // departureArray[].hashedId with HOLE hashes for front-region particles.
   // planetExtractionKernel needs the original PLANET hashedId to scatter correctly.
   if (count_removed_planet > 0) {
@@ -957,7 +1011,7 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
                                 cudaMemcpyDefault, streams[species+ns]));
   }
 
-  // Sorting, the first cycle, x might be 0
+  // Compact the stayed prefix into the front of the SoA arrays.
   cudaErrChk(cudaStreamWaitEvent(streams[species], event2, 0));
   if (hole > 0) 
   sortingKernel1<<<getGridSize(hole, SMALL_BLOCK_SIZE), SMALL_BLOCK_SIZE, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
@@ -989,26 +1043,30 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   return hole; // Number of exiting + deleted + planet particles
 }
 
+/**
+ * @brief Launch the per-cycle particle mover workflow for all species.
+ *
+ * This prepares the field interpolation buffer, decides whether the current
+ * cycle uses the sorted or unsorted moment pipeline, and enqueues one async
+ * mover task per species on the solver thread pool.
+ * @param cycle Simulation cycle being advanced.
+ * @return Always `false`; retained for legacy caller compatibility.
+ */
 bool c_Solver::ParticlesMoverMomentAsync(int cycle)
 {
-  // move all species of particles
-  
   timeTasks_set_main_task(TimeTasks::PARTICLES);
 
-  // Decide whether to sort this cycle
+  // ======= Decide whether to use the sorted particle pipeline this cycle =======
   sortThisCycle_ = (sortingCycle_ > 0) && (cycle % sortingCycle_ == 0);
   const bool doMomentsInLauncher = !sortThisCycle_;
   if (MPIdata::get_rank() == 0)
     printf("  [Cycle %d] Particle sorting: %s\n", cycle, sortThisCycle_ ? "ON" : "OFF");
 
-  // Should change this to add background field
-  //EMf->set_fieldForPcls();
+  // Build the particle-field interpolation buffer on cell centers.
   EMf->set_fieldForPclsToCenter(fieldForPclHostPtr);
 
-  auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
-  //! copy fieldForPcls to device, for every species 
+  // Copy the shared field-interpolation buffer to the device once.
   cudaErrChk(cudaMemcpyAsync(fieldForPclCUDAPtr, fieldForPclHostPtr, (grid->getNZN() * (grid->getNYN() - 1) * (grid->getNXN() - 1)) * 24 * sizeof(cudaFieldType), cudaMemcpyDefault, streams[0]));
-    // castingField<<<gridSize/256 + 1, 256, 0, streams[0]>>>(grid3DCUDACUDAPtr, fieldForPclCUDAPtr);
   cudaErrChk(cudaEventRecord(event0, streams[0]));
 
   for(int i=0; i<ns; i++){
@@ -1051,16 +1109,20 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle)
   return (false);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-//  Planet quasi-neutral BC: cross-species processing on planetStream
-//  Single host sync at the end; all intermediate results stay on device.
-// ═══════════════════════════════════════════════════════════════════════
+/**
+ * @brief Process planet-hit particles across all species on the dedicated planet stream.
+ *
+ * Ions are reduced to a total removed charge, electrons are energy-ranked, and
+ * only the charge-balanced survivor subset is reflected back into the outgoing
+ * communication buffers. Intermediate work stays on the GPU until the final
+ * small host-side synchronization needed for reflected-particle counts.
+ */
 void c_Solver::processPlanetParticles()
 {
 #if ENABLE_SOA_TIMING
   auto _tP0 = std::chrono::high_resolution_clock::now();
 #endif
-  // ── Step 1: Check if any planet particles exist ──
+  // ======= Step 1: Check whether any planet particles were collected =======
   int totalIonPlanet  = 0;
   int totalElecPlanet = 0;
   for (int i = 0; i < ns; i++) {
@@ -1082,7 +1144,7 @@ void c_Solver::processPlanetParticles()
 #if ENABLE_SOA_TIMING
   auto _tP1 = std::chrono::high_resolution_clock::now();
 #endif
-  // ── Step 2: Reduce ion charge on GPU (result stays on device) ──
+  // ======= Step 2: Reduce removed ion charge on the GPU =======
   cudaErrChk(cudaMemsetAsync(planetIonChargeDevice, 0, sizeof(cudaParticleType), planetStream));
   for (int i = 0; i < ns; i++) {
     if (col->getQOM(i) <= 0 || planetPclCount[i] == 0) continue;
@@ -1091,10 +1153,10 @@ void c_Solver::processPlanetParticles()
     planetChargeReductionKernel<<<gridSz, blockSize, blockSize * sizeof(cudaParticleType), planetStream>>>(
         planetArrayCUDAPtr[i], planetPclCount[i], planetIonChargeDevice);
   }
-  // No host sync — ionChargeDevice is read by chargeCutoffKernel via device pointer
+  // No host sync is needed here: later kernels consume planetIonChargeDevice directly.
 
-  // ── Step 3: Expand cross-species buffers if needed ──
-  // Round up to next power of 2 for bitonic sort
+  // ======= Step 3: Resize shared work buffers as needed =======
+  // Round up to the next power of 2 for bitonic sort.
   int nPad = 1;
   while (nPad < totalElecPlanet) nPad <<= 1;
 
@@ -1106,14 +1168,14 @@ void c_Solver::processPlanetParticles()
     cudaErrChk(cudaMalloc(&planetGlobalIdxBuf,  planetBufCapacity * sizeof(uint32_t)));
   }
 
-  // Expand reflected output buffer if needed (upper bound = totalElecPlanet)
+  // Expand the reflected-particle output buffer if needed.
   if (totalElecPlanet > planetReflectedBufCapacity) {
     if (planetReflectedBuf) cudaFree(planetReflectedBuf);
     planetReflectedBufCapacity = totalElecPlanet * 2;
     cudaErrChk(cudaMalloc(&planetReflectedBuf, planetReflectedBufCapacity * sizeof(SpeciesParticle)));
   }
 
-  // ── Step 4: Compute energy per electron planet particle ──
+  // ======= Step 4: Compute per-electron energy and build species offsets =======
   int offset = 0;
   for (int e = 0; e < planetElecSpeciesCount; e++) {
     int specIdx = planetElecSpeciesMap[e];
@@ -1128,13 +1190,13 @@ void c_Solver::processPlanetParticles()
     offset += planetPclCount[specIdx];
   }
 
-  // Copy offsets to device (used by chargeCutoffKernel and planetReflectCompactKernel)
+  // Copy offsets to device for the cutoff and reflection kernels.
   if (planetElecSpeciesCount > 0) {
     cudaErrChk(cudaMemcpyAsync(planetElecOffsetsDevice, planetElecOffsets,
                                 planetElecSpeciesCount * sizeof(int), cudaMemcpyHostToDevice, planetStream));
   }
 
-  // Update device array of planetArray device pointers (in case pointers changed due to expand)
+  // Refresh the device pointer array in case any per-species planet buffer expanded.
   {
     for (int e = 0; e < planetElecSpeciesCount; e++)
       planetTmpPtrs[e] = planetArrayCUDAPtr[planetElecSpeciesMap[e]];
@@ -1142,7 +1204,7 @@ void c_Solver::processPlanetParticles()
                                 planetElecSpeciesCount * sizeof(planetArray*), cudaMemcpyHostToDevice, planetStream));
   }
 
-  // ── Step 5: Bitonic sort (descending by energy) ──
+  // ======= Step 5: Sort electron planet particles by descending energy =======
   if (nPad > totalElecPlanet) {
     bitonicPadKernel<<<getGridSize(nPad - totalElecPlanet, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
         planetEnergyBuf, planetGlobalIdxBuf, totalElecPlanet, nPad);
@@ -1154,29 +1216,29 @@ void c_Solver::processPlanetParticles()
     }
   }
 
-  // ── Step 6: Find cutoff (result stays on device) ──
+  // ======= Step 6: Find the energy cutoff that matches the removed ion charge =======
   cudaErrChk(cudaMemsetAsync(planetCutoffDevice, 0, sizeof(int), planetStream));
   chargeCutoffKernel<<<1, 1, 0, planetStream>>>(
       planetArrayCUDAPtrDevice, planetElecSpeciesCount, planetElecOffsetsDevice,
       planetGlobalIdxBuf, totalElecPlanet,
       planetIonChargeDevice, planetCutoffDevice);
-  // No host sync — cutoffDevice is read by planetReflectCompactKernel via device pointer
+  // No host sync is needed here: the reflection kernel reads planetCutoffDevice directly.
 
-  // ── Step 7: Fused reflect + compact (all electron species in one kernel launch) ──
+  // ======= Step 7: Reflect and compact surviving electrons =======
   const int doSphere = moverParamHostPtr[0]->doSphere;
   const cudaCommonType originX = moverParamHostPtr[0]->sphereOrigin[0];
   const cudaCommonType originY = moverParamHostPtr[0]->sphereOrigin[1];
   const cudaCommonType originZ = moverParamHostPtr[0]->sphereOrigin[2];
   const cudaCommonType radius  = moverParamHostPtr[0]->sphereRadius;
 
-  // Zero per-species atomic counters
+  // Zero the per-species atomic survivor counters.
   cudaErrChk(cudaMemsetAsync(planetSurvivorCountDevice, 0,
                               planetElecSpeciesCount * sizeof(int), planetStream));
 
-  // Launch: totalElecPlanet threads; each checks if it is a survivor via device cutoff
+  // Launch one thread per electron candidate; each checks the device-side cutoff.
   const int reflectionType = col->getPlanetReflectionType();
   if (reflectionType == 1) {
-    // Diffuse (isotropic) scattering — matches legacy rotateAndCountParticlesInsideSphere
+    // Diffuse scattering matches the legacy isotropic reflection path.
     planetDiffuseCompactKernel<<<getGridSize(totalElecPlanet, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
         planetArrayCUDAPtrDevice, planetElecSpeciesCount,
         planetElecOffsetsDevice,
@@ -1188,7 +1250,7 @@ void c_Solver::processPlanetParticles()
         originX, originY, originZ, radius, doSphere,
         planetRngCycleCounter);
   } else {
-    // Specular (mirror) reflection — default
+    // Specular reflection is the default path.
     planetReflectCompactKernel<<<getGridSize(totalElecPlanet, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
         planetArrayCUDAPtrDevice, planetElecSpeciesCount,
         planetElecOffsetsDevice,
@@ -1201,23 +1263,23 @@ void c_Solver::processPlanetParticles()
   }
   planetRngCycleCounter++;
 
-  // ── Step 8: D2H survivor counts (one small transfer) ──
+  // ======= Step 8: Copy survivor counts back to the host =======
   cudaErrChk(cudaMemcpyAsync(planetSurvivorCount, planetSurvivorCountDevice,
                               planetElecSpeciesCount * sizeof(int), cudaMemcpyDeviceToHost, planetStream));
-  cudaErrChk(cudaStreamSynchronize(planetStream)); // ONLY sync: need counts on host for resize + D2H
+  cudaErrChk(cudaStreamSynchronize(planetStream)); // Counts are needed on host for buffer growth and D2H copies.
 #if ENABLE_SOA_TIMING
   auto _tP2 = std::chrono::high_resolution_clock::now();
 #endif
 
-  // ── Step 9: D2H reflected particles into AoS comm buffer (appended after exiting) ──
+  // ======= Step 9: Copy reflected particles into the per-species comm buffers =======
   for (int e = 0; e < planetElecSpeciesCount; e++) {
     if (planetSurvivorCount[e] == 0) continue;
     int specIdx = planetElecSpeciesMap[e];
     const int nRefl = planetSurvivorCount[e];
     const int commOffset = particlesCommInj[specIdx]->getCommNOP();
-    // Grow comm buffer to accommodate reflected particles
+    // Grow the communication buffer before appending reflected particles.
     particlesCommInj[specIdx]->prepareCommBufferForNOP(commOffset + nRefl);
-    // Single AoS D→H from reflected device buffer into comm buffer at offset
+    // Copy the compact reflected AoS block into the next comm-buffer slot range.
     cudaErrChk(cudaMemcpyAsync(
         particlesCommInj[specIdx]->getCommPclsDataMut() + commOffset,
         planetReflectedBuf + planetElecOffsets[e],
@@ -1225,7 +1287,7 @@ void c_Solver::processPlanetParticles()
         cudaMemcpyDeviceToHost, planetStream));
   }
 
-  // Sync to ensure all D2H are complete before MPI exchange
+  // Complete all reflected-particle D2H copies before MPI exchange starts.
   cudaErrChk(cudaStreamSynchronize(planetStream));
 #if ENABLE_SOA_TIMING
   auto _tP3 = std::chrono::high_resolution_clock::now();
@@ -1240,15 +1302,22 @@ void c_Solver::processPlanetParticles()
 #endif
 }
 
+/**
+ * @brief Wait for mover tasks, exchange particles through MPI, and finalize moments.
+ *
+ * This method joins the async mover futures, optionally processes planet hits,
+ * overlaps MPI exchange with GPU sorting, appends incoming particles, and
+ * finishes the moment accumulation path used by the current cycle.
+ * @param cycle Simulation cycle being finalized.
+ * @return Always `false`; retained for legacy caller compatibility.
+ */
 bool c_Solver::MoverAwaitAndPclExchange(int cycle)
 {
 #if ENABLE_SOA_TIMING
   auto _t0 = std::chrono::high_resolution_clock::now();
 #endif
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 3A: Await mover+compaction futures
-  // ═══════════════════════════════════════════════════════════════════════
+  // ======= Phase 3A: await mover and compaction futures =======
   for (int i = 0; i < ns; i++){ 
 #if ENABLE_SOA_TIMING
     auto _ta = std::chrono::high_resolution_clock::now();
@@ -1268,34 +1337,28 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
   auto _t1 = std::chrono::high_resolution_clock::now();
 #endif
 
-  // ── Planet processing on planetStream (blocks internally, completes before returning) ──
+  // ======= Planet processing on the dedicated planet stream =======
   if (doPlanet_)
     processPlanetParticles();
 #if ENABLE_SOA_TIMING
   auto _t2 = std::chrono::high_resolution_clock::now();
 #endif
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 3B: Sync all streams → update NOP → prepare sort buffers
-  //  SAFE: after this sync, no GPU kernels are in flight for any species.
-  //  We can safely resize sort buffers (which may cudaMalloc/cudaFree).
-  //  SORTED PIPELINE ONLY — unsorted pipeline skips sorting entirely.
-  // ═══════════════════════════════════════════════════════════════════════
+  // ======= Phase 3B: sync streams, update NOP, and prepare sort buffers =======
+  // Safe point: after this sync, no GPU kernels are in flight for any species.
+  // Sort-buffer resizing may call cudaMalloc/cudaFree, so it must happen here.
   if (sortThisCycle_) {
     for (int i = 0; i < ns; i++) {
-      // Update host NOP to stayed count (compacted prefix only)
+      // Update host NOP to the stayed-particle prefix length.
       pclsArrayHostPtr[i]->setNOE(stayedParticle[i]);
-      // Sync stream to ensure mover+compaction kernels have completed
+      // Ensure mover and compaction kernels are complete before buffer resizing.
       cudaErrChk(cudaStreamSynchronize(streams[i]));
-      // Resize sort buffers if needed (may cudaMalloc/cudaFree — safe: no kernels)
+      // Resize sort buffers if needed.
       cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    //  Phase 3C: Enqueue sort stages 1-3 for all species (non-blocking)
-    //  GPU processes histogram + prefix sum + sorted indices while CPU
-    //  proceeds to MPI exchange below.
-    // ═══════════════════════════════════════════════════════════════════════
+    // ======= Phase 3C: enqueue sort stages 1-3 for all species =======
+    // Histogram, prefix sum, and sorted-index generation overlap with MPI below.
     for (int i = 0; i < ns; i++) {
       cellSorters[i].enqueueSortAsync(pclsArrayHostPtr[i],
                                        grid3DCUDACUDAPtr,
@@ -1303,7 +1366,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
                                        streams[i]);
     }
   } else {
-    // Unsorted pipeline: just update NOP (no sort prep needed)
+    // Unsorted pipeline: only update NOP, with no sort preparation.
     for (int i = 0; i < ns; i++) {
       pclsArrayHostPtr[i]->setNOE(stayedParticle[i]);
     }
@@ -1312,9 +1375,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
   auto _t2b = std::chrono::high_resolution_clock::now();
 #endif
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 3D: MPI exchange (CPU-side, overlaps with GPU sort stages 1-3)
-  // ═══════════════════════════════════════════════════════════════════════
+  // ======= Phase 3D: perform MPI exchange while sort stages 1-3 run =======
   for (int i = 0; i < ns; i++)
   {
 #if ENABLE_SOA_TIMING
@@ -1346,7 +1407,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
   auto _t3 = std::chrono::high_resolution_clock::now();
 #endif
 
-  // ── Exosphere ionization ──
+  // ======= Exosphere ionization =======
   injectExosphereParticles();
 #if ENABLE_SOA_TIMING
   auto _t4 = std::chrono::high_resolution_clock::now();
@@ -1355,30 +1416,23 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
            std::chrono::duration<double, std::milli>(_t4 - _t3).count());
 #endif
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 3E: Finish sort (sync + stage 4 scatter/swap) for all species
-  //  After this, SoA pointers in hostPtr are updated (sorted data).
-  //  SORTED PIPELINE ONLY.
-  // ═══════════════════════════════════════════════════════════════════════
+  // ======= Phase 3E: finish sorting for all species =======
+  // After this, the host particleArrayCUDA objects contain the sorted SoA pointers.
   if (sortThisCycle_) {
     for (int i = 0; i < ns; i++) {
       cellSorters[i].finishSort(streams[i]);
-      // Re-sync host struct to device (SoA pointers were swapped on host)
+      // Re-sync the device-side metadata after the host-side pointer swap.
       cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
                                   sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    //  Phase 3F: Sync all streams — ensures stage 4 scatter is FULLY done
-    //  SAFE: after this, no GPU kernels are running. We can expand() safely
-    //  (which does cudaMalloc + cudaMemcpy + cudaFree on SoA buffers).
-    // ═══════════════════════════════════════════════════════════════════════
+    // ======= Phase 3F: sync all streams before mutating SoA allocations =======
+    // expand() may allocate, copy, and free SoA buffers, so no kernels may be active.
     for (int i = 0; i < ns; i++) {
       cudaErrChk(cudaStreamSynchronize(streams[i]));
     }
   } else {
-    // Unsorted pipeline: sync all streams so mover+compaction kernels finish
-    // before we expand() or launch momentKernelNew below.
+    // Unsorted pipeline: wait for mover/compaction kernels before any expand() or tail moments.
     for (int i = 0; i < ns; i++) {
       cudaErrChk(cudaStreamSynchronize(streams[i]));
     }
@@ -1387,26 +1441,23 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
   auto _t4b = std::chrono::high_resolution_clock::now();
 #endif
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 3G: Per-species: expand + H2D incoming + moments + D2H
-  //  Memory mutations (expand) happen first per species, then all kernels.
-  // ═══════════════════════════════════════════════════════════════════════
+  // ======= Phase 3G: expand, append incoming particles, and finalize moments =======
   const auto momentGridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
 
   for (int i = 0; i < ns; i++) {
 
-    // Total particles = stayed (sorted prefix) + incoming (MPI + repopulated + exosphere)
+    // Total particles = stayed prefix + incoming particles.
     auto newPclNum = stayedParticle[i] + particlesCommInj[i]->getCommNOP();
 
-    // ── Expand SoA arrays if needed (may cudaMalloc + cudaFree) ──
-    // SAFE: Phase 3F sync guarantees no kernels are using these buffers.
+    // Expand SoA arrays if needed.
+    // Safe point: Phase 3F guarantees no kernels are using these buffers.
     if ((newPclNum * EXPAND_THRESHOLD_FACTOR) >= pclsArrayHostPtr[i]->getSize()) {
       pclsArrayHostPtr[i]->expand(newPclNum * EXPAND_GROWTH_FACTOR, streams[i]);
       departureArrayHostPtr[i]->expand(pclsArrayHostPtr[i]->getSize(), streams[i]);
       cudaErrChk(cudaMemcpyAsync(departureArrayCUDAPtr[i], departureArrayHostPtr[i], sizeof(departureArrayType), cudaMemcpyDefault, streams[i]));
     }
 
-    // ── H2D incoming particles via staging buffer ──
+    // Copy incoming AoS particles to the device staging buffer.
     const int incomingCount = particlesCommInj[i]->getCommNOP();
     if (incomingCount > 0) {
       if (static_cast<uint32_t>(incomingCount) > incomingStagingHostPtr[i]->getSize()) {
@@ -1420,20 +1471,20 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
                 cudaMemcpyDefault, streams[i]));
     }
 
-    // ── Update NOP to total (stayed + incoming) and sync to device ──
+    // Update NOP to the new total and copy the host metadata back to the device.
     pclsArrayHostPtr[i]->setNOE(newPclNum);
     cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
                                 sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
 
-    // ── Scatter incoming AoS → SoA at offset=stayedParticle[i] ──
+    // Scatter the incoming AoS particles into the SoA tail at offset stayedParticle[i].
     if (incomingCount > 0)
       scatterAoSToSoAKernel<<<getGridSize(incomingCount, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
           incomingStagingHostPtr[i]->getArray(),
           pclsArrayCUDAPtr[i], (uint32_t)stayedParticle[i], (uint32_t)incomingCount);
 
-    // ── Moments: sorted vs unsorted pipeline ──
+    // Finalize moments according to the active sorted/unsorted pipeline.
     if (sortThisCycle_) {
-      // SORTED: zero moments, then cell-aware kernel for sorted prefix + flat kernel for tail
+      // Sorted path: cell-aware moments for the stayed prefix, flat kernel for the incoming tail.
       cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[i], 0,
                                   momentGridSize * 10 * sizeof(cudaMomentType), streams[i]));
 
@@ -1456,15 +1507,15 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
         momentKernelNew<<<getGridSize(tailCount, SMALL_BLOCK_SIZE), SMALL_BLOCK_SIZE, 0, streams[i]>>>(
             momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
     } else {
-      // UNSORTED: momentKernelStayed already ran in cudaLauncherAsync (covered [0, stayed)).
-      // Only need momentKernelNew for the incoming tail [stayed, newPclNum).
+      // Unsorted path: the stayed prefix was already handled in cudaLauncherAsync().
+      // Only the incoming tail needs momentKernelNew.
       const int tailCount = newPclNum - stayedParticle[i];
       if (tailCount > 0)
         momentKernelNew<<<getGridSize(tailCount, SMALL_BLOCK_SIZE), SMALL_BLOCK_SIZE, 0, streams[i]>>>(
             momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
     }
 
-    // ── Reset hashedSum + departureArray ──
+    // Reset hashed sums and departure flags for the next cycle.
     for (int j = 0; j < departureArrayElementType::HASHED_SUM_NUM; j++)
       hashedSumArrayHostPtr[i][j].resetBucket();
     cudaErrChk(cudaMemcpyAsync(hashedSumArrayCUDAPtr[i], hashedSumArrayHostPtr[i],
@@ -1502,23 +1553,35 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
   return (false);
 }
 
-//! MAXWELL SOLVER for Bfield (assuming Efield has already been calculated)
+/**
+ * @brief Advance the magnetic field solver for one cycle.
+ *
+ * This assumes the electric field has already been updated for the same cycle.
+ * @param cycle Simulation cycle being advanced.
+ */
 void c_Solver::CalculateB(int cycle) {
   timeTasks_set_main_task(TimeTasks::FIELDS);
   // calculate the B field
   EMf->calculateB(cycle);
 }
 
+/**
+ * @brief Synchronize moment accumulation and prepare field-side derived quantities.
+ *
+ * After all D2H moment copies complete, this method optionally schedules
+ * particle merging, communicates ghost moments, applies special boundary
+ * charge sources, and computes the field-solver derived moment quantities.
+ */
 void c_Solver::MomentsAwait() {
 
   timeTasks_set_main_task(TimeTasks::MOMENTS);
 
-  // synchronize
+  // Wait for all per-species moment kernels and D2H copies to finish.
   cudaErrChk(cudaDeviceSynchronize());
 
   if constexpr(PARTICLE_MERGING)
   {
-    // check which one to merge
+    // Mark species whose particle count exceeds the merge threshold.
     for(int i = 0; i < ns; i++) {
       if(pclsArrayHostPtr[i]->getNOP() > MERGE_THRESHOLD * pclsArrayHostPtr[i]->getInitialNOP()) {
         toBeMerged[2 * i] = 1;
@@ -1527,7 +1590,7 @@ void c_Solver::MomentsAwait() {
         toBeMerged[2 * i] = 0;
       }
     }
-    // select spcecies to merge: the one that has not been merged for most cycles among the species that require merging
+    // Select the species that has gone the longest without merging.
     mergeIdx = -1;
     int mergeCountFromLast = -1;
     for(int i=0;i<ns;i++){
@@ -1553,22 +1616,26 @@ void c_Solver::MomentsAwait() {
   }
 
   EMf->setZeroDerivedMoments();
-  // Fill with constant charge the planet
+  // Fill the planet interior with the constant charge used by the legacy boundary model.
   if (caseType_ == CaseType::Dipole) {
     EMf->ConstantChargePlanet(col->getL_square(),col->getx_center_planet(),col->gety_center_planet(),col->getz_center_planet());
   } else if (caseType_ == CaseType::Dipole2D) {
     EMf->ConstantChargePlanet2DPlaneXZ(col->getL_square(),col->getx_center_planet(),col->getz_center_planet());
   }
-  // Set a constant charge in the OpenBC boundaries
+  // Legacy OpenBC constant-charge path is intentionally left disabled here.
   //EMf->ConstantChargeOpenBC();
-  // sum all over the species
+  // Accumulate species moments into total moments.
   EMf->sumOverSpecies();
-  // calculate densities on centers from nodes
+  // Interpolate nodal densities to cell centers.
   EMf->interpDensitiesN2C();
-  // calculate the hat quantities for the implicit method
+  // Compute the hat quantities required by the implicit field solve.
   EMf->calculateHatFunctions();
 }
 
+/**
+ * @brief Append the current per-species particle counts to the rank-local CSV log.
+ * @param cycle Simulation cycle associated with the recorded counts.
+ */
 void c_Solver::writeParticleNum(int cycle) {
   if (!pclNumCSV.is_open() || !pclNumCSV.good()) {
     // Reopen if stream is in a bad state
@@ -1585,6 +1652,13 @@ void c_Solver::writeParticleNum(int cycle) {
 }
 
 
+/**
+ * @brief Write restart, field, particle, and test-particle outputs for one cycle.
+ *
+ * Particle and restart outputs wait on outputCopyAsync() so the host-side SoA
+ * mirrors are up to date before the IOManager consumes them.
+ * @param cycle Simulation cycle being written.
+ */
 void c_Solver::WriteOutput(int cycle) {
 
 #ifdef USE_CATALYST
@@ -1593,7 +1667,7 @@ void c_Solver::WriteOutput(int cycle) {
 
   WriteConserved(cycle);
 
-  // ---- Restart checkpoint ----
+  // ======= Restart checkpoint =======
   if (restart_cycle > 0 && cycle % restart_cycle == 0) {
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     // SoA data is already in host vectors after outputCopyAsync — no conversion needed
@@ -1602,13 +1676,13 @@ void c_Solver::WriteOutput(int cycle) {
 
   if (!Parameters::get_doWriteOutput()) return;
 
-  // ---- Field output ----
+  // ======= Field output =======
   if (!col->field_output_is_off() &&
       (cycle % col->getFieldOutputCycle() == 0 || cycle == first_cycle)) {
     ioManager->writeFields(cycle);
   }
 
-  // ---- Particle output ----
+  // ======= Particle output =======
   if (!col->particle_output_is_off() &&
       cycle % col->getParticlesOutputCycle() == 0) {
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
@@ -1616,22 +1690,29 @@ void c_Solver::WriteOutput(int cycle) {
     ioManager->writeParticles(cycle);
   }
 
-  // ---- Test-particle output ----
+  // ======= Test-particle output =======
   if (nstestpart > 0 && !col->testparticle_output_is_off() &&
       cycle % col->getTestParticlesOutputCycle() == 0) {
     ioManager->writeTestParticles(cycle);
   }
 }
 
-void c_Solver::outputCopyAsync(int cycle) { // -1 to enable
+/**
+ * @brief Schedule asynchronous GPU-to-host particle copies for a future output cycle.
+ *
+ * The solver calls this one cycle ahead of output. Passing `cycle == -1`
+ * forces the copy path used during final restart writing.
+ * @param cycle Current simulation cycle used to predict the next output step.
+ */
+void c_Solver::outputCopyAsync(int cycle) {
   if (ioManager->needsParticleSync(cycle + 1)) {
     for (int i = 0; i < ns; i++) {
       const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
-      // Prepare host SoA vectors to receive nop particles
+      // Resize the host SoA vectors to receive the current particle count.
       particlesHost[i]->prepareSoAForNOP(nop);
       if (nop == 0) continue;
       const size_t bytes = nop * sizeof(double);
-      // Direct GPU SoA → host SoA: 8 async copies, no AoS intermediary
+      // Direct GPU SoA -> host SoA transfer with no AoS intermediary.
       cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getUallMut(), pclsArrayHostPtr[i]->getU(), bytes, cudaMemcpyDefault, streams[0]));
       cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getVallMut(), pclsArrayHostPtr[i]->getV(), bytes, cudaMemcpyDefault, streams[0]));
       cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getWallMut(), pclsArrayHostPtr[i]->getW(), bytes, cudaMemcpyDefault, streams[0]));
@@ -1645,7 +1726,10 @@ void c_Solver::outputCopyAsync(int cycle) { // -1 to enable
   }
 }
 
-// write the conserved quantities
+/**
+ * @brief Append conserved-quantity diagnostics to the rank-selected text file.
+ * @param cycle Simulation cycle being written.
+ */
 void c_Solver::WriteConserved(int cycle) {
   if(col->getDiagnosticsOutputCycle() > 0 && cycle % col->getDiagnosticsOutputCycle() == 0)
   {
@@ -1699,29 +1783,36 @@ void c_Solver::WriteConserved(int cycle) {
   }
 }
 
+/**
+ * @brief Write one velocity-distribution snapshot for every species.
+ *
+ * Output cadence is controlled by the caller; this method only performs the
+ * per-species histogram calculation and file append.
+ * @param cycle Simulation cycle being written.
+ */
 void c_Solver::WriteVelocityDistribution(int cycle)
 {
-  // Velocity distribution
-  //if(cycle % col->getVelocityDistributionOutputCycle() == 0)
-  {
-    for (int is = 0; is < ns; is++) {
-      double maxVel = particlesHost[is]->getMaxVelocity();
-      long long *VelocityDist = particlesHost[is]->getVelocityDistribution(nDistributionBins, maxVel);
-      if (myrank == 0) {
-        ofstream my_file(ds.c_str(), fstream::app);
-        my_file << cycle << "\t" << is << "\t" << maxVel;
-        for (int i = 0; i < nDistributionBins; i++)
-          my_file << "\t" << VelocityDist[i];
-        my_file << endl;
-        my_file.close();
-      }
-      delete [] VelocityDist;
+  for (int is = 0; is < ns; is++) {
+    double maxVel = particlesHost[is]->getMaxVelocity();
+    long long *VelocityDist = particlesHost[is]->getVelocityDistribution(nDistributionBins, maxVel);
+    if (myrank == 0) {
+      ofstream my_file(ds.c_str(), fstream::app);
+      my_file << cycle << "\t" << is << "\t" << maxVel;
+      for (int i = 0; i < nDistributionBins; i++)
+        my_file << "\t" << VelocityDist[i];
+      my_file << endl;
+      my_file.close();
     }
+    delete [] VelocityDist;
   }
 }
 
-// This seems to record values at a grid of sample points
-//
+/**
+ * @brief Write field and moment traces at a regular grid of virtual satellite points.
+ *
+ * The trace file samples electromagnetic fields, selected current sums, and
+ * charge densities at `nsat^3` probe locations in the local domain.
+ */
 void c_Solver::WriteVirtualSatelliteTraces()
 {
   if(ns <= 2) return;
@@ -1748,6 +1839,9 @@ void c_Solver::WriteVirtualSatelliteTraces()
   my_file.close();
 }
 
+/**
+ * @brief Finalize output backends, optionally write the last restart, and free CUDA state.
+ */
 void c_Solver::Finalize() {
 
   pclNumCSV.close();
@@ -1763,11 +1857,16 @@ void c_Solver::Finalize() {
 
   deInitCUDA();
 
-  // stop profiling
+  // Stop profiling after all runtime work has completed.
   my_clock->stopTiming();
 }
 
-//! place the particles into new cells according to their current position
+/**
+ * @brief Perform the legacy host-side particle sort for all species.
+ *
+ * This path is separate from the GPU cell sorter and only touches the host
+ * ParticleSoAHost containers.
+ */
 void c_Solver::sortParticles() {
 
   for(int species_idx=0; species_idx<ns; species_idx++)
@@ -1775,12 +1874,12 @@ void c_Solver::sortParticles() {
 
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// sortAllSpecies — Full GPU counting sort for ALL species.
-// Called before data-analysis cycles so that analysis kernels observe
-// particles in cell-sorted order.  This is independent of the mover's
-// sortThisCycle_ flag and can run on any cycle.
-// ────────────────────────────────────────────────────────────────────────────
+/**
+ * @brief Perform a full GPU cell sort for every species.
+ *
+ * This is used by the analysis path when cell-sorted order is required
+ * independently of the mover's periodic sorting cadence.
+ */
 void c_Solver::sortAllSpecies() {
   for (int i = 0; i < ns; i++) {
     // Ensure no kernels are in flight on this species' stream
@@ -1797,12 +1896,15 @@ void c_Solver::sortAllSpecies() {
                                 sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
   }
 
-  // Barrier: all species fully sorted before returning
+  // Wait until every species has completed its full sort pipeline.
   for (int i = 0; i < ns; i++) {
     cudaErrChk(cudaStreamSynchronize(streams[i]));
   }
 }
 
+/**
+ * @brief Pad host particle capacities for regular and test-particle species.
+ */
 void c_Solver::pad_particle_capacities()
 {
   for (int i = 0; i < ns; i++)
@@ -1813,6 +1915,9 @@ void c_Solver::pad_particle_capacities()
 }
 
 
+/**
+ * @brief Return the first cycle after the current simulation window.
+ */
 int c_Solver::LastCycle() {
     return (col->getNcycles() + first_cycle);
 }
@@ -1827,8 +1932,9 @@ int c_Solver::LastCycle() {
  *
  * Memory-aware injection: before sampling, the method queries GPU free memory
  * and computes a per-species particle budget to prevent out-of-memory conditions.
- * A configurable safety margin (memoryReserveFraction) keeps a fraction of GPU
- * memory free for field arrays, moments, and other allocations.
+ * The current implementation applies a fixed low-memory heuristic and keeps a
+ * portion of the currently free GPU memory in reserve for field arrays, moments,
+ * and other runtime allocations.
  *
  * Task-based parallelism: each planetary species is submitted as an independent
  * task to the thread pool (same pool used by the mover). Each task uses its own
@@ -1840,7 +1946,7 @@ void c_Solver::injectExosphereParticles()
 {
   if (exosphereIonization == nullptr) return;
 
-  // ── Compute memory-aware particle budget per species ──
+  // ======= Compute a memory-aware per-species injection budget =======
   // Only activate a budget when GPU memory is actually scarce or a hard cap
   // is configured.  When memory is plentiful, maxParticlesPerSpecies stays 0
   // (unlimited), so sampleIonizedParticles follows the original zero-overhead
@@ -1877,7 +1983,7 @@ void c_Solver::injectExosphereParticles()
     }
   }
 
-  // Enqueue one task per planetary species.
+  // ======= Enqueue one sampling task per planetary species =======
   // Each task: (1) samples particles via thread-safe RNG, (2) appends to particlesCommInj[i] AoS comm buffer.
   // No shared mutable state between tasks — safe for concurrent execution.
   // numSolarWindSpecies, numPlanetarySpecies, and exosphereTaskFutures are persistent
@@ -1903,7 +2009,7 @@ void c_Solver::injectExosphereParticles()
     );
   }
 
-  // Wait for all species to complete before the H2D copy loop runs.
+  // Wait for every species task before the subsequent H2D copy loop runs.
   for (auto& future : exosphereTaskFutures) {
     future.get();
   }

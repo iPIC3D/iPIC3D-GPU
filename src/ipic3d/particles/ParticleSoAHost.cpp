@@ -118,9 +118,7 @@ ParticleSoAHost::ParticleSoAHost(int speciesNum, CollectiveIO* col,
   bucketOffset_            = new array3_int(numCellsX_, numCellsY_, numCellsZ_);
 }
 
-// ========================================================================
-// Destructor
-// ========================================================================
+// ======= Destruction =======
 
 ParticleSoAHost::~ParticleSoAHost()
 {
@@ -129,10 +127,13 @@ ParticleSoAHost::~ParticleSoAHost()
   delete bucketOffset_;
 }
 
-// ========================================================================
-// Particle generation methods
-// ========================================================================
+// ======= Particle generation =======
 
+/**
+ * @brief Populate the species with the default Maxwellian initialization.
+ *
+ * @param EMf Field object used to sample equilibrium density.
+ */
 void ParticleSoAHost::maxwellian(Field* EMf)
 {
   srand(vct_->getCartesian_rank() + 2);
@@ -161,6 +162,11 @@ void ParticleSoAHost::maxwellian(Field* EMf)
   }
 }
 
+/**
+ * @brief Populate the null-points/Taylor-Green cases with local current-driven drift.
+ *
+ * @param EMf Field object used to sample density and local current.
+ */
 void ParticleSoAHost::maxwellianNullPoints(Field* EMf)
 {
   srand(vct_->getCartesian_rank() + 2);
@@ -205,6 +211,11 @@ void ParticleSoAHost::maxwellianNullPoints(Field* EMf)
   }
 }
 
+/**
+ * @brief Populate the double-Harris configuration.
+ *
+ * @param EMf Field object used to sample equilibrium density.
+ */
 void ParticleSoAHost::maxwellianDoubleHarris(Field* EMf)
 {
   srand(vct_->getCartesian_rank() + 2);
@@ -239,6 +250,11 @@ void ParticleSoAHost::maxwellianDoubleHarris(Field* EMf)
   }
 }
 
+/**
+ * @brief Populate the hump-perturbation configuration.
+ *
+ * @param EMf Field object used to sample equilibrium density.
+ */
 void ParticleSoAHost::maxwellianHumpPerturbation(Field* EMf)
 {
   srand(vct_->getCartesian_rank() + 2);
@@ -268,6 +284,11 @@ void ParticleSoAHost::maxwellianHumpPerturbation(Field* EMf)
   }
 }
 
+/**
+ * @brief Initialize test particles from pitch angle and energy.
+ *
+ * @param EMf Field object used to sample reference density.
+ */
 void ParticleSoAHost::pitch_angle_energy(Field* EMf)
 {
   srand(vct_->getCartesian_rank() + 3 + speciesNumber_);
@@ -315,20 +336,32 @@ void ParticleSoAHost::pitch_angle_energy(Field* EMf)
   }
 }
 
+/**
+ * @brief Force-free particle initialization stub.
+ *
+ * The solver can select this path, but the actual particle initialization logic
+ * is intentionally left unimplemented in the current code.
+ *
+ * @param EMf Field object passed through from the solver.
+ */
 void ParticleSoAHost::force_free(Field* EMf)
 {
   eprintf("force_free was not properly implemented and needs to be revised.");
 }
 
+/**
+ * @brief Load this species from the restart file into the host SoA arrays.
+ */
 void ParticleSoAHost::restartLoad()
 {
   col_->read_particles_restart(vct_, speciesNumber_, u, v, w, q, x, y, z, t);
 }
 
-// ========================================================================
-// Diagnostics
-// ========================================================================
+// ======= Diagnostics =======
 
+/**
+ * @brief Compute the MPI-reduced maximum particle speed for this species.
+ */
 double ParticleSoAHost::getMaxVelocity() const
 {
   double localMaxVel = 0.0;
@@ -343,6 +376,15 @@ double ParticleSoAHost::getMaxVelocity() const
   return globalMaxVel;
 }
 
+/**
+ * @brief Compute an MPI-reduced speed histogram for this species.
+ *
+ * The caller owns the returned histogram buffer.
+ *
+ * @param numBins Number of histogram bins.
+ * @param maxVelocity Maximum speed represented by the histogram.
+ * @return Newly allocated histogram buffer owned by the caller.
+ */
 long long* ParticleSoAHost::getVelocityDistribution(int numBins, double maxVelocity) const
 {
   long long* histogram = new long long[numBins];
@@ -376,10 +418,11 @@ long long* ParticleSoAHost::getVelocityDistribution(int numBins, double maxVeloc
   return histogram;
 }
 
-// ========================================================================
-// Cell-sorted reorder
-// ========================================================================
+// ======= Cell-sorted reorder =======
 
+/**
+ * @brief Reorder particles by cell index using a serial counting sort.
+ */
 void ParticleSoAHost::sort_particles_serial()
 {
   const int numParticles = getNOP();
@@ -498,10 +541,15 @@ void ParticleSoAHost::sort_particles_parallel(int* cellCount, int* cellOffset)
   x.swap(xSorted); y.swap(ySorted); z.swap(zSorted); t.swap(tSorted);
 }
 
-// ========================================================================
-// BC configuration queries (for GPU kernel setup — pure config, no data)
-// ========================================================================
+// ======= Boundary-condition configuration queries =======
 
+/**
+ * @brief Build reemission-boundary configuration for the GPU mover.
+ *
+ * @param doRepopulateInjection Output global flag enabling repopulation logic.
+ * @param doRepopulateInjectionSide Output per-face repopulation flags.
+ * @param repopulateBoundary Output per-face repopulation boundary positions.
+ */
 void ParticleSoAHost::repopulate_particlesInfo(
     bool* doRepopulateInjection,
     bool* doRepopulateInjectionSide,
@@ -557,6 +605,14 @@ void ParticleSoAHost::repopulate_particlesInfo(
   repopulateBoundary[5] = zHgh;
 }
 
+/**
+ * @brief Build open-boundary outflow configuration for the GPU mover.
+ *
+ * @param doOpenBC Output global flag enabling open-boundary logic.
+ * @param applyOpenBC Output per-face open-boundary enable flags.
+ * @param deleteBoundary Output per-face delete-boundary positions.
+ * @param openBoundary Output per-face open-boundary positions.
+ */
 void ParticleSoAHost::openbc_particles_outflowInfo(
     bool* doOpenBC, bool* applyOpenBC,
     cudaCommonType* deleteBoundary, cudaCommonType* openBoundary) const
@@ -601,6 +657,11 @@ void ParticleSoAHost::openbc_particles_outflowInfo(
   openBoundary[4] = zLow;              openBoundary[5] = zHgh;
 }
 
+/**
+ * @brief Fill per-face EXIT-boundary flags for the GPU mover.
+ *
+ * @param isExitBC Output per-face flags; true means exiting particles are deleted locally.
+ */
 void ParticleSoAHost::fillExitBCFlags(bool* isExitBC) const
 {
   using namespace BCparticles;
@@ -612,10 +673,14 @@ void ParticleSoAHost::fillExitBCFlags(bool* isExitBC) const
   isExitBC[5] = (!vct_->getPERIODICZ_P() && vct_->noZrghtNeighbor_P() && bcPfaceZright_ == EXIT);
 }
 
-// ========================================================================
-// Append from external AoS buffer (exosphere / planet injection)
-// ========================================================================
+// ======= AoS append path =======
 
+/**
+ * @brief Append externally produced AoS particles into the host SoA arrays.
+ *
+ * @param buffer Input AoS particle buffer.
+ * @param count Number of particles to append from @p buffer.
+ */
 void ParticleSoAHost::appendFromAoS(const SpeciesParticle* buffer, int count)
 {
   if (count <= 0) return;
@@ -636,9 +701,7 @@ void ParticleSoAHost::appendFromAoS(const SpeciesParticle* buffer, int count)
   }
 }
 
-// ========================================================================
-// Helper: fill one cell with Maxwellian particles (for repopulation)
-// ========================================================================
+// ======= Repopulation helper =======
 
 void ParticleSoAHost::populateCellWithParticles(
   int cellIndexX, int cellIndexY, int cellIndexZ,

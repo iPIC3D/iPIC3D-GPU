@@ -7,9 +7,7 @@
 #include "planetKernel.cuh"
 
 
-// ═══════════════════════════════════════════════════════════════
-//  Planet Extraction — compact PLANET particles into planetArray
-// ═══════════════════════════════════════════════════════════════
+// ======= Planet extraction =======
 
 constexpr cudaCommonType TWO_PI = (cudaCommonType)6.28318530717958647692;
 
@@ -17,6 +15,10 @@ constexpr cudaCommonType TWO_PI = (cudaCommonType)6.28318530717958647692;
  * @brief Compact all particles flagged PLANET into the planet SoA buffer (device-only).
  *        Analogous to exitingKernel but writes to a device-only SoA buffer.
  *        Uses hashedSum[PLANET_HASHEDSUM_INDEX] for scatter indices.
+ * @param pclsArray Source particle SoA buffer.
+ * @param departureArray Per-particle destination metadata.
+ * @param planetArr Destination device-side planet particle buffer.
+ * @param hashedSumArray Prefix-sum helpers for destination indexing.
  */
 __global__ void planetExtractionKernel(
     particleArrayCUDA* pclsArray,
@@ -47,13 +49,14 @@ __global__ void planetExtractionKernel(
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-//  Ion charge reduction
-// ═══════════════════════════════════════════════════════════════
+// ======= Ion charge reduction =======
 
 /**
  * @brief Sum |q| of all particles in one species' planet SoA buffer.
  *        Block-level reduction then atomicAdd into *chargeOut.
+ * @param planetArr Device buffer holding the extracted planet particles.
+ * @param count Number of valid entries in `planetArr`.
+ * @param chargeOut Device scalar accumulating the total absolute charge.
  */
 __global__ void planetChargeReductionKernel(
     planetArray* planetArr, int count,
@@ -82,14 +85,18 @@ __global__ void planetChargeReductionKernel(
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-//  Electron energy computation
-// ═══════════════════════════════════════════════════════════════
+// ======= Electron energy staging =======
 
 /**
  * @brief For each electron planet particle compute kinetic energy and write
  *        into merged buffers at position (speciesOffset + localIndex).
  *        Energy: Ek = |q| / (2 * |qom|) * (u^2 + v^2 + w^2)
+ * @param planetArr Device buffer holding one electron species' planet particles.
+ * @param count Number of valid entries in `planetArr`.
+ * @param qom Charge-to-mass ratio of the species.
+ * @param energyBuf Merged output buffer for kinetic-energy keys.
+ * @param globalIdxBuf Merged output buffer for global particle indices.
+ * @param speciesOffset Prefix offset of this species in the merged buffers.
  */
 __global__ void planetEnergyKernel(
     planetArray* planetArr, int count,
@@ -115,13 +122,15 @@ __global__ void planetEnergyKernel(
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-//  Bitonic sort (descending by energy, key-value)
-// ═══════════════════════════════════════════════════════════════
+// ======= Bitonic energy sort =======
 
 /**
  * @brief Pad tail of arrays beyond realN with -inf keys so they
  *        sink to the end under descending sort.
+ * @param keys Sort-key buffer to pad.
+ * @param values Payload buffer aligned with `keys`.
+ * @param realN Number of valid entries before padding.
+ * @param paddedN Power-of-two length used by the bitonic sort.
  */
 __global__ void bitonicPadKernel(
     cudaParticleType* keys, uint32_t* values,
@@ -136,6 +145,8 @@ __global__ void bitonicPadKernel(
 /**
  * @brief One compare-and-swap step of bitonic sort.
  *        Produces a descending sequence when the outer loop completes.
+ * @param keys Sort keys updated in place.
+ * @param values Payload buffer permuted in lockstep with `keys`.
  * @param j XOR distance for this step
  * @param k block size for this stage
  * @param n padded array length (power of 2)
@@ -149,9 +160,9 @@ __global__ void bitonicSortStepKernel(
     if (i >= n) return;
 
     int ixj = i ^ j;
-    if (ixj <= i) return;  // one thread per pair
+    if (ixj <= i) return;  // one thread handles each compare-and-swap pair
 
-    // ascending = true when (i & k) != 0  →  descending when false
+    // ascending = true when (i & k) != 0, descending otherwise
     bool ascending = ((i & k) != 0);
 
     if (( ascending && keys[i] > keys[ixj]) ||
@@ -170,16 +181,14 @@ __global__ void bitonicSortStepKernel(
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-//  Charge cutoff — prefix-sum to find how many electrons to remove
-// ═══════════════════════════════════════════════════════════════
+// ======= Charge cutoff =======
 
 /**
  * @brief Sequential prefix-sum of |q| in sorted (descending energy) order.
  *        Finds the cutoff index: electrons [0..cutoff-1] are deleted,
  *        electrons [cutoff..n-1] survive and will be reflected.
  *
- *        Single-thread kernel — planet particle counts are small (typically
+ *        Single-thread kernel: planet particle counts are small (typically
  *        <100K), so a sequential scan is fast enough and avoids complexity.
  *
  * @param planetArrs  array of device pointers to per-species planetArrays
@@ -232,13 +241,11 @@ __global__ void chargeCutoffKernel(
             return;
         }
     }
-    *cutoffIndex = n;  // not enough electrons — delete all
+    *cutoffIndex = n;  // not enough electrons; delete all
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-//  Fused reflect + compact kernel (all electron species, device-only cutoff)
-// ═══════════════════════════════════════════════════════════════
+// ======= Specular reflection and compaction =======
 
 /**
  * @brief Specular (mirror) reflect surviving electrons and compact them
@@ -246,9 +253,22 @@ __global__ void chargeCutoffKernel(
  *        Reads cutoff from device memory (no host sync needed).
  *        Each thread maps to one entry in the sorted survivor range
  *        (sortedIdx = cutoff + tid); threads beyond the valid range
- *        early-return.  Decodes species from the global index, applies
- *        v' = v - 2(v·n̂)n̂, places the particle on the sphere surface,
+ *        early-return. Decodes species from the global index, applies
+ *        v' = v - 2(v.n)n, places the particle on the sphere surface,
  *        and writes it to outputBuf[speciesOffset + atomicSlot].
+ * @param planetArrs Device array of per-species planet buffers.
+ * @param nElecSpecies Number of electron species present in `planetArrs`.
+ * @param speciesOffsets Prefix offsets for each electron species in merged buffers.
+ * @param sortedGlobalIdx Energy-sorted merged particle indices.
+ * @param cutoffDevice Device pointer to the first surviving sorted index.
+ * @param totalElecPlanet Total number of electron planet particles across species.
+ * @param outputBuf Output AoS buffer receiving reflected survivors.
+ * @param survivorCounters Per-species device counters for compacted survivors.
+ * @param originX X coordinate of the planet center.
+ * @param originY Y coordinate of the planet center.
+ * @param originZ Z coordinate of the planet center.
+ * @param sphereRadius Planet radius used for repositioning.
+ * @param doSphere Geometry selector: 1 for full sphere, 2 for XZ-plane circle.
  */
 __global__ void planetReflectCompactKernel(
     planetArray** planetArrs, int nElecSpecies,
@@ -293,7 +313,7 @@ __global__ void planetReflectCompactKernel(
     // Read the original planet particle
     SpeciesParticle pcl = planetArrs[speciesIdx]->getArray()[localIdx];
 
-    // ── Reflect ──
+    // Reflect.
     const cudaCommonType eps = sphereRadius * (cudaCommonType)5e-2;  // small offset to prevent sticking to surface
 
     if (doSphere == 1) { // 3D
@@ -317,7 +337,7 @@ __global__ void planetReflectCompactKernel(
         pcl.set_x(1, originY + (sphereRadius + eps) * ny);
         pcl.set_x(2, originZ + (sphereRadius + eps) * nz);
 
-    } else if (doSphere == 2) { // 2D (XZ plane)
+    } else if (doSphere == 2) { // 2D XZ-plane circle
         const cudaCommonType dx = pcl.get_x() - originX;
         const cudaCommonType dz = pcl.get_z() - originZ;
         cudaCommonType r  = sqrt(dx * dx + dz * dz);
@@ -335,7 +355,7 @@ __global__ void planetReflectCompactKernel(
         pcl.set_x(2, originZ + (sphereRadius + eps) * nz);
     }
 
-    // ── Compact: atomicAdd to get a write slot in the output buffer ──
+    // Compact into the per-species output segment.
     int mySlot = atomicAdd(&survivorCounters[speciesIdx], 1);
     int outOffset = speciesOffsets[speciesIdx];
 
@@ -344,11 +364,13 @@ __global__ void planetReflectCompactKernel(
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-//  Simple GPU-compatible hash-based PRNG (xorshift32)
-//  Portable across CUDA and HIP — no vendor-specific intrinsics.
-// ═══════════════════════════════════════════════════════════════
+// ======= Local RNG helpers =======
 
+/**
+ * @brief Advance a simple xorshift32 PRNG state.
+ * @param seed Current PRNG state.
+ * @return Updated PRNG state after one xorshift step.
+ */
 __device__ inline uint32_t planetRngHash(uint32_t seed)
 {
     seed ^= seed << 13;
@@ -357,9 +379,13 @@ __device__ inline uint32_t planetRngHash(uint32_t seed)
     return seed;
 }
 
-/// Return a uniform value in (0, 1).  Precision is limited by the
-/// mantissa width of cudaCommonType (24 bits for float, 32 bits used
-/// here map into the 52-bit double mantissa).
+/**
+ * @brief Return a uniform random variate in the half-open interval [0, 1).
+ *
+ * Precision is bounded by the mantissa width of `cudaCommonType`.
+ * @param state PRNG state updated in place.
+ * @return Pseudorandom variate in `[0, 1)`.
+ */
 __device__ inline cudaCommonType planetRngUniform(uint32_t& state)
 {
     state = planetRngHash(state);
@@ -367,11 +393,7 @@ __device__ inline cudaCommonType planetRngUniform(uint32_t& state)
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-//  Fused DIFFUSE reflect + compact kernel  (isotropic scattering)
-//  Branch-free hemisphere sampling — no rejection loop, no warp
-//  divergence.  Portable across CUDA (warp 32) and HIP (wave 64).
-// ═══════════════════════════════════════════════════════════════
+// ======= Diffuse reflection and compaction =======
 
 /**
  * @brief Same structure as planetReflectCompactKernel, but instead of
@@ -380,7 +402,7 @@ __device__ inline cudaCommonType planetRngUniform(uint32_t& state)
  *        the original speed |v|.
  *
  *        NOTE: this is NOT identical to the legacy CPU function
- *        rotateAndCountParticlesInsideSphere().  The legacy code samples
+ *        rotateAndCountParticlesInsideSphere(). The legacy code samples
  *        theta uniformly in [0, pi) (global frame) then rejects the inward
  *        hemisphere, producing a non-uniform p(Omega) ~ 1/sin(theta).
  *        This kernel samples cos(theta) uniformly in (0, 1) in the LOCAL
@@ -396,7 +418,20 @@ __device__ inline cudaCommonType planetRngUniform(uint32_t& state)
  *        Position is reset to the sphere surface (unlike the legacy
  *        code which left it inside).
  *
- * @param rngSeedBase  base seed for the per-thread PRNG (e.g. cycle number)
+ * @param planetArrs Device array of per-species planet buffers.
+ * @param nElecSpecies Number of electron species present in `planetArrs`.
+ * @param speciesOffsets Prefix offsets for each electron species in merged buffers.
+ * @param sortedGlobalIdx Energy-sorted merged particle indices.
+ * @param cutoffDevice Device pointer to the first surviving sorted index.
+ * @param totalElecPlanet Total number of electron planet particles across species.
+ * @param outputBuf Output AoS buffer receiving diffusely reflected survivors.
+ * @param survivorCounters Per-species device counters for compacted survivors.
+ * @param originX X coordinate of the planet center.
+ * @param originY Y coordinate of the planet center.
+ * @param originZ Z coordinate of the planet center.
+ * @param sphereRadius Planet radius used for repositioning.
+ * @param doSphere Geometry selector: 1 for full sphere, 2 for XZ-plane circle.
+ * @param rngSeedBase Base seed for the per-thread PRNG (for example the cycle number)
  */
 __global__ void planetDiffuseCompactKernel(
     planetArray** planetArrs, int nElecSpecies,
@@ -448,7 +483,7 @@ __global__ void planetDiffuseCompactKernel(
     const cudaCommonType wold = pcl.get_w();
     const cudaCommonType Vmod = sqrt(uold * uold + vold * vold + wold * wold);
 
-    // ── Initialise per-thread RNG ──
+    // Initialize the per-thread RNG state.
     uint32_t rngState = rngSeedBase ^ (uint32_t)((uint32_t)sortedIdx * 2654435761u + 1u);
     rngState = planetRngHash(rngState);
     if (rngState == 0u) rngState = 1u;  // xorshift32 absorbs at 0
@@ -456,7 +491,7 @@ __global__ void planetDiffuseCompactKernel(
     const cudaCommonType eps = sphereRadius * (cudaCommonType)5e-2;
 
 
-    if (doSphere == 1) { // ── 3D ──
+    if (doSphere == 1) { // 3D sphere
         const cudaCommonType dx = pcl.get_x() - originX;
         const cudaCommonType dy = pcl.get_y() - originY;
         const cudaCommonType dz = pcl.get_z() - originZ;
@@ -464,19 +499,19 @@ __global__ void planetDiffuseCompactKernel(
         if (r < (cudaCommonType)1e-30) r = (cudaCommonType)1e-30;
         const cudaCommonType invr = (cudaCommonType)1.0 / r;
 
-        // Outward unit normal  n = (nx, ny, nz)
+        // Outward unit normal n = (nx, ny, nz).
         const cudaCommonType nx = dx * invr;
         const cudaCommonType ny = dy * invr;
         const cudaCommonType nz = dz * invr;
 
-        // Random direction on the outward hemisphere (no rejection)
+        // Random direction on the outward hemisphere without rejection.
         const cudaCommonType cosTheta = planetRngUniform(rngState);
         const cudaCommonType sinTheta = sqrt((cudaCommonType)1.0 - cosTheta * cosTheta);
         const cudaCommonType phi = TWO_PI * planetRngUniform(rngState);
         const cudaCommonType cphi = cos(phi);
         const cudaCommonType sphi = sin(phi);
 
-        // Velocity in LOCAL frame  (z_local = n)
+        // Velocity in the local frame where z_local aligns with the normal.
         const cudaCommonType vl_x = Vmod * sinTheta * cphi;
         const cudaCommonType vl_y = Vmod * sinTheta * sphi;
         const cudaCommonType vl_z = Vmod * cosTheta;
@@ -496,12 +531,12 @@ __global__ void planetDiffuseCompactKernel(
             t1y =  (cudaCommonType)0.0;
             t1z =  nx * invLen;
         }
-        // t2 = cross(n, t1)
+        // t2 = cross(n, t1).
         const cudaCommonType t2x = ny * t1z - nz * t1y;
         const cudaCommonType t2y = nz * t1x - nx * t1z;
         const cudaCommonType t2z = nx * t1y - ny * t1x;
 
-        // Rotate to global frame:  v = vl_x * t1 + vl_y * t2 + vl_z * n
+        // Rotate back to the global frame: v = vl_x * t1 + vl_y * t2 + vl_z * n.
         pcl.set_u(0, vl_x * t1x + vl_y * t2x + vl_z * nx);
         pcl.set_u(1, vl_x * t1y + vl_y * t2y + vl_z * ny);
         pcl.set_u(2, vl_x * t1z + vl_y * t2z + vl_z * nz);
@@ -510,7 +545,7 @@ __global__ void planetDiffuseCompactKernel(
         pcl.set_x(1, originY + (sphereRadius + eps) * ny);
         pcl.set_x(2, originZ + (sphereRadius + eps) * nz);
 
-    } else if (doSphere == 2) { // ── 2D (XZ plane) ──
+    } else if (doSphere == 2) { // 2D XZ-plane circle
         const cudaCommonType dx = pcl.get_x() - originX;
         const cudaCommonType dz = pcl.get_z() - originZ;
         cudaCommonType r = sqrt(dx * dx + dz * dz);
@@ -531,7 +566,7 @@ __global__ void planetDiffuseCompactKernel(
         pcl.set_x(2, originZ + (sphereRadius + eps) * nz);
     }
 
-    // ── Compact: atomicAdd to get a write slot in the output buffer ──
+    // Compact into the per-species output segment.
     int mySlot = atomicAdd(&survivorCounters[speciesIdx], 1);
     int outOffset = speciesOffsets[speciesIdx];
 

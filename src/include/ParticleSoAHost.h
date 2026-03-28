@@ -232,12 +232,43 @@ public:
 
   // ===== Particle initialisation (implemented in ParticleSoAHost.cpp) =====
 
+  /**
+   * @brief Populate the species with the default Maxwellian initialization.
+   *
+   * @param EMf Field object used to sample drifts and initialization parameters.
+   */
   void maxwellian(Field* EMf);
+  /**
+   * @brief Populate the null-points/Taylor-Green cases using local current-driven drift.
+   *
+   * @param EMf Field object used to sample local current-driven drifts.
+   */
   void maxwellianNullPoints(Field* EMf);
+  /**
+   * @brief Populate the double-Harris configuration.
+   *
+   * @param EMf Field object used to sample the equilibrium.
+   */
   void maxwellianDoubleHarris(Field* EMf);
+  /**
+   * @brief Populate the hump-perturbation configuration.
+   *
+   * @param EMf Field object used to sample the equilibrium.
+   */
   void maxwellianHumpPerturbation(Field* EMf);
+  /**
+   * @brief Initialize test particles from pitch angle and energy.
+   *
+   * @param EMf Field object used to sample magnetic-field direction and strength.
+   */
   void pitch_angle_energy(Field* EMf);
+  /**
+   * @brief Stub for the force-free particle initialization path.
+   *
+   * @param EMf Field object passed through from the solver.
+   */
   void force_free(Field* EMf);
+  /** @brief Load particle data for this species from a restart file. */
   void restartLoad();
 
   // ===== Diagnostics (MPI reductions via borrowed communicator) =====
@@ -287,27 +318,51 @@ public:
   /** Maximum velocity magnitude (MPI-reduced across all ranks). */
   double getMaxVelocity() const;
 
-  /** Velocity distribution histogram (MPI-reduced). Caller owns result. */
+  /**
+   * @brief Compute a velocity-distribution histogram reduced over MPI ranks.
+   *
+   * @param numBins Number of histogram bins.
+   * @param maxVelocity Upper velocity bound used to map particles into bins.
+   * @return Newly allocated histogram owned by the caller.
+   */
   long long* getVelocityDistribution(int numBins, double maxVelocity) const;
 
   // ===== Cell-sorted reorder (implemented in ParticleSoAHost.cpp) =====
 
+  /** @brief Reorder particles by cell index on the host using a serial counting sort. */
   void sort_particles_serial();
   void sort_particles_parallel(int* cellCount, int* cellOffset);
 
   // ===== BC configuration queries (for GPU kernel setup) =====
 
-  /** Fill repopulate-injection info for GPU kernel configuration. */
+  /**
+   * @brief Fill repopulate-injection info for GPU kernel configuration.
+   *
+   * @param doRepopulateInjection Output flag that enables repopulation logic.
+   * @param doRepopulateInjectionSide Output per-face enable flags.
+   * @param repopulateBoundary Output per-face repopulation boundary positions.
+   */
   void repopulate_particlesInfo(bool* doRepopulateInjection,
                                 bool* doRepopulateInjectionSide,
                                 cudaCommonType* repopulateBoundary) const;
 
-  /** Fill open-BC outflow info for GPU kernel configuration. */
+  /**
+   * @brief Fill open-boundary outflow info for GPU kernel configuration.
+   *
+   * @param doOpenBC Output global open-boundary enable flag.
+   * @param applyOpenBC Output per-face open-boundary enable flags.
+   * @param deleteBoundary Output per-face delete-boundary positions.
+   * @param openBoundary Output per-face open-boundary positions.
+   */
   void openbc_particles_outflowInfo(bool* doOpenBC, bool* applyOpenBC,
                                     cudaCommonType* deleteBoundary,
                                     cudaCommonType* openBoundary) const;
 
-  /** Fill per-face EXIT BC flags for GPU kernel. */
+  /**
+   * @brief Fill per-face EXIT BC flags for the GPU mover.
+   *
+   * @param isExitBC Output per-face flags; true means exiting particles are deleted locally.
+   */
   void fillExitBCFlags(bool* isExitBC) const;
 
   // ===== BC face config (read-only) =====
@@ -321,7 +376,12 @@ public:
 
   // ===== Append from external AoS (for exosphere / planet injection) =====
 
-  /** Scatter AoS particles into SoA arrays. Expandable buffer. */
+  /**
+   * @brief Scatter AoS particles into the host SoA arrays.
+   *
+   * @param buffer Input AoS particle buffer.
+   * @param count Number of particles to append from @p buffer.
+   */
   void appendFromAoS(const SpeciesParticle* buffer, int count);
 
   // ===== Raw borrowed-pointer accessors (for ParticleCommInjection etc.) =====
@@ -347,6 +407,17 @@ public:
 private:
 
   // ===== Helper: fill one cell with Maxwellian particles =====
+  /**
+   * @brief Populate one logical cell with Maxwellian particles.
+   *
+   * @param cellIndexX Cell index in x.
+   * @param cellIndexY Cell index in y.
+   * @param cellIndexZ Cell index in z.
+   * @param chargePerParticle Particle charge/weight assigned to each generated particle.
+   * @param dxPerPcl In-cell spacing in x between generated particles.
+   * @param dyPerPcl In-cell spacing in y between generated particles.
+   * @param dzPerPcl In-cell spacing in z between generated particles.
+   */
   void populateCellWithParticles(int cellIndexX, int cellIndexY, int cellIndexZ,
                                  double chargePerParticle,
                                  double dxPerPcl, double dyPerPcl, double dzPerPcl);

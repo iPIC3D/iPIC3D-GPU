@@ -70,6 +70,7 @@ __global__ void histogramKernel3D(const int nop, const histogramTypeIn *d1, cons
 /**
  * @brief reset and calculate the center of each histogram bin
  * @details this kernel is launched once for each histogram bin for all 3 histograms
+ * @param histogramCUDAPtr Device histogram descriptor to reset.
  */
 __global__ void resetBin(velocityHistogramCUDA3D* histogramCUDAPtr){
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -87,7 +88,6 @@ __global__ void resetBin(velocityHistogramCUDA3D* histogramCUDAPtr){
 
 
 } // namespace velocityHistogram
-
 
 
 

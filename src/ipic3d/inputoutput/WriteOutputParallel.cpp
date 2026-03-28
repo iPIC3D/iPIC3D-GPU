@@ -31,6 +31,17 @@
 #include <iomanip>
 using std::string;
 
+/**
+ * @brief Write one PHDF5 field output file using the legacy parallel HDF5 path.
+ *
+ * This helper writes electric and magnetic fields plus per-species charge
+ * density and current datasets for the given cycle.
+ * @param grid Local grid descriptor used for dimensions and coordinates.
+ * @param EMf Field container supplying the output arrays.
+ * @param col Collective I/O configuration.
+ * @param vct MPI topology used for rank-local extents.
+ * @param cycle Simulation cycle being written.
+ */
 void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle){
 
 #ifdef PHDF5
@@ -40,16 +51,12 @@ void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
   stringstream filenmbr;
   string       filename;
 
-  /* ------------------- */
-  /* Setup the file name */
-  /* ------------------- */
+  // ======= Build the output file name =======
 
   filenmbr << setfill('0') << setw(5) << cycle;
   filename = col->getSaveDirName() + "/" + col->getSimName() + "_" + filenmbr.str() + ".h5";
 
-  /* ---------------------------------------------------------------------------- */
-  /* Define the number of cells in the globa and local mesh and set the mesh size */
-  /* ---------------------------------------------------------------------------- */
+  // ======= Define global/local mesh sizes and domain lengths =======
 
   int nxc = grid->getNXC();
   int nyc = grid->getNYC();
@@ -59,33 +66,25 @@ void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
   int    dlocl[3] = { nxc-2,            nyc-2,            nzc-2 };
   double L    [3] = { col ->getLx ()  , col ->getLy ()  , col ->getLz ()   };
 
-  /* --------------------------------------- */
-  /* Declare and open the parallel HDF5 file */
-  /* --------------------------------------- */
+  // ======= Create the parallel HDF5 file =======
 
   PHDF5fileClass outputfile(filename, 3, vct->getCoordinates(), vct->getFieldComm());
 
   outputfile.CreatePHDF5file(L, dglob, dlocl, false);
 
-  /* ------------------------ */
-  /* Write the Electric field */
-  /* ------------------------ */
+  // ======= Write electric-field datasets =======
 
   outputfile.WritePHDF5dataset("Fields", "Ex", EMf->getEx(), nxc-2, nyc-2, nzc-2);
   outputfile.WritePHDF5dataset("Fields", "Ey", EMf->getEy(), nxc-2, nyc-2, nzc-2);
   outputfile.WritePHDF5dataset("Fields", "Ez", EMf->getEz(), nxc-2, nyc-2, nzc-2);
 
-  /* ------------------------ */
-  /* Write the Magnetic field */
-  /* ------------------------ */
+  // ======= Write magnetic-field datasets =======
 
   outputfile.WritePHDF5dataset("Fields", "Bx", EMf->getBxc(), nxc-2, nyc-2, nzc-2);
   outputfile.WritePHDF5dataset("Fields", "By", EMf->getByc(), nxc-2, nyc-2, nzc-2);
   outputfile.WritePHDF5dataset("Fields", "Bz", EMf->getBzc(), nxc-2, nyc-2, nzc-2);
 
-  /* ----------------------------------------------- */
-  /* Write the moments for each species */
-  /* ----------------------------------------------- */
+  // ======= Write per-species moments =======
 
   for (int is = 0; is < col->getNs(); is++)
   {
@@ -93,9 +92,9 @@ void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
     snmbr << is;
     const string num = snmbr.str();
 
-    // Charge Density
+    // Charge density.
     outputfile.WritePHDF5dataset("Fields", string("Rho_")+num , EMf->getRHOcs(is), nxc-2, nyc-2, nzc-2, 4*3.1415926535897);
-    // Current (on node grid, same as pvtk output)
+    // Current on the node grid, matching the VTK output convention.
     outputfile.WritePHDF5dataset("Fields", string("Jx_")+num, EMf->getJxs(is), nxc-2, nyc-2, nzc-2);
     outputfile.WritePHDF5dataset("Fields", string("Jy_")+num, EMf->getJys(is), nxc-2, nyc-2, nzc-2);
     outputfile.WritePHDF5dataset("Fields", string("Jz_")+num, EMf->getJzs(is), nxc-2, nyc-2, nzc-2);

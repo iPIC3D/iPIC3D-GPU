@@ -42,6 +42,10 @@ __host__ void velocityHistogram3D::init(velocitySoA* pclArray, const int species
 
 /**
  * @brief Synchronous function to get the min and max for 3 dimensions, result is stored in minArray and maxArray
+ * @param pclArray Borrowed velocity SoA view for one species.
+ * @param species Species index, kept for interface symmetry with the caller.
+ * @param stream CUDA stream used by the reduction kernels.
+ * @return `0` on success.
  */
 __host__ int velocityHistogram3D::getRange(velocitySoA* pclArray, const int species, cudaStream_t stream){
 
@@ -85,7 +89,6 @@ __host__ int velocityHistogram3D::getRange(velocitySoA* pclArray, const int spec
 
 
 }
-
 
 
 

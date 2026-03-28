@@ -1,17 +1,9 @@
-/*
- * IOManager.h - Modular I/O manager for iPIC3D
+/**
+ * @file IOManager.h
+ * @brief Modular I/O manager for iPIC3D.
  *
- * Decouples field, particle, and restart I/O so each concern can
- * independently use any available backend (HDF5, VTK, ADIOS2, H5hut, etc.).
- *
- * Design rationale:
- *   - WriteMethod (from input file) determines the FIELD output backend.
- *   - Particle output backend is selected independently:
- *       USE_ADIOS2 → ADIOS2;   H5hut WriteMethod → H5hut;   else → serial HDF5.
- *   - Restart output backend is selected independently:
- *       USE_ADIOS2 → ADIOS2;   else → serial HDF5.
- *   - No preprocessor guard leaks: each backend's code is self-contained
- *     behind its own #ifdef / #ifndef.
+ * Decouples field, particle, and restart I/O so each concern can select its
+ * backend independently.
  */
 
 #ifndef IO_MANAGER_H
@@ -26,7 +18,7 @@
 #include "mpi.h"
 #endif
 
-// Forward declarations — no backend headers pulled into the translation unit
+// Forward declarations; keep backend headers out of this translation unit.
 #ifndef NO_HDF5
 class OutputWrapperFPP;
 #endif
@@ -37,7 +29,7 @@ namespace ADIOS2IO { class ADIOS2Manager; }
 
 class IOManager {
 public:
-    // ---- backend enums (field, particle, restart are independent) ----
+    // ======= Backend enums =======
     enum class FieldBackend    { NONE, SHDF5, PVTK, NBCVTK, PARALLEL_HDF5, H5HUT, ADIOS2 };
     enum class ParticleBackend { NONE, SHDF5, H5HUT, ADIOS2 };
     enum class RestartBackend  { NONE, SHDF5, ADIOS2 };
@@ -45,7 +37,7 @@ public:
     IOManager();
     ~IOManager();
 
-    // Non-copyable, non-movable
+    // Non-copyable, non-movable.
     IOManager(const IOManager&) = delete;
     IOManager& operator=(const IOManager&) = delete;
 
@@ -53,33 +45,70 @@ public:
      * @brief Initialise backends based on compile-time options and runtime config.
      *
      * Must be called once, after Collective/Grid/EMfields/Particles are ready.
-     * The pointers are stored but NOT owned — the caller (c_Solver) keeps ownership.
+     * The pointers are stored but not owned; the caller (`c_Solver`) keeps ownership.
+     *
+     * @param col Collective input/configuration object.
+     * @param vct MPI topology descriptor.
+     * @param grid Local grid descriptor.
+     * @param EMf Electromagnetic-field container.
+     * @param outputPart Array of per-species host particle containers.
+     * @param ns Number of particle species.
+     * @param testpart Array of host test-particle containers.
+     * @param nstestpart Number of test-particle species.
+     * @param first_cycle First simulation cycle to consider for output scheduling.
      */
     void init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
               EMfields3D* EMf, ParticleSoAHost** outputPart, int ns,
               ParticleSoAHost** testpart, int nstestpart, int first_cycle);
 
-    // ---- write methods (no cycle-gating — caller decides when to call) ----
+    // ======= Write methods =======
 
-    /** Write field data (E, B, J, rho, moments). */
+    /**
+     * @brief Write field data (E, B, J, rho, moments).
+     *
+     * @param cycle Simulation cycle being written.
+     */
     void writeFields(int cycle);
 
-    /** Write particle data (position, velocity, charge, ID). */
+    /**
+     * @brief Write particle data (position, velocity, charge, ID).
+     *
+     * @param cycle Simulation cycle being written.
+     */
     void writeParticles(int cycle);
 
-    /** Write test-particle data. */
+    /**
+     * @brief Write test-particle data.
+     *
+     * @param cycle Simulation cycle being written.
+     */
     void writeTestParticles(int cycle);
 
-    /** Write restart checkpoint (fields + particles). */
+    /**
+     * @brief Write a restart checkpoint containing fields and particles.
+     *
+     * @param cycle Simulation cycle being checkpointed.
+     */
     void writeRestart(int cycle);
 
-    // ---- restart READ methods (dispatch to RestartReader) ----
+    // ======= Restart read methods =======
 
     /**
      * @brief Read EM fields and species densities from a restart checkpoint.
      *
      * Delegates to RestartReader::readFields using the restart directory
      * and last cycle stored in the Collective configuration.
+     *
+     * @param vct MPI topology descriptor.
+     * @param grid Local grid descriptor.
+     * @param Bxn Restart target array for magnetic field Bx on nodes.
+     * @param Byn Restart target array for magnetic field By on nodes.
+     * @param Bzn Restart target array for magnetic field Bz on nodes.
+     * @param Ex Restart target array for electric field Ex on nodes.
+     * @param Ey Restart target array for electric field Ey on nodes.
+     * @param Ez Restart target array for electric field Ez on nodes.
+     * @param rhons Restart target arrays for per-species charge density.
+     * @param ns Number of particle species.
      */
     void readFieldRestart(
         const VCtopology3D* vct, const Grid3DCU* grid,
@@ -92,6 +121,17 @@ public:
      *
      * Delegates to RestartReader::readParticles using the restart directory
      * and last cycle stored in the Collective configuration.
+     *
+     * @param vct MPI topology descriptor.
+     * @param species_number Species index to read.
+     * @param u Restart target vector for x-velocity.
+     * @param v Restart target vector for y-velocity.
+     * @param w Restart target vector for z-velocity.
+     * @param q Restart target vector for particle charge/weight.
+     * @param x Restart target vector for x-position.
+     * @param y Restart target vector for y-position.
+     * @param z Restart target vector for z-position.
+     * @param t Restart target vector for particle tag/time.
      */
     void readParticlesRestart(
         const VCtopology3D* vct, int species_number,
@@ -107,28 +147,30 @@ public:
      */
     void finalize();
 
-    // ---- queries used by c_Solver for GPU-host copy scheduling ----
+    // ======= GPU-host copy scheduling queries =======
 
     /**
      * @brief Will the given cycle require particle data on the host?
      *
-     * Used by c_Solver::outputCopyAsync() to decide whether to schedule
-     * a GPU→host memcpy for the NEXT cycle.
+     * Used by `c_Solver::outputCopyAsync()` to decide whether to schedule
+     * a GPU-to-host memcpy for the next cycle.
+     *
+     * @param cycle Simulation cycle to query.
      */
     bool needsParticleSync(int cycle) const;
 
-    // ---- accessor helpers ----
+    // ======= Accessor helpers =======
     FieldBackend    getFieldBackend()    const { return fieldBackend_; }
     ParticleBackend getParticleBackend() const { return particleBackend_; }
     RestartBackend  getRestartBackend()  const { return restartBackend_; }
 
 private:
-    // ---- backend selection ----
+    // ======= Backend selection =======
     FieldBackend    fieldBackend_    = FieldBackend::NONE;
     ParticleBackend particleBackend_ = ParticleBackend::NONE;
     RestartBackend  restartBackend_  = RestartBackend::NONE;
 
-    // ---- backend objects (owned) ----
+    // ======= Owned backend objects =======
 #ifndef NO_HDF5
     OutputWrapperFPP* outputWrapperFPP_ = nullptr;
 #endif
@@ -136,7 +178,7 @@ private:
     ADIOS2IO::ADIOS2Manager* adiosManager_ = nullptr;
 #endif
 
-    // ---- VTK / NBCVTK write buffers (owned) ----
+    // ======= Owned VTK write buffers =======
     float**** fieldwritebuffer_  = nullptr;
     float***  momentwritebuffer_ = nullptr;
 
@@ -156,7 +198,7 @@ private:
     MPI_Status  momentstsArr_[14]  = {};
     int         momentreqcounter_  = 0;
 
-    // ---- registered (non-owning) pointers ----
+    // ======= Registered non-owning pointers =======
     Collective*   col_        = nullptr;
     VCtopology3D* vct_        = nullptr;
     Grid3DCU*     grid_       = nullptr;

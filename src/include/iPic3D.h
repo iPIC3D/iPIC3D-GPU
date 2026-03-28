@@ -56,7 +56,9 @@ class IOManager;   // modular I/O manager (see IOManager.h)
 namespace iPic3D {
   class c_Solver;
 
-  // Simulation case types — resolved once from the input-file string in Init()
+  /**
+   * @brief Simulation case identifiers resolved once during solver initialization.
+   */
   enum class CaseType {
     GEMnoPert,
     ForceFree,
@@ -79,6 +81,13 @@ namespace dataAnalysis {
 
 namespace iPic3D {
 
+  /**
+   * @brief Top-level iPIC3D solver orchestrator.
+   *
+   * The solver owns MPI/topology state, fields, particle containers, CUDA
+   * runtime objects, and output backends. Runtime control flows through the
+   * methods declared here and implemented in `iPIC3Dlib.cu`.
+   */
   class c_Solver {
 
   friend dataAnalysis::dataAnalysisPipelineImpl;
@@ -101,30 +110,100 @@ namespace iPic3D {
       my_clock(0)
     {}
 
-
+    // ======= Initialization and lifecycle =======
+    /**
+     * @brief Initialize the full solver state from input arguments.
+     *
+     * @param argc Command-line argument count.
+     * @param argv Command-line argument vector.
+     * @return Zero on success; non-zero on failure.
+     */
     int Init(int argc, char **argv);
+    /**
+     * @brief Allocate and initialize all CUDA-side solver resources.
+     *
+     * @return Zero on success; non-zero on failure.
+     */
     int initCUDA();
+    /**
+     * @brief Release all CUDA-side solver resources.
+     *
+     * @return Zero on success; non-zero on failure.
+     */
     int deInitCUDA();
-    
+
+    // ======= Particle and field advance =======
     void CalculateMoments();
+    /**
+     * @brief Advance the electric field solve for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void CalculateField(int cycle);
+    /**
+     * @brief Launch the GPU mover pipeline for one species.
+     *
+     * @param species Species index.
+     * @param doMomentsInLauncher True when moments are deposited in the same async path.
+     * @return Status code from the launch path.
+     */
     int cudaLauncherAsync(int species, bool doMomentsInLauncher);
+    /**
+     * @brief Launch mover and moment work for all species asynchronously.
+     *
+     * @param cycle Current simulation cycle.
+     * @return True when the mover pipeline completed successfully.
+     */
     bool ParticlesMoverMomentAsync(int cycle);
+    /**
+     * @brief Wait for mover completion, exchange particles, and handle injections.
+     *
+     * @param cycle Current simulation cycle.
+     * @return True when the exchange path completed successfully.
+     */
     bool MoverAwaitAndPclExchange(int cycle);
     void processPlanetParticles();
     void injectExosphereParticles();
     void sortAllSpecies();
+    /**
+     * @brief Advance the magnetic field for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void CalculateB(int cycle);
     void MomentsAwait();
 
-    //
-    // output methods
-    //
+    // ======= Output and diagnostics =======
+    /**
+     * @brief Write per-species particle counts for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void writeParticleNum(int cycle);
+    /**
+     * @brief Write conserved-quantity diagnostics for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void WriteConserved(int cycle);
+    /**
+     * @brief Write the velocity-distribution diagnostic for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void WriteVelocityDistribution(int cycle);
     void WriteVirtualSatelliteTraces();
+    /**
+     * @brief Schedule or execute GPU-to-host copies needed for output.
+     *
+     * @param cycle Current simulation cycle, or -1 for the final flush path.
+     */
     void outputCopyAsync(int cycle);
+    /**
+     * @brief Write configured outputs for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void WriteOutput(int cycle);
     void Finalize();
 
@@ -135,8 +214,24 @@ namespace iPic3D {
   private:
     void pad_particle_capacities();
     void sortParticles();
+    /**
+     * @brief Copy one species' moment buffer from device to host.
+     *
+     * @param species Species index.
+     * @param stream CUDA stream used for the asynchronous copy.
+     */
     void copyMomentsD2H(int species, cudaStream_t stream);
+    /**
+     * @brief Register one species' host moment arrays as pinned memory.
+     *
+     * @param species Species index.
+     */
     void registerMomentsPinnedMemory(int species);
+    /**
+     * @brief Unregister one species' host moment arrays from pinned memory.
+     *
+     * @param species Species index.
+     */
     void unregisterMomentsPinnedMemory(int species);
 
   private:
@@ -170,14 +265,14 @@ namespace iPic3D {
     std::future<int>* exitingResults;
     int* stayedParticle; // stayed particles for each species
 
-	//! Host pointers of objects, to be copied to device, for management later
-	  particleArrayCUDA**   pclsArrayHostPtr;       // array of pointer, point to objects on host
+    // ======= Host-side metadata objects mirrored to the device =======
+	  particleArrayCUDA**   pclsArrayHostPtr;       // array of pointers to host-resident metadata objects
     departureArrayType**  departureArrayHostPtr;  // for every species
     hashedSum**           hashedSumArrayHostPtr;      // species * 8
     exitingArray**        exitingArrayHostPtr;        // species
     arrayCUDA<SpeciesParticle>** incomingStagingHostPtr;  // per-species AoS staging for H→D incoming particles
     fillerBuffer**        fillerBufferArrayHostPtr;   // species
-    grid3DCUDA* 		      grid3DCUDAHostPtr;      // one grid, used in all specieses
+    grid3DCUDA* 		      grid3DCUDAHostPtr;      // one shared grid descriptor for all species
     moverParameter**      moverParamHostPtr;		  // for every species
     momentParameter**     momentParamHostPtr;		  // for every species
 
@@ -192,24 +287,24 @@ namespace iPic3D {
     CaseType caseType_;  // resolved once in Init() from col->getCase()
     bool     doPlanet_;  // true when caseType_ is Dipole or Dipole2D
     
-	//! CUDA pointers of objects, have been copied to device
-    particleArrayCUDA**   pclsArrayCUDAPtr;           // array of pointer, point to pclsArray on device
+    // ======= Device-side metadata objects =======
+    particleArrayCUDA**   pclsArrayCUDAPtr;           // array of pointers to device-resident particle metadata
     departureArrayType**  departureArrayCUDAPtr;      // for every species
     hashedSum**           hashedSumArrayCUDAPtr;      // species * 8
     exitingArray**        exitingArrayCUDAPtr;        // species
     arrayCUDA<SpeciesParticle>** incomingStagingCUDAPtr;  // per-species device copy of staging metadata
     fillerBuffer**        fillerBufferArrayCUDAPtr;   // species
-    grid3DCUDA* 		      grid3DCUDACUDAPtr;    	    // one grid, used in all specieses
+    grid3DCUDA* 		      grid3DCUDACUDAPtr;    	    // one shared grid descriptor for all species
     moverParameter**      moverParamCUDAPtr;		      // for every species
     momentParameter**     momentParamCUDAPtr;		      // for every species
 
     int* cellCountCUDAPtr;
     int* cellOffsetCUDAPtr;
 
-	//! simple device buffers
-    // [10][nxn][nyn][nzn], a piece of cuda memory to hold the moment
+    // ======= Shared device buffers =======
+    // [10][nxn][nyn][nzn] packed moment storage per species.
     cudaTypeArray1<cudaMomentType>* momentsCUDAPtr; // for every species
-    // [nxn][nyn][nzn][2*4], a piece of cuda memory to hold E and B from host
+    // Packed field-interpolation buffer copied from host for mover kernels.
     cudaTypeArray1<cudaFieldType> fieldForPclCUDAPtr; // for all species
 
     cudaTypeArray1<cudaFieldType> fieldForPclHostPtr;
@@ -241,7 +336,7 @@ namespace iPic3D {
     int mergeIdx = -1;
     int* toBeMerged;
 
-    //! Planet quasi-neutral BC data structures
+    // ======= Planet quasi-neutral boundary-condition state =======
     planetArray**       planetArrayHostPtr;      // per species, host-pinned metadata
     planetArray**       planetArrayCUDAPtr;      // per species, device metadata
     int*                planetPclCount;           // per species, planet particle count this cycle

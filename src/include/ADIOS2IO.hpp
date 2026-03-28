@@ -95,9 +95,21 @@ public:
     }
 
 /**
- * @brief Construct a new ADIOS2Manager object
- * 
- * @details create or open the output files, register the pointers, configure the output routine
+ * @brief Create or open the ADIOS2 output files and bind solver data sources.
+ *
+ * @details Registers field and particle sources, configures the output layout,
+ *          and opens the files needed by subsequent append calls.
+ * @param fieldTag Base tag for field-output variables.
+ * @param particleTag Base tag for particle-output variables.
+ * @param sample Output sampling stride used by the backend.
+ * @param col Solver collective/configuration object.
+ * @param vct MPI topology for rank-local domain information.
+ * @param grid Local grid descriptor.
+ * @param EMf Field container used as the data source.
+ * @param outputPart Regular particle species to serialize.
+ * @param ns Number of regular particle species.
+ * @param testpart Test-particle species to serialize.
+ * @param nstestpart Number of test-particle species.
  */
 void initOutputFiles(string fieldTag, string particleTag, int sample,
                      Collective* col, VCtopology3D* vct, Grid3DCU* grid,
@@ -117,19 +129,34 @@ void closeOutputFiles();
 
 public:
 /**
- * @brief these are the output routines for different categories of data
+ * @brief Append one field-output step to the ADIOS2 stream.
+ * @param cycle Simulation cycle being written.
  */
-
 void appendFieldOutput(int cycle); 
 
+/**
+ * @brief Append one particle-output step to the ADIOS2 stream.
+ * @param cycle Simulation cycle being written.
+ */
 void appendParticleOutput(int cycle);
 
+/**
+ * @brief Append one restart/checkpoint step to the ADIOS2 stream.
+ * @param cycle Simulation cycle being written.
+ */
 void appendRestartOutput(int cycle);
 
 private:
 
 /**
- * @brief helper function to create or inquire a variable
+ * @brief Create or query an ADIOS2 variable and optionally update its selection.
+ * @param io ADIOS2 IO object that owns the variable definition.
+ * @param name Variable name.
+ * @param shape Global variable shape for array variables.
+ * @param start Local starting offset within `shape`.
+ * @param count Local extent within `shape`.
+ * @param constantDims Whether the variable has constant dimensions across steps.
+ * @return ADIOS2 variable handle, newly defined or previously queried.
  */
 template < typename T >
 adios2::Variable<T> _variableHelper(adios2::IO &io, const std::string &name, const adios2::Dims &shape = adios2::Dims(), 
@@ -342,4 +369,3 @@ void _particleID(adios2::IO &io, adios2::Engine &engine){
 
 
 #endif
-

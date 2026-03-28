@@ -1,35 +1,37 @@
-// ============================================================================
-// GPU kernels for cell-based particle sorting (counting sort).
+// ======= Cell-based particle sorting =======
+//
+// GPU counting-sort pipeline for the cell-sorted particle path.
 //
 // Algorithm (4 stages):
-//   Stage 1: Position → cell index (on-the-fly) + histogram
-//   Stage 2: Exclusive prefix sum of histogram → cell offsets
-//   Stage 3: Recompute cell → atomicAdd on offsets → sorted_indices
+//   Stage 1: Position -> cell index (on-the-fly) + histogram
+//   Stage 2: Exclusive prefix sum of histogram -> cell offsets
+//   Stage 3: Recompute cell -> atomicAdd on offsets -> sorted_indices
 //   Stage 4: scatter_partial per SoA array + cycling pointer swap
+//
+// Host-side execution is split into:
+//   prepareBuffers()   -> resize reusable temporary storage
+//   enqueueSortAsync() -> launch GPU stages 1-3
+//   finishSort()       -> wait, then launch/complete GPU stage 4
 //
 // All kernels use grid-stride loops and handle arbitrary particle/cell counts.
 // Partial sort: only particles[0 .. num_to_sort) are sorted; the tail
 // [num_to_sort .. nop) is copied as-is by the scatter kernel.
-// ============================================================================
 
 #include "cellSortBuffers.cuh"
 #include <vector>
 #include <cmath>
 #include <cstdio>
 
-// ============================================================================
-// Device helper: position → flat cell index
-// ============================================================================
-//
-// Delegates to grid3DCUDA::get_safe_cell() so that the cell assignment is
-// *exactly* the same as in the mover (get_safe_cell_and_weights) and moment
-// kernels.  In particular this picks up the NaN-safe floating-point clamping
-// (make_grid_position_safe) that runs before floor() when
-// suppress_runaway_particle_instability is true.
-//
-// Linearization: cx + cy * nxc + cz * nxc * nyc   (x-fastest)
-// Domain: guarded cells [0, nxc) × [0, nyc) × [0, nzc)
-//
+// ======= Cell index helper =======
+
+/**
+ * @brief Map one particle position to the flattened guarded-cell index.
+ *
+ * Delegates to `grid3DCUDA::get_safe_cell()` so the cell classification stays
+ * aligned with the mover and moment kernels, including the NaN-safe clamping
+ * path used before `floor()`. The linearization is
+ * `cx + cy * nxc + cz * nxc * nyc` with x as the fastest-varying index.
+ */
 __device__ __forceinline__
 int compute_cell_idx(cudaPclType_X xp, cudaPclType_Y yp, cudaPclType_Z zp,
                      const grid3DCUDA* g)
@@ -40,15 +42,15 @@ int compute_cell_idx(cudaPclType_X xp, cudaPclType_Y yp, cudaPclType_Z zp,
 }
 
 
-// ============================================================================
-// Warp-aggregated atomic increment (portable fallback)
-// ============================================================================
-//
-// Uses ballot + shfl to aggregate threads with the same cell index,
-// so only one atomicAdd per unique value per warp.
-//
-// Note: WARP_SIZE and warp_mask_t are defined in cudaTypeDef.cuh for portability.
+// ======= Warp-aggregated histogram helper =======
 
+/**
+ * @brief Aggregate equal-cell contributions within a warp before issuing atomics.
+ *
+ * Threads in the active warp are partitioned by `cell`. One leader per group
+ * performs a single `atomicAdd()` carrying the population count of that group.
+ * `WARP_SIZE` and `warp_mask_t` come from `cudaTypeDef.cuh`.
+ */
 __device__ __forceinline__
 void warp_aggregated_atomic_inc(int* histogram, int cell)
 {
@@ -68,12 +70,18 @@ void warp_aggregated_atomic_inc(int* histogram, int cell)
 }
 
 
-// ============================================================================
-// Stage 1a: Histogram — shared memory (small grids, num_cells ≤ 1024)
-// ============================================================================
+// ======= Stage 1: Histogram =======
+
 static constexpr int SORT_HISTOGRAM_SHMEM_LIMIT = 1024;
 static constexpr int SORT_BLOCK_SIZE = 256;
 
+/**
+ * @brief Build the cell histogram with one shared-memory accumulator per block.
+ *
+ * This path is used when the full histogram fits in shared memory. Each block
+ * clears a private histogram, accumulates with warp-aggregated atomics, then
+ * flushes its totals to the global histogram.
+ */
 __global__ void cell_sort_histogram_small_kernel(
     const cudaPclType_X* __restrict__ x,
     const cudaPclType_Y* __restrict__ y,
@@ -103,15 +111,14 @@ __global__ void cell_sort_histogram_small_kernel(
 
     // Flush shared histogram to global
     for (int i = threadIdx.x; i < num_cells; i += blockDim.x) {
-        if (shmem_hist[i] > 0)
-            atomicAdd(&cell_counts[i], shmem_hist[i]);
+        atomicAdd(&cell_counts[i], shmem_hist[i]);
     }
 }
 
 
-// ============================================================================
-// Stage 1b: Histogram — warp-aggregated global atomics (large grids)
-// ============================================================================
+/**
+ * @brief Build the cell histogram directly in global memory for large grids.
+ */
 __global__ void cell_sort_histogram_warp_agg_kernel(
     const cudaPclType_X* __restrict__ x,
     const cudaPclType_Y* __restrict__ y,
@@ -131,9 +138,9 @@ __global__ void cell_sort_histogram_warp_agg_kernel(
 }
 
 
-// ============================================================================
-// Launcher: Stage 1
-// ============================================================================
+/**
+ * @brief Launch the Stage 1 histogram kernel variant selected by grid size.
+ */
 __host__ inline void launch_cell_sort_histogram(
     const cudaPclType_X* x,
     const cudaPclType_Y* y,
@@ -158,11 +165,19 @@ __host__ inline void launch_cell_sort_histogram(
 }
 
 
-// ============================================================================
-// Stage 2: Exclusive Prefix Sum (Blelloch scan)
-// ============================================================================
+// ======= Stage 2: Exclusive prefix sum =======
 
-// ── Shared memory Blelloch scan (in-place, handles n > 2*blockDim.x) ──
+/**
+ * @brief Run an in-place Blelloch exclusive scan on a shared-memory array.
+ *
+ * `data` must hold a power-of-two number of elements. Work is distributed
+ * across all threads in the block, so the helper also handles `n` values
+ * larger than `2 * blockDim.x`.
+ *
+ * The algorithm has two tree passes:
+ *   1. up-sweep: accumulate subtree sums toward the root
+ *   2. down-sweep: propagate exclusive prefixes back to every leaf
+ */
 __device__ __forceinline__
 void blelloch_scan_shared(int* data, int n)
 {
@@ -199,7 +214,13 @@ void blelloch_scan_shared(int* data, int n)
     __syncthreads();
 }
 
-// ── Single-block scan (num_cells ≤ SORT_SCAN_ELEMENTS_PER_BLOCK = 512) ──
+/**
+ * @brief Scan the full histogram in one block when it fits in one scan tile.
+ *
+ * The kernel loads the histogram into shared memory, pads the tail up to the
+ * next power of two, runs the in-place Blelloch scan, then writes the valid
+ * prefix values back to `cell_offsets`.
+ */
 __global__ void cell_sort_prefix_sum_single_kernel(
     int*       __restrict__ cell_offsets,
     const int* __restrict__ cell_counts,
@@ -219,7 +240,15 @@ __global__ void cell_sort_prefix_sum_single_kernel(
         cell_offsets[i] = sdata[i];
 }
 
-// ── Phase 1: block-local scan, store block total ──
+// ======= Stage 2: Multi-block helpers =======
+
+/**
+ * @brief Stage 2 phase 1: scan one tile locally and emit its total.
+ *
+ * Each block loads one `SORT_SCAN_ELEMENTS_PER_BLOCK` tile, writes the tile's
+ * exclusive scan to `output`, and stores the tile sum in `block_sums` so
+ * phase 2 can build prefixes between tiles.
+ */
 __global__ void cell_sort_prefix_sum_phase1_kernel(
     int*       __restrict__ output,
     int*       __restrict__ block_sums,
@@ -268,7 +297,9 @@ __global__ void cell_sort_prefix_sum_phase1_kernel(
     if (tid == 0) block_sums[blockIdx.x] = block_total;
 }
 
-// ── Phase 2: scan block totals (single block) ──
+/**
+ * @brief Stage 2 phase 2: exclusive-scan the per-tile totals from phase 1.
+ */
 __global__ void cell_sort_prefix_sum_phase2_kernel(
     int* __restrict__ block_sums,
     int               num_blocks,
@@ -287,7 +318,9 @@ __global__ void cell_sort_prefix_sum_phase2_kernel(
         block_sums[i] = sdata[i];
 }
 
-// ── Phase 3: add block prefix to each element ──
+/**
+ * @brief Stage 2 phase 3: add the per-tile prefix to every local phase-1 scan.
+ */
 __global__ void cell_sort_prefix_sum_phase3_kernel(
     int*       __restrict__ data,
     const int* __restrict__ block_sums,
@@ -304,15 +337,26 @@ __global__ void cell_sort_prefix_sum_phase3_kernel(
 }
 
 
-// ============================================================================
-// Launcher: Stage 2
-// ============================================================================
+// ======= Stage 2 launcher =======
+
+/**
+ * @brief Return the smallest power of two greater than or equal to `v`.
+ */
 __host__ inline int next_power_of_2(int v) {
     int p = 1;
     while (p < v) p *= 2;
     return p;
 }
 
+/**
+ * @brief Launch the single-block or three-phase Stage 2 prefix-sum path.
+ *
+ * Small histograms are scanned entirely in one block. Larger histograms are
+ * handled as:
+ *   1. phase 1: local tile scans + tile totals
+ *   2. phase 2: scan the tile totals
+ *   3. phase 3: add each scanned tile prefix back to its tile
+ */
 __host__ inline void launch_cell_sort_prefix_sum(
     int*         cell_offsets,
     const int*   cell_counts,
@@ -330,13 +374,14 @@ __host__ inline void launch_cell_sort_prefix_sum(
         return;
     }
 
-    // Multi-block: 3 phases
+    // ======= Phase 1: Scan each tile and record tile totals =======
     int nblocks = (num_cells + SORT_SCAN_ELEMENTS_PER_BLOCK - 1) / SORT_SCAN_ELEMENTS_PER_BLOCK;
     size_t phase1_shmem = SORT_SCAN_ELEMENTS_PER_BLOCK * sizeof(int);
 
     cell_sort_prefix_sum_phase1_kernel<<<nblocks, SORT_SCAN_BLOCK_SIZE, phase1_shmem, stream>>>(
         cell_offsets, block_sums, cell_counts, num_cells);
 
+    // ======= Phase 2: Scan the tile totals in one block =======
     int phase2_padded = next_power_of_2(nblocks);
     constexpr int MAX_PHASE2_SINGLE_BLOCK = 8192;
     if (phase2_padded > MAX_PHASE2_SINGLE_BLOCK) {
@@ -350,14 +395,21 @@ __host__ inline void launch_cell_sort_prefix_sum(
     cell_sort_prefix_sum_phase2_kernel<<<1, SORT_SCAN_BLOCK_SIZE, phase2_shmem, stream>>>(
         block_sums, nblocks, phase2_padded);
 
+    // ======= Phase 3: Add the scanned tile prefixes back to each tile =======
     cell_sort_prefix_sum_phase3_kernel<<<nblocks, SORT_SCAN_BLOCK_SIZE, 0, stream>>>(
         cell_offsets, block_sums, num_cells);
 }
 
 
-// ============================================================================
-// Stage 3: Compute sorted indices (recompute cell from position)
-// ============================================================================
+// ======= Stage 3: Sorted indices =======
+
+/**
+ * @brief Recompute each particle cell and reserve its destination slot.
+ *
+ * `cell_offsets` starts as the Stage 2 exclusive prefix sum. Each particle
+ * atomically increments its cell counter and receives the unique scatter index
+ * it will use in Stage 4.
+ */
 __global__ void cell_sort_sorted_indices_kernel(
     unsigned int*        __restrict__ sorted_indices,
     int*                 __restrict__ cell_offsets,   // mutated by atomics
@@ -378,9 +430,9 @@ __global__ void cell_sort_sorted_indices_kernel(
     }
 }
 
-// ============================================================================
-// Launcher: Stage 3
-// ============================================================================
+/**
+ * @brief Launch Stage 3 to fill the permutation used by the scatter pass.
+ */
 __host__ inline void launch_cell_sort_sorted_indices(
     unsigned int*        sorted_indices,
     int*                 cell_offsets,
@@ -398,9 +450,14 @@ __host__ inline void launch_cell_sort_sorted_indices(
 }
 
 
-// ============================================================================
-// Stage 4: Scatter with partial sort (sorted prefix + identity tail)
-// ============================================================================
+// ======= Stage 4: Scatter =======
+
+/**
+ * @brief Scatter the sorted prefix and copy the unsorted tail unchanged.
+ *
+ * Entries `[0, num_to_sort)` are written to their Stage 3 destinations, while
+ * `[num_to_sort, nop)` are copied in place so the unsorted tail remains valid.
+ */
 template <typename T>
 __global__ void cell_sort_scatter_partial_kernel(
     T*                   __restrict__ dst,
@@ -421,9 +478,9 @@ __global__ void cell_sort_scatter_partial_kernel(
     }
 }
 
-// ============================================================================
-// Launcher: Stage 4 (one array)
-// ============================================================================
+/**
+ * @brief Launch the Stage 4 scatter for one SoA field buffer.
+ */
 template <typename T>
 __host__ inline void launch_cell_sort_scatter_partial(
     T*                  dst,
@@ -440,9 +497,14 @@ __host__ inline void launch_cell_sort_scatter_partial(
 }
 
 
-// ============================================================================
-// CellSorter::prepareBuffers() — resize sort buffers (no kernels in flight!)
-// ============================================================================
+// ======= CellSorter buffer preparation =======
+
+/**
+ * @brief Host phase A: ensure all temporary sort buffers are large enough.
+ *
+ * This prepares the reusable storage needed by GPU stages 1-4 but does not
+ * launch any kernels.
+ */
 __host__ void CellSorter::prepareBuffers(
     particleArrayCUDA* hostPtr,
     cudaStream_t       s)
@@ -462,9 +524,11 @@ __host__ void CellSorter::prepareBuffers(
 }
 
 
-// ============================================================================
-// CellSorter::enqueueSortAsync() — stages 1-3, non-blocking
-// ============================================================================
+// ======= CellSorter staging =======
+
+/**
+ * @brief Host phase B: enqueue GPU stages 1-3 without waiting for Stage 4.
+ */
 __host__ void CellSorter::enqueueSortAsync(
     particleArrayCUDA* hostPtr,
     const grid3DCUDA*  deviceGrid,
@@ -485,33 +549,34 @@ __host__ void CellSorter::enqueueSortAsync(
 
     ParticleSoADevice* soa = hostPtr->getSoA();
 
-    // ── Stage 1: Histogram ──
+    // ======= Stage 1: Histogram =======
     buffers.zero_async(s);
     launch_cell_sort_histogram(
         soa->x, soa->y, soa->z,
         buffers.cell_counts, deviceGrid, num_cells, num_to_sort, s);
 
-    // ── Stage 2: Prefix sum (Blelloch scan) ──
+    // ======= Stage 2: Prefix sum =======
     launch_cell_sort_prefix_sum(
         buffers.cell_offsets, buffers.cell_counts,
         buffers.block_sums,
         num_cells, s);
 
-    // Preserve prefix sum for cell-aware moment kernel
+    // Preserve the Stage 2 output before Stage 3 mutates `cell_offsets`.
     cudaErrChk(cudaMemcpyAsync(
         buffers.cell_start_offsets, buffers.cell_offsets,
         num_cells * sizeof(int), cudaMemcpyDeviceToDevice, s));
 
-    // ── Stage 3: Sorted indices (recomputes cell from position) ──
+    // ======= Stage 3: Sorted indices =======
     launch_cell_sort_sorted_indices(
         buffers.sorted_indices, buffers.cell_offsets,
         soa->x, soa->y, soa->z, deviceGrid, num_to_sort, s);
 }
 
+// ======= CellSorter completion =======
 
-// ============================================================================
-// CellSorter::finishSort() — sync + stage 4 scatter & pointer swap
-// ============================================================================
+/**
+ * @brief Host phase C: synchronize stages 1-3, then execute Stage 4.
+ */
 __host__ void CellSorter::finishSort(cudaStream_t s)
 {
     if (!sort_pending) return;
@@ -521,14 +586,15 @@ __host__ void CellSorter::finishSort(cudaStream_t s)
     const uint32_t nop         = pending_nop;
     ParticleSoADevice* soa     = pending_hostPtr->getSoA();
 
-    // ── Required barrier ──
+    // ======= Required barrier =======
     // Stages 1-3 must complete on the GPU before we scatter.
-    // Also protects against host-pinned DMA races (see original comment).
+    // Also protects against host-pinned DMA races.
     cudaErrChk(cudaStreamSynchronize(s));
 
     const unsigned int* idx = buffers.sorted_indices;
 
-    // Scatter field_ptr → scratch, then swap the two pointers so that
+    // ======= Stage 4: Scatter one field at a time and swap pointers =======
+    // Scatter field_ptr -> scratch, then swap the two pointers so that
     // scratch now points to the old (unsorted) allocation and field_ptr
     // points to the freshly-sorted data.
     auto scatter_and_swap = [&](auto*& field_ptr) {
@@ -548,10 +614,11 @@ __host__ void CellSorter::finishSort(cudaStream_t s)
     scatter_and_swap(soa->t);
 }
 
+// ======= CellSorter convenience wrapper =======
 
-// ============================================================================
-// CellSorter::sort() — convenience wrapper (backward compat)
-// ============================================================================
+/**
+ * @brief Execute host phases A-C in sequence for a complete sort.
+ */
 __host__ void CellSorter::sort(
     particleArrayCUDA* hostPtr,
     const grid3DCUDA*  deviceGrid,

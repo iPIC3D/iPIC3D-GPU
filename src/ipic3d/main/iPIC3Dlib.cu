@@ -151,9 +151,17 @@ c_Solver::~c_Solver()
   Adaptor::Finalize();
 #endif
   delete [] Ke;
+  delete [] BulkEnergy;
   delete [] momentum;
   delete [] Qtot;
   delete [] Qremoved;
+
+  if (testpart) {
+    for (int i = 0; i < nstestpart; i++)
+      delete testpart[i];
+    delete[] testpart;
+  }
+
   delete exosphereIonization;
   delete my_clock;
 }
@@ -547,12 +555,6 @@ int c_Solver::initCUDA(){
     toBeMerged[i] = 0;
   }
   //memset(toBeMerged, 0, 2 * ns * sizeof(int));
-
-  cudaErrChk(cudaHostAlloc(&cellCountHostPtr, sizeof(int) * grid->getNXC() * grid->getNYC() * grid->getNZC(), cudaHostAllocDefault));
-  cudaErrChk(cudaHostAlloc(&cellOffsetHostPtr, sizeof(int) * grid->getNXC() * grid->getNYC() * grid->getNZC(), cudaHostAllocDefault));
-
-  cudaErrChk(cudaMalloc(&cellCountCUDAPtr, sizeof(int) * grid->getNXC() * grid->getNYC() * grid->getNZC()));
-  cudaErrChk(cudaMalloc(&cellOffsetCUDAPtr, sizeof(int) * grid->getNXC() * grid->getNYC() * grid->getNZC()));
 
   // ======= Initialize per-species cell sorters =======
   sortingCycle_ = col->getSortingCycle();

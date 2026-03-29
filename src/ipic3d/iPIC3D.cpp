@@ -56,11 +56,16 @@ int main(int argc, char **argv) {
     if (dataAnalysis::dataAnalysisPipeline::isAnalysisCycle(i)) {
       KCode.sortAllSpecies();
     }
+    auto t_sort = std::chrono::high_resolution_clock::now();
 
+    // DA analysis runs async on GPU while CalculateField runs on CPU.
+    // t_field is sampled *before* DA.waitForAnalysis() so that field= reflects
+    // only the field solver and not particle-count-dependent analysis wait time.
     DA.startAnalysis(i);
     KCode.CalculateField(i); // E field
-    DA.waitForAnalysis();
     auto t_field = std::chrono::high_resolution_clock::now();
+    DA.waitForAnalysis();
+    auto t_da_wait = std::chrono::high_resolution_clock::now();
 
     KCode.ParticlesMoverMomentAsync(i); // launch Mover kernels (moments computed post-sort)
     // some spare CPU cycles
@@ -81,8 +86,10 @@ int main(int argc, char **argv) {
     std::chrono::duration<double, std::milli> elapsed = end - start;
     if (KCode.get_myrank() == 0) {
       std::cout<< "Execution time cycle: "<< elapsed.count() << " ms"
-               << "  [field=" << std::chrono::duration<double, std::milli>(t_field - start).count()
-               << " mover+out=" << std::chrono::duration<double, std::milli>(t_mover - t_field).count()
+               << "  [sort=" << std::chrono::duration<double, std::milli>(t_sort - start).count()
+               << " field=" << std::chrono::duration<double, std::milli>(t_field - t_sort).count()
+               << " da_wait=" << std::chrono::duration<double, std::milli>(t_da_wait - t_field).count()
+               << " mover+out=" << std::chrono::duration<double, std::milli>(t_mover - t_da_wait).count()
                << " exchange+sort+moments=" << std::chrono::duration<double, std::milli>(t_exchange - t_mover).count()
                << " B=" << std::chrono::duration<double, std::milli>(t_bfield - t_exchange).count()
                << " momentsAwait=" << std::chrono::duration<double, std::milli>(t_moments - t_bfield).count()

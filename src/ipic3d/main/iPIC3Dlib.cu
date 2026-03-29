@@ -1366,8 +1366,9 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
 
   // Compute per-species injection count (cheap, cached).
   // Declared at function scope so Phase 3G can also use it.
-  int injectedBCS[ns]={0};
+  int injectedBCS[ns];
   for (int i = 0; i < ns; i++) {
+    injectedBCS[i] = 0;
     if (moverParamHostPtr[i]->doRepopulateInjection)
       injectedBCS[i] = particlesCommInj[i]->computeInjectionCount();
   }

@@ -20,6 +20,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <algorithm>
+#include <random>
 
 using std::cout;
 using std::endl;
@@ -136,28 +137,52 @@ ParticleSoAHost::~ParticleSoAHost()
  */
 void ParticleSoAHost::maxwellian(Field* EMf)
 {
-  srand(vct_->getCartesian_rank() + 2);
   assert_eq(getNOP(), 0);
 
+  const int nxr = numCellsX_ - 2;
+  const int nyr = numCellsY_ - 2;
+  const int nzr = numCellsZ_ - 2;
+  const int nop = nxr * nyr * nzr * numParticlesPerCell_;
+  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
   const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
 
-  for (int i = 1; i < numCellsX_ - 1; i++)
-  for (int j = 1; j < numCellsY_ - 1; j++)
-  for (int k = 1; k < numCellsZ_ - 1; k++)
+  prepareSoAForNOP(nop);
+
+  #pragma omp parallel
   {
-    const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
-    for (int ii = 0; ii < numPclPerCellX_; ii++)
-    for (int jj = 0; jj < numPclPerCellY_; jj++)
-    for (int kk = 0; kk < numPclPerCellZ_; kk++)
+    const int tid = omp_get_thread_num();
+    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 + tid * 1049);
+
+    #pragma omp for collapse(3) schedule(static)
+    for (int i = 1; i < numCellsX_ - 1; ++i)
+    for (int j = 1; j < numCellsY_ - 1; ++j)
+    for (int k = 1; k < numCellsZ_ - 1; ++k)
     {
-      double velX, velY, velZ;
-      sample_maxwellian(velX, velY, velZ,
-                        thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
-                        driftVelocityX_, driftVelocityY_, driftVelocityZ_);
-      const double posX = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
-      const double posY = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
-      const double posZ = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
-      create_new_particle(velX, velY, velZ, chargePerParticle, posX, posY, posZ);
+      const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
+      const int idxBase = cellIdx * numParticlesPerCell_;
+      const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
+
+      for (int ii = 0; ii < numPclPerCellX_; ++ii)
+      for (int jj = 0; jj < numPclPerCellY_; ++jj)
+      for (int kk = 0; kk < numPclPerCellZ_; ++kk)
+      {
+        const int subIdx = (ii * numPclPerCellY_ + jj) * numPclPerCellZ_ + kk;
+        const int idx = idxBase + subIdx;
+
+        double velX, velY, velZ;
+        sample_maxwellian(velX, velY, velZ,
+                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
+                          driftVelocityX_, driftVelocityY_, driftVelocityZ_, rng);
+
+        u[idx] = velX;
+        v[idx] = velY;
+        w[idx] = velZ;
+        q[idx] = chargePerParticle;
+        x[idx] = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
+        y[idx] = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
+        z[idx] = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
+        t[idx] = baseID + idx;
+      }
     }
   }
 }
@@ -169,44 +194,54 @@ void ParticleSoAHost::maxwellian(Field* EMf)
  */
 void ParticleSoAHost::maxwellianNullPoints(Field* EMf)
 {
-  srand(vct_->getCartesian_rank() + 2);
-
+  const int nxr = numCellsX_ - 2;
+  const int nyr = numCellsY_ - 2;
+  const int nzr = numCellsZ_ - 2;
+  const int nop = nxr * nyr * nzr * numParticlesPerCell_;
+  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
   const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
 
-  for (int i = 1; i < numCellsX_ - 1; i++)
-  for (int j = 1; j < numCellsY_ - 1; j++)
-  for (int k = 1; k < numCellsZ_ - 1; k++)
+  prepareSoAForNOP(nop);
+
+  #pragma omp parallel
   {
-    const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
+    const int tid = omp_get_thread_num();
+    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 + tid * 1049);
 
-    double localDriftX = EMf->getJxs(i, j, k, speciesNumber_) / EMf->getRHOns(i, j, k, speciesNumber_);
-    if (localDriftX > speedOfLight_) {
-      cout << "DRIFT VELOCITY x > c : B init field too high!" << endl;
-      MPI_Abort(MPI_COMM_WORLD, 2);
-    }
-    double localDriftY = EMf->getJys(i, j, k, speciesNumber_) / EMf->getRHOns(i, j, k, speciesNumber_);
-    if (localDriftY > speedOfLight_) {
-      cout << "DRIFT VELOCITY y > c : B init field too high!" << endl;
-      MPI_Abort(MPI_COMM_WORLD, 2);
-    }
-    double localDriftZ = EMf->getJzs(i, j, k, speciesNumber_) / EMf->getRHOns(i, j, k, speciesNumber_);
-    if (localDriftZ > speedOfLight_) {
-      cout << "DRIFT VELOCITY z > c : B init field too high!" << endl;
-      MPI_Abort(MPI_COMM_WORLD, 2);
-    }
-
-    for (int ii = 0; ii < numPclPerCellX_; ii++)
-    for (int jj = 0; jj < numPclPerCellY_; jj++)
-    for (int kk = 0; kk < numPclPerCellZ_; kk++)
+    #pragma omp for collapse(3) schedule(static)
+    for (int i = 1; i < numCellsX_ - 1; i++)
+    for (int j = 1; j < numCellsY_ - 1; j++)
+    for (int k = 1; k < numCellsZ_ - 1; k++)
     {
-      double velX, velY, velZ;
-      sample_maxwellian(velX, velY, velZ,
-                        thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
-                        localDriftX, localDriftY, localDriftZ);
-      const double posX = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
-      const double posY = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
-      const double posZ = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
-      create_new_particle(velX, velY, velZ, chargePerParticle, posX, posY, posZ);
+      const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
+      const int idxBase = cellIdx * numParticlesPerCell_;
+      const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
+
+      double localDriftX = EMf->getJxs(i, j, k, speciesNumber_) / EMf->getRHOns(i, j, k, speciesNumber_);
+      double localDriftY = EMf->getJys(i, j, k, speciesNumber_) / EMf->getRHOns(i, j, k, speciesNumber_);
+      double localDriftZ = EMf->getJzs(i, j, k, speciesNumber_) / EMf->getRHOns(i, j, k, speciesNumber_);
+
+      for (int ii = 0; ii < numPclPerCellX_; ++ii)
+      for (int jj = 0; jj < numPclPerCellY_; ++jj)
+      for (int kk = 0; kk < numPclPerCellZ_; ++kk)
+      {
+        const int subIdx = (ii * numPclPerCellY_ + jj) * numPclPerCellZ_ + kk;
+        const int idx = idxBase + subIdx;
+
+        double velX, velY, velZ;
+        sample_maxwellian(velX, velY, velZ,
+                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
+                          localDriftX, localDriftY, localDriftZ, rng);
+
+        u[idx] = velX;
+        v[idx] = velY;
+        w[idx] = velZ;
+        q[idx] = chargePerParticle;
+        x[idx] = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
+        y[idx] = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
+        z[idx] = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
+        t[idx] = baseID + idx;
+      }
     }
   }
 }
@@ -218,34 +253,60 @@ void ParticleSoAHost::maxwellianNullPoints(Field* EMf)
  */
 void ParticleSoAHost::maxwellianDoubleHarris(Field* EMf)
 {
-  srand(vct_->getCartesian_rank() + 2);
   assert_eq(getNOP(), 0);
 
+  const int nxr = numCellsX_ - 2;
+  const int nyr = numCellsY_ - 2;
+  const int nzr = numCellsZ_ - 2;
+  const int nop = nxr * nyr * nzr * numParticlesPerCell_;
+  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
   const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
   const double domainYUpper = domainLengthY_ / 2.0;
 
-  for (int i = 1; i < numCellsX_ - 1; i++)
-  for (int j = 1; j < numCellsY_ - 1; j++)
-  for (int k = 1; k < numCellsZ_ - 1; k++)
+  prepareSoAForNOP(nop);
+
+  #pragma omp parallel
   {
-    const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
-    for (int ii = 0; ii < numPclPerCellX_; ii++)
-    for (int jj = 0; jj < numPclPerCellY_; jj++)
-    for (int kk = 0; kk < numPclPerCellZ_; kk++)
+    const int tid = omp_get_thread_num();
+    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 + tid * 1049);
+
+    #pragma omp for collapse(3) schedule(static)
+    for (int i = 1; i < numCellsX_ - 1; i++)
+    for (int j = 1; j < numCellsY_ - 1; j++)
+    for (int k = 1; k < numCellsZ_ - 1; k++)
     {
-      const double posX = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
-      const double posY = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
-      const double posZ = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
+      const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
+      const int idxBase = cellIdx * numParticlesPerCell_;
+      const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
 
-      double velX, velY, velZ;
-      if (posY > domainYUpper)
-        sample_maxwellian(velX, velY, velZ, thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
-                          driftVelocityX_, driftVelocityY_, driftVelocityZ_);
-      else
-        sample_maxwellian(velX, velY, velZ, thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
-                          driftVelocityX_, driftVelocityY_, driftVelocityZ_);
+      for (int ii = 0; ii < numPclPerCellX_; ++ii)
+      for (int jj = 0; jj < numPclPerCellY_; ++jj)
+      for (int kk = 0; kk < numPclPerCellZ_; ++kk)
+      {
+        const int subIdx = (ii * numPclPerCellY_ + jj) * numPclPerCellZ_ + kk;
+        const int idx = idxBase + subIdx;
 
-      create_new_particle(velX, velY, velZ, chargePerParticle, posX, posY, posZ);
+        const double posX = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
+        const double posY = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
+        const double posZ = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
+
+        double velX, velY, velZ;
+        if (posY > domainYUpper)
+          sample_maxwellian(velX, velY, velZ, thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
+                            driftVelocityX_, driftVelocityY_, driftVelocityZ_, rng);
+        else
+          sample_maxwellian(velX, velY, velZ, thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
+                            driftVelocityX_, driftVelocityY_, driftVelocityZ_, rng);
+
+        u[idx] = velX;
+        v[idx] = velY;
+        w[idx] = velZ;
+        q[idx] = chargePerParticle;
+        x[idx] = posX;
+        y[idx] = posY;
+        z[idx] = posZ;
+        t[idx] = baseID + idx;
+      }
     }
   }
 }
@@ -257,29 +318,56 @@ void ParticleSoAHost::maxwellianDoubleHarris(Field* EMf)
  */
 void ParticleSoAHost::maxwellianHumpPerturbation(Field* EMf)
 {
-  srand(vct_->getCartesian_rank() + 2);
   assert_eq(getNOP(), 0);
 
+  const int nxr = numCellsX_ - 2;
+  const int nyr = numCellsY_ - 2;
+  const int nzr = numCellsZ_ - 2;
+  const int nop = nxr * nyr * nzr * numParticlesPerCell_;
+  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
   const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
 
-  for (int i = 1; i < numCellsX_ - 1; i++)
-  for (int j = 1; j < numCellsY_ - 1; j++)
-  for (int k = 1; k < numCellsZ_ - 1; k++)
+  prepareSoAForNOP(nop);
+
+  #pragma omp parallel
   {
-    const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
-    for (int ii = 0; ii < numPclPerCellX_; ii++)
-    for (int jj = 0; jj < numPclPerCellY_; jj++)
-    for (int kk = 0; kk < numPclPerCellZ_; kk++)
+    const int tid = omp_get_thread_num();
+    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 + tid * 1049);
+
+    #pragma omp for collapse(3) schedule(static)
+    for (int i = 1; i < numCellsX_ - 1; i++)
+    for (int j = 1; j < numCellsY_ - 1; j++)
+    for (int k = 1; k < numCellsZ_ - 1; k++)
     {
-      const double posX = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
-      const double posY = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
-      const double posZ = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
+      const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
+      const int idxBase = cellIdx * numParticlesPerCell_;
+      const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
 
-      double velX, velY, velZ;
-      sample_maxwellian(velX, velY, velZ, thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
-                        driftVelocityX_, driftVelocityY_, driftVelocityZ_);
+      for (int ii = 0; ii < numPclPerCellX_; ++ii)
+      for (int jj = 0; jj < numPclPerCellY_; ++jj)
+      for (int kk = 0; kk < numPclPerCellZ_; ++kk)
+      {
+        const int subIdx = (ii * numPclPerCellY_ + jj) * numPclPerCellZ_ + kk;
+        const int idx = idxBase + subIdx;
 
-      create_new_particle(velX, velY, velZ, chargePerParticle, posX, posY, posZ);
+        const double posX = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
+        const double posY = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
+        const double posZ = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
+
+        double velX, velY, velZ;
+        sample_maxwellian(velX, velY, velZ,
+                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
+                          driftVelocityX_, driftVelocityY_, driftVelocityZ_, rng);
+
+        u[idx] = velX;
+        v[idx] = velY;
+        w[idx] = velZ;
+        q[idx] = chargePerParticle;
+        x[idx] = posX;
+        y[idx] = posY;
+        z[idx] = posZ;
+        t[idx] = baseID + idx;
+      }
     }
   }
 }
@@ -291,37 +379,56 @@ void ParticleSoAHost::maxwellianHumpPerturbation(Field* EMf)
  */
 void ParticleSoAHost::pitch_angle_energy(Field* EMf)
 {
-  srand(vct_->getCartesian_rank() + 3 + speciesNumber_);
   assert_eq(getNOP(), 0);
 
+  const int nxr = numCellsX_ - 2;
+  const int nyr = numCellsY_ - 2;
+  const int nzr = numCellsZ_ - 2;
+  const int nop = nxr * nyr * nzr * numParticlesPerCell_;
+  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
   const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
-  long long counter = 0;
 
-  for (int i = 1; i < numCellsX_ - 1; i++)
-  for (int j = 1; j < numCellsY_ - 1; j++)
-  for (int k = 1; k < numCellsZ_ - 1; k++)
+  prepareSoAForNOP(nop);
+
+  #pragma omp parallel
   {
-    // charge following electron (species 0)
-    const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, 0);
+    const int tid = omp_get_thread_num();
+    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 + tid * 1049);
 
-    for (int ii = 0; ii < numPclPerCellX_; ii++)
-    for (int jj = 0; jj < numPclPerCellY_; jj++)
-    for (int kk = 0; kk < numPclPerCellZ_; kk++)
+    #pragma omp for collapse(3) schedule(static)
+    for (int i = 1; i < numCellsX_ - 1; i++)
+    for (int j = 1; j < numCellsY_ - 1; j++)
+    for (int k = 1; k < numCellsZ_ - 1; k++)
     {
-      const double posX = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
-      const double posY = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
-      const double posZ = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
+      const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
+      const int idxBase = cellIdx * numParticlesPerCell_;
+      // charge following electron (species 0)
+      const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, 0);
 
-      // velocity — assumes B is along z
-      const double totalMomentum    = sqrt((energy_ + 1) * (energy_ + 1) - 1);
-      const double parallelVelocity = totalMomentum * cos(pitchAngle_);
-      const double perpMomentum     = totalMomentum * sin(pitchAngle_);
-      const double gyroPhase        = 2 * M_PI * rand() / (double)RAND_MAX;
-      const double velX             = perpMomentum * cos(gyroPhase);
-      const double velY             = perpMomentum * sin(gyroPhase);
-      counter++;
+      for (int ii = 0; ii < numPclPerCellX_; ii++)
+      for (int jj = 0; jj < numPclPerCellY_; jj++)
+      for (int kk = 0; kk < numPclPerCellZ_; kk++)
+      {
+        const int subIdx = (ii * numPclPerCellY_ + jj) * numPclPerCellZ_ + kk;
+        const int idx = idxBase + subIdx;
 
-      create_new_particle(velX, velY, parallelVelocity, chargePerParticle, posX, posY, posZ);
+        // velocity — assumes B is along z
+        const double totalMomentum    = sqrt((energy_ + 1) * (energy_ + 1) - 1);
+        const double parallelVelocity = totalMomentum * cos(pitchAngle_);
+        const double perpMomentum     = totalMomentum * sin(pitchAngle_);
+        const double gyroPhase        = 2 * M_PI * sample_u_double(rng);
+        const double velX             = perpMomentum * cos(gyroPhase);
+        const double velY             = perpMomentum * sin(gyroPhase);
+
+        u[idx] = velX;
+        v[idx] = velY;
+        w[idx] = parallelVelocity;
+        q[idx] = chargePerParticle;
+        x[idx] = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
+        y[idx] = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
+        z[idx] = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
+        t[idx] = baseID + idx;
+      }
     }
   }
 
@@ -331,7 +438,7 @@ void ParticleSoAHost::pitch_angle_energy(Field* EMf)
          << " with pitch angle " << pitchAngle_
          << ", energy " << energy_
          << ", qom " << chargeOverMass_
-         << ", npcel " << counter << endl;
+         << ", npcel " << nop << endl;
     cout << "------------------------------------------" << endl;
   }
 }
@@ -701,31 +808,4 @@ void ParticleSoAHost::appendFromAoS(const SpeciesParticle* buffer, int count)
   }
 }
 
-// ======= Repopulation helper =======
 
-void ParticleSoAHost::populateCellWithParticles(
-  int cellIndexX, int cellIndexY, int cellIndexZ,
-  double chargePerParticle,
-  double dxPerPcl, double dyPerPcl, double dzPerPcl)
-{
-  const double cellLowX = grid_->getXN(cellIndexX, cellIndexY, cellIndexZ);
-  const double cellLowY = grid_->getYN(cellIndexX, cellIndexY, cellIndexZ);
-  const double cellLowZ = grid_->getZN(cellIndexX, cellIndexY, cellIndexZ);
-  for (int ii = 0; ii < numPclPerCellX_; ii++)
-  for (int jj = 0; jj < numPclPerCellY_; jj++)
-  for (int kk = 0; kk < numPclPerCellZ_; kk++)
-  {
-    double velX, velY, velZ, posX, posY, posZ;
-    do {
-      sample_maxwellian(velX, velY, velZ,
-                        thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
-                        driftVelocityX_, driftVelocityY_, driftVelocityZ_);
-      posX = (ii + sample_u_double()) * dxPerPcl + cellLowX;
-      posY = (jj + sample_u_double()) * dyPerPcl + cellLowY;
-      posZ = (kk + sample_u_double()) * dzPerPcl + cellLowZ;
-    } while ((posX > domainLengthX_) || (posY > domainLengthY_) || (posZ > domainLengthZ_)
-             || (posX * posY * posZ) < 0
-             || sqrt(velX*velX + velY*velY + velZ*velZ) > speedOfLight_);
-    create_new_particle(velX, velY, velZ, chargePerParticle, posX, posY, posZ);
-  }
-}

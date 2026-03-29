@@ -213,7 +213,8 @@ private:
   /** Helper: populate one cell with Maxwellian particles into comm buffer. */
   void populateCellWithParticles(int cellIndexX, int cellIndexY, int cellIndexZ,
                                  double chargePerParticle,
-                                 double dxPerPcl, double dyPerPcl, double dzPerPcl);
+                                 double dxPerPcl, double dyPerPcl, double dzPerPcl,
+                                 int baseIdx, std::mt19937_64& rng);
 
   /** Swap-remove particle at index from comm buffer. */
   void deleteCommParticle(int particleIndex) {
@@ -267,6 +268,9 @@ private:
 
   // --- Particle-ID generator (for injected particles) ---
   doubleIDgenerator particleIDGenerator_;
+
+  // --- Thread-local RNG for BC reemission (single-thread, few particles) ---
+  std::mt19937_64 bcRng_;
 
   bool cVERBOSE_;
 };

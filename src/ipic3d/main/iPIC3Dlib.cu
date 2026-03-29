@@ -278,14 +278,11 @@ int c_Solver::Init(int argc, char **argv) {
   for (int i = 0; i < ns; i++)
   {
     particlesHost[i] = new ParticleSoAHost(i, col, vct, grid);
-    const auto totalPcl = col->getNpcel(i) * grid->getNXN() * grid->getNYN() * grid->getNZN();
 
-    if (col->getRestart_status() == 0) {
-      particlesHost[i]->reserveSpace(totalPcl);
-      particlesHost[i]->clearParticles();
-    } else { // restart
+    if (col->getRestart_status() != 0) { // restart
       particlesHost[i]->restartLoad();
     }
+    // Fresh start: maxwellian methods below call prepareSoAForNOP() internally
   }
 
   // Initial condition for PARTICLES (skipped when restarting)

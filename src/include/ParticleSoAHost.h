@@ -406,22 +406,6 @@ public:
 
 private:
 
-  // ===== Helper: fill one cell with Maxwellian particles =====
-  /**
-   * @brief Populate one logical cell with Maxwellian particles.
-   *
-   * @param cellIndexX Cell index in x.
-   * @param cellIndexY Cell index in y.
-   * @param cellIndexZ Cell index in z.
-   * @param chargePerParticle Particle charge/weight assigned to each generated particle.
-   * @param dxPerPcl In-cell spacing in x between generated particles.
-   * @param dyPerPcl In-cell spacing in y between generated particles.
-   * @param dzPerPcl In-cell spacing in z between generated particles.
-   */
-  void populateCellWithParticles(int cellIndexX, int cellIndexY, int cellIndexZ,
-                                 double chargePerParticle,
-                                 double dxPerPcl, double dyPerPcl, double dzPerPcl);
-
   // ===== Species identity =====
   int        speciesNumber_     = 0;
   double     chargeOverMass_    = 0.0;     // qom

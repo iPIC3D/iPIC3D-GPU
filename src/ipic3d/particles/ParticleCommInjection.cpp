@@ -22,6 +22,7 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <random>
 
 using std::cout;
 using std::endl;
@@ -137,6 +138,10 @@ ParticleCommInjection::ParticleCommInjection(ParticleSoAHost& hostParticles)
   bcPfaceZright_ = col_->getBcPfaceZright();
 
   cVERBOSE_ = vct_->getcVERBOSE();
+
+  // Seed BC reemission RNG (single-thread, few particles per cycle)
+  bcRng_.seed(static_cast<uint64_t>(MPIdata::get_rank()) * 31 +
+              static_cast<uint64_t>(speciesNumber_) * 127 + 9973);
 
   // Reserve ID generator
   const double numPclEstimate = double(grid_->get_num_cells_rr()) * col_->getNpcel(speciesNumber_);
@@ -367,7 +372,7 @@ void ParticleCommInjection::apply_Xleft_BC(vector_SpeciesParticle& pcls, int sta
         pcl.fetch_x() *= -1;
         double vel[3];
         sample_maxwellian(vel[0], vel[1], vel[2],
-                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_);
+                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_, bcRng_);
         vel[0] = fabs(vel[0]);
         pcl.set_u(vel);
       }
@@ -398,7 +403,7 @@ void ParticleCommInjection::apply_Yleft_BC(vector_SpeciesParticle& pcls, int sta
         pcl.fetch_y() *= -1;
         double vel[3];
         sample_maxwellian(vel[0], vel[1], vel[2],
-                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_);
+                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_, bcRng_);
         vel[1] = fabs(vel[1]);
         pcl.set_u(vel);
       }
@@ -429,7 +434,7 @@ void ParticleCommInjection::apply_Zleft_BC(vector_SpeciesParticle& pcls, int sta
         pcl.fetch_z() *= -1;
         double vel[3];
         sample_maxwellian(vel[0], vel[1], vel[2],
-                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_);
+                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_, bcRng_);
         vel[2] = fabs(vel[2]);
         pcl.set_u(vel);
       }
@@ -462,7 +467,7 @@ void ParticleCommInjection::apply_Xrght_BC(vector_SpeciesParticle& pcls, int sta
         posX = 2 * domainLengthX_ - posX;
         double vel[3];
         sample_maxwellian(vel[0], vel[1], vel[2],
-                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_);
+                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_, bcRng_);
         vel[0] = -fabs(vel[0]);
         pcl.set_u(vel);
       }
@@ -495,7 +500,7 @@ void ParticleCommInjection::apply_Yrght_BC(vector_SpeciesParticle& pcls, int sta
         posY = 2 * domainLengthY_ - posY;
         double vel[3];
         sample_maxwellian(vel[0], vel[1], vel[2],
-                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_);
+                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_, bcRng_);
         vel[1] = -fabs(vel[1]);
         pcl.set_u(vel);
       }
@@ -528,7 +533,7 @@ void ParticleCommInjection::apply_Zrght_BC(vector_SpeciesParticle& pcls, int sta
         posZ = 2 * domainLengthZ_ - posZ;
         double vel[3];
         sample_maxwellian(vel[0], vel[1], vel[2],
-                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_);
+                          thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_, bcRng_);
         vel[2] = -fabs(vel[2]);
         pcl.set_u(vel);
       }
@@ -786,11 +791,14 @@ void ParticleCommInjection::appendFromAoS(const SpeciesParticle* buffer, int cou
 void ParticleCommInjection::populateCellWithParticles(
   int cellIndexX, int cellIndexY, int cellIndexZ,
   double chargePerParticle,
-  double dxPerPcl, double dyPerPcl, double dzPerPcl)
+  double dxPerPcl, double dyPerPcl, double dzPerPcl,
+  int baseIdx, std::mt19937_64& rng)
 {
   const double cellLowX = grid_->getXN(cellIndexX, cellIndexY, cellIndexZ);
   const double cellLowY = grid_->getYN(cellIndexX, cellIndexY, cellIndexZ);
   const double cellLowZ = grid_->getZN(cellIndexX, cellIndexY, cellIndexZ);
+  SpeciesParticle* pclList = commPcls.getList();
+  int subIdx = 0;
   for (int ii = 0; ii < numPclPerCellX_; ii++)
   for (int jj = 0; jj < numPclPerCellY_; jj++)
   for (int kk = 0; kk < numPclPerCellZ_; kk++)
@@ -799,26 +807,27 @@ void ParticleCommInjection::populateCellWithParticles(
     do {
       sample_maxwellian(velX, velY, velZ,
                         thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_,
-                        driftVelocityX_, driftVelocityY_, driftVelocityZ_);
-      posX = (ii + sample_u_double()) * dxPerPcl + cellLowX;
-      posY = (jj + sample_u_double()) * dyPerPcl + cellLowY;
-      posZ = (kk + sample_u_double()) * dzPerPcl + cellLowZ;
+                        driftVelocityX_, driftVelocityY_, driftVelocityZ_, rng);
+      posX = (ii + sample_u_double(rng)) * dxPerPcl + cellLowX;
+      posY = (jj + sample_u_double(rng)) * dyPerPcl + cellLowY;
+      posZ = (kk + sample_u_double(rng)) * dzPerPcl + cellLowZ;
     } while ((posX > domainLengthX_) || (posY > domainLengthY_) || (posZ > domainLengthZ_)
              || (posX * posY * posZ) < 0
              || sqrt(velX * velX + velY * velY + velZ * velZ) > speedOfLight_);
 
-    // Push into AoS comm buffer with generated ID
-    commPcls.push_back(SpeciesParticle(velX, velY, velZ, chargePerParticle,
-                                        posX, posY, posZ,
-                                        particleIDGenerator_.generateID()));
+    pclList[baseIdx + subIdx] = SpeciesParticle(velX, velY, velZ, chargePerParticle,
+                                                 posX, posY, posZ,
+                                                 particleIDGenerator_.generateID());
+    subIdx++;
   }
 }
 
 /**
  * @brief Inject reemitted Maxwellian particles at REEMISSION boundaries.
  *
- * New particles are written directly into the AoS communication buffer so the
- * solver can append them to the GPU SoA tail in the normal incoming-particle path.
+ * Pre-computes face ranges and total count, pre-sizes the pinned comm buffer,
+ * then fills all faces in parallel with OpenMP.  Each thread uses a private
+ * mt19937_64 RNG and writes to a non-overlapping region of commPcls.
  */
 void ParticleCommInjection::repopulateParticlesOnlyInjection()
 {
@@ -867,50 +876,89 @@ void ParticleCommInjection::repopulateParticlesOnlyInjection()
   const int upYstart = nyc - 1 - numLayers;
   const int upZstart = nzc - 1 - numLayers;
 
+  // --- Step 1: pre-compute per-face cell ranges (same narrowing logic) ---
+  struct FaceRange {
+    int ixBeg, ixEnd, iyBeg, iyEnd, izBeg, izEnd;
+    bool active;
+    int nCells() const {
+      if (!active) return 0;
+      return (ixEnd - ixBeg + 1) * (iyEnd - iyBeg + 1) * (izEnd - izBeg + 1);
+    }
+    int nY() const { return iyEnd - iyBeg + 1; }
+    int nZ() const { return izEnd - izBeg + 1; }
+  };
+  FaceRange faces[6];
+
   int xbeg = 1, xend = nxc - 2;
   int ybeg = 1, yend = nyc - 2;
   int zbeg = 1, zend = nzc - 2;
 
-  if (repopXleft) {
-    for (int ix = 1; ix <= numLayers; ix++)
-    for (int jy = ybeg; jy <= yend; jy++)
-    for (int kz = zbeg; kz <= zend; kz++)
-      populateCellWithParticles(ix, jy, kz, chargePerParticle, dxPerPcl, dyPerPcl, dzPerPcl);
-    xbeg += numLayers;
+  // Xleft
+  faces[0].active = repopXleft;
+  faces[0] = {1, numLayers, ybeg, yend, zbeg, zend, repopXleft};
+  if (repopXleft) xbeg += numLayers;
+  // Xrght
+  faces[1] = {upXstart, xend, ybeg, yend, zbeg, zend, repopXrght};
+  if (repopXrght) xend -= numLayers;
+  // Yleft
+  faces[2] = {xbeg, xend, 1, numLayers, zbeg, zend, repopYleft};
+  if (repopYleft) ybeg += numLayers;
+  // Yrght
+  faces[3] = {xbeg, xend, upYstart, yend, zbeg, zend, repopYrght};
+  if (repopYrght) yend -= numLayers;
+  // Zleft
+  faces[4] = {xbeg, xend, ybeg, yend, 1, numLayers, repopZleft};
+  // Zrght
+  faces[5] = {xbeg, xend, ybeg, yend, upZstart, zend, repopZrght};
+
+  // Cumulative particle offsets per face
+  int totalInjected = 0;
+  int pclOffset[6];
+  for (int f = 0; f < 6; f++) {
+    pclOffset[f] = totalInjected;
+    totalInjected += faces[f].nCells() * numParticlesPerCell_;
   }
-  if (repopXrght) {
-    for (int ix = upXstart; ix <= xend; ix++)
-    for (int jy = ybeg; jy <= yend; jy++)
-    for (int kz = zbeg; kz <= zend; kz++)
-      populateCellWithParticles(ix, jy, kz, chargePerParticle, dxPerPcl, dyPerPcl, dzPerPcl);
-    xend -= numLayers;
-  }
-  if (repopYleft) {
-    for (int ix = xbeg; ix <= xend; ix++)
-    for (int jy = 1; jy <= numLayers; jy++)
-    for (int kz = zbeg; kz <= zend; kz++)
-      populateCellWithParticles(ix, jy, kz, chargePerParticle, dxPerPcl, dyPerPcl, dzPerPcl);
-    ybeg += numLayers;
-  }
-  if (repopYrght) {
-    for (int ix = xbeg; ix <= xend; ix++)
-    for (int jy = upYstart; jy <= yend; jy++)
-    for (int kz = zbeg; kz <= zend; kz++)
-      populateCellWithParticles(ix, jy, kz, chargePerParticle, dxPerPcl, dyPerPcl, dzPerPcl);
-    yend -= numLayers;
-  }
-  if (repopZleft) {
-    for (int ix = xbeg; ix <= xend; ix++)
-    for (int jy = ybeg; jy <= yend; jy++)
-    for (int kz = 1; kz <= numLayers; kz++)
-      populateCellWithParticles(ix, jy, kz, chargePerParticle, dxPerPcl, dyPerPcl, dzPerPcl);
-  }
-  if (repopZrght) {
-    for (int ix = xbeg; ix <= xend; ix++)
-    for (int jy = ybeg; jy <= yend; jy++)
-    for (int kz = upZstart; kz <= zend; kz++)
-      populateCellWithParticles(ix, jy, kz, chargePerParticle, dxPerPcl, dyPerPcl, dzPerPcl);
-  }
+
+  if (totalInjected == 0) return;
+
+  // --- Step 2: pre-size pinned comm buffer ---
+  const int baseOffset = commPcls.size();
+  commPcls.resize(baseOffset + totalInjected);
+
+  // --- Step 3: switch ID generator to multi-thread mode ---
+  particleIDGenerator_.reserve_particles_in_range(
+      static_cast<double>(baseOffset));
+
+  // --- Step 4: parallel fill — single fork, nowait across faces ---
+  #pragma omp parallel
+  {
+    std::mt19937_64 rng(
+        static_cast<uint64_t>(MPIdata::get_rank()) * 31 +
+        static_cast<uint64_t>(speciesNumber_) * 127 +
+        static_cast<uint64_t>(omp_get_thread_num()) * 1049 +
+        7919);
+
+    for (int f = 0; f < 6; f++) {
+      if (!faces[f].active) continue;
+      const int nCells = faces[f].nCells();
+      const int fBase  = baseOffset + pclOffset[f];
+      const int ny     = faces[f].nY();
+      const int nz     = faces[f].nZ();
+
+      #pragma omp for schedule(static) nowait
+      for (int c = 0; c < nCells; c++) {
+        const int lix = c / (ny * nz);
+        const int ljy = (c / nz) % ny;
+        const int lkz = c % nz;
+        const int writeIdx = fBase + c * numParticlesPerCell_;
+
+        populateCellWithParticles(
+          faces[f].ixBeg + lix, faces[f].iyBeg + ljy, faces[f].izBeg + lkz,
+          chargePerParticle, dxPerPcl, dyPerPcl, dzPerPcl,
+          writeIdx, rng);
+      }
+    }
+  } // implicit barrier
 }
 
 // ========================================================================

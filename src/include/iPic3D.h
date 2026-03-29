@@ -101,6 +101,8 @@ namespace iPic3D {
       EMf(0),
       particlesCommInj(nullptr),
       particlesHost(nullptr),
+      testpart(nullptr),
+      exosphereIonization(nullptr),
       ioManager(0),
       Ke(0),
       BulkEnergy(0),

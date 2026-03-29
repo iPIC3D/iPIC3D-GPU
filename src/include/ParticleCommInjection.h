@@ -31,6 +31,7 @@
 #include "ipicdefs.h"
 #include "ipicmath.h"
 #include "ParticleSoAHost.h"
+#include "injectionKernel.cuh"
 
 /**
  * @brief MPI particle exchange engine with expandable AoS comm buffer.
@@ -118,6 +119,21 @@ public:
 
   /** Inject new Maxwellian particles at REEMISSION boundaries (into comm buffer). */
   void repopulateParticlesOnlyInjection();
+
+  /** Compute the number of particles that repopulateParticlesOnlyInjection()
+   *  would create, without actually generating them.  Used to pre-size
+   *  device SoA arrays before a GPU injection kernel. */
+  int computeInjectionCount() const;
+
+  /** Populate an injectionParameter struct for the GPU injection kernel.
+   *  The struct is fully initialized and ready for cudaMemcpy H→D.
+   *  Must be called once at init time (all fields are constant). */
+  void fillInjectionParameter(injectionParameter* param) const;
+
+  /** Reserve a contiguous block of particle IDs for GPU-side injection.
+   *  Returns the base ID; the kernel assigns base + globalIdx.
+   *  Must be called single-threaded before each kernel launch. */
+  double reserveIDBlock(int count) { return particleIDGenerator_.reserveIDBlock(count); }
 
   /** Open BC: duplicate boundary particles, delete exiting ones (into comm buffer). */
   void openBCParticlesOutflow();
@@ -225,6 +241,9 @@ private:
     commPcls.pop_back();
   }
 
+  /** One-time computation of injection count (called from constructor). */
+  int computeInjectionCountImpl() const;
+
   // --- Borrowed references from ParticleSoAHost ---
   ParticleSoAHost& hostParticles_;
   const CollectiveIO*      col_;
@@ -271,6 +290,9 @@ private:
 
   // --- Thread-local RNG for BC reemission (single-thread, few particles) ---
   std::mt19937_64 bcRng_;
+
+  // --- Cached injection count (constant across cycles, computed in ctor) ---
+  int cachedInjectionCount_;
 
   bool cVERBOSE_;
 };

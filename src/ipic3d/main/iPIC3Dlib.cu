@@ -67,6 +67,7 @@
 #include "thread"
 #include "future"
 #include "particleControlKernel.cuh"
+#include "injectionKernel.cuh"
 
 
 #ifdef USE_CATALYST
@@ -520,6 +521,15 @@ int c_Solver::initCUDA(){
     momentParamCUDAPtr[i] = copyToDevice(momentParamHostPtr[i], streams[i]);
   }
 
+  // ======= Build per-species GPU injection parameters =======
+  injectionParamHostPtr = new injectionParameter*[ns];
+  injectionParamCUDAPtr = new injectionParameter*[ns];
+  for (int i = 0; i < ns; i++) {
+    injectionParamHostPtr[i] = newHostPinnedObject<injectionParameter>();
+    particlesCommInj[i]->fillInjectionParameter(injectionParamHostPtr[i]);
+    injectionParamCUDAPtr[i] = copyToDevice(injectionParamHostPtr[i], streams[i]);
+  }
+
 
 
   // ======= Allocate device moment buffers =======
@@ -682,6 +692,7 @@ int c_Solver::deInitCUDA(){
 
     deleteHostPinnedObject(moverParamHostPtr[i]);
     deleteHostPinnedObject(momentParamHostPtr[i]);
+    deleteHostPinnedObject(injectionParamHostPtr[i]);
 
     // Release device-side object storage.
 
@@ -694,6 +705,7 @@ int c_Solver::deInitCUDA(){
 
     cudaFree(moverParamCUDAPtr[i]);
     cudaFree(momentParamCUDAPtr[i]);
+    cudaFree(injectionParamCUDAPtr[i]);
 
     cudaFree(momentsCUDAPtr[i]);
     
@@ -717,6 +729,8 @@ int c_Solver::deInitCUDA(){
   delete[] moverParamCUDAPtr;
   delete[] momentParamHostPtr;
   delete[] momentParamCUDAPtr;
+  delete[] injectionParamHostPtr;
+  delete[] injectionParamCUDAPtr;
   delete[] momentsCUDAPtr;
   delete[] toBeMerged;
 
@@ -1345,31 +1359,81 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
   auto _t2 = std::chrono::high_resolution_clock::now();
 #endif
 
-  // ======= Phase 3B: sync streams, update NOP, and prepare sort buffers =======
-  // Safe point: after this sync, no GPU kernels are in flight for any species.
-  // Sort-buffer resizing may call cudaMalloc/cudaFree, so it must happen here.
-  if (sortThisCycle_) {
+  // ======= Phase 3B: sync, pre-expand SoA, update NOP, prepare sort =======
+  // After this phase no GPU kernels are in flight.  SoA arrays are large
+  // enough for stayed + injection + estimated MPI incoming, so that a
+  // future GPU injection kernel can write directly to the SoA tail.
+
+  // Compute per-species injection count (cheap, cached).
+  // Declared at function scope so Phase 3G can also use it.
+  int injectedBCS[ns]={0};
+  for (int i = 0; i < ns; i++) {
+    if (moverParamHostPtr[i]->doRepopulateInjection)
+      injectedBCS[i] = particlesCommInj[i]->computeInjectionCount();
+  }
+  {
+
     for (int i = 0; i < ns; i++) {
-      // Update host NOP to the stayed-particle prefix length.
-      pclsArrayHostPtr[i]->setNOE(stayedParticle[i]);
-      // Ensure mover and compaction kernels are complete before buffer resizing.
+      // Sync compaction kernels so expand() can safely realloc.
       cudaErrChk(cudaStreamSynchronize(streams[i]));
-      // Resize sort buffers if needed.
-      cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
+
+      // Estimate: stayed + injected + exiting-as-proxy-for-incoming.
+      const uint32_t estimatedMPI = particlesCommInj[i]->getCommNOP();
+      const uint32_t estimatedTotal = (uint32_t)stayedParticle[i] + injectedBCS[i] + estimatedMPI;
+
+      // Pre-expand SoA if needed (one allocation, before any kernel launch).
+      if ((estimatedTotal * EXPAND_THRESHOLD_FACTOR) >= pclsArrayHostPtr[i]->getSize()) {
+        pclsArrayHostPtr[i]->expand(
+            static_cast<uint32_t>(estimatedTotal * EXPAND_GROWTH_FACTOR), streams[i]);
+        departureArrayHostPtr[i]->expand(pclsArrayHostPtr[i]->getSize(), streams[i]);
+        cudaErrChk(cudaMemcpyAsync(departureArrayCUDAPtr[i], departureArrayHostPtr[i],
+                    sizeof(departureArrayType), cudaMemcpyDefault, streams[i]));
+      }
+
+      // Set host NOP to stayed + injected (injection count is known).
+      // MPI particles will be appended on top in Phase 3G.
+      pclsArrayHostPtr[i]->setNOE(stayedParticle[i] + injectedBCS[i]);
     }
 
-    // ======= Phase 3C: enqueue sort stages 1-3 for all species =======
-    // Histogram, prefix sum, and sorted-index generation overlap with MPI below.
+
+    // ======= Launch GPU injection kernels (async on per-species stream) =======
     for (int i = 0; i < ns; i++) {
-      cellSorters[i].enqueueSortAsync(pclsArrayHostPtr[i],
-                                       grid3DCUDACUDAPtr,
-                                       stayedParticle[i],  // sort only stayed prefix
-                                       streams[i]);
+      if (injectedBCS[i] > 0) {
+        // Reserve unique particle IDs for this batch.
+        double baseID = particlesCommInj[i]->reserveIDBlock(injectedBCS[i]);
+
+        // Per-cycle seed: deterministic but different each cycle+species.
+        unsigned long long rngSeed =
+            (unsigned long long)cycle * 6364136223846793005ULL +
+            (unsigned long long)i;
+
+        // Sync host metadata to device (SoA pointers may have changed after expand).
+        cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
+                    sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
+
+        injectionKernel<<<getGridSize(injectedBCS[i], DEFAULT_BLOCK_SIZE),
+                          DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
+            pclsArrayCUDAPtr[i],
+            injectionParamCUDAPtr[i],
+            (uint32_t)stayedParticle[i],
+            baseID,
+            rngSeed);
+      }
     }
-  } else {
-    // Unsorted pipeline: only update NOP, with no sort preparation.
-    for (int i = 0; i < ns; i++) {
-      pclsArrayHostPtr[i]->setNOE(stayedParticle[i]);
+
+    if (sortThisCycle_) {
+      for (int i = 0; i < ns; i++) {
+        cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
+      }
+
+      // ======= Phase 3C: enqueue sort stages 1-3 for all species =======
+      // Histogram, prefix sum, and sorted-index generation overlap with MPI below.
+      for (int i = 0; i < ns; i++) {
+        cellSorters[i].enqueueSortAsync(pclsArrayHostPtr[i],
+                                         grid3DCUDACUDAPtr,
+                                         stayedParticle[i] + injectedBCS[i],  // sort stayed + injected
+                                         streams[i]);
+      }
     }
   }
 #if ENABLE_SOA_TIMING
@@ -1389,18 +1453,11 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
     particlesCommInj[i]->recommunicateParticlesUntilDone(1);
 #if ENABLE_SOA_TIMING
     auto _mpi2 = std::chrono::high_resolution_clock::now();
-#endif
-    if (moverParamHostPtr[i]->doRepopulateInjection) {
-      particlesCommInj[i]->repopulateParticlesOnlyInjection();
-    }
-#if ENABLE_SOA_TIMING
-    auto _mpi3 = std::chrono::high_resolution_clock::now();
     if (MPIdata::get_rank() == 0)
-      printf("  [SoA MPI s%d: separate=%.2f recomm=%.2f inject=%.2f total=%.2f ms  commNOP=%d]\n", i,
+      printf("  [SoA MPI s%d: separate=%.2f recomm=%.2f total=%.2f ms  commNOP=%d]\n", i,
              std::chrono::duration<double, std::milli>(_mpi1 - _mpi0).count(),
              std::chrono::duration<double, std::milli>(_mpi2 - _mpi1).count(),
-             std::chrono::duration<double, std::milli>(_mpi3 - _mpi2).count(),
-             std::chrono::duration<double, std::milli>(_mpi3 - _mpi0).count(),
+             std::chrono::duration<double, std::milli>(_mpi2 - _mpi0).count(),
              particlesCommInj[i]->getCommNOP());
 #endif
   }
@@ -1426,19 +1483,16 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
       cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
                                   sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
     }
+  } 
 
-    // ======= Phase 3F: sync all streams before mutating SoA allocations =======
-    // expand() may allocate, copy, and free SoA buffers, so no kernels may be active.
-    for (int i = 0; i < ns; i++) {
-      cudaErrChk(cudaStreamSynchronize(streams[i]));
-    }
-  } else {
-    // Unsorted pipeline: wait for mover/compaction kernels before any expand() or tail moments.
-    for (int i = 0; i < ns; i++) {
-      cudaErrChk(cudaStreamSynchronize(streams[i]));
-    }
-  }
-#if ENABLE_SOA_TIMING
+  // ======= Phase 3F: sync all streams before mutating SoA allocations =======
+  // expand() may allocate, copy, and free SoA buffers, so no kernels may be active.
+
+  // Unsorted pipeline: wait for mover/compaction kernels before any expand() or tail moments.
+  for (int i = 0; i < ns; i++) 
+    cudaErrChk(cudaStreamSynchronize(streams[i]));
+
+    #if ENABLE_SOA_TIMING
   auto _t4b = std::chrono::high_resolution_clock::now();
 #endif
 
@@ -1447,8 +1501,9 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
 
   for (int i = 0; i < ns; i++) {
 
-    // Total particles = stayed prefix + incoming particles.
-    auto newPclNum = stayedParticle[i] + particlesCommInj[i]->getCommNOP();
+    // Total particles = stayed + GPU-injected + MPI incoming.
+    const int sortedCount = stayedParticle[i] + injectedBCS[i];
+    auto newPclNum = sortedCount + particlesCommInj[i]->getCommNOP();
 
     // Expand SoA arrays if needed.
     // Safe point: Phase 3F guarantees no kernels are using these buffers.
@@ -1477,11 +1532,11 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
     cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
                                 sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[i]));
 
-    // Scatter the incoming AoS particles into the SoA tail at offset stayedParticle[i].
+    // Scatter the incoming AoS particles into the SoA tail after stayed+injected.
     if (incomingCount > 0)
       scatterAoSToSoAKernel<<<getGridSize(incomingCount, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
           incomingStagingHostPtr[i]->getArray(),
-          pclsArrayCUDAPtr[i], (uint32_t)stayedParticle[i], (uint32_t)incomingCount);
+          pclsArrayCUDAPtr[i], (uint32_t)sortedCount, (uint32_t)incomingCount);
 
     // Finalize moments according to the active sorted/unsorted pipeline.
     if (sortThisCycle_) {
@@ -1489,7 +1544,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
       cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[i], 0,
                                   momentGridSize * 10 * sizeof(cudaMomentType), streams[i]));
 
-      const uint32_t numSorted = stayedParticle[i];
+      const uint32_t numSorted = sortedCount;
       if (numSorted > 0) {
         const int numCells = cellSorters[i].getNumCells();
         const int warps = numCells;
@@ -1503,13 +1558,13 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
             momentsCUDAPtr[i]);
       }
 
-      const int tailCount = newPclNum - stayedParticle[i];
+      const int tailCount = newPclNum - sortedCount;
       if (tailCount > 0)
         momentKernelNew<<<getGridSize(tailCount, SMALL_BLOCK_SIZE), SMALL_BLOCK_SIZE, 0, streams[i]>>>(
-            momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], stayedParticle[i]);
+            momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], sortedCount);
     } else {
       // Unsorted path: the stayed prefix was already handled in cudaLauncherAsync().
-      // Only the incoming tail needs momentKernelNew.
+      // Only the injected + incoming tail needs momentKernelNew.
       const int tailCount = newPclNum - stayedParticle[i];
       if (tailCount > 0)
         momentKernelNew<<<getGridSize(tailCount, SMALL_BLOCK_SIZE), SMALL_BLOCK_SIZE, 0, streams[i]>>>(

@@ -222,19 +222,22 @@ public:
 
   }
 
+  // Grow-only reserve for pinned memory.
+  // cudaHostAlloc / cudaFreeHost are very expensive (~100+ ms for multi-million
+  // element buffers), so we never shrink capacity — only reallocate when the
+  // requested size exceeds the current capacity.
   void reserve(int newcapacity) override 
   {
-    if(this->_size > newcapacity) return;
+    if(newcapacity <= this->_capacity) return;
 
     newcapacity = ((newcapacity-1)/this->num_elem_in_block+1)*this->num_elem_in_block;
-    if(newcapacity != this->_capacity)
-    {
-      this->_capacity = newcapacity;
-      type* oldList = this->list;
-      this->list = AlignedAllocPinned(type,this->_capacity);
+    this->_capacity = newcapacity;
+    type* oldList = this->list;
+    this->list = AlignedAllocPinned(type,this->_capacity);
+    if(this->_size > 0 && oldList)
       memcpy(this->list,oldList,sizeof(type)*this->_size);
+    if(oldList)
       AlignedFreePinned(oldList);
-    }
   }
 
 };

@@ -277,6 +277,7 @@ namespace iPic3D {
     grid3DCUDA* 		      grid3DCUDAHostPtr;      // one shared grid descriptor for all species
     moverParameter**      moverParamHostPtr;		  // for every species
     momentParameter**     momentParamHostPtr;		  // for every species
+    injectionParameter**  injectionParamHostPtr;  // for every species (GPU injection)
 
     CellSorter* cellSorters;  // per-species GPU cell sorter (counting sort)
 
@@ -296,6 +297,7 @@ namespace iPic3D {
     grid3DCUDA* 		      grid3DCUDACUDAPtr;    	    // one shared grid descriptor for all species
     moverParameter**      moverParamCUDAPtr;		      // for every species
     momentParameter**     momentParamCUDAPtr;		      // for every species
+    injectionParameter**  injectionParamCUDAPtr;      // for every species (GPU injection)
 
     // ======= Shared device buffers =======
     // [10][nxn][nyn][nzn] packed moment storage per species.

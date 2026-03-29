@@ -88,6 +88,14 @@
 #define __popc(x) __popcll(static_cast<unsigned long long>(x))
 #define __ffs(x) __ffsll(static_cast<unsigned long long>(x))
 
+// cuRAND → hipRAND
+#define curandStatePhilox4_32_10_t hiprandStatePhilox4_32_10_t
+#define curand_init              hiprand_init
+#define curand_normal_double     hiprand_normal_double
+#define curand_uniform_double    hiprand_uniform_double
+#define curand_normal            hiprand_normal
+#define curand_uniform           hiprand_uniform
+
 
 
 #endif

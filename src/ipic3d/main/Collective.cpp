@@ -888,6 +888,86 @@ void Collective::Print() {
     if (omega_p_dt < 2.0) cout << "  OK" << endl; else cout << "  WARNING: plasma oscillations under-resolved!" << endl;
   }
 
+  // ======= Estimated Memory Usage Per Rank =======
+  cout << endl;
+  cout << "Estimated Memory Per Rank" << endl;
+  cout << "---------------------" << endl;
+
+  auto ceilDiv = [](int a, int b) { return (a + b - 1) / b; };
+  const int nxc_loc = ceilDiv(nxc, XLEN) + 2;  // +2 ghost cells
+  const int nyc_loc = ceilDiv(nyc, YLEN) + 2;
+  const int nzc_loc = ceilDiv(nzc, ZLEN) + 2;
+  const int nxn_loc = nxc_loc + 1;
+  const int nyn_loc = nyc_loc + 1;
+  const int nzn_loc = nzc_loc + 1;
+  const long long gridN = (long long)nxn_loc * nyn_loc * nzn_loc;
+  const long long gridC = (long long)nxc_loc * nyc_loc * nzc_loc;
+  const long long fieldSize = (long long)nzn_loc * (nyn_loc - 1) * (nxn_loc - 1);
+  const double MB = 1024.0 * 1024.0;
+
+  cout << "Local grid (with ghosts): "
+       << nxc_loc << "x" << nyc_loc << "x" << nzc_loc << " cells, "
+       << nxn_loc << "x" << nyn_loc << "x" << nzn_loc << " nodes" << endl;
+
+  // --- HOST ---
+  // EMfields3D: 50 node-3D + 15 cell-3D + 10*ns node-4D + ns cell-4D + fieldForPcls + Krylov
+  double hostEMf = (50.0 * gridN + 15.0 * gridC
+                    + (10.0 * ns) * gridN + ns * gridC
+                    + gridN * 8.0 + 6.0 * 3 * gridN) * 8;
+  double hostFieldBuf = fieldSize * 24.0 * 8;       // pinned field buffer
+  double hostPcl = 0, hostComm = 0;
+  for (int i = 0; i < ns; i++) {
+    long long nop_i = (long long)npcel[i] * nxn_loc * nyn_loc * nzn_loc;
+    hostPcl  += nop_i * 8.0 * 8;        // 8 SoA arrays * 8 bytes
+    hostComm += 0.1 * nop_i * 64.0;     // MPI comm buffer (AoS)
+  }
+  double hostTotal = (hostEMf + hostFieldBuf + hostPcl + hostComm) / MB;
+
+  cout << "HOST:   EMfields = " << hostEMf / MB << " MB"
+       << ", particles = " << hostPcl / MB << " MB"
+       << ", comm = " << hostComm / MB << " MB"
+       << ", field buf = " << hostFieldBuf / MB << " MB" << endl;
+  cout << "        TOTAL = " << hostTotal << " MB (" << hostTotal / 1024 << " GB)" << endl;
+
+  // --- DEVICE ---
+  // GPU allocations use actual NOP from maxwellian (interior cells only, no ghosts)
+  const int nxc_r = nxc_loc - 2, nyc_r = nyc_loc - 2, nzc_r = nzc_loc - 2;
+  const double CAP_FACTOR = 1.4, AUX_FRAC = 0.1, PLANET_FRAC = 0.05;
+  bool isDipole = (Case == "Dipole" || Case == "Dipole2D");
+
+  double devFieldBuf = fieldSize * 24.0 * 8;
+  double devMoments  = ns * gridN * 10.0 * 8;
+  double devPcl = 0, devBuf = 0, devSort = 0, devPlanet = 0;
+
+  for (int i = 0; i < ns; i++) {
+    long long nop_i = (long long)npcel[i] * nxc_r * nyc_r * nzc_r;  // actual NOP (interior cells)
+    long long cap_i = (long long)(nop_i * CAP_FACTOR);
+
+    devPcl += cap_i * 8.0 * 8;                                    // SoA arrays
+    devBuf += cap_i * 8.0                                          // departure
+            + AUX_FRAC * nop_i * (64.0 + 4.0 + 64.0);            // exiting + filler + staging
+
+    if (SortingCycle > 0)
+      devSort += 3.0 * gridC * 4 + cap_i * (4.0 + 8.0);          // histograms + indices + scratch
+
+    if (isDipole)
+      devPlanet += PLANET_FRAC * nop_i * 64.0;
+  }
+  double devTotal = (devFieldBuf + devMoments + devPcl + devBuf + devSort + devPlanet) / MB;
+
+  cout << "DEVICE: particles = " << devPcl / MB << " MB"
+       << ", buffers = " << devBuf / MB << " MB"
+       << ", moments = " << devMoments / MB << " MB"
+       << ", field = " << devFieldBuf / MB << " MB";
+  if (devSort > 0)   cout << ", sort = " << devSort / MB << " MB";
+  if (devPlanet > 0) cout << ", planet = " << devPlanet / MB << " MB";
+  cout << endl;
+  cout << "        TOTAL = " << devTotal << " MB (" << devTotal / 1024 << " GB)"
+       << "  (+ 500 MB CUDA context)" << endl;
+
+  cout << "COMBINED = " << (hostTotal + devTotal) << " MB ("
+       << (hostTotal + devTotal) / 1024 << " GB)" << endl;
+  cout << "---------------------" << endl;
 
 }
 /*! Print Simulation Parameters */

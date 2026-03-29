@@ -85,6 +85,8 @@
 #define __shfl_sync(x, y, z) __shfl(y, z)
 #define __ballot_sync(mask, predicate) __ballot(predicate)
 #define __activemask() __ballot(1)
+#define __popc(x) __popcll(static_cast<unsigned long long>(x))
+#define __ffs(x) __ffsll(static_cast<unsigned long long>(x))
 
 
 

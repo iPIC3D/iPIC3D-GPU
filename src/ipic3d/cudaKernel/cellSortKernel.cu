@@ -63,7 +63,7 @@ void warp_aggregated_atomic_inc(int* histogram, int cell)
         int leader_cell = __shfl_sync(active, cell, leader);
         warp_mask_t match = __ballot_sync(active, cell == leader_cell) & remaining;
         if (lane == leader) {
-            atomicAdd(&histogram[leader_cell], warp_popcount(match));
+            atomicAdd(&histogram[leader_cell], __popc(match));
         }
         remaining &= ~match;
     }

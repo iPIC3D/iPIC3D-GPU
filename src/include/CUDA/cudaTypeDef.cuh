@@ -24,15 +24,6 @@ using warp_mask_t = uint64_t;
 // Only available in device compilation units (.cu files compiled by nvcc/hipcc)
 #if defined(__CUDACC__) || defined(__HIPCC__)
 
-// Portable popcount: 32-bit on CUDA, 64-bit on HIP
-__device__ __forceinline__ int warp_popcount(warp_mask_t mask) {
-#ifndef HIPIFLY
-    return __popc(mask);
-#else
-    return __popcll(mask);
-#endif
-}
-
 // Portable warp-wide sum reduction (works for any WARP_SIZE)
 template <typename T>
 __device__ __forceinline__ T warp_reduce_sum(T val) {

@@ -23,6 +23,12 @@
 #include <cmath>
 #include <algorithm>
 #include <random>
+#include <chrono>
+
+// Set to 1 to print per-phase timing inside repopulateParticlesOnlyInjection
+#ifndef ENABLE_INJECTION_TIMING
+#define ENABLE_INJECTION_TIMING 1
+#endif
 
 using std::cout;
 using std::endl;
@@ -921,13 +927,25 @@ void ParticleCommInjection::repopulateParticlesOnlyInjection()
 
   if (totalInjected == 0) return;
 
+#if ENABLE_INJECTION_TIMING
+  auto _inj0 = std::chrono::high_resolution_clock::now();
+#endif
+
   // --- Step 2: pre-size pinned comm buffer ---
   const int baseOffset = commPcls.size();
   commPcls.resize(baseOffset + totalInjected);
 
+#if ENABLE_INJECTION_TIMING
+  auto _inj1 = std::chrono::high_resolution_clock::now();
+#endif
+
   // --- Step 3: switch ID generator to multi-thread mode ---
   particleIDGenerator_.reserve_particles_in_range(
       static_cast<double>(baseOffset));
+
+#if ENABLE_INJECTION_TIMING
+  auto _inj2 = std::chrono::high_resolution_clock::now();
+#endif
 
   // --- Step 4: parallel fill — single fork, nowait across faces ---
   #pragma omp parallel
@@ -959,6 +977,29 @@ void ParticleCommInjection::repopulateParticlesOnlyInjection()
       }
     }
   } // implicit barrier
+
+#if ENABLE_INJECTION_TIMING
+  auto _inj3 = std::chrono::high_resolution_clock::now();
+  if (MPIdata::get_rank() == 0) {
+    int activeFaces = 0;
+    for (int f = 0; f < 6; f++) if (faces[f].active) activeFaces++;
+    printf("    [inject s%d: resize=%.2f idGen=%.2f fill=%.2f total=%.2f ms"
+           "  baseOff=%d injected=%d faces=%d]",
+           speciesNumber_,
+           std::chrono::duration<double, std::milli>(_inj1 - _inj0).count(),
+           std::chrono::duration<double, std::milli>(_inj2 - _inj1).count(),
+           std::chrono::duration<double, std::milli>(_inj3 - _inj2).count(),
+           std::chrono::duration<double, std::milli>(_inj3 - _inj0).count(),
+           baseOffset, totalInjected, activeFaces);
+    // per-face breakdown
+    const char* faceNames[6] = {"Xl", "Xr", "Yl", "Yr", "Zl", "Zr"};
+    for (int f = 0; f < 6; f++) {
+      if (faces[f].active)
+        printf(" %s=%d", faceNames[f], faces[f].nCells() * numParticlesPerCell_);
+    }
+    printf("\n");
+  }
+#endif
 }
 
 // ========================================================================

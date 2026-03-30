@@ -71,6 +71,7 @@ namespace iPic3D {
     TaylorGreen,
     HumpPert,
     RandomCase,
+    GEMHarris,
     Default         // unknown string → default initialisation
   };
 }

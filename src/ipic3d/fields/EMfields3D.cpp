@@ -3375,6 +3375,172 @@ void EMfields3D::initGEM()
   }
 }
 
+void EMfields3D::initGEMHarris()
+{
+  const Collective       *col  = &get_col();
+  const VirtualTopology3D *vct  = &get_vct();
+  const Grid             *grid = &get_grid();
+
+  // --- configurable perturbation parameters ---
+  const double pertGEM  = col->getPertGEM();
+  const double pertHump = col->getPertHump();
+  const double deltax   = col->getDeltaxHump() * delta;
+  const double deltay   = col->getDeltayHump() * delta;
+  const int    ampere   = col->getCurrentFromAmpere();
+
+  // --- wavenumbers ---
+  const double kx   = 2.0 * M_PI / Lx;
+  const double kyG  = 2.0 * M_PI / Ly;   // GEM: full wavelength (periodic y)
+  const double kyH  = M_PI / Ly;          // hump: half wavelength (wall parity)
+  const double A0   = (pertHump != 0.0) ? pertHump * B0x / kyH : 0.0;
+
+  if (restart1 == 0)
+  {
+    if (vct->getCartesian_rank() == 0)
+    {
+      cout << "---------------------------------------------------" << endl;
+      cout << "       Initialize GEM Harris                       " << endl;
+      cout << "---------------------------------------------------" << endl;
+      cout << "B0x                = " << B0x   << endl;
+      cout << "B0y                = " << B0y   << endl;
+      cout << "B0z                = " << B0z   << endl;
+      cout << "delta              = " << delta  << endl;
+      cout << "pertGEM            = " << pertGEM  << endl;
+      cout << "pertHump           = " << pertHump << endl;
+      if (pertHump != 0.0) {
+        cout << "deltaxHump         = " << col->getDeltaxHump()
+             << " (physical " << deltax << ")" << endl;
+        cout << "deltayHump         = " << col->getDeltayHump()
+             << " (physical " << deltay << ")" << endl;
+      }
+      cout << "currentFromAmpere  = " << ampere << endl;
+      for (int i = 0; i < ns; i++)
+      {
+        cout << "rho species " << i << " = " << rhoINIT[i];
+        if (DriftSpecies[i]) cout << "  DRIFTING" << endl;
+        else                 cout << "  BACKGROUND" << endl;
+      }
+      cout << "---------------------------------------------------" << endl;
+    }
+
+    // === B and density on nodes ===
+    for (int i = 0; i < nxn; i++)
+      for (int j = 0; j < nyn; j++)
+        for (int k = 0; k < nzn; k++)
+        {
+          const double xM = grid->getXN(i, j, k) - 0.5 * Lx;
+          const double yM = grid->getYN(i, j, k) - 0.5 * Ly;
+
+          // --- density ---
+          for (int is = 0; is < ns; is++)
+          {
+            const double sign_q = qom[is] / fabs(qom[is]);
+            if (DriftSpecies[is])
+            {
+              const double sech = 1.0 / cosh(yM / delta);
+              rhons[is][i][j][k] = sign_q * rhoINIT[is] * sech * sech / FourPI;
+            }
+            else
+              rhons[is][i][j][k] = sign_q * rhoINIT[is] / FourPI;
+          }
+
+          // --- E = 0 ---
+          Ex[i][j][k] = 0.0;
+          Ey[i][j][k] = 0.0;
+          Ez[i][j][k] = 0.0;
+
+          // === Harris equilibrium ===
+          Bxn[i][j][k] = B0x * tanh(yM / delta);
+          Byn[i][j][k] = B0y;
+          Bzn[i][j][k] = B0z;
+
+          // === GEM perturbation (from vector potential, div-free) ===
+          if (pertGEM != 0.0)
+          {
+            Bxn[i][j][k] += -pertGEM * B0x * (Lx / Ly)
+                            * cos(kx * xM) * sin(kyG * yM);
+            Byn[i][j][k] += pertGEM * B0x
+                            * sin(kx * xM) * cos(kyG * yM);
+          }
+
+          // === Hump perturbation (from vector potential, div-free) ===
+          if (pertHump != 0.0)
+          {
+            const double g  = exp(-xM * xM / (deltax * deltax)
+                                  -yM * yM / (deltay * deltay));
+            const double Cx = cos(kx  * xM);
+            const double Sx = sin(kx  * xM);
+            const double Cy = cos(kyH * yM);
+            const double Sy = sin(kyH * yM);
+
+            // dAz/dy  ->  delta Bx
+            Bxn[i][j][k] += A0 * g * Cx
+                          * (-2.0 * yM / (deltay * deltay) * Cy - kyH * Sy);
+            // -dAz/dx ->  delta By
+            Byn[i][j][k] += A0 * g * Cy
+                          * ( 2.0 * xM / (deltax * deltax) * Cx + kx * Sx);
+          }
+        }
+
+    // --- ghost communication on nodes ---
+    communicateNodeBC(nxn, nyn, nzn, Bxn,
+        col->bcBx[0], col->bcBx[1], col->bcBx[2],
+        col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+    communicateNodeBC(nxn, nyn, nzn, Byn,
+        col->bcBy[0], col->bcBy[1], col->bcBy[2],
+        col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+    communicateNodeBC(nxn, nyn, nzn, Bzn,
+        col->bcBz[0], col->bcBz[1], col->bcBz[2],
+        col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+
+    // --- B on centers via interpolation ---
+    grid->interpN2C(Bxc, Bxn);
+    grid->interpN2C(Byc, Byn);
+    grid->interpN2C(Bzc, Bzn);
+
+    // --- ghost communication on centers ---
+    communicateCenterBC(nxc, nyc, nzc, Bxc,
+        col->bcBx[0], col->bcBx[1], col->bcBx[2],
+        col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+    communicateCenterBC(nxc, nyc, nzc, Byc,
+        col->bcBy[0], col->bcBy[1], col->bcBy[2],
+        col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+    communicateCenterBC(nxc, nyc, nzc, Bzc,
+        col->bcBz[0], col->bcBz[1], col->bcBz[2],
+        col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+
+    // --- density on centers ---
+    for (int is = 0; is < ns; is++)
+      grid->interpN2C(rhocs, is, rhons);
+
+    // --- current initialization ---
+    if (ampere)
+    {
+      // Ampere mode: J = (c/4pi) curl(B) distributed by u0/v0/w0 weights
+      eqValue(0.0, tempXN, nxn, nyn, nzn);
+      eqValue(0.0, tempYN, nxn, nyn, nzn);
+      eqValue(0.0, tempZN, nxn, nyn, nzn);
+      grid->curlC2N(tempXN, tempYN, tempZN, Bxc, Byc, Bzc);
+
+      for (int i = 0; i < nxn; i++)
+        for (int j = 0; j < nyn; j++)
+          for (int k = 0; k < nzn; k++)
+            for (int is = 0; is < ns; is++)
+            {
+              Jxs[is][i][j][k] = col->getU0(is) * c * tempXN[i][j][k] / FourPI;
+              Jys[is][i][j][k] = col->getV0(is) * c * tempYN[i][j][k] / FourPI;
+              Jzs[is][i][j][k] = col->getW0(is) * c * tempZN[i][j][k] / FourPI;
+            }
+    }
+    // else: Jxs/Jys/Jzs stay at zero (default)
+    // particle init will use global u0/v0/w0 as drift velocities
+  }
+  else
+  {
+    init();  // restart
+  }
+}
+
 void EMfields3D::initNullPoints()
 {
   const VirtualTopology3D *vct = &get_vct();

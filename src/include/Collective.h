@@ -183,6 +183,11 @@ class Collective
     double getB1x()const{ return (B1x); }
     double getB1y()const{ return (B1y); }
     double getB1z()const{ return (B1z); }
+    double getPertGEM()const{ return pertGEM; }
+    double getPertHump()const{ return pertHump; }
+    double getDeltaxHump()const{ return deltaxHump; }
+    double getDeltayHump()const{ return deltayHump; }
+    int    getCurrentFromAmpere()const{ return currentFromAmpere; }
     //bool getVerbose()const{ return (verbose); }
     //bool getTrackParticleID(int nspecies)const{ return (TrackParticleID[nspecies]); }
     int getRestart_status()const{ return (restart_status); }
@@ -447,6 +452,12 @@ class Collective
     double B1y;
     double B1z;
 
+    /*! GEMHarris perturbation parameters */
+    double pertGEM;           ///< GEM perturbation amplitude [fraction of B0x]
+    double pertHump;          ///< hump perturbation amplitude [fraction of B0x]
+    double deltaxHump;        ///< hump x-width [units of delta]
+    double deltayHump;        ///< hump y-width [units of delta]
+    int    currentFromAmpere; ///< 1 = J from curl(B) with u0 weights, 0 = J from u0 drift
 
     /*! boolean value for verbose results */
     //bool verbose;

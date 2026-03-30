@@ -75,6 +75,8 @@ class EMfields3D                // :public Field
     void initBEAM(double x_center, double y_center, double z_center, double radius);
     /** @brief Initialize the standard GEM challenge configuration. */
     void initGEM();
+    /** @brief Single Harris sheet with optional GEM/hump perturbations and optional Ampère current. */
+    void initGEMHarris();
     void initOriginalGEM();
     /** @brief Initialize the double-Harris-sheet GEM configuration. */
     void initGEMDoubleHarris();

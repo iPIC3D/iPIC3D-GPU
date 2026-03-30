@@ -114,6 +114,7 @@ static CaseType parseCaseType(const std::string& s) {
   if (s == "TaylorGreen")     return CaseType::TaylorGreen;
   if (s == "HumpPert")        return CaseType::HumpPert;
   if (s == "RandomCase")      return CaseType::RandomCase;
+  if (s == "GEMHarris")       return CaseType::GEMHarris;
   return CaseType::Default;
 }
 //MPIdata* iPic3D::c_Solver::mpi=0;
@@ -255,6 +256,7 @@ int c_Solver::Init(int argc, char **argv) {
     case CaseType::NullPoints:      EMf->initNullPoints(); break;
     case CaseType::TaylorGreen:     EMf->initTaylorGreen(); break;
     case CaseType::HumpPert:        EMf->initHumpPerturbation(); break;
+    case CaseType::GEMHarris:       EMf->initGEMHarris(); break;
     case CaseType::RandomCase:
       EMf->initRandomField();
       if (myrank==0) {
@@ -298,6 +300,12 @@ int c_Solver::Init(int argc, char **argv) {
         case CaseType::TaylorGreen:     particlesHost[i]->maxwellianNullPoints(EMf); break;
         case CaseType::GEMDoubleHarris: particlesHost[i]->maxwellianDoubleHarris(EMf); break;
         case CaseType::HumpPert:        particlesHost[i]->maxwellianHumpPerturbation(EMf); break;
+        case CaseType::GEMHarris:
+          if (col->getCurrentFromAmpere())
+            particlesHost[i]->maxwellianNullPoints(EMf);
+          else
+            particlesHost[i]->maxwellian(EMf);
+          break;
         default:                        particlesHost[i]->maxwellian(EMf); break;
       }
       particlesHost[i]->reserve_remaining_particle_IDs();

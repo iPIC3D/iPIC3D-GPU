@@ -138,6 +138,12 @@ void Collective::ReadInput(string inputfile) {
 
     delta = config.read < double >("delta",0.5);
 
+    pertGEM           = config.read<double>("pertGEM",    0.0);
+    pertHump          = config.read<double>("pertHump",   0.0);
+    deltaxHump        = config.read<double>("deltaxHump", 8.0);
+    deltayHump        = config.read<double>("deltayHump", 4.0);
+    currentFromAmpere = config.read<int>("currentFromAmpere", 0);
+
     Case              = config.read<string>("Case");
     wmethod           = config.read<string>("WriteMethod");
     SimName           = config.read<string>("SimulationName");

@@ -226,12 +226,7 @@ void IOManager::writeFields(int cycle) {
     // Serial HDF5 (one file per process).
     case FieldBackend::SHDF5:
 #ifndef NO_HDF5
-        if (!col_->getFieldOutputTag().empty())
-            outputWrapperFPP_->append_output(
-                col_->getFieldOutputTag().c_str(), cycle);
-        if (!col_->getMomentsOutputTag().empty())
-            outputWrapperFPP_->append_output(
-                col_->getMomentsOutputTag().c_str(), cycle);
+        outputWrapperFPP_->append_field_moment_output(cfg, cycle);
 #endif
         break;
 
@@ -300,14 +295,14 @@ void IOManager::writeFields(int cycle) {
     // Parallel HDF5.
     case FieldBackend::PARALLEL_HDF5:
 #ifndef NO_HDF5
-        WriteOutputParallel(grid_, EMf_, outputPart_, col_, vct_, cycle);
+        WriteOutputParallel(grid_, EMf_, col_, vct_, cycle, cfg);
 #endif
         break;
 
     // H5hut.
     case FieldBackend::H5HUT:
 #ifndef NO_HDF5
-        WriteFieldsH5hut(ns_, grid_, EMf_, col_, vct_, cycle);
+        WriteFieldsH5hut(ns_, grid_, EMf_, col_, vct_, cycle, cfg);
 #endif
         break;
 

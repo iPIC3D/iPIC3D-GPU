@@ -32,6 +32,8 @@
 #include "PSKhdf5adaptor.h"
 #endif
 
+struct OutputTagConfig;
+
 using namespace PSK;
 
 class OutputWrapperFPP
@@ -56,8 +58,8 @@ class OutputWrapperFPP
     int 		  ns,
     ParticleSoAHost   **testpart,
     int 		  nstestpart);
-  void append_output(const char* tag, int cycle);
   void append_output(const char* tag, int cycle, int sample);
+  void append_field_moment_output(const OutputTagConfig& cfg, int cycle);
   void append_restart(int cycle);
 };
 

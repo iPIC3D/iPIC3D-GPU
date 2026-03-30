@@ -39,7 +39,6 @@
 #include "IOManager.h"
 //
 #ifndef NO_HDF5
-#include "WriteOutputParallel.h"
 #include "OutputWrapperFPP.h"
 #endif
 

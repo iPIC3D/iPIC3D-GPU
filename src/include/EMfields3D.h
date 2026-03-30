@@ -412,6 +412,13 @@ class EMfields3D                // :public Field
     arr4_double getpZZsn() { return pZZsn; }
     double getpZZsn(int X,int Y,int Z,int is)const{return pZZsn.get(is,X,Y,Z);}
 
+    // per-species 3D slice accessors (node grid) for parallel HDF5 / H5hut output
+    arr3_double getpXXsn(int is){return arr3_double(pXXsn.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getpXYsn(int is){return arr3_double(pXYsn.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getpXZsn(int is){return arr3_double(pXZsn.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getpYYsn(int is){return arr3_double(pYYsn.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getpYZsn(int is){return arr3_double(pYZsn.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getpZZsn(int is){return arr3_double(pZZsn.fetch_arr4()[is], nxn, nyn, nzn);}
 
     double getJx(int X, int Y, int Z) const { return Jx.get(X,Y,Z);}
     double getJy(int X, int Y, int Z) const { return Jy.get(X,Y,Z);}

@@ -35,13 +35,15 @@
 #include <string>
 using std::string;
 
-void WriteFieldsH5hut(int nspec, Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle);
+struct OutputTagConfig;
+
+void WriteFieldsH5hut(int nspec, Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle, const OutputTagConfig& cfg);
 void WritePartclH5hut(int nspec, Grid3DCU *grid, ParticleSoAHost **part, CollectiveIO *col, VCtopology3D *vct, int cycle);
 
 void ReadPartclH5hut(int nspec, ParticleSoAHost **part, Collective *col, VCtopology3D *vct, Grid3DCU *grid);
 void ReadFieldsH5hut(int nspec, EMfields3D *EMf,       Collective *col, VCtopology3D *vct, Grid3DCU *grid);
 
-void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, ParticleSoAHost **part, CollectiveIO *col, VCtopology3D *vct, int cycle);
+void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle, const OutputTagConfig& cfg);
 
 
 
@@ -52,7 +54,6 @@ int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
 int WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,int cycle,
 			float*** momentswritebuffer,MPI_Request requestArr[],MPI_File fhArr[]);
 
-void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & tag, int cycle);
 void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & tag, int cycle,float**** fieldwritebuffer);
 void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & tag, int cycle,float***  momentswritebuffer);
 void WriteMomentsJVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle, float**** fieldwritebuffer);

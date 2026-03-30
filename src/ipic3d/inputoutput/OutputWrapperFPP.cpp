@@ -21,6 +21,7 @@
 
 #include "mpi.h"
 #include "OutputWrapperFPP.h"
+#include "OutputTagConfig.h"
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
@@ -95,20 +96,20 @@ void OutputWrapperFPP::init_output_files(
 #endif
 }
 
-void OutputWrapperFPP::append_output(const char* tag, int cycle)
-{
-#ifndef NO_HDF5
-    hdf5_agent.open_append(output_file);
-    output_mgr.output(tag, cycle);
-    hdf5_agent.close();
-#endif
-}
-
 void OutputWrapperFPP::append_output(const char* tag, int cycle, int sample)
 {
 #ifndef NO_HDF5
     hdf5_agent.open_append(output_file);
     output_mgr.output(tag, cycle, sample);
+    hdf5_agent.close();
+#endif
+}
+
+void OutputWrapperFPP::append_field_moment_output(const OutputTagConfig& cfg, int cycle)
+{
+#ifndef NO_HDF5
+    hdf5_agent.open_append(output_file);
+    hdf5_agent.outputFieldsMoments(cfg, cycle);
     hdf5_agent.close();
 #endif
 }

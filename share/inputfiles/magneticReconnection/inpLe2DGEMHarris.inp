@@ -21,8 +21,10 @@ B0z = 0.01 #0.0097 #0.02231
 delta = 0.5
 
 # %%%%%%%%%%%%%%%%%%% GEMHarris perturbation and Ampere init %%%%%%%%%%%%%%%%%%
-pertGEM              = 0.01       # GEM tearing perturbation amplitude (matches ECsim parameters[0])
-pertHump             = 0.0        # Gaussian hump perturbation (off)
+pertGEM              = 0.0       # GEM tearing perturbation amplitude
+pertHump             = 0.2        # Gaussian hump perturbation (off)
+deltaxHump           = 1.0        # Hump x-envelope width [units of delta]
+deltayHump           = 1.0        # Hump y-envelope width [units of delta]
 currentFromAmpere    = 1          # J from curl(B) with normalized u0/v0/w0 weights
 spatiallyVaryingThermal = 1       # Reference-state pressure for local thermal velocity
 
@@ -40,7 +42,7 @@ Smooth = 0.2           # Smoothing value (5-points stencil) Value =1.0 menas no-
 # %%%%%%%%%%%%%%%%%% BOX SIZE %%%%%%%%%%%%%%%
 Lx =   20.0            # Lx = simulation box length - x direction   
 Ly =   10.0            # Ly = simulation box length - y direction
-Lz =   0.1             # Lz = simulation box length - z direction   
+Lz =   1.0             # Lz = simulation box length - z direction   
 
 nxc =  1024 #384              # nxc = number of cells - x direction        
 nyc =  512 #512             # nyc = number of cells - y direction

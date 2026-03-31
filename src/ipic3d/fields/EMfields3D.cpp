@@ -3513,6 +3513,23 @@ void EMfields3D::initGEMHarris()
       grid->interpN2C(rhocs, is, rhons);
 
     // --- current initialization ---
+    // Zero moment arrays so particle init never reads uninitialized memory.
+    for (int is = 0; is < ns; is++)
+      for (int i = 0; i < nxn; i++)
+        for (int j = 0; j < nyn; j++)
+          for (int k = 0; k < nzn; k++)
+          {
+            Jxs[is][i][j][k] = 0.0;
+            Jys[is][i][j][k] = 0.0;
+            Jzs[is][i][j][k] = 0.0;
+            pXXsn[is][i][j][k] = 0.0;
+            pXYsn[is][i][j][k] = 0.0;
+            pXZsn[is][i][j][k] = 0.0;
+            pYYsn[is][i][j][k] = 0.0;
+            pYZsn[is][i][j][k] = 0.0;
+            pZZsn[is][i][j][k] = 0.0;
+          }
+
     if (ampere)
     {
       // Ampere mode: J = (c/4pi) curl(B) distributed by u0/v0/w0 weights
@@ -3537,8 +3554,6 @@ void EMfields3D::initGEMHarris()
 
       // --- Reference pressure state for spatially varying thermal velocity ---
       const int svt = col->getSpatiallyVaryingThermal();
-      if (svt && vct->getCartesian_rank() == 0)
-        cout << "Building reference pressure state (spatiallyVaryingThermal=1)" << endl;
 
       for (int is = 0; is < ns; is++)
       {

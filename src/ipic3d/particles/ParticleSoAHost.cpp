@@ -199,7 +199,8 @@ void ParticleSoAHost::maxwellianNullPoints(Field* EMf)
   const int nzr = numCellsZ_ - 2;
   const int nop = nxr * nyr * nzr * numParticlesPerCell_;
   const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
-  const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
+  const double chargeSign = chargeOverMass_ / fabs(chargeOverMass_);
+  const double chargeFactor = chargeSign * grid_->getVOL() / numParticlesPerCell_;
 
   prepareSoAForNOP(nop);
 
@@ -217,9 +218,13 @@ void ParticleSoAHost::maxwellianNullPoints(Field* EMf)
       const int idxBase = cellIdx * numParticlesPerCell_;
       const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
 
-      double localDriftX = EMf->getJxs(i, j, k, speciesNumber_) / EMf->getRHOns(i, j, k, speciesNumber_);
-      double localDriftY = EMf->getJys(i, j, k, speciesNumber_) / EMf->getRHOns(i, j, k, speciesNumber_);
-      double localDriftZ = EMf->getJzs(i, j, k, speciesNumber_) / EMf->getRHOns(i, j, k, speciesNumber_);
+      // Jxs from initGEMHarris/initNullPoints stores the Ampere current in
+      // the field convention (unsigned rhons).  The moment kernel deposits
+      // Jzs_moment = sign(q)*rhons*v, so drift = Jzs / (sign(q)*rhons).
+      const double signedRho = chargeSign * EMf->getRHOns(i, j, k, speciesNumber_);
+      double localDriftX = EMf->getJxs(i, j, k, speciesNumber_) / signedRho;
+      double localDriftY = EMf->getJys(i, j, k, speciesNumber_) / signedRho;
+      double localDriftZ = EMf->getJzs(i, j, k, speciesNumber_) / signedRho;
 
       for (int ii = 0; ii < numPclPerCellX_; ++ii)
       for (int jj = 0; jj < numPclPerCellY_; ++jj)
@@ -266,7 +271,8 @@ void ParticleSoAHost::maxwellianAmpereVaryingThermal(Field* EMf)
   const int nzr = numCellsZ_ - 2;
   const int nop = nxr * nyr * nzr * numParticlesPerCell_;
   const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
-  const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
+  const double chargeSign = chargeOverMass_ / fabs(chargeOverMass_);  // +1 ions, -1 electrons
+  const double chargeFactor = chargeSign * grid_->getVOL() / numParticlesPerCell_;
 
   prepareSoAForNOP(nop);
 
@@ -284,11 +290,16 @@ void ParticleSoAHost::maxwellianAmpereVaryingThermal(Field* EMf)
       const int idxBase = cellIdx * numParticlesPerCell_;
       const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
 
-      // Local drift velocity from Ampere current
+      // Local drift velocity from Ampere current.
+      // Jxs is stored in the Ampere/field convention (no charge sign),
+      // but rhons during init is always positive (unsigned).  The moment
+      // kernel deposits Jzs_moment = sign(q)*rho*v, so to recover the
+      // physical drift velocity we must divide by sign(q)*rho.
       const double rho = EMf->getRHOns(i, j, k, speciesNumber_);
-      const double localDriftX = EMf->getJxs(i, j, k, speciesNumber_) / rho;
-      const double localDriftY = EMf->getJys(i, j, k, speciesNumber_) / rho;
-      const double localDriftZ = EMf->getJzs(i, j, k, speciesNumber_) / rho;
+      const double signedRho = chargeSign * rho;
+      const double localDriftX = EMf->getJxs(i, j, k, speciesNumber_) / signedRho;
+      const double localDriftY = EMf->getJys(i, j, k, speciesNumber_) / signedRho;
+      const double localDriftZ = EMf->getJzs(i, j, k, speciesNumber_) / signedRho;
 
       // Local thermal velocity from reference pressure state:
       // vth_i = sqrt(p_ii / rho - (J_i / rho)^2)

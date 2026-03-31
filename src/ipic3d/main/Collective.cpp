@@ -916,6 +916,9 @@ void Collective::Print() {
        << nxc_loc << "x" << nyc_loc << "x" << nzc_loc << " cells, "
        << nxn_loc << "x" << nyn_loc << "x" << nzn_loc << " nodes" << endl;
 
+  // Interior cell counts (no ghost layers) — used for particle estimates
+  const int nxc_r = nxc_loc - 2, nyc_r = nyc_loc - 2, nzc_r = nzc_loc - 2;
+
   // --- HOST ---
   // EMfields3D: 50 node-3D + 15 cell-3D + 10*ns node-4D + ns cell-4D + fieldForPcls + Krylov
   double hostEMf = (50.0 * gridN + 15.0 * gridC
@@ -924,7 +927,7 @@ void Collective::Print() {
   double hostFieldBuf = fieldSize * 24.0 * 8;       // pinned field buffer
   double hostPcl = 0, hostComm = 0;
   for (int i = 0; i < ns; i++) {
-    long long nop_i = (long long)npcel[i] * nxn_loc * nyn_loc * nzn_loc;
+    long long nop_i = (long long)npcel[i] * nxc_r * nyc_r * nzc_r;  // interior cells (same as device)
     hostPcl  += nop_i * 8.0 * 8;        // 8 SoA arrays * 8 bytes
     hostComm += 0.1 * nop_i * 64.0;     // MPI comm buffer (AoS)
   }
@@ -938,7 +941,6 @@ void Collective::Print() {
 
   // --- DEVICE ---
   // GPU allocations use actual NOP from maxwellian (interior cells only, no ghosts)
-  const int nxc_r = nxc_loc - 2, nyc_r = nyc_loc - 2, nzc_r = nzc_loc - 2;
   const double CAP_FACTOR = 1.4, AUX_FRAC = 0.1, PLANET_FRAC = 0.05;
   bool isDipole = (Case == "Dipole" || Case == "Dipole2D");
 

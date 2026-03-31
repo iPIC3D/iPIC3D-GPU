@@ -3434,14 +3434,13 @@ void EMfields3D::initGEMHarris()
           // --- density ---
           for (int is = 0; is < ns; is++)
           {
-            const double sign_q = qom[is] / fabs(qom[is]);
             if (DriftSpecies[is])
             {
               const double sech = 1.0 / cosh(yM / delta);
-              rhons[is][i][j][k] = sign_q * rhoINIT[is] * sech * sech / FourPI;
+              rhons[is][i][j][k] = rhoINIT[is] * sech * sech / FourPI;
             }
             else
-              rhons[is][i][j][k] = sign_q * rhoINIT[is] / FourPI;
+              rhons[is][i][j][k] = rhoINIT[is] / FourPI;
           }
 
           // --- E = 0 ---
@@ -3526,9 +3525,9 @@ void EMfields3D::initGEMHarris()
       double sumU = 0.0, sumV = 0.0, sumW = 0.0;
       for (int is = 0; is < ns; is++)
       {
-        sumU += abs(col->getU0(is));
-        sumV += abs(col->getV0(is));
-        sumW += abs(col->getW0(is));
+        sumU += (col->getU0(is));
+        sumV += (col->getV0(is));
+        sumW += (col->getW0(is));
       }
       if (vct->getCartesian_rank() == 0)
       {

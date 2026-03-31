@@ -3526,9 +3526,9 @@ void EMfields3D::initGEMHarris()
       double sumU = 0.0, sumV = 0.0, sumW = 0.0;
       for (int is = 0; is < ns; is++)
       {
-        sumU += col->getU0(is);
-        sumV += col->getV0(is);
-        sumW += col->getW0(is);
+        sumU += abs(col->getU0(is));
+        sumV += abs(col->getV0(is));
+        sumW += abs(col->getW0(is));
       }
       if (vct->getCartesian_rank() == 0)
       {

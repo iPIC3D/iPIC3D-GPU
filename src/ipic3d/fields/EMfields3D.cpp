@@ -3522,15 +3522,62 @@ void EMfields3D::initGEMHarris()
       eqValue(0.0, tempZN, nxn, nyn, nzn);
       grid->curlC2N(tempXN, tempYN, tempZN, Bxc, Byc, Bzc);
 
-      for (int i = 0; i < nxn; i++)
-        for (int j = 0; j < nyn; j++)
-          for (int k = 0; k < nzn; k++)
-            for (int is = 0; is < ns; is++)
+      // --- Normalize velocity weights so they sum to 1 per component ---
+      double sumU = 0.0, sumV = 0.0, sumW = 0.0;
+      for (int is = 0; is < ns; is++)
+      {
+        sumU += col->getU0(is);
+        sumV += col->getV0(is);
+        sumW += col->getW0(is);
+      }
+      if (vct->getCartesian_rank() == 0)
+      {
+        cout << "currentFromAmpere weight sums: "
+             << "sumU0=" << sumU << "  sumV0=" << sumV << "  sumW0=" << sumW << endl;
+      }
+
+      // --- Reference pressure state for spatially varying thermal velocity ---
+      const int svt = col->getSpatiallyVaryingThermal();
+      if (svt && vct->getCartesian_rank() == 0)
+        cout << "Building reference pressure state (spatiallyVaryingThermal=1)" << endl;
+
+      for (int is = 0; is < ns; is++)
+      {
+        const double wU = (sumU != 0.0) ? col->getU0(is) / sumU : 0.0;
+        const double wV = (sumV != 0.0) ? col->getV0(is) / sumV : 0.0;
+        const double wW = (sumW != 0.0) ? col->getW0(is) / sumW : 0.0;
+        const double factU = wU * c / FourPI;
+        const double factV = wV * c / FourPI;
+        const double factW = wW * c / FourPI;
+        const double uthS2 = col->getUth(is) * col->getUth(is);
+        const double vthS2 = col->getVth(is) * col->getVth(is);
+        const double wthS2 = col->getWth(is) * col->getWth(is);
+
+        for (int i = 0; i < nxn; i++)
+          for (int j = 0; j < nyn; j++)
+            for (int k = 0; k < nzn; k++)
             {
-              Jxs[is][i][j][k] = col->getU0(is) * c * tempXN[i][j][k] / FourPI;
-              Jys[is][i][j][k] = col->getV0(is) * c * tempYN[i][j][k] / FourPI;
-              Jzs[is][i][j][k] = col->getW0(is) * c * tempZN[i][j][k] / FourPI;
+              Jxs[is][i][j][k] = factU * tempXN[i][j][k];
+              Jys[is][i][j][k] = factV * tempYN[i][j][k];
+              Jzs[is][i][j][k] = factW * tempZN[i][j][k];
             }
+
+        if (svt)
+        {
+          for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+              for (int k = 0; k < nzn; k++)
+              {
+                const double rho = rhons[is][i][j][k];
+                const double Jx  = Jxs[is][i][j][k];
+                const double Jy  = Jys[is][i][j][k];
+                const double Jz  = Jzs[is][i][j][k];
+                pXXsn[is][i][j][k] = Jx * Jx / rho + uthS2 * rho;
+                pYYsn[is][i][j][k] = Jy * Jy / rho + vthS2 * rho;
+                pZZsn[is][i][j][k] = Jz * Jz / rho + wthS2 * rho;
+              }
+        }
+      }
     }
     // else: Jxs/Jys/Jzs stay at zero (default)
     // particle init will use global u0/v0/w0 as drift velocities

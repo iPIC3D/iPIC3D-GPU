@@ -301,10 +301,14 @@ int c_Solver::Init(int argc, char **argv) {
         case CaseType::GEMDoubleHarris: particlesHost[i]->maxwellianDoubleHarris(EMf); break;
         case CaseType::HumpPert:        particlesHost[i]->maxwellianHumpPerturbation(EMf); break;
         case CaseType::GEMHarris:
-          if (col->getCurrentFromAmpere())
-            particlesHost[i]->maxwellianNullPoints(EMf);
-          else
+          if (col->getCurrentFromAmpere()) {
+            if (col->getSpatiallyVaryingThermal())
+              particlesHost[i]->maxwellianAmpereVaryingThermal(EMf);
+            else
+              particlesHost[i]->maxwellianNullPoints(EMf);
+          } else {
             particlesHost[i]->maxwellian(EMf);
+          }
           break;
         default:                        particlesHost[i]->maxwellian(EMf); break;
       }

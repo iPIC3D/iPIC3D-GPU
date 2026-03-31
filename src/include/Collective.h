@@ -188,6 +188,7 @@ class Collective
     double getDeltaxHump()const{ return deltaxHump; }
     double getDeltayHump()const{ return deltayHump; }
     int    getCurrentFromAmpere()const{ return currentFromAmpere; }
+    int    getSpatiallyVaryingThermal()const{ return spatiallyVaryingThermal; }
     //bool getVerbose()const{ return (verbose); }
     //bool getTrackParticleID(int nspecies)const{ return (TrackParticleID[nspecies]); }
     int getRestart_status()const{ return (restart_status); }
@@ -458,6 +459,7 @@ class Collective
     double deltaxHump;        ///< hump x-width [units of delta]
     double deltayHump;        ///< hump y-width [units of delta]
     int    currentFromAmpere; ///< 1 = J from curl(B) with u0 weights, 0 = J from u0 drift
+    int    spatiallyVaryingThermal; ///< 1 = use reference-state pressure for local vth, 0 = global uth
 
     /*! boolean value for verbose results */
     //bool verbose;

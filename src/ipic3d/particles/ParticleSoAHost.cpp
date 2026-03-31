@@ -247,6 +247,88 @@ void ParticleSoAHost::maxwellianNullPoints(Field* EMf)
 }
 
 /**
+ * @brief Populate using local Ampere-driven drift and reference-state thermal velocity.
+ *
+ * Drift: v_drift = Jxs/rhons per cell (from currentFromAmpere).
+ * Thermal: vth = sqrt(pXXsn/rhons - (Jxs/rhons)^2) per cell.
+ * Matches the ECsim reference-state initialization (at t=0 this gives global uth
+ * algebraically, but preserves the mechanism for discrete numerical effects and
+ * future extension to non-trivial pressure profiles).
+ *
+ * @param EMf Field object with Ampere currents and reference pressure state.
+ */
+void ParticleSoAHost::maxwellianAmpereVaryingThermal(Field* EMf)
+{
+  assert_eq(getNOP(), 0);
+
+  const int nxr = numCellsX_ - 2;
+  const int nyr = numCellsY_ - 2;
+  const int nzr = numCellsZ_ - 2;
+  const int nop = nxr * nyr * nzr * numParticlesPerCell_;
+  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
+  const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
+
+  prepareSoAForNOP(nop);
+
+  #pragma omp parallel
+  {
+    const int tid = omp_get_thread_num();
+    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 + tid * 1049);
+
+    #pragma omp for collapse(3) schedule(static)
+    for (int i = 1; i < numCellsX_ - 1; i++)
+    for (int j = 1; j < numCellsY_ - 1; j++)
+    for (int k = 1; k < numCellsZ_ - 1; k++)
+    {
+      const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
+      const int idxBase = cellIdx * numParticlesPerCell_;
+      const double chargePerParticle = chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
+
+      // Local drift velocity from Ampere current
+      const double rho = EMf->getRHOns(i, j, k, speciesNumber_);
+      const double localDriftX = EMf->getJxs(i, j, k, speciesNumber_) / rho;
+      const double localDriftY = EMf->getJys(i, j, k, speciesNumber_) / rho;
+      const double localDriftZ = EMf->getJzs(i, j, k, speciesNumber_) / rho;
+
+      // Local thermal velocity from reference pressure state:
+      // vth_i = sqrt(p_ii / rho - (J_i / rho)^2)
+      const double pxx = EMf->getpXXsn(i, j, k, speciesNumber_);
+      const double pyy = EMf->getpYYsn(i, j, k, speciesNumber_);
+      const double pzz = EMf->getpZZsn(i, j, k, speciesNumber_);
+      const double vthX2 = pxx / rho - localDriftX * localDriftX;
+      const double vthY2 = pyy / rho - localDriftY * localDriftY;
+      const double vthZ2 = pzz / rho - localDriftZ * localDriftZ;
+      // Guard against negative values from floating-point round-off
+      const double localVthX = (vthX2 > 0.0) ? sqrt(vthX2) : thermalVelocityX_;
+      const double localVthY = (vthY2 > 0.0) ? sqrt(vthY2) : thermalVelocityY_;
+      const double localVthZ = (vthZ2 > 0.0) ? sqrt(vthZ2) : thermalVelocityZ_;
+
+      for (int ii = 0; ii < numPclPerCellX_; ++ii)
+      for (int jj = 0; jj < numPclPerCellY_; ++jj)
+      for (int kk = 0; kk < numPclPerCellZ_; ++kk)
+      {
+        const int subIdx = (ii * numPclPerCellY_ + jj) * numPclPerCellZ_ + kk;
+        const int idx = idxBase + subIdx;
+
+        double velX, velY, velZ;
+        sample_maxwellian(velX, velY, velZ,
+                          localVthX, localVthY, localVthZ,
+                          localDriftX, localDriftY, localDriftZ, rng);
+
+        u[idx] = velX;
+        v[idx] = velY;
+        w[idx] = velZ;
+        q[idx] = chargePerParticle;
+        x[idx] = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
+        y[idx] = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
+        z[idx] = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
+        t[idx] = baseID + idx;
+      }
+    }
+  }
+}
+
+/**
  * @brief Populate the double-Harris configuration.
  *
  * @param EMf Field object used to sample equilibrium density.

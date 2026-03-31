@@ -143,6 +143,7 @@ void Collective::ReadInput(string inputfile) {
     deltaxHump        = config.read<double>("deltaxHump", 8.0);
     deltayHump        = config.read<double>("deltayHump", 4.0);
     currentFromAmpere = config.read<int>("currentFromAmpere", 0);
+    spatiallyVaryingThermal = config.read<int>("spatiallyVaryingThermal", 0);
 
     Case              = config.read<string>("Case");
     wmethod           = config.read<string>("WriteMethod");

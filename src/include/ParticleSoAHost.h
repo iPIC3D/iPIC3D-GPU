@@ -245,6 +245,15 @@ public:
    */
   void maxwellianNullPoints(Field* EMf);
   /**
+   * @brief Populate using local Ampere-driven drift and reference-state thermal velocity.
+   *
+   * Uses Jxs/rhons for the local drift and pXXsn/rhons for local thermal velocity,
+   * matching the ECsim reference-state initialization approach.
+   *
+   * @param EMf Field object with Ampere currents and reference pressure state.
+   */
+  void maxwellianAmpereVaryingThermal(Field* EMf);
+  /**
    * @brief Populate the double-Harris configuration.
    *
    * @param EMf Field object used to sample the equilibrium.

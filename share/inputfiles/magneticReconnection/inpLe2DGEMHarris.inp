@@ -25,8 +25,19 @@ pertGEM              = 0.0       # GEM tearing perturbation amplitude
 pertHump             = 0.2        # Gaussian hump perturbation (off)
 deltaxHump           = 1.0        # Hump x-envelope width [units of delta]
 deltayHump           = 1.0        # Hump y-envelope width [units of delta]
+kxHump               = -1.0      # Hump x-wavenumber (<0 = 2*PI/Lx)
+kyHump               = -1.0      # Hump y-wavenumber (<0 = PI/Ly)
 currentFromAmpere    = 1          # J from curl(B) with normalized u0/v0/w0 weights
 spatiallyVaryingThermal = 1       # Reference-state pressure for local thermal velocity
+# --- To match GEM case exactly (pertX=0.4, delta=0.5), set: ---
+# pertGEM              = 0.0
+# pertHump             = 0.12566   # 0.4*PI/10
+# deltaxHump           = 1.0
+# deltayHump           = 1.0
+# kxHump               = 0.62832   # PI/(10*delta) = PI/5
+# kyHump               = 0.62832   # PI/(10*delta) = PI/5
+# currentFromAmpere    = 0
+# spatiallyVaryingThermal = 0
 
 #  %%%%%%%%%%%%%%%%%%% TIME %%%%%%%%%%%%%%%%%%
 dt = .065 #0.125               # dt = time step  

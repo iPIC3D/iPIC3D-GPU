@@ -3389,9 +3389,10 @@ void EMfields3D::initGEMHarris()
   const int    ampere   = col->getCurrentFromAmpere();
 
   // --- wavenumbers ---
-  const double kx   = 2.0 * M_PI / Lx;
-  const double kyG  = 2.0 * M_PI / Ly;   // GEM: full wavelength (periodic y)
-  const double kyH  = M_PI / Ly;          // hump: half wavelength (wall parity)
+  const double kxG  = 2.0 * M_PI / Lx;              // pertGEM tearing-mode kx
+  const double kyG  = 2.0 * M_PI / Ly;              // pertGEM tearing-mode ky
+  const double kx   = (col->getKxHump() < 0.0) ? 2.0 * M_PI / Lx : col->getKxHump();
+  const double kyH  = (col->getKyHump() < 0.0) ? M_PI / Ly        : col->getKyHump();
   const double A0   = (pertHump != 0.0) ? pertHump * B0x / kyH : 0.0;
 
   if (restart1 == 0)
@@ -3412,6 +3413,8 @@ void EMfields3D::initGEMHarris()
              << " (physical " << deltax << ")" << endl;
         cout << "deltayHump         = " << col->getDeltayHump()
              << " (physical " << deltay << ")" << endl;
+        cout << "kxHump             = " << kx  << endl;
+        cout << "kyHump             = " << kyH << endl;
       }
       cout << "currentFromAmpere  = " << ampere << endl;
       for (int i = 0; i < ns; i++)
@@ -3457,9 +3460,9 @@ void EMfields3D::initGEMHarris()
           if (pertGEM != 0.0)
           {
             Bxn[i][j][k] += -pertGEM * B0x * (Lx / Ly)
-                            * cos(kx * xM) * sin(kyG * yM);
+                            * cos(kxG * xM) * sin(kyG * yM);
             Byn[i][j][k] += pertGEM * B0x
-                            * sin(kx * xM) * cos(kyG * yM);
+                            * sin(kxG * xM) * cos(kyG * yM);
           }
 
           // === Hump perturbation (from vector potential, div-free) ===
@@ -3554,6 +3557,8 @@ void EMfields3D::initGEMHarris()
 
       // --- Reference pressure state for spatially varying thermal velocity ---
       const int svt = col->getSpatiallyVaryingThermal();
+      if (svt && vct->getCartesian_rank() == 0)
+        cout << "Building reference pressure state (spatiallyVaryingThermal=1)" << endl;
 
       for (int is = 0; is < ns; is++)
       {

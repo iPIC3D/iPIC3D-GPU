@@ -187,6 +187,8 @@ class Collective
     double getPertHump()const{ return pertHump; }
     double getDeltaxHump()const{ return deltaxHump; }
     double getDeltayHump()const{ return deltayHump; }
+    double getKxHump()const{ return kxHump; }
+    double getKyHump()const{ return kyHump; }
     int    getCurrentFromAmpere()const{ return currentFromAmpere; }
     int    getSpatiallyVaryingThermal()const{ return spatiallyVaryingThermal; }
     //bool getVerbose()const{ return (verbose); }
@@ -458,6 +460,8 @@ class Collective
     double pertHump;          ///< hump perturbation amplitude [fraction of B0x]
     double deltaxHump;        ///< hump x-width [units of delta]
     double deltayHump;        ///< hump y-width [units of delta]
+    double kxHump;            ///< hump x-wavenumber (<0 = 2*PI/Lx)
+    double kyHump;            ///< hump y-wavenumber (<0 = PI/Ly)
     int    currentFromAmpere; ///< 1 = J from curl(B) with u0 weights, 0 = J from u0 drift
     int    spatiallyVaryingThermal; ///< 1 = use reference-state pressure for local vth, 0 = global uth
 

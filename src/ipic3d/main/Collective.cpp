@@ -142,6 +142,8 @@ void Collective::ReadInput(string inputfile) {
     pertHump          = config.read<double>("pertHump",   0.0);
     deltaxHump        = config.read<double>("deltaxHump", 8.0);
     deltayHump        = config.read<double>("deltayHump", 4.0);
+    kxHump            = config.read<double>("kxHump",     -1.0);
+    kyHump            = config.read<double>("kyHump",     -1.0);
     currentFromAmpere = config.read<int>("currentFromAmpere", 0);
     spatiallyVaryingThermal = config.read<int>("spatiallyVaryingThermal", 0);
 

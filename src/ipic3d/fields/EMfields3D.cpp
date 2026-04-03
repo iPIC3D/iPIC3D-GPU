@@ -3541,18 +3541,21 @@ void EMfields3D::initGEMHarris()
       eqValue(0.0, tempZN, nxn, nyn, nzn);
       grid->curlC2N(tempXN, tempYN, tempZN, Bxc, Byc, Bzc);
 
-      // --- Normalize velocity weights so they sum to 1 per component ---
+      // --- Charge-weighted normalization: sign(q)*w0 sums to N,
+      //     so weight f_s = sign(q_s)*w0_s / N ensures sum(f_s) = 1
+      //     and recovered drift sign(v) = sign(w0). ---
       double sumU = 0.0, sumV = 0.0, sumW = 0.0;
       for (int is = 0; is < ns; is++)
       {
-        sumU += (col->getU0(is));
-        sumV += (col->getV0(is));
-        sumW += (col->getW0(is));
+        const double qs = (col->getQOM(is) > 0.0) ? 1.0 : -1.0;
+        sumU += qs * col->getU0(is);
+        sumV += qs * col->getV0(is);
+        sumW += qs * col->getW0(is);
       }
       if (vct->getCartesian_rank() == 0)
       {
-        cout << "currentFromAmpere weight sums: "
-             << "sumU0=" << sumU << "  sumV0=" << sumV << "  sumW0=" << sumW << endl;
+        cout << "currentFromAmpere charge-weighted sums: "
+             << "N_u=" << sumU << "  N_v=" << sumV << "  N_w=" << sumW << endl;
       }
 
       // --- Reference pressure state for spatially varying thermal velocity ---
@@ -3562,9 +3565,10 @@ void EMfields3D::initGEMHarris()
 
       for (int is = 0; is < ns; is++)
       {
-        const double wU = (sumU != 0.0) ? col->getU0(is) / sumU : 0.0;
-        const double wV = (sumV != 0.0) ? col->getV0(is) / sumV : 0.0;
-        const double wW = (sumW != 0.0) ? col->getW0(is) / sumW : 0.0;
+        const double qs = (col->getQOM(is) > 0.0) ? 1.0 : -1.0;
+        const double wU = (sumU != 0.0) ? qs * col->getU0(is) / sumU : 0.0;
+        const double wV = (sumV != 0.0) ? qs * col->getV0(is) / sumV : 0.0;
+        const double wW = (sumW != 0.0) ? qs * col->getW0(is) / sumW : 0.0;
         const double factU = wU * c / FourPI;
         const double factV = wV * c / FourPI;
         const double factW = wW * c / FourPI;

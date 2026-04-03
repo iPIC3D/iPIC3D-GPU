@@ -58,10 +58,28 @@ cmake .. # using CUDA by default
 cmake -DHIP_ON=ON .. # use HIP
 ```
 
-If you's like to use HIP, notice the GPU architecture in [CMakeLists.txt](./CMakeLists.txt), change it according to your hardware to get bet performance:
+#### CMake options
 
-``` cmake 
-set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx90a) 
+| Option | Default | Description |
+|--------|---------|-------------|
+| `CUDA_ARCH` | `75` | CUDA compute capability (minimum `75` for double-precision `atomicAdd`). Example: `-DCUDA_ARCH=80` for A100 |
+| `HIP_ON` | `OFF` | Set `ON` to compile with HIP instead of CUDA |
+| `HIP_ARCH` | `gfx90a` | HIP GPU architecture (e.g. `gfx90a` for MI250X, `gfx940` for MI300). Example: `-DHIP_ARCH=gfx940` |
+| `USE_HDF5` | `ON` | Compile HDF5-based I/O backends (serial HDF5, parallel HDF5, H5hut) |
+| `USE_PHDF5` | `ON` | Enable parallel HDF5 field output (requires `USE_HDF5=ON` and MPI-enabled HDF5). Auto-disabled when `USE_HDF5=OFF` |
+| `USE_ADIOS2` | `ON` | Compile ADIOS2 backend for particles and restarts |
+| `USE_CATALYST` | `OFF` | Enable ParaView Catalyst in-situ visualization (requires ParaView ≥ 5.7) |
+| `USE_BATSRUS` | `OFF` | Enable BATS-R-US MHD coupling (adds `BATSRUS` compile definition) |
+| `USE_OPENMP` | `ON` | Enable OpenMP in the CPU solver. **Delete CMake cache when changing this.** |
+| `BENCH_MARK` | `OFF` | Print per-task timing (`LOG_TASKS_TOTAL_TIME`) |
+| `BUILD_SHARED_LIBS` | `ON` | Build shared libraries (`OFF` for static) |
+| `SITE` | `default` | Select a predefined site configuration from `cmake/sites/` |
+
+Example with explicit architecture and selected backends:
+```shell
+cmake -DCUDA_ARCH=80 -DUSE_ADIOS2=ON -DUSE_HDF5=ON -DUSE_PHDF5=ON ..
+# or for HIP:
+cmake -DHIP_ON=ON -DHIP_ARCH=gfx90a -DUSE_ADIOS2=ON ..
 ```
 
 
@@ -221,7 +239,9 @@ The simulation case is selected via the `Case` parameter in the input file (e.g.
 | `NullPoints` | **Magnetic null-point topology.** Periodic field with components like $B_x \propto -\sin x\,\cos y\,\cos z$ creating a network of null points. Electron current is initialised from $\nabla\times\mathbf{B}$; ions are at rest. | — |
 | `TaylorGreen` | **Taylor-Green vortex.** 3-D periodic velocity field ($u_e \propto \sin x\,\cos y$, etc.) combined with a periodic magnetic field. Used for testing decaying MHD turbulence and energy transfer. | `share/inputfiles/turbulence/testTurbulence3D.inp` |
 | `RandomCase` | **Random-perturbation reconnection.** Harris current sheet (like GEM) overlaid with a multi-mode random magnetic perturbation ($k_x$, $k_y$, $k_z$ harmonics with random phases and $1/k$ amplitude scaling). | — |
-| `BATSRUS` | **Coupling with BATS-R-US MHD code.** Reads fluid fields (density, velocity, pressure, B) from an external MHD solution and initialises Maxwellian particle distributions cell-by-cell to match the MHD moments. Requires `#ifdef BATSRUS` at compile time. | — |
+| `GEMHarris` | **Generalised Harris sheet.** Combines a Harris $B_x$ profile with optional GEM perturbation (`pertGEM`) and/or hump perturbation (`pertHump`). Supports Ampere-consistent current initialisation (`currentFromAmpere = 1`) and spatially varying thermal velocity (`spatiallyVaryingThermal = 1`). When `currentFromAmpere = 1`, drift velocities are derived from $\nabla\times\mathbf{B}$ and the `w0` species weights control relative current partition (sign of `w0` sets drift direction, magnitude sets weight). | `share/inputfiles/magneticReconnection/inpLe2DGEMHarris.inp` |
+| `HumpPert` | **Magnetic hump perturbation.** Uniform density with a localised $\operatorname{sech}^2$ magnetic-pressure hump centred at the domain midpoint superimposed on $\mathbf{B}_0$. The hump width is set by `delta`, shape by `deltaxHump`, `deltayHump`, and amplitude by `pertHump`. Used for studying compressive magnetic relaxation. | — |
+| `BATSRUS` | **Coupling with BATS-R-US MHD code.** Reads fluid fields (density, velocity, pressure, B) from an external MHD solution and initialises Maxwellian particle distributions cell-by-cell to match the MHD moments. Requires `USE_BATSRUS=ON` at compile time. | — |
 
 Any unrecognised `Case` string falls through to a **default** initialisation: uniform density, constant background $\mathbf{B}$, zero electric field. A warning is printed to standard output.
 
@@ -235,6 +255,8 @@ Some cases apply additional boundary-condition fixes during the time loop:
 | `ForceFree` | `fixBforcefree` — enforce force-free B profile at $y$-boundaries |
 | `Dipole` | `ConstantChargePlanet` — maintain fixed charge inside the planet sphere (every cycle) |
 | `Dipole2D` | `ConstantChargePlanet2DPlaneXZ` — 2-D variant of the above (every cycle) |
+| `GEMHarris` | None |
+| `HumpPert` | None |
 
 ### Setting the case
 
@@ -245,6 +267,105 @@ Case = GEM
 ```
 
 The `Case` string is **case-sensitive** and must match one of the names in the table above exactly.
+
+### Case-specific input parameters
+
+Some cases use additional input-file parameters beyond the common ones:
+
+| Parameter | Default | Used by | Description |
+|-----------|---------|---------|-------------|
+| `delta` | `0.5` | GEM, GEMnoPert, GEMDoubleHarris, ForceFree, GEMHarris, HumpPert | Current sheet half-thickness |
+| `pertGEM` | `0.0` | GEM, GEMHarris | GEM flux perturbation amplitude |
+| `pertHump` | `0.0` | HumpPert, GEMHarris | Hump perturbation amplitude |
+| `deltaxHump` | `8.0` | HumpPert, GEMHarris | Hump width in x |
+| `deltayHump` | `4.0` | HumpPert, GEMHarris | Hump width in y |
+| `kxHump` | `-1.0` | GEMHarris | Hump wave number x (if ≥ 0) |
+| `kyHump` | `-1.0` | GEMHarris | Hump wave number y (if ≥ 0) |
+| `currentFromAmpere` | `0` | GEMHarris | `1`: derive drift velocity from $\nabla\times\mathbf{B}$ instead of using `u0`/`v0`/`w0` directly |
+| `spatiallyVaryingThermal` | `0` | GEMHarris | `1`: use spatially varying thermal velocity (requires `currentFromAmpere = 1`) |
+
+## Output Control
+
+Output is controlled through **cycle parameters** (how often to write) and **tag strings** (what to write).
+
+### Output cycles
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `FieldOutputCycle` | `100` | Write field/moments data every N cycles. `0` disables field output. |
+| `ParticlesOutputCycle` | `0` | Write particle data every N cycles. `0` disables particle output. |
+| `RestartOutputCycle` | `5000` | Write restart checkpoint every N cycles. `0` disables periodic checkpoints. |
+| `DiagnosticsOutputCycle` | `FieldOutputCycle` | Write scalar diagnostics (energy, etc.) every N cycles. Defaults to `FieldOutputCycle` if not set. |
+| `TestPartOutputCycle` | `0` | Write test-particle trajectory data every N cycles. |
+| `SortingCycle` | `0` | Re-sort particles by cell every N cycles for cache efficiency. `0` disables. |
+
+### Field output tags (`FieldOutputTag`)
+
+A `+`-separated string selecting which grid-level fields to write. Example: `FieldOutputTag = B+E+rho`
+
+| Token | Data written |
+|-------|-------------|
+| `B` | Magnetic field ($B_x$, $B_y$, $B_z$) |
+| `E` | Electric field ($E_x$, $E_y$, $E_z$) |
+| `Je` | Current density for species 0 ($J_{x,0}$, $J_{y,0}$, $J_{z,0}$) |
+| `Ji` | Current density for species 1 |
+| `Je2` | Current density for species 2 |
+| `Ji3` | Current density for species 3 |
+| `rho` | Total charge density |
+
+### Moments output tags (`MomentsOutputTag`)
+
+A `+`-separated string selecting which per-species or total moments to write. Example: `MomentsOutputTag = rho+J+PXX+PYY+PZZ`
+
+**All-species** (writes one file per species):
+
+| Token | Data |
+|-------|------|
+| `rho` | Charge density |
+| `J` | Current density |
+| `P` | Full pressure tensor (all 6 components) |
+| `PXX`, `PXY`, `PXZ`, `PYY`, `PYZ`, `PZZ` | Individual pressure tensor components |
+
+**Species-indexed** (single species `s`):
+
+| Pattern | Example | Data |
+|---------|---------|------|
+| `rho<s>` | `rho0` | Density of species 0 |
+| `J<s>` | `J1` | Current of species 1 |
+| `P<s>` | `P0` | Full pressure tensor of species 0 |
+| `PXX<s>` ... `PZZ<s>` | `PXX2` | Single component for species 2 |
+
+**Summed totals** (sum over all species):
+
+| Token | Data |
+|-------|------|
+| `rho_tot` | Total charge density |
+| `J_tot` | Total current density |
+| `P_tot` | Total pressure tensor |
+| `PXX_tot` ... `PZZ_tot` | Individual total pressure components |
+
+### Particle output tags (`ParticlesOutputTag`)
+
+A `+`-separated string selecting which particle data to write. Example: `ParticlesOutputTag = position+velocity+q+ID`
+
+| Token | Data |
+|-------|------|
+| `position` | Particle positions ($x$, $y$, $z$) |
+| `velocity` | Particle velocities ($u$, $v$, $w$) |
+| `q` | Particle charge |
+| `ID` | Particle ID |
+
+Additional ADIOS2-only tokens used for restart data: `proc_topology`, `E`, `B`, `Js`, `rhos`, `pressure`.
+
+### Other output parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `WriteMethod` | — | Field output backend (see [I/O Backends](#io-backends) below) |
+| `SaveDirName` | `data` | Output directory. **Warning:** existing contents are deleted on fresh start. |
+| `RestartDirName` | `data` | Directory for restart checkpoint files |
+| `CallFinalize` | `1` | Write a final restart checkpoint when the simulation ends (requires `RestartOutputCycle > 0`) |
+| `ParaviewScriptPath` | `""` | Path to ParaView Catalyst Python script (requires `USE_CATALYST`) |
 
 ## I/O Backends
 

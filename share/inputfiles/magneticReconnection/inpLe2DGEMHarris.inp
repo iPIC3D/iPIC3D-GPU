@@ -14,7 +14,7 @@ SimulationName    = GEMHarris                       # Simulation name for the ou
 
 
 #  %%%%%%%%%%%%%%%%%%% Magnetic Reconnection %%%%%%%%%%%%%%%%%%
-B0x = 0.0249
+B0x = 0.025
 B0y = 0.00
 B0z = 0.01 #0.0097 #0.02231
 
@@ -22,13 +22,14 @@ delta = 0.5
 
 # %%%%%%%%%%%%%%%%%%% GEMHarris perturbation and Ampere init %%%%%%%%%%%%%%%%%%
 pertGEM              = 0.0       # GEM tearing perturbation amplitude
-pertHump             = 0.2        # Gaussian hump perturbation (off)
+pertHump             = 0.12566        # Gaussian hump perturbation (off)
 deltaxHump           = 1.0        # Hump x-envelope width [units of delta]
 deltayHump           = 1.0        # Hump y-envelope width [units of delta]
-kxHump               = -1.0      # Hump x-wavenumber (<0 = 2*PI/Lx)
-kyHump               = -1.0      # Hump y-wavenumber (<0 = PI/Ly)
+kxHump               = 0.62832     # Hump x-wavenumber (<0 = 2*PI/Lx)
+kyHump               = 0.62832     # Hump y-wavenumber (<0 = PI/Ly)
 currentFromAmpere    = 1          # J from curl(B) with normalized u0/v0/w0 weights
 spatiallyVaryingThermal = 1       # Reference-state pressure for local thermal velocity
+
 # --- To match GEM case exactly (pertX=0.4, delta=0.5), set: ---
 # pertGEM              = 0.0
 # pertHump             = 0.12566   # 0.4*PI/10
@@ -55,8 +56,8 @@ Lx =   20.0            # Lx = simulation box length - x direction
 Ly =   10.0            # Ly = simulation box length - y direction
 Lz =   1.0             # Lz = simulation box length - z direction   
 
-nxc =  1024 #384              # nxc = number of cells - x direction        
-nyc =  512 #512             # nyc = number of cells - y direction
+nxc =  512 #384              # nxc = number of cells - x direction        
+nyc =  256 #512             # nyc = number of cells - y direction
 nzc =  1               # nzc = number of cells - z direction        
 
 # %%%%%%%%%%%%%%%%%% MPI TOPOLOGY %%%%%%%%%%%%%%%
@@ -89,6 +90,8 @@ u0              = 0.0     0.0     0.0     0.0    # Drift velocity in X
 v0              = 0.0     0.0     0.0     0.0    # Drift velocity in X
 w0              = 0.0042 -0.0021  0.0    0.0 #0.00325 -0.01624 0.0      0.0    # Drift velocity in X
 
+
+SortingCycle=1
 
 # %%%%%%%%%%%% Periodicity in each direction %%%%%%%%%%%%%%%
 PERIODICX       = 1                  # In direction X (1=true, 0=false)

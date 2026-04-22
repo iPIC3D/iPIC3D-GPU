@@ -15,11 +15,11 @@
  *          according to the DepartureArray.  
  *          The exiting particles in ExitingBuffer are orginaized in their destinations, with random order adopted from hashedSum.
  *          
- *          This kernel is also responsible for preparing the 2 hashedSum for SortingKernel1 and SortingKernel2. It will modify the 
+ *          This kernel is also responsible for preparing the 2 hashedSum for compactParticles1 and compactParticles2. It will modify the 
  *          elements of the departure array.
  *          
  * @param exitingArray The buffer used for exiting particles for 6 directions, the size and distriburtion are decided by the 6 hashedSum
- * @param hashedSumArray 10 hashedSum, 6 from the Mover, 1 for the deleted, 1 for planet, 2 for Sorting.
+ * @param hashedSumArray 10 hashedSum, 6 from the Mover, 1 for the deleted, 1 for planet, 2 for compaction.
  * 
  */
 __global__ void exitingKernel(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 

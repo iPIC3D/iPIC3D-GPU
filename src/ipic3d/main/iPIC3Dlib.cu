@@ -46,6 +46,7 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <vector>
 
 // ======= Timing Debugging =======
 // Set to 1 to enable per-phase timing printfs
@@ -909,7 +910,12 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   //          " pclsArrayHostPtr[species]->getNOP() " << pclsArrayHostPtr[species]->getNOP() << std::endl;
   if constexpr(PARTICLE_SPLITTING)
   {
-    if(pclsArrayHostPtr[species]->getNOP() < SPLIT_THRESHOLD * pclsArrayHostPtr[species]->getInitialNOP()){
+    // Guard: splitting requires at least one source particle to duplicate.
+    // The `multiple times` branch below divides by getNOP(), so an empty
+    // species (e.g. catastrophic depletion) would otherwise trigger a
+    // divide-by-zero and a zero-block kernel launch.
+    if(pclsArrayHostPtr[species]->getNOP() > 0 &&
+       pclsArrayHostPtr[species]->getNOP() < SPLIT_THRESHOLD * pclsArrayHostPtr[species]->getInitialNOP()){
       const uint32_t deltaPcl = pclsArrayHostPtr[species]->getInitialNOP() - pclsArrayHostPtr[species]->getNOP();
       if(deltaPcl < pclsArrayHostPtr[species]->getNOP()){
         std::cout << "Particle splitting basic myrank: "<< MPIdata::get_rank() << " species " << species <<" number particles: " << pclsArrayHostPtr[species]->getNOP() <<
@@ -939,11 +945,18 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   auto _tL1 = std::chrono::high_resolution_clock::now(); // after splitting, before mover launch
 #endif
   cudaErrChk(cudaStreamWaitEvent(streams[species], event0, 0));
-  if (doPlanet_)
-    moverSubcyclesKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
-  else
-    moverKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
-  
+  // Empty species (e.g. planetary species before exosphere injection has
+  // populated them) have NOP=0. Skip kernels that iterate per-particle;
+  // downstream consumers already correctly handle zero exit/stayed counts.
+  // Note: moments memset must still run so the D2H copy reads zeros.
+  const uint32_t nop = pclsArrayHostPtr[species]->getNOP();
+  if (nop > 0) {
+    if (doPlanet_)
+      moverSubcyclesKernel<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+    else
+      moverKernel<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+  }
+
   cudaErrChk(cudaEventRecord(event1, streams[species]));
   // Unsorted pipeline: compute moments for stayed particles right after mover
   // (overlaps with hashedSum D2H + exitingKernel on streams[species+ns]).
@@ -951,8 +964,9 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   if (doMomentsInLauncher) {
     const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
     cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[species], 0, gridSize*10*sizeof(cudaMomentType), streams[species]));
-    momentKernelStayed<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
-        &(moverParamCUDAPtr[species]->appendCountAtomic), momentParamCUDAPtr[species], grid3DCUDACUDAPtr, momentsCUDAPtr[species]);
+    if (nop > 0)
+      momentKernelStayed<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
+          &(moverParamCUDAPtr[species]->appendCountAtomic), momentParamCUDAPtr[species], grid3DCUDACUDAPtr, momentsCUDAPtr[species]);
   }
 
   // Copy 8 hashedSums to host: 6 directions + delete + planet (XLOW..PLANET)
@@ -1022,8 +1036,11 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
 #if ENABLE_SOA_TIMING
   auto _tL4 = std::chrono::high_resolution_clock::now(); // before exitingKernel
 #endif
-  exitingKernel<<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species], 
-                departureArrayCUDAPtr[species], exitingArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
+  // Re-read NOP: the OpenBC block above may have grown it via setNOE().
+  const uint32_t nopAfterOBC = pclsArrayHostPtr[species]->getNOP();
+  if (nopAfterOBC > 0)
+    exitingKernel<<<getGridSize((int)nopAfterOBC, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species+ns]>>>(pclsArrayCUDAPtr[species],
+                  departureArrayCUDAPtr[species], exitingArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
 
   cudaErrChk(cudaEventRecord(event2, streams[species+ns]));
 
@@ -1038,12 +1055,18 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   }
 
   // Compact the stayed prefix into the front of the SoA arrays.
+  // (compactParticles1/2 perform hole-and-filler compaction only; no sorting.)
   cudaErrChk(cudaStreamWaitEvent(streams[species], event2, 0));
-  if (hole > 0) 
-  sortingKernel1<<<getGridSize(hole, SMALL_BLOCK_SIZE), SMALL_BLOCK_SIZE, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
+  const uint32_t stayedCount = pclsArrayHostPtr[species]->getNOP() - hole;
+  if (hole > 0)
+    compactParticles1<<<getGridSize(hole, SMALL_BLOCK_SIZE), SMALL_BLOCK_SIZE, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species],
                                                           fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+departureArrayElementType::FILLER_HASHEDSUM_INDEX, hole);
-  sortingKernel2<<<getGridSize((int)(pclsArrayHostPtr[species]->getNOP()-hole), DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species], 
-                                                          fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+departureArrayElementType::HOLE_HASHEDSUM_INDEX, pclsArrayHostPtr[species]->getNOP()-hole);
+  // Guard against the catastrophic edge case hole == NOP (every particle
+  // departs in a single step). Launching with zero work would produce a
+  // grid size of 0 and a CUDA invalid-configuration error.
+  if (stayedCount > 0)
+    compactParticles2<<<getGridSize((int)stayedCount, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species],
+                                                          fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+departureArrayElementType::HOLE_HASHEDSUM_INDEX, stayedCount);
 
   cudaErrChk(cudaEventDestroy(event1));
   cudaErrChk(cudaEventDestroy(event2));
@@ -1110,6 +1133,15 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle)
     // GPU cell sort — all NOP particles (merge requires cell ordering)
     const uint32_t mergeNop = pclsArrayHostPtr[i]->getNOP();
     cudaErrChk(cudaStreamSynchronize(streams[i]));  // ensure no kernels in flight
+    // Lazy-init: cellSorters[i] is only constructed in c_Solver::Init() when
+    // sortingCycle_ > 0. The merging path however needs the sorter even when
+    // periodic sorting is disabled (sortingCycle_ == 0); initialize on first
+    // use to avoid undefined behavior in prepareBuffers/enqueueSortAsync.
+    if (!cellSorters[i].initialized) {
+      cellSorters[i].init(*grid3DCUDAHostPtr,
+                          pclsArrayHostPtr[i]->getCapacity(),
+                          streams[i]);
+    }
     cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
     cellSorters[i].enqueueSortAsync(pclsArrayHostPtr[i], grid3DCUDACUDAPtr,
                                      mergeNop, streams[i]);
@@ -1377,9 +1409,10 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
 
   // Compute per-species injection count (cheap, cached).
   // Declared at function scope so Phase 3G can also use it.
-  int injectedBCS[ns];
+  // std::vector with runtime size `ns` replaces the non-standard VLA form
+  // `int injectedBCS[ns];` (GCC extension, not valid ISO C++).
+  std::vector<int> injectedBCS(ns, 0);
   for (int i = 0; i < ns; i++) {
-    injectedBCS[i] = 0;
     if (moverParamHostPtr[i]->doRepopulateInjection)
       injectedBCS[i] = particlesCommInj[i]->computeInjectionCount();
   }
@@ -1738,9 +1771,28 @@ void c_Solver::WriteOutput(int cycle) {
 
   WriteConserved(cycle);
 
+  // Pipeline note on output cycle labeling:
+  //   outputCopyAsync(i) is called at the end of iteration i, AFTER the mover
+  //   has advanced particles from t_i to t_{i+1}. So the host SoA mirror that
+  //   the next iteration's WriteOutput(i+1) consumes already represents
+  //   particles at physical time t_{i+1}. The cycle label `cycle` therefore
+  //   correctly identifies the particle state, and matches the convention used
+  //   by the field arrays in EMf at the same iteration.
+  //
+  //   Special case: on the very first iteration (cycle == first_cycle), no
+  //   outputCopyAsync() has run yet and the host mirror holds the initial
+  //   (or restart-loaded) state, which by convention represents
+  //   t = first_cycle. The label `cycle` still matches.
+
   // ======= Restart checkpoint =======
   if (restart_cycle > 0 && cycle % restart_cycle == 0) {
-    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    // Defensive guard: only synchronize the event if it was actually recorded
+    // by a prior outputCopyAsync(). On a never-recorded event,
+    // cudaEventSynchronize succeeds silently; skipping it makes that
+    // dependency on the initial / restart-loaded mirror explicit.
+    if (outputCopyEverRecorded_) {
+      cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    }
     // SoA data is already in host vectors after outputCopyAsync — no conversion needed
     ioManager->writeRestart(cycle);
   }
@@ -1756,7 +1808,9 @@ void c_Solver::WriteOutput(int cycle) {
   // ======= Particle output =======
   if (!col->particle_output_is_off() &&
       cycle % col->getParticlesOutputCycle() == 0) {
-    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    if (outputCopyEverRecorded_) {
+      cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    }
     // SoA data is already in host vectors after outputCopyAsync — no conversion needed
     ioManager->writeParticles(cycle);
   }
@@ -1794,6 +1848,9 @@ void c_Solver::outputCopyAsync(int cycle) {
       cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getTallMut(), pclsArrayHostPtr[i]->getT(), bytes, cudaMemcpyDefault, streams[0]));
     }
     cudaErrChk(cudaEventRecord(eventOutputCopy, streams[0]));
+    // Mark that the host particle SoA mirrors now hold a real copy-back
+    // snapshot, so WriteOutput() may safely synchronize on eventOutputCopy.
+    outputCopyEverRecorded_ = true;
   }
 }
 
@@ -1955,6 +2012,17 @@ void c_Solver::sortAllSpecies() {
   for (int i = 0; i < ns; i++) {
     // Ensure no kernels are in flight on this species' stream
     cudaErrChk(cudaStreamSynchronize(streams[i]));
+
+    // Lazy-init: cellSorters[i] is only constructed in c_Solver::Init() when
+    // sortingCycle_ > 0. Analysis cycles can however call sortAllSpecies()
+    // even with periodic sorting disabled (sortingCycle_ == 0), in which
+    // case the sorter buffers are still null. Initialize on first use here
+    // to avoid undefined behavior in prepareBuffers/enqueueSortAsync.
+    if (!cellSorters[i].initialized) {
+      cellSorters[i].init(*grid3DCUDAHostPtr,
+                          pclsArrayHostPtr[i]->getCapacity(),
+                          streams[i]);
+    }
 
     const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
     cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);

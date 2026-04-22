@@ -311,6 +311,12 @@ namespace iPic3D {
     ThreadPool *threadPoolPtr;
 
     cudaEvent_t event0, eventOutputCopy;
+    // True once outputCopyAsync() has actually scheduled a D->H copy and
+    // recorded eventOutputCopy. Used by WriteOutput() to guard against
+    // synchronizing on a never-recorded event on the very first cycle, and to
+    // know whether the host SoA mirrors hold copy-back data or just the
+    // initial / restart-loaded particle state.
+    bool outputCopyEverRecorded_ = false;
 
     //bool verbose;
     string SaveDirName;

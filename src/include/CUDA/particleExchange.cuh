@@ -80,7 +80,9 @@ __global__ void planetExtractionKernel(particleArrayCUDA* pclsArray, departureAr
  *
  * This kernel scans the back `x` entries of the particle array, identifies the
  * stayed particles that can be used to fill holes in the front region, and
- * writes their indices into the filler buffer.
+ * writes their indices into the filler buffer. This is the first stage of the
+ * GPU compaction path; it does NOT perform any sorting (no relative ordering
+ * is established between particles).
  *
  * @param pclsArray Device-side particle SoA container.
  * @param departureArray Device-side departure metadata array.
@@ -88,22 +90,23 @@ __global__ void planetExtractionKernel(particleArrayCUDA* pclsArray, departureAr
  * @param hashedSumArray Device-side hashed-sum bucket for filler compaction.
  * @param x Number of rear entries to scan.
  */
-__global__ void sortingKernel1(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
+__global__ void compactParticles1(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
 									fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int x);
 
 /**
- * @brief Fill front-region holes in the SoA array using indices prepared by sortingKernel1.
+ * @brief Fill front-region holes in the SoA array using indices prepared by compactParticles1.
  *
  * Each thread handles one particle in the stayed prefix and copies one rear
- * filler particle into the current hole when needed.
+ * filler particle into the current hole when needed. This is the second stage
+ * of the GPU compaction path; it does NOT perform any sorting.
  *
  * @param pclsArray Device-side particle SoA container.
  * @param departureArray Device-side departure metadata array.
- * @param fillerBuffer Device-side buffer filled by sortingKernel1().
+ * @param fillerBuffer Device-side buffer filled by compactParticles1().
  * @param hashedSumArray Device-side hashed-sum bucket for front-hole compaction.
  * @param stayedParticle Number of particles in the compacted stayed prefix.
  */
-__global__ void sortingKernel2(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
+__global__ void compactParticles2(particleArrayCUDA* pclsArray, departureArrayType* departureArray, 
 									fillerBuffer* fillerBuffer, hashedSum* hashedSumArray, int stayedParticle);
 
 

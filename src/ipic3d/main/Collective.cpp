@@ -23,6 +23,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sstream>
 #include <vector>
 #include "input_array.h"
 #include "Collective.h"
@@ -98,6 +99,12 @@ void Collective::ReadInput(string inputfile) {
     ncycles = config.read < int >("ncycles");
     th = config.read < double >("th",1.0);
 
+    // Macrocell sizes for (v_par, v_perp) spectra data analysis.
+    // Default 0 disables the feature at runtime.
+    MacrocellNx = config.read < int >("MacrocellNx", 0);
+    MacrocellNy = config.read < int >("MacrocellNy", 0);
+    MacrocellNz = config.read < int >("MacrocellNz", 0);
+
     Smooth = config.read < double >("Smooth",1.0);
     SmoothNiter = config.read < int >("SmoothNiter",6);
 
@@ -105,6 +112,20 @@ void Collective::ReadInput(string inputfile) {
     RestartDirName = config.read < string > ("RestartDirName","data");
     ns = config.read < int >("ns");
     nstestpart = config.read < int >("nsTestPart", 0);
+
+    // Per-species enable mask for the (v_par,v_perp) macrocell spectra.
+    // Read as a free-form list ("1 0 1 ..."); missing trailing entries
+    // default to 0, extra entries are silently ignored. Default: all off.
+    {
+        VelocitySpectraSpecies.assign(ns, 0);
+        const std::string raw = config.read<std::string>("VelocitySpectraSpecies", std::string());
+        std::istringstream iss(raw);
+        for (int s = 0; s < ns; ++s) {
+            int v = 0;
+            if (!(iss >> v)) break;            // run out of tokens -> remaining stay 0
+            VelocitySpectraSpecies[s] = v ? 1 : 0;
+        }
+    }
     NpMaxNpRatio = config.read < double >("NpMaxNpRatio",1.5);
     assert_ge(NpMaxNpRatio, 1.);
     // mode parameters for second order in time

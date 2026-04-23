@@ -33,6 +33,7 @@
 #endif
 #include <string>
 #include <memory>
+#include <vector>
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "aligned_vector.h"
@@ -113,6 +114,19 @@ class Collective
     int getXLEN()const{ return (XLEN); }
     int getYLEN()const{ return (YLEN); }
     int getZLEN()const{ return (ZLEN); }
+
+    // ── Macrocell (v_par, v_perp) spectra ──
+    // Macrocell size in cells along each axis (interior cells only).
+    // 0 disables the feature at runtime.
+    int getMacrocellNx()const{ return (MacrocellNx); }
+    int getMacrocellNy()const{ return (MacrocellNy); }
+    int getMacrocellNz()const{ return (MacrocellNz); }
+    /*! Per-species enable mask for the (v_par,v_perp) macrocell spectra.
+     *  Returns false (off) if the input file did not list the species. */
+    bool getVelocitySpectraSpecies(int s)const{
+        return (s >= 0 && s < (int)VelocitySpectraSpecies.size())
+               && (VelocitySpectraSpecies[s] != 0);
+    }
     bool getPERIODICX()const{ return (PERIODICX); }
     bool getPERIODICY()const{ return (PERIODICY); }
     bool getPERIODICZ()const{ return (PERIODICZ); }
@@ -259,6 +273,14 @@ class Collective
     int SmoothNiter;
     /*! number of time cycles */
     int ncycles;
+    /*! macrocell size (interior cells) for the (v_par,v_perp) spectra
+     *  data-analysis module.  0 on any axis disables the feature. */
+    int MacrocellNx;
+    int MacrocellNy;
+    int MacrocellNz;
+    /*! Per-species on/off mask for the (v_par,v_perp) macrocell spectra.
+     *  Empty / unset means off for all species. */
+    std::vector<int> VelocitySpectraSpecies;
     /*! physical space dimensions */
     int dim;
     /*! simulation box length - X direction */

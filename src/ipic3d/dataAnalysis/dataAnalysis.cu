@@ -13,6 +13,8 @@
 
 #include "iPic3D.h"
 #include "VCtopology3D.h"
+#include "Collective.h"
+#include "Grid3DCU.h"
 #include "outputPrepare.h"
 #include "threadPool.hpp"
 
@@ -22,6 +24,8 @@
 #include "GMM/cudaGMM.cuh"
 #include "particleArraySoAView.cuh"
 #include "velocityHistogram.cuh"
+#include "macrocellSpectra.cuh"
+#include "cellSortBuffers.cuh"
 
 
 #include "mpi.h"
@@ -58,6 +62,18 @@ private:
     // dimensions: numSpecies, cycles
     std::vector<std::vector<cudaGMMWeight::GMMResult<GMMType, DATA_DIM_GMM>>> gmmResults;
 
+    // Macrocell (v_par, v_perp) spectra
+    std::unique_ptr<macrocellSpectra::macrocellSpectra2D> macrocellHist;
+    std::string macrocellSubdomainDir;
+    int  macrocellMyRank = 0;
+    bool macrocellEnabled = false;
+    std::vector<char> macrocellSpeciesMask; // size ns, 1=on, 0=off
+    // Borrowed from c_Solver for the macrocell module:
+    cudaCommonType*    macrocellFieldForPcls = nullptr; // shared by all species
+    const grid3DCUDA*  macrocellGridDevicePtr = nullptr;
+    CellSorter*        macrocellCellSorters   = nullptr; // per-species sorter array
+    const VCtopology3D*      macrocellVct      = nullptr;
+
 
 public:
 
@@ -79,6 +95,55 @@ public:
                 GMMSubDomainOutputPath = GMM_OUTPUT_DIR + "subDomain" + std::to_string(KCode.myrank) + "_";
                 gmmArray = new cudaGMMWeight::GMM<GMMType, DATA_DIM_GMM, weightType>[1];
                 gmmResults.resize(ns);
+            }
+        }
+
+        if constexpr (MACROCELL_SPECTRA_ENABLE) {
+            const int Cx = KCode.col->getMacrocellNx();
+            const int Cy = KCode.col->getMacrocellNy();
+            const int Cz = KCode.col->getMacrocellNz();
+            // Per-species enable mask from input file (default off).
+            macrocellSpeciesMask.assign(ns, 0);
+            int anySpecies = 0;
+            for (int s = 0; s < ns; ++s) {
+                if (KCode.col->getVelocitySpectraSpecies(s)) {
+                    macrocellSpeciesMask[s] = 1;
+                    ++anySpecies;
+                }
+            }
+            if (Cx > 0 && Cy > 0 && Cz > 0 && anySpecies > 0) {
+                // Interior cell extents per subdomain (exclude one ghost layer per side).
+                const int Nx_int = KCode.grid->getNXC() - 2;
+                const int Ny_int = KCode.grid->getNYC() - 2;
+                const int Nz_int = KCode.grid->getNZC() - 2;
+                // Subdomain origin in the global interior cell index space.
+                const int gOffX = KCode.vct->getCoordinates(0) * Nx_int;
+                const int gOffY = KCode.vct->getCoordinates(1) * Ny_int;
+                const int gOffZ = KCode.vct->getCoordinates(2) * Nz_int;
+
+                macrocellSpectra::MacrocellPartition part;
+                if (!part.build(Nx_int, Ny_int, Nz_int, Cx, Cy, Cz,
+                                gOffX, gOffY, gOffZ)) {
+                    std::cerr << "[macrocellSpectra] invalid macrocell sizes ("
+                              << Cx << "," << Cy << "," << Cz
+                              << ") vs interior (" << Nx_int << "," << Ny_int
+                              << "," << Nz_int << "); feature disabled.\n";
+                } else {
+                    macrocellHist = std::make_unique<macrocellSpectra::macrocellSpectra2D>(part);
+                    macrocellSubdomainDir = MACROCELL_SPECTRA_OUTPUT_DIR
+                                          + "subDomain_" + std::to_string(KCode.myrank) + "/";
+                    macrocellMyRank        = KCode.myrank;
+                    macrocellFieldForPcls  = KCode.fieldForPclCUDAPtr;
+                    macrocellGridDevicePtr = KCode.grid3DCUDACUDAPtr;
+                    macrocellCellSorters   = KCode.cellSorters;
+                    macrocellVct           = KCode.vct;
+                    macrocellEnabled       = true;
+                    if constexpr (MACROCELL_SPECTRA_OUTPUT) {
+                        macrocellHist->writePartitionMetadata(macrocellSubdomainDir,
+                                                              macrocellMyRank,
+                                                              macrocellVct);
+                    }
+                }
             }
         }
     }
@@ -373,6 +438,24 @@ int dataAnalysisPipelineImpl::analysisEntre(int cycle){
                 GMMAnalysisSpecies(cycle, i, GMMSpeciesOutputPath);
             }
         }
+
+        if constexpr (MACROCELL_SPECTRA_ENABLE) {
+            if (macrocellEnabled && i < (int)macrocellSpeciesMask.size()
+                && macrocellSpeciesMask[i]) {
+                macrocellHist->reset(streams[i]);
+                macrocellHist->launch(pclsArrayHostPtr[i],
+                                      macrocellFieldForPcls,
+                                      macrocellGridDevicePtr,
+                                      macrocellCellSorters[i].getCellStartOffsets(),
+                                      macrocellCellSorters[i].getCellCounts(),
+                                      i, streams[i]);
+                if constexpr (MACROCELL_SPECTRA_OUTPUT) {
+                    macrocellHist->writeToFile(macrocellSubdomainDir,
+                                               macrocellMyRank, macrocellVct,
+                                               i, cycle, streams[i]);
+                }
+            }
+        }
     }
 
     
@@ -389,6 +472,17 @@ void dataAnalysisPipelineImpl::startAnalysis(int cycle){
     if(DATA_ANALYSIS_EVERY_CYCLE == 0 || (cycle % DATA_ANALYSIS_EVERY_CYCLE != 0)){
         analysisFuture = std::future<int>();
     } else {
+        if (MPIdata::get_rank() == 0) {
+            const bool histOn = VELOCITY_HISTOGRAM_ENABLE;
+            const bool gmmOn  = VELOCITY_HISTOGRAM_ENABLE && GMM_ENABLE;
+            const bool mcOn   = MACROCELL_SPECTRA_ENABLE && macrocellEnabled;
+            if (histOn || gmmOn || mcOn) {
+                printf("  [Cycle %d] Data analysis: ON [%s%s%s]\n", cycle,
+                       histOn ? "histogram " : "",
+                       gmmOn  ? "GMM "       : "",
+                       mcOn   ? "macrocellSpectra" : "");
+            }
+        }
         analysisFuture = DAthreadPool->enqueue(&dataAnalysisPipelineImpl::analysisEntre, this, cycle); 
 
         if(analysisFuture.valid() == false){
@@ -497,6 +591,23 @@ void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns, VirtualTopo
         MPI_Barrier(MPIdata::get_PicGlobalComm());
 
         writeVctMapping(GMMSubDomainOutputPath + "vctMapping_subDomain" + std::to_string(myrank) + ".txt");
+    }
+
+    if constexpr (MACROCELL_SPECTRA_ENABLE && MACROCELL_SPECTRA_OUTPUT) {
+        const auto macrocellRoot = MACROCELL_SPECTRA_OUTPUT_DIR;
+
+        if (myrank == 0 && 0 != checkOutputFolder(macrocellRoot)) {
+            throw std::runtime_error("[!]Error: Can not create output folder for macrocell spectra");
+        }
+
+        MPI_Barrier(MPIdata::get_PicGlobalComm());
+
+        // Per-subdomain folder.
+        const auto subDir = macrocellRoot + "subDomain_" + std::to_string(myrank) + "/";
+        if (0 != checkOutputFolder(subDir)) {
+            throw std::runtime_error("[!]Error: Can not create subdomain folder for macrocell spectra");
+        }
+        writeVctMapping(subDir + "vctMapping.txt");
     }
 
 }

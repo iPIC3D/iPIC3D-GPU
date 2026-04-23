@@ -203,6 +203,14 @@ private:
     std::vector<MPI_Status>  momentstsArr_;
     int         momentreqcounter_  = 0;
 
+    /**
+     * @brief Complete any in-flight NBCVTK split-collective writes and close their files.
+     *
+     * Safe to call when the field backend is not NBCVTK (no-op)
+     * (resets the per-buffer counters after draining).
+     */
+    void drainNBCVTKPending();
+
     // ======= Registered non-owning pointers =======
     Collective*   col_        = nullptr;
     VCtopology3D* vct_        = nullptr;

@@ -433,6 +433,12 @@ int c_Solver::initCUDA(){
   streams = new cudaStream_t[ns*2]; stayedParticle = new int[ns]; exitingResults = new std::future<int>[ns];
   for(int i=0; i<ns; i++){ cudaErrChk(cudaStreamCreate(streams+i)); cudaErrChk(cudaStreamCreate(streams+i+ns)); stayedParticle[i] = 0; }
   cudaErrChk(cudaStreamCreate(&planetStream));
+  // Dedicated streams for output D->H and field-interpolation H->D copies.
+  // Isolating these from the per-species streams[] removes implicit ordering
+  // between the output copy and the next cycle's mover/sort kernels, which is
+  // re-established explicitly via cycleEndEvent/eventOutputCopy below.
+  cudaErrChk(cudaStreamCreate(&outputStream));
+  cudaErrChk(cudaStreamCreate(&fieldH2DStream));
   {
     // ======= Allocate device-resident particle containers and staging buffers =======
     pclsArrayHostPtr = new particleArrayCUDA*[ns];
@@ -567,6 +573,32 @@ int c_Solver::initCUDA(){
   threadPoolPtr = new ThreadPool(ns);
   cudaErrChk(cudaEventCreateWithFlags(&event0, cudaEventDisableTiming));
   cudaErrChk(cudaEventCreateWithFlags(&eventOutputCopy, cudaEventDisableTiming|cudaEventBlockingSync));
+  // Per-species persistent events. cycleEndEvent[i] is recorded at the end
+  // of MoverAwaitAndPclExchange on streams[i]. moverHashedReadyEvt[i] /
+  // auxHashedReadyEvt[i] replace the previously per-call event1/event2
+  // created inside cudaLauncherAsync.
+  cycleEndEvent        = new cudaEvent_t[ns];
+  moverHashedReadyEvt  = new cudaEvent_t[ns];
+  auxHashedReadyEvt    = new cudaEvent_t[ns];
+  stayedMomentsDoneEvt = new cudaEvent_t[ns];
+  for (int i = 0; i < ns; i++) {
+    cudaErrChk(cudaEventCreateWithFlags(&cycleEndEvent[i],        cudaEventDisableTiming|cudaEventBlockingSync));
+    cudaErrChk(cudaEventCreateWithFlags(&moverHashedReadyEvt[i],  cudaEventDisableTiming));
+    cudaErrChk(cudaEventCreateWithFlags(&auxHashedReadyEvt[i],    cudaEventDisableTiming));
+    cudaErrChk(cudaEventCreateWithFlags(&stayedMomentsDoneEvt[i], cudaEventDisableTiming));
+    // Pre-record cycleEndEvent[i] on streams[i] so MomentsAwait() / output-
+    // CopyAsync() are well-defined even if invoked before any moment pipeline
+    // has run. Both real producers (CalculateMoments and MoverAwaitAndPcl-
+    // Exchange) re-record this event after their copyMomentsD2H so subsequent
+    // waits correctly observe the latest cycle's moments.
+    cudaErrChk(cudaEventRecord(cycleEndEvent[i], streams[i]));
+  }
+  // Pre-record eventOutputCopy on outputStream once, so that the very first
+  // cycle's cudaStreamWaitEvent on it (in cudaLauncherAsync / sortAllSpecies)
+  // is well-defined and resolves immediately. This eliminates the need for a
+  // "first-cycle" guard flag; cycle 0 still consumes the initial / restart-
+  // loaded host SoA mirror because outputCopyAsync() has not yet run.
+  cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
 
   // ======= Allocate merge bookkeeping =======
   toBeMerged = new int[2 * ns];
@@ -681,6 +713,16 @@ int c_Solver::deInitCUDA(){
 
   cudaEventDestroy(event0);
   cudaEventDestroy(eventOutputCopy);
+  for (int i = 0; i < ns; i++) {
+    cudaEventDestroy(cycleEndEvent[i]);
+    cudaEventDestroy(moverHashedReadyEvt[i]);
+    cudaEventDestroy(auxHashedReadyEvt[i]);
+    cudaEventDestroy(stayedMomentsDoneEvt[i]);
+  }
+  delete[] cycleEndEvent;
+  delete[] moverHashedReadyEvt;
+  delete[] auxHashedReadyEvt;
+  delete[] stayedMomentsDoneEvt;
 
   delete threadPoolPtr;
 
@@ -774,6 +816,8 @@ int c_Solver::deInitCUDA(){
   // ======= Destroy streams =======
   for(int i=0; i<ns*2; i++)cudaStreamDestroy(streams[i]);
   cudaStreamDestroy(planetStream);
+  cudaStreamDestroy(outputStream);
+  cudaStreamDestroy(fieldH2DStream);
   delete[] streams;
   delete[] stayedParticle;
   delete[] exitingResults;
@@ -865,6 +909,12 @@ void c_Solver::CalculateMoments() {
     // Particle data is already resident on the device; only the kernel launch is needed here.
     momentKernelNew<<<(pclsArrayHostPtr[i]->getNOP()/DEFAULT_BLOCK_SIZE + 1), DEFAULT_BLOCK_SIZE, 0, streams[i] >>>(momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], 0);
     copyMomentsD2H(i, streams[i]);
+    // Record cycleEndEvent[i] on streams[i] so the per-species event-based
+    // sync inside MomentsAwait() actually waits for this initial moment
+    // pipeline. Without this record, MomentsAwait would observe a never-
+    // recorded event (which makes cudaEventSynchronize return immediately)
+    // and proceed to use stale / undefined host moment buffers in cycle 0.
+    cudaErrChk(cudaEventRecord(cycleEndEvent[i], streams[i]));
   }
 
   // Synchronize all species before the field-side ghost exchange and reductions.
@@ -901,9 +951,21 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   auto _tL0 = std::chrono::high_resolution_clock::now();
 #endif
 
-  cudaEvent_t event1, event2;
-  cudaErrChk(cudaEventCreateWithFlags(&event1, cudaEventDisableTiming));
-  cudaErrChk(cudaEventCreateWithFlags(&event2, cudaEventDisableTiming));
+  // Explicit edge: gate every SoA-mutating kernel on this species' stream
+  // behind the previous cycle's output D->H drain. Required because output
+  // copies now run on the dedicated outputStream and are no longer ordered
+  // implicitly with streams[species]. Pre-recorded at init so this resolves
+  // immediately on cycle 0. Aux stream streams[species+ns] is transitively
+  // ordered via moverHashedReadyEvt[species] later in this function.
+  cudaErrChk(cudaStreamWaitEvent(streams[species],    eventOutputCopy, 0));
+  cudaErrChk(cudaStreamWaitEvent(streams[species+ns], eventOutputCopy, 0));
+
+  // Persistent per-species events (created once in initCUDA, destroyed in
+  // deInitCUDA) replacing what used to be per-call event1/event2.
+  //   moverHashedReadyEvt[species] : recorded on streams[species]    after mover writes hashedSums
+  //   auxHashedReadyEvt[species]   : recorded on streams[species+ns] after exitingKernel completes
+  cudaEvent_t& event1 = moverHashedReadyEvt[species];
+  cudaEvent_t& event2 = auxHashedReadyEvt[species];
 
   // ======= Particle count control: optional splitting =======
   //std::cout << "myrank: "<<MPIdata::get_rank() <<" pclsArrayHostPtr[species]->getInitialNOP(): " << pclsArrayHostPtr[species]->getInitialNOP() <<
@@ -968,6 +1030,12 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
       momentKernelStayed<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
           &(moverParamCUDAPtr[species]->appendCountAtomic), momentParamCUDAPtr[species], grid3DCUDACUDAPtr, momentsCUDAPtr[species]);
   }
+  // Mark that momentKernelStayed has finished reading appendCountAtomic and
+  // pclsArrayCUDAPtr->nop_. This event is consumed below before the OpenBC
+  // path resets the device counter and rewrites the particle metadata; it is
+  // recorded unconditionally so the wait is well-defined on every cycle (in
+  // the sorted path it just chains the empty cycle's mover, which is cheap).
+  cudaErrChk(cudaEventRecord(stayedMomentsDoneEvt[species], streams[species]));
 
   // Copy 8 hashedSums to host: 6 directions + delete + planet (XLOW..PLANET)
   cudaErrChk(cudaStreamWaitEvent(streams[species+ns], event1, 0));
@@ -976,8 +1044,20 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
 
   // Copy OpenBC appended particle number to host
   if (moverParamHostPtr[species]->doOpenBC) {
+    // The D->H read of appendCountAtomic is non-destructive; it only needs
+    // mover ordering (event1 wait above) and may run in parallel with
+    // momentKernelStayed.
     cudaErrChk(cudaMemcpyAsync(&moverParamHostPtr[species]->appendCountAtomic, &moverParamCUDAPtr[species]->appendCountAtomic, 
                                 sizeof(uint32_t), cudaMemcpyDefault, streams[species+ns]));
+    // The next two operations are destructive for momentKernelStayed:
+    //   - cudaMemsetAsync zeros appendCountAtomic, which the kernel reads as
+    //     `*appendCount` to compute totPcl = nop + appendCount.
+    //   - The H->D rewrite of pclsArrayCUDAPtr below mutates pclsArray->nop_,
+    //     which the kernel reads via momentParam->pclsArray->getNOP().
+    // Without the wait below, both can land while the kernel is still
+    // iterating, silently dropping (memset wins) or double-counting (H->D
+    // wins) the OpenBC-appended particles in the moment deposition.
+    cudaErrChk(cudaStreamWaitEvent(streams[species+ns], stayedMomentsDoneEvt[species], 0));
     cudaErrChk(cudaMemsetAsync(&moverParamCUDAPtr[species]->appendCountAtomic, 0, sizeof(uint32_t), streams[species+ns]));
     cudaErrChk(cudaStreamSynchronize(streams[species+ns]));
 
@@ -1068,8 +1148,7 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
     compactParticles2<<<getGridSize((int)stayedCount, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species],
                                                           fillerBufferArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]+departureArrayElementType::HOLE_HASHEDSUM_INDEX, stayedCount);
 
-  cudaErrChk(cudaEventDestroy(event1));
-  cudaErrChk(cudaEventDestroy(event2));
+  // event1/event2 are now persistent (initCUDA / deInitCUDA); no per-call destroy.
   cudaErrChk(cudaStreamSynchronize(streams[species+ns])); // exiting D→H complete, comm buffer ready
 
 #if ENABLE_SOA_TIMING
@@ -1114,9 +1193,13 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle)
   // Build the particle-field interpolation buffer on cell centers.
   EMf->set_fieldForPclsToCenter(fieldForPclHostPtr);
 
-  // Copy the shared field-interpolation buffer to the device once.
-  cudaErrChk(cudaMemcpyAsync(fieldForPclCUDAPtr, fieldForPclHostPtr, (grid->getNZN() * (grid->getNYN() - 1) * (grid->getNXN() - 1)) * 24 * sizeof(cudaFieldType), cudaMemcpyDefault, streams[0]));
-  cudaErrChk(cudaEventRecord(event0, streams[0]));
+  // Copy the shared field-interpolation buffer to the device once on the
+  // dedicated fieldH2DStream. Isolating this H->D copy from streams[0]
+  // removes a subtle implicit ordering with whatever else happens to live
+  // on streams[0]; per-species mover kernels still consume the buffer via
+  // the explicit cudaStreamWaitEvent(streams[species], event0) below.
+  cudaErrChk(cudaMemcpyAsync(fieldForPclCUDAPtr, fieldForPclHostPtr, (grid->getNZN() * (grid->getNYN() - 1) * (grid->getNXN() - 1)) * 24 * sizeof(cudaFieldType), cudaMemcpyDefault, fieldH2DStream));
+  cudaErrChk(cudaEventRecord(event0, fieldH2DStream));
 
   for(int i=0; i<ns; i++){
     if (i != mergeIdx){
@@ -1133,6 +1216,10 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle)
     // GPU cell sort — all NOP particles (merge requires cell ordering)
     const uint32_t mergeNop = pclsArrayHostPtr[i]->getNOP();
     cudaErrChk(cudaStreamSynchronize(streams[i]));  // ensure no kernels in flight
+    // Explicit edge: also wait for the previous cycle's output D->H drain
+    // before mutating SoA via sort/merge. The host sync above only waits for
+    // streams[i]; outputStream is independent.
+    cudaErrChk(cudaStreamWaitEvent(streams[i], eventOutputCopy, 0));
     // Lazy-init: cellSorters[i] is only constructed in c_Solver::Init() when
     // sortingCycle_ > 0. The merging path however needs the sorter even when
     // periodic sorting is disabled (sortingCycle_ == 0); initialize on first
@@ -1632,6 +1719,13 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
 #endif
   for (int i = 0; i < ns; i++) {
     copyMomentsD2H(i, streams[i]);
+    // Cycle-end marker on streams[i]. Happens-after every in-place SoA write
+    // of this cycle (compactParticles2 / scatterAoSToSoAKernel) and after the
+    // moment kernels and the moment D->H copy on the same stream. Consumers:
+    //   - MomentsAwait()    : per-species cudaEventSynchronize (host)
+    //   - outputCopyAsync() : cudaStreamWaitEvent on outputStream
+    //   - cudaLauncherAsync (next cycle, indirectly via eventOutputCopy)
+    cudaErrChk(cudaEventRecord(cycleEndEvent[i], streams[i]));
   }
 
 #if ENABLE_SOA_TIMING
@@ -1677,8 +1771,15 @@ void c_Solver::MomentsAwait() {
 
   timeTasks_set_main_task(TimeTasks::MOMENTS);
 
-  // Wait for all per-species moment kernels and D2H copies to finish.
-  cudaErrChk(cudaDeviceSynchronize());
+  // Wait for all per-species moment kernels and D->H copies to finish.
+  // cycleEndEvent[i] is recorded on streams[i] right after copyMomentsD2H(i),
+  // so a per-species cudaEventSynchronize is sufficient and avoids a global
+  // device sync that would also drain unrelated streams (planetStream is
+  // already host-synced inside processPlanetParticles; outputStream of the
+  // previous cycle, if any, must NOT be waited on here \u2014 the next cycle's
+  // mover/sort already explicitly waits on eventOutputCopy).
+  for (int i = 0; i < ns; ++i)
+    cudaErrChk(cudaEventSynchronize(cycleEndEvent[i]));
 
   if constexpr(PARTICLE_MERGING)
   {
@@ -1786,13 +1887,12 @@ void c_Solver::WriteOutput(int cycle) {
 
   // ======= Restart checkpoint =======
   if (restart_cycle > 0 && cycle % restart_cycle == 0) {
-    // Defensive guard: only synchronize the event if it was actually recorded
-    // by a prior outputCopyAsync(). On a never-recorded event,
-    // cudaEventSynchronize succeeds silently; skipping it makes that
-    // dependency on the initial / restart-loaded mirror explicit.
-    if (outputCopyEverRecorded_) {
-      cudaErrChk(cudaEventSynchronize(eventOutputCopy));
-    }
+    // eventOutputCopy is pre-recorded once at init on outputStream and re-
+    // recorded by every outputCopyAsync() that actually issues copies. The
+    // synchronize below is therefore always well-defined: on cycle 0 it
+    // resolves immediately and the host SoA mirror still holds the initial /
+    // restart-loaded state (which by convention represents t = first_cycle).
+    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     // SoA data is already in host vectors after outputCopyAsync — no conversion needed
     ioManager->writeRestart(cycle);
   }
@@ -1808,9 +1908,8 @@ void c_Solver::WriteOutput(int cycle) {
   // ======= Particle output =======
   if (!col->particle_output_is_off() &&
       cycle % col->getParticlesOutputCycle() == 0) {
-    if (outputCopyEverRecorded_) {
-      cudaErrChk(cudaEventSynchronize(eventOutputCopy));
-    }
+    // See comment above: the event is pre-recorded so this is always safe.
+    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     // SoA data is already in host vectors after outputCopyAsync — no conversion needed
     ioManager->writeParticles(cycle);
   }
@@ -1831,6 +1930,16 @@ void c_Solver::WriteOutput(int cycle) {
  */
 void c_Solver::outputCopyAsync(int cycle) {
   if (ioManager->needsParticleSync(cycle + 1)) {
+    // Explicit edge: wait for every species' end-of-cycle event before reading
+    // particle SoA from device. cycleEndEvent[s] is recorded on streams[s] at
+    // the end of MoverAwaitAndPclExchange and so happens-after every in-place
+    // SoA write of the current cycle. By cycle 0 these events have been
+    // recorded (MoverAwaitAndPclExchange ran before WriteOutput). Using a
+    // dedicated outputStream isolates the D->H copies from the per-species
+    // streams used by the next cycle's mover/sort, so those kernels can run
+    // ahead in parallel with output as long as they wait on eventOutputCopy.
+    for (int s = 0; s < ns; ++s)
+      cudaErrChk(cudaStreamWaitEvent(outputStream, cycleEndEvent[s], 0));
     for (int i = 0; i < ns; i++) {
       const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
       // Resize the host SoA vectors to receive the current particle count.
@@ -1838,19 +1947,16 @@ void c_Solver::outputCopyAsync(int cycle) {
       if (nop == 0) continue;
       const size_t bytes = nop * sizeof(double);
       // Direct GPU SoA -> host SoA transfer with no AoS intermediary.
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getUallMut(), pclsArrayHostPtr[i]->getU(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getVallMut(), pclsArrayHostPtr[i]->getV(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getWallMut(), pclsArrayHostPtr[i]->getW(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getQallMut(), pclsArrayHostPtr[i]->getQ(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getXallMut(), pclsArrayHostPtr[i]->getX(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getYallMut(), pclsArrayHostPtr[i]->getY(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getZallMut(), pclsArrayHostPtr[i]->getZ(), bytes, cudaMemcpyDefault, streams[0]));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getTallMut(), pclsArrayHostPtr[i]->getT(), bytes, cudaMemcpyDefault, streams[0]));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getUallMut(), pclsArrayHostPtr[i]->getU(), bytes, cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getVallMut(), pclsArrayHostPtr[i]->getV(), bytes, cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getWallMut(), pclsArrayHostPtr[i]->getW(), bytes, cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getQallMut(), pclsArrayHostPtr[i]->getQ(), bytes, cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getXallMut(), pclsArrayHostPtr[i]->getX(), bytes, cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getYallMut(), pclsArrayHostPtr[i]->getY(), bytes, cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getZallMut(), pclsArrayHostPtr[i]->getZ(), bytes, cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getTallMut(), pclsArrayHostPtr[i]->getT(), bytes, cudaMemcpyDefault, outputStream));
     }
-    cudaErrChk(cudaEventRecord(eventOutputCopy, streams[0]));
-    // Mark that the host particle SoA mirrors now hold a real copy-back
-    // snapshot, so WriteOutput() may safely synchronize on eventOutputCopy.
-    outputCopyEverRecorded_ = true;
+    cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
   }
 }
 
@@ -1861,6 +1967,18 @@ void c_Solver::outputCopyAsync(int cycle) {
 void c_Solver::WriteConserved(int cycle) {
   if(col->getDiagnosticsOutputCycle() > 0 && cycle % col->getDiagnosticsOutputCycle() == 0)
   {
+    // particlesHost[*]->getKe/getP/getTotalQ() iterate over the host SoA
+    // u/v/w/q arrays, which are populated only by the async D->H copies in
+    // outputCopyAsync() on outputStream and signalled by eventOutputCopy.
+    // The mover launched just before WriteOutput() only inserts a stream-side
+    // wait on eventOutputCopy (cudaStreamWaitEvent in cudaLauncherAsync), it
+    // does NOT block the host. Without the synchronize below, diagnostics on
+    // cycle i>first_cycle can read torn / partially-copied host buffers from
+    // outputCopyAsync(i-1), producing nonsense conserved quantities.
+    // eventOutputCopy is pre-recorded at init so cycle 0 / first_cycle is
+    // well-defined: the host SoA still holds the initial / restart-loaded
+    // state and the synchronize resolves immediately.
+    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     Eenergy = EMf->getEenergy();
     Benergy = EMf->getBenergy();
     TOTenergy = 0.0;
@@ -2012,6 +2130,10 @@ void c_Solver::sortAllSpecies() {
   for (int i = 0; i < ns; i++) {
     // Ensure no kernels are in flight on this species' stream
     cudaErrChk(cudaStreamSynchronize(streams[i]));
+    // Explicit edge: also wait for the previous cycle's output D->H drain
+    // before sort kernels mutate the SoA. The host sync above only waits for
+    // streams[i]; outputStream is independent.
+    cudaErrChk(cudaStreamWaitEvent(streams[i], eventOutputCopy, 0));
 
     // Lazy-init: cellSorters[i] is only constructed in c_Solver::Init() when
     // sortingCycle_ > 0. Analysis cycles can however call sortAllSpecies()

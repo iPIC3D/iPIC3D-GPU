@@ -34,6 +34,17 @@ using std::string;
 IOManager::IOManager() = default;
 
 IOManager::~IOManager() {
+    // Defensive diagnostic: if finalize() was not called (e.g. early abort),
+    // NBCVTK split-collective writes may still be in flight. We cannot safely
+    // issue MPI calls from a destructor (MPI may already be finalized, and
+    // these are collective operations), so just warn the user that the last
+    // output cycle may be truncated.
+    if (fieldreqcounter_ > 0 || momentreqcounter_ > 0) {
+        dprintf("IOManager: ~IOManager() found %d field and %d moment NBCVTK "
+                "writes still pending; finalize() was not called. "
+                "Last output cycle may be truncated.\n",
+                fieldreqcounter_, momentreqcounter_);
+    }
 #ifndef NO_HDF5
     delete outputWrapperFPP_;
 #endif
@@ -413,11 +424,57 @@ void IOManager::readParticlesRestart(
 // ======= Finalization =======
 
 void IOManager::finalize() {
+    // Drain any in-flight NBCVTK split-collective writes from the last output
+    // cycle. Must run before MPI_Finalize and is collective on the file's
+    // communicator; c_Solver::Finalize() guarantees both.
+    drainNBCVTKPending();
 #ifdef USE_ADIOS2
     if (adiosManager_)
         adiosManager_->closeOutputFiles();
 #endif
     // OutputWrapperFPP has no explicit close; the destructor handles cleanup.
+}
+
+void IOManager::drainNBCVTKPending() {
+    if (fieldBackend_ != FieldBackend::NBCVTK) return;
+
+    if (fieldreqcounter_ > 0 && !fieldreqArr_.empty()) {
+        for (int si = 0; si < fieldreqcounter_; ++si) {
+            int ec = MPI_File_write_all_end(
+                fieldfhArr_[si],
+                &fieldwritebuffer_[si][0][0][0],
+                &fieldstsArr_[si]);
+            if (ec != MPI_SUCCESS) {
+                char es[100]; int len, cls;
+                MPI_Error_class(ec, &cls);
+                MPI_Error_string(cls, es, &len);
+                dprintf("MPI_File_write_all_end error during NBCVTK field drain  %d  %s\n",
+                        si, es);
+            } else {
+                MPI_File_close(&fieldfhArr_[si]);
+            }
+        }
+        fieldreqcounter_ = 0;
+    }
+
+    if (momentreqcounter_ > 0 && !momentreqArr_.empty()) {
+        for (int si = 0; si < momentreqcounter_; ++si) {
+            int ec = MPI_File_write_all_end(
+                momentfhArr_[si],
+                &momentwritebuffer_[si][0][0],
+                &momentstsArr_[si]);
+            if (ec != MPI_SUCCESS) {
+                char es[100]; int len, cls;
+                MPI_Error_class(ec, &cls);
+                MPI_Error_string(cls, es, &len);
+                dprintf("MPI_File_write_all_end error during NBCVTK moment drain  %d  %s\n",
+                        si, es);
+            } else {
+                MPI_File_close(&momentfhArr_[si]);
+            }
+        }
+        momentreqcounter_ = 0;
+    }
 }
 
 // ======= Scheduling query =======

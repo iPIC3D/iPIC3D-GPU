@@ -263,7 +263,9 @@ namespace iPic3D {
 
     int cudaDeviceOnNode; // the device this rank should use
     cudaStream_t*       streams;
-    cudaStream_t        planetStream;  // dedicated stream for planet BC processing
+    cudaStream_t        planetStream;     // dedicated stream for planet BC processing
+    cudaStream_t        outputStream;     // dedicated stream for output D->H copies
+    cudaStream_t        fieldH2DStream;   // dedicated stream for fieldForPcl H->D copy
 
     std::future<int>* exitingResults;
     int* stayedParticle; // stayed particles for each species
@@ -311,12 +313,26 @@ namespace iPic3D {
     ThreadPool *threadPoolPtr;
 
     cudaEvent_t event0, eventOutputCopy;
-    // True once outputCopyAsync() has actually scheduled a D->H copy and
-    // recorded eventOutputCopy. Used by WriteOutput() to guard against
-    // synchronizing on a never-recorded event on the very first cycle, and to
-    // know whether the host SoA mirrors hold copy-back data or just the
-    // initial / restart-loaded particle state.
-    bool outputCopyEverRecorded_ = false;
+    // Per-species end-of-cycle event, recorded on streams[i] right after
+    // copyMomentsD2H(i, streams[i]) at the end of MoverAwaitAndPclExchange.
+    // Captures both: (a) all in-place SoA writes for cycle i are complete,
+    // and (b) per-species moment D->H copy has finished. Used by:
+    //   - MomentsAwait()        (host-side cudaEventSynchronize)
+    //   - outputCopyAsync()     (cudaStreamWaitEvent on outputStream)
+    cudaEvent_t* cycleEndEvent;          // [ns]
+    // Persistent per-species replacements for the previously per-call
+    // event1/event2 created inside cudaLauncherAsync. Hoisted out to avoid
+    // per-cycle create/destroy overhead.
+    cudaEvent_t* moverHashedReadyEvt;    // [ns] : recorded on streams[i]   after mover writes hashedSums
+    cudaEvent_t* auxHashedReadyEvt;      // [ns] : recorded on streams[i+ns] after exitingKernel completes
+    // Per-species event recorded on streams[i] right AFTER momentKernelStayed
+    // (unsorted pipeline only). Used by the OpenBC append-count handling on
+    // streams[i+ns] to ensure the device-side memset of appendCountAtomic and
+    // the H->D rewrite of particleArrayCUDA metadata happen-after the kernel
+    // that reads them. Without this edge, momentKernelStayed can observe a
+    // reset counter or a torn nop_ value, dropping or double-counting OpenBC-
+    // appended particles in the moment deposition.
+    cudaEvent_t* stayedMomentsDoneEvt;   // [ns]
 
     //bool verbose;
     string SaveDirName;

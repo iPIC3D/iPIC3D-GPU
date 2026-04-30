@@ -17,6 +17,10 @@ namespace macrocellSpectra {
 
 using namespace DAConfig;
 
+// Histogram element type for per-macrocell (v_par, v_perp) bins.
+// Kept as `cudaTypeSingle` for parity with `velocityHistogram::histogramTypeOut`.
+using macrocellHistType = cudaTypeSingle;
+
 // ======= Host-side macrocell tiling =======
 
 /**
@@ -159,8 +163,8 @@ private:
     int* dRangeZ_ = nullptr;
 
     // Flat histogram buffer (device + pinned host mirror).
-    float* dHist_ = nullptr;
-    float* hHist_ = nullptr;
+    macrocellHistType* dHist_ = nullptr;
+    macrocellHistType* hHist_ = nullptr;
     size_t numFloats_ = 0;   ///< == part_.M * Nb
 
     // Returns vmax for the given species using the fixed-range convention.
@@ -193,7 +197,7 @@ __global__ void macrocellSpectraKernel(
     const cudaCommonType* __restrict__ fieldForPcls,  // packed cudaFieldType
     const grid3DCUDA*     __restrict__ grid,
     // Histogram parameters
-    float* __restrict__ histOut,                       // [M * Nb]
+    macrocellSpectra::macrocellHistType* __restrict__ histOut, // [M * Nb]
     int   binsVpar, int binsVperp,
     cudaCommonType vmax,
     cudaCommonType bMin);

@@ -11,6 +11,8 @@
 #include "cudaTypeDef.cuh"
 #include "gridCUDA.cuh"
 
+using macrocellSpectra::macrocellHistType;
+
 namespace {
 
 __device__ __forceinline__
@@ -43,7 +45,7 @@ __global__ void macrocellSpectraKernel(
     int Mx, int My, int Mz,
     const cudaCommonType* __restrict__ fieldForPcls,
     const grid3DCUDA*     __restrict__ grid,
-    float* __restrict__ histOut,
+    macrocellHistType* __restrict__ histOut,
     int   binsVpar, int binsVperp,
     cudaCommonType vmax,
     cudaCommonType bMin)
@@ -62,12 +64,12 @@ __global__ void macrocellSpectraKernel(
     const int Nb = binsVpar * binsVperp;
 
     // Shared memory layout:
-    //   [0 .. Nb)               : float mini-histogram
-    //   [Nb*4 .. Nb*4 + 24*8)   : 8 corners x 3 B components in cudaCommonType
+    //   [0 .. Nb)                              : macrocellHistType mini-histogram
+    //   [Nb*sizeof(macrocellHistType) .. + 24*8) : 8 corners x 3 B components in cudaCommonType
     extern __shared__ unsigned char smemRaw[];
-    float*          shHist = reinterpret_cast<float*>(smemRaw);
-    cudaCommonType* shB    = reinterpret_cast<cudaCommonType*>(
-                                 smemRaw + Nb * sizeof(float));
+    macrocellHistType* shHist = reinterpret_cast<macrocellHistType*>(smemRaw);
+    cudaCommonType*    shB    = reinterpret_cast<cudaCommonType*>(
+                                    smemRaw + Nb * sizeof(macrocellHistType));
 
     // Bin geometry (vpar in [-vmax,+vmax], vperp in [0,vmax]).
     const cudaCommonType vparMin   = -vmax;
@@ -78,7 +80,7 @@ __global__ void macrocellSpectraKernel(
     const cudaCommonType invResVperp = (cudaCommonType)binsVperp / (vperpMax - vperpMin);
 
     // Zero the mini-histogram.
-    for (int i = threadIdx.x; i < Nb; i += blockDim.x) shHist[i] = 0.0f;
+    for (int i = threadIdx.x; i < Nb; i += blockDim.x) shHist[i] = (macrocellHistType)0;
     __syncthreads();
 
     const int nxc = grid->nxc;
@@ -156,14 +158,14 @@ __global__ void macrocellSpectraKernel(
             if (ip < 0 || ie < 0) continue;
 
             // Weight by |q| (matches velocityHistogramKernel scaling).
-            const float wgt = (float)fabs((double)q[p] * 1.0e7);
+            const macrocellHistType wgt = (macrocellHistType)fabs((double)q[p] * 1.0e7);
             atomicAdd(&shHist[ie * binsVpar + ip], wgt);
         }
         __syncthreads();
     }
 
     // Flush the mini-histogram to the global per-macrocell slice.
-    float* gSlice = histOut + (size_t)m * (size_t)Nb;
+    macrocellHistType* gSlice = histOut + (size_t)m * (size_t)Nb;
     for (int i = threadIdx.x; i < Nb; i += blockDim.x) {
         gSlice[i] = shHist[i];
     }

@@ -64,17 +64,13 @@ namespace {
 // Helper: copy a host vector<MacrocellRange> to a device int array of size 2*N
 // laid out as [start0, size0, start1, size1, ...].
 int* uploadRanges(const std::vector<MacrocellRange>& ranges) {
-    const size_t bytes = ranges.size() * 2 * sizeof(int);
     std::vector<int> flat;
     flat.reserve(ranges.size() * 2);
     for (const auto& r : ranges) {
         flat.push_back(r.start);
         flat.push_back(r.size);
     }
-    int* dPtr = nullptr;
-    cudaErrChk(cudaMalloc(&dPtr, bytes));
-    cudaErrChk(cudaMemcpy(dPtr, flat.data(), bytes, cudaMemcpyHostToDevice));
-    return dPtr;
+    return copyArrayToDevice(flat.data(), static_cast<int>(flat.size()));
 }
 
 } // namespace
@@ -92,8 +88,9 @@ macrocellSpectra2D::macrocellSpectra2D(const MacrocellPartition& part)
     dRangeZ_ = uploadRanges(part_.rangeZ);
 
     numFloats_ = static_cast<size_t>(part_.M) * static_cast<size_t>(Nb);
-    cudaErrChk(cudaMalloc(&dHist_, numFloats_ * sizeof(float)));
-    cudaErrChk(cudaMallocHost((void**)&hHist_, numFloats_ * sizeof(float)));
+    cudaErrChk(cudaMalloc(&dHist_, numFloats_ * sizeof(macrocellHistType)));
+    hHist_ = static_cast<macrocellHistType*>(
+                 allocateHostPinnedMem(sizeof(macrocellHistType), numFloats_));
 }
 
 
@@ -107,7 +104,7 @@ macrocellSpectra2D::~macrocellSpectra2D() {
 
 
 void macrocellSpectra2D::reset(cudaStream_t stream) {
-    cudaErrChk(cudaMemsetAsync(dHist_, 0, numFloats_ * sizeof(float), stream));
+    cudaErrChk(cudaMemsetAsync(dHist_, 0, numFloats_ * sizeof(macrocellHistType), stream));
 }
 
 
@@ -125,8 +122,8 @@ void macrocellSpectra2D::launch(particleArrayCUDA* pclsHostPtr,
 
     dim3 grid(part_.Mx, part_.My, part_.Mz);
     constexpr int BLOCK_SIZE = 128;
-    // Shared memory: mini-histogram (Nb floats) + 8 corners x 3 B components.
-    const size_t shmemBytes = Nb * sizeof(float)
+    // Shared memory: mini-histogram (Nb x macrocellHistType) + 8 corners x 3 B components.
+    const size_t shmemBytes = Nb * sizeof(macrocellHistType)
                             + 24 * sizeof(cudaCommonType);
 
     macrocellSpectraKernel<<<grid, BLOCK_SIZE, shmemBytes, stream>>>(
@@ -217,7 +214,7 @@ void macrocellSpectra2D::writeToFile(const std::string&        subdomainDir,
 {
     // D->H copy of the full per-species histogram block.
     cudaErrChk(cudaMemcpyAsync(hHist_, dHist_,
-                               numFloats_ * sizeof(float),
+                               numFloats_ * sizeof(macrocellHistType),
                                cudaMemcpyDeviceToHost, stream));
     cudaErrChk(cudaStreamSynchronize(stream));
 
@@ -254,7 +251,7 @@ void macrocellSpectra2D::writeToFile(const std::string&        subdomainDir,
         if (!bin.is_open())
             throw std::runtime_error("macrocellSpectra: cannot open " + binPath);
         bin.write(reinterpret_cast<const char*>(hHist_ + size_t(m) * Nb),
-                  Nb * sizeof(float));
+                  Nb * sizeof(macrocellHistType));
         bin.close();
 
         // JSON sidecar

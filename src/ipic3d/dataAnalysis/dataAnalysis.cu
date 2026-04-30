@@ -418,6 +418,11 @@ int dataAnalysisPipelineImpl::GMMAnalysisSpecies(const int cycle, const int spec
  * @return `0` on success.
  */
 int dataAnalysisPipelineImpl::analysisEntre(int cycle){
+    // Stream ownership invariant: this function is enqueued on DAthreadPool and
+    // mutates streams[i]; the caller (iPIC3D.cpp) must keep streams[i] idle on
+    // entry (sortAllSpecies syncs) and must not touch streams[i] again until
+    // DA.waitForAnalysis() returns (which only happens once each per-species
+    // path here ends with a cudaStreamSynchronize on streams[i]).
     cudaErrChk(cudaSetDevice(deviceOnNode));
 
     // species by species to save VRAM
@@ -453,6 +458,11 @@ int dataAnalysisPipelineImpl::analysisEntre(int cycle){
                     macrocellHist->writeToFile(macrocellSubdomainDir,
                                                macrocellMyRank, macrocellVct,
                                                i, cycle, streams[i]);
+                } else {
+                    // Single shared dHist_ is reused across species: drain
+                    // streams[i] so the next species' reset/launch on
+                    // streams[i+1] cannot race with this species' kernel.
+                    cudaErrChk(cudaStreamSynchronize(streams[i]));
                 }
             }
         }

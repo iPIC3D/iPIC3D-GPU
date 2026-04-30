@@ -28,7 +28,7 @@
 #include "Grid3DCU.h"
 #include "CG.h"
 #include "GMRES.h"
-#include "Particles3Dcomm.h"
+#include "ParticleSoAHost.h"
 #include "Moments.h"
 #include "Parameters.h"
 #include "ompdefs.h"
@@ -513,7 +513,15 @@ void phys2solver(double *vectSolver, const arr3_double vectPhys1, const arr3_dou
       }
     }
 }
-/*! Calculate Electric field with the implicit solver: the Maxwell solver method is called here */
+/**
+ * @brief Advance the electric field using the implicit Maxwell solve.
+ *
+ * This routine performs optional divergence cleaning, builds the Maxwell
+ * right-hand side, solves the linear system, smooths the resulting field,
+ * and refreshes boundary/ghost values needed by interpolation.
+ *
+ * @param cycle Current simulation cycle.
+ */
 void EMfields3D::calculateE(int cycle)
 {
   const Collective *col = &get_col();
@@ -1474,6 +1482,14 @@ void EMfields3D::ConstantChargeOpenBC()
   }
 }
 
+/**
+ * @brief Impose the constant-charge planet model inside the 3D spherical mask.
+ *
+ * @param R Planet radius.
+ * @param x_center Planet-center x coordinate.
+ * @param y_center Planet-center y coordinate.
+ * @param z_center Planet-center z coordinate.
+ */
 void EMfields3D::ConstantChargePlanet(double R,
                                       double x_center, double y_center, double z_center)
 {
@@ -1510,6 +1526,13 @@ void EMfields3D::ConstantChargePlanet(double R,
   }
 }
 
+/**
+ * @brief Impose the constant-charge planet model inside the 2D XZ-plane mask.
+ *
+ * @param R Planet radius.
+ * @param x_center Planet-center x coordinate.
+ * @param z_center Planet-center z coordinate.
+ */
 void EMfields3D::ConstantChargePlanet2DPlaneXZ(double R, double x_center, double z_center)
 {
   const Grid *grid = &get_grid();
@@ -1539,10 +1562,9 @@ void EMfields3D::ConstantChargePlanet2DPlaneXZ(double R, double x_center, double
   }
 }
 
-/*! Populate the field data used to push particles */
-//
-//
-//
+/**
+ * @brief Populate the legacy nodal particle-field buffer.
+ */
 void EMfields3D::set_fieldForPcls()
 {
 #pragma omp parallel for collapse(3)
@@ -1560,13 +1582,12 @@ void EMfields3D::set_fieldForPcls()
 }
 
 /**
- * @brief field for a cell, optimized for GPU memory access
- * @details each cell has 6 fields on 8 grid points
- *        for this GPU optimized buffer, store data from 4 grid points in this cell
- *        which can be used by it self and the next cell
- *        the overhead is smaller than 3 times of the original buffer
+ * @brief Pack a GPU-friendly field buffer for particle pushing.
  *
- * @param fieldForPclsOnCenter field buffer for particles, (nxn-1)*(nyn-1)*(nzn)*4*6
+ * Each XY cell stores the four corner nodes needed by the mover for one Z slab.
+ * Every packed entry contains six values per corner: `(Bx, By, Bz, Ex, Ey, Ez)`.
+ *
+ * @param fieldForPclsOnCenter Output buffer with shape `(nxn-1)*(nyn-1)*nzn*4*6`.
  */
 void EMfields3D::set_fieldForPclsToCenter(cudaFieldType *fieldForPclsOnCenter)
 {
@@ -1610,7 +1631,14 @@ void EMfields3D::set_fieldForPclsToCenter(cudaFieldType *fieldForPclsOnCenter)
       }
 }
 
-/*! Calculate Magnetic field with the implicit solver: calculate B defined on nodes With E(n+ theta) computed, the magnetic field is evaluated from Faraday's law */
+/**
+ * @brief Advance the magnetic field from the updated electric field.
+ *
+ * With `E(n + theta)` already available, the magnetic field is updated from
+ * Faraday's law and then communicated/interpolated as needed.
+ *
+ * @param cycle Current simulation cycle.
+ */
 void EMfields3D::calculateB(int cycle)
 {
   const Collective *col = &get_col();
@@ -1840,7 +1868,9 @@ void EMfields3D::AddPerturbation(double deltaBoB, double kx, double ky, double E
   grid->interpN2C(Bzc, Bzn);
 }
 
-/*! Calculate hat rho hat, Jx hat, Jy hat, Jz hat */
+/**
+ * @brief Compute the hat quantities used by the implicit field solve.
+ */
 void EMfields3D::calculateHatFunctions()
 {
   const VirtualTopology3D *vct = &get_vct();
@@ -1900,13 +1930,22 @@ void EMfields3D::PoissonImage(double *image, double *vector)
   // move from physical space to krylov space
   phys2solver(image, poissonIm, nxc, nyc, nzc);
 }
-/*! interpolate charge density and pressure density from node to center */
+/**
+ * @brief Interpolate nodal charge density to cell centers.
+ */
 void EMfields3D::interpDensitiesN2C()
 {
   // do we need communication or not really?
   get_grid().interpN2C(rhoc, rhon);
 }
-/*! communicate ghost for grid -> Particles interpolation */
+/**
+ * @brief Communicate one species' primary moments for particle-to-grid reduction.
+ *
+ * Shared-node contributions are summed first, non-periodic boundaries are
+ * adjusted, and then the ghost nodes are repopulated.
+ *
+ * @param ns Species index whose primary moments are being communicated.
+ */
 void EMfields3D::communicateGhostP2G(int ns)
 {
   // interpolate adding common nodes among processors
@@ -1974,6 +2013,9 @@ void EMfields3D::communicateGhostP2G(int ns)
 //   // receive and parse communication
 // }
 
+/**
+ * @brief Zero the aggregate moments derived from the per-species primary moments.
+ */
 void EMfields3D::setZeroDerivedMoments()
 {
   for (int i = 0; i < nxn; i++)
@@ -2026,7 +2068,9 @@ void EMfields3D::setZeroDensities()
   setZeroPrimaryMoments();
 }
 
-/*!SPECIES: Sum the charge density of different species on NODES */
+/**
+ * @brief Sum nodal charge density over all species.
+ */
 void EMfields3D::sumOverSpecies()
 {
   for (int is = 0; is < ns; is++)
@@ -2036,7 +2080,9 @@ void EMfields3D::sumOverSpecies()
           rhon[i][j][k] += rhons[is][i][j][k];
 }
 
-/*!SPECIES: Sum current density for different species */
+/**
+ * @brief Sum nodal current density over all species.
+ */
 void EMfields3D::sumOverSpeciesJ()
 {
   for (int is = 0; is < ns; is++)
@@ -3239,7 +3285,9 @@ void EMfields3D::initEM_rotate(double B, double theta)
     grid->interpN2C(rhocs, is, rhons);
 }
 
-/*! initiliaze EM for GEM challange */
+/**
+ * @brief Initialize the standard GEM challenge field configuration.
+ */
 void EMfields3D::initGEM()
 {
   const VirtualTopology3D *vct = &get_vct();
@@ -3324,6 +3372,242 @@ void EMfields3D::initGEM()
   else
   {
     init(); // use the fields from restart file
+  }
+}
+
+void EMfields3D::initGEMHarris()
+{
+  const Collective       *col  = &get_col();
+  const VirtualTopology3D *vct  = &get_vct();
+  const Grid             *grid = &get_grid();
+
+  // --- configurable perturbation parameters ---
+  const double pertGEM  = col->getPertGEM();
+  const double pertHump = col->getPertHump();
+  const double deltax   = col->getDeltaxHump() * delta;
+  const double deltay   = col->getDeltayHump() * delta;
+  const int    ampere   = col->getCurrentFromAmpere();
+
+  // --- wavenumbers ---
+  const double kxG  = 2.0 * M_PI / Lx;              // pertGEM tearing-mode kx
+  const double kyG  = 2.0 * M_PI / Ly;              // pertGEM tearing-mode ky
+  const double kx   = (col->getKxHump() < 0.0) ? 2.0 * M_PI / Lx : col->getKxHump();
+  const double kyH  = (col->getKyHump() < 0.0) ? M_PI / Ly        : col->getKyHump();
+  const double A0   = (pertHump != 0.0) ? pertHump * B0x / kyH : 0.0;
+
+  if (restart1 == 0)
+  {
+    if (vct->getCartesian_rank() == 0)
+    {
+      cout << "---------------------------------------------------" << endl;
+      cout << "       Initialize GEM Harris                       " << endl;
+      cout << "---------------------------------------------------" << endl;
+      cout << "B0x                = " << B0x   << endl;
+      cout << "B0y                = " << B0y   << endl;
+      cout << "B0z                = " << B0z   << endl;
+      cout << "delta              = " << delta  << endl;
+      cout << "pertGEM            = " << pertGEM  << endl;
+      cout << "pertHump           = " << pertHump << endl;
+      if (pertHump != 0.0) {
+        cout << "deltaxHump         = " << col->getDeltaxHump()
+             << " (physical " << deltax << ")" << endl;
+        cout << "deltayHump         = " << col->getDeltayHump()
+             << " (physical " << deltay << ")" << endl;
+        cout << "kxHump             = " << kx  << endl;
+        cout << "kyHump             = " << kyH << endl;
+      }
+      cout << "currentFromAmpere  = " << ampere << endl;
+      for (int i = 0; i < ns; i++)
+      {
+        cout << "rho species " << i << " = " << rhoINIT[i];
+        if (DriftSpecies[i]) cout << "  DRIFTING" << endl;
+        else                 cout << "  BACKGROUND" << endl;
+      }
+      cout << "---------------------------------------------------" << endl;
+    }
+
+    // === B and density on nodes ===
+    for (int i = 0; i < nxn; i++)
+      for (int j = 0; j < nyn; j++)
+        for (int k = 0; k < nzn; k++)
+        {
+          const double xM = grid->getXN(i, j, k) - 0.5 * Lx;
+          const double yM = grid->getYN(i, j, k) - 0.5 * Ly;
+
+          // --- density ---
+          for (int is = 0; is < ns; is++)
+          {
+            if (DriftSpecies[is])
+            {
+              const double sech = 1.0 / cosh(yM / delta);
+              rhons[is][i][j][k] = rhoINIT[is] * sech * sech / FourPI;
+            }
+            else
+              rhons[is][i][j][k] = rhoINIT[is] / FourPI;
+          }
+
+          // --- E = 0 ---
+          Ex[i][j][k] = 0.0;
+          Ey[i][j][k] = 0.0;
+          Ez[i][j][k] = 0.0;
+
+          // === Harris equilibrium ===
+          Bxn[i][j][k] = B0x * tanh(yM / delta);
+          Byn[i][j][k] = B0y;
+          Bzn[i][j][k] = B0z;
+
+          // === GEM perturbation (from vector potential, div-free) ===
+          if (pertGEM != 0.0)
+          {
+            Bxn[i][j][k] += -pertGEM * B0x * (Lx / Ly)
+                            * cos(kxG * xM) * sin(kyG * yM);
+            Byn[i][j][k] += pertGEM * B0x
+                            * sin(kxG * xM) * cos(kyG * yM);
+          }
+
+          // === Hump perturbation (from vector potential, div-free) ===
+          if (pertHump != 0.0)
+          {
+            const double g  = exp(-xM * xM / (deltax * deltax)
+                                  -yM * yM / (deltay * deltay));
+            const double Cx = cos(kx  * xM);
+            const double Sx = sin(kx  * xM);
+            const double Cy = cos(kyH * yM);
+            const double Sy = sin(kyH * yM);
+
+            // dAz/dy  ->  delta Bx
+            Bxn[i][j][k] += A0 * g * Cx
+                          * (-2.0 * yM / (deltay * deltay) * Cy - kyH * Sy);
+            // -dAz/dx ->  delta By
+            Byn[i][j][k] += A0 * g * Cy
+                          * ( 2.0 * xM / (deltax * deltax) * Cx + kx * Sx);
+          }
+        }
+
+    // --- ghost communication on nodes ---
+    communicateNodeBC(nxn, nyn, nzn, Bxn,
+        col->bcBx[0], col->bcBx[1], col->bcBx[2],
+        col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+    communicateNodeBC(nxn, nyn, nzn, Byn,
+        col->bcBy[0], col->bcBy[1], col->bcBy[2],
+        col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+    communicateNodeBC(nxn, nyn, nzn, Bzn,
+        col->bcBz[0], col->bcBz[1], col->bcBz[2],
+        col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+
+    // --- B on centers via interpolation ---
+    grid->interpN2C(Bxc, Bxn);
+    grid->interpN2C(Byc, Byn);
+    grid->interpN2C(Bzc, Bzn);
+
+    // --- ghost communication on centers ---
+    communicateCenterBC(nxc, nyc, nzc, Bxc,
+        col->bcBx[0], col->bcBx[1], col->bcBx[2],
+        col->bcBx[3], col->bcBx[4], col->bcBx[5], vct, this);
+    communicateCenterBC(nxc, nyc, nzc, Byc,
+        col->bcBy[0], col->bcBy[1], col->bcBy[2],
+        col->bcBy[3], col->bcBy[4], col->bcBy[5], vct, this);
+    communicateCenterBC(nxc, nyc, nzc, Bzc,
+        col->bcBz[0], col->bcBz[1], col->bcBz[2],
+        col->bcBz[3], col->bcBz[4], col->bcBz[5], vct, this);
+
+    // --- density on centers ---
+    for (int is = 0; is < ns; is++)
+      grid->interpN2C(rhocs, is, rhons);
+
+    // --- current initialization ---
+    // Zero moment arrays so particle init never reads uninitialized memory.
+    for (int is = 0; is < ns; is++)
+      for (int i = 0; i < nxn; i++)
+        for (int j = 0; j < nyn; j++)
+          for (int k = 0; k < nzn; k++)
+          {
+            Jxs[is][i][j][k] = 0.0;
+            Jys[is][i][j][k] = 0.0;
+            Jzs[is][i][j][k] = 0.0;
+            pXXsn[is][i][j][k] = 0.0;
+            pXYsn[is][i][j][k] = 0.0;
+            pXZsn[is][i][j][k] = 0.0;
+            pYYsn[is][i][j][k] = 0.0;
+            pYZsn[is][i][j][k] = 0.0;
+            pZZsn[is][i][j][k] = 0.0;
+          }
+
+    if (ampere)
+    {
+      // Ampere mode: J = (c/4pi) curl(B) distributed by u0/v0/w0 weights
+      eqValue(0.0, tempXN, nxn, nyn, nzn);
+      eqValue(0.0, tempYN, nxn, nyn, nzn);
+      eqValue(0.0, tempZN, nxn, nyn, nzn);
+      grid->curlC2N(tempXN, tempYN, tempZN, Bxc, Byc, Bzc);
+
+      // --- Charge-weighted normalization: sign(q)*w0 sums to N,
+      //     so weight f_s = sign(q_s)*w0_s / N ensures sum(f_s) = 1
+      //     and recovered drift sign(v) = sign(w0). ---
+      double sumU = 0.0, sumV = 0.0, sumW = 0.0;
+      for (int is = 0; is < ns; is++)
+      {
+        const double qs = (col->getQOM(is) > 0.0) ? 1.0 : -1.0;
+        sumU += qs * col->getU0(is);
+        sumV += qs * col->getV0(is);
+        sumW += qs * col->getW0(is);
+      }
+      if (vct->getCartesian_rank() == 0)
+      {
+        cout << "currentFromAmpere charge-weighted sums: "
+             << "N_u=" << sumU << "  N_v=" << sumV << "  N_w=" << sumW << endl;
+      }
+
+      // --- Reference pressure state for spatially varying thermal velocity ---
+      const int svt = col->getSpatiallyVaryingThermal();
+      if (svt && vct->getCartesian_rank() == 0)
+        cout << "Building reference pressure state (spatiallyVaryingThermal=1)" << endl;
+
+      for (int is = 0; is < ns; is++)
+      {
+        const double qs = (col->getQOM(is) > 0.0) ? 1.0 : -1.0;
+        const double wU = (sumU != 0.0) ? qs * col->getU0(is) / sumU : 0.0;
+        const double wV = (sumV != 0.0) ? qs * col->getV0(is) / sumV : 0.0;
+        const double wW = (sumW != 0.0) ? qs * col->getW0(is) / sumW : 0.0;
+        const double factU = wU * c / FourPI;
+        const double factV = wV * c / FourPI;
+        const double factW = wW * c / FourPI;
+        const double uthS2 = col->getUth(is) * col->getUth(is);
+        const double vthS2 = col->getVth(is) * col->getVth(is);
+        const double wthS2 = col->getWth(is) * col->getWth(is);
+
+        for (int i = 0; i < nxn; i++)
+          for (int j = 0; j < nyn; j++)
+            for (int k = 0; k < nzn; k++)
+            {
+              Jxs[is][i][j][k] = factU * tempXN[i][j][k];
+              Jys[is][i][j][k] = factV * tempYN[i][j][k];
+              Jzs[is][i][j][k] = factW * tempZN[i][j][k];
+            }
+
+        if (svt)
+        {
+          for (int i = 0; i < nxn; i++)
+            for (int j = 0; j < nyn; j++)
+              for (int k = 0; k < nzn; k++)
+              {
+                const double rho = rhons[is][i][j][k];
+                const double Jx  = Jxs[is][i][j][k];
+                const double Jy  = Jys[is][i][j][k];
+                const double Jz  = Jzs[is][i][j][k];
+                pXXsn[is][i][j][k] = Jx * Jx / rho + uthS2 * rho;
+                pYYsn[is][i][j][k] = Jy * Jy / rho + vthS2 * rho;
+                pZZsn[is][i][j][k] = Jz * Jz / rho + wthS2 * rho;
+              }
+        }
+      }
+    }
+    // else: Jxs/Jys/Jzs stay at zero (default)
+    // particle init will use global u0/v0/w0 as drift velocities
+  }
+  else
+  {
+    init();  // restart
   }
 }
 
@@ -4026,7 +4310,9 @@ void EMfields3D::initGEMnoPert()
   }
 }
 
-// new init, random problem
+/**
+ * @brief Initialize the random-field test configuration.
+ */
 void EMfields3D::initRandomField()
 {
   const VirtualTopology3D *vct = &get_vct();
@@ -4169,7 +4455,9 @@ void EMfields3D::initRandomField()
   delArr2(modes_seed, 7);
 }
 
-/*! Init Force Free (JxB=0) */
+/**
+ * @brief Initialize the force-free equilibrium configuration.
+ */
 void EMfields3D::initForceFree()
 {
   const VirtualTopology3D *vct = &get_vct();
@@ -4285,7 +4573,9 @@ void EMfields3D::initBEAM(double x_center, double y_center, double z_center,
   }
 }
 
-/*! Initialise a combination of magnetic dipoles */
+/**
+ * @brief Initialize the 3D magnetic-dipole planetary configuration.
+ */
 void EMfields3D::initDipole()
 {
   const Collective *col = &get_col();
@@ -4391,7 +4681,9 @@ void EMfields3D::initDipole()
   }
 }
 
-/*! Initialise a 2D magnetic dipoles according to paper L.K.S Two-way coupling of a global Hall ....*/
+/**
+ * @brief Initialize the 2D magnetic-dipole planetary configuration.
+ */
 void EMfields3D::initDipole2D()
 {
   const Collective *col = &get_col();
@@ -4502,7 +4794,9 @@ void EMfields3D::initDipole2D()
 }
 
 #ifdef BATSRUS
-/*! initiliaze EM for GEM challange */
+/**
+ * @brief Initialize fields from BATSRUS data.
+ */
 void EMfields3D::initBATSRUS()
 {
   const Collective *col = &get_col();

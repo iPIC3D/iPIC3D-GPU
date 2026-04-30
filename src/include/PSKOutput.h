@@ -32,10 +32,12 @@ developers: D. Burgess, June/July 2006
 #include <string>
 #include <vector>
 #include <list>
+#include <set>
 
 #include "errors.h"
+#include "OutputTagConfig.h"
 #include "PSKException.h"
-#include "Particles3Dcomm.h"
+#include "ParticleSoAHost.h"
 #include "Field.h"
 #include "Collective.h"
 #include "VCtopology3D.h"
@@ -641,6 +643,101 @@ public:
       this->output_adaptor.write("/energy/electric/cycle_" + cc.str(), E_en);
     }
 
+  }
+
+  /**
+   * @brief Write field and moment data controlled by OutputTagConfig.
+   *
+   * Replaces the legacy string-based dispatch for field/moment output.
+   * Uses the same HDF5 dataset paths as the old code for compatibility.
+   */
+  void outputFieldsMoments(const OutputTagConfig& cfg, int cycle) {
+    stringstream cc;
+    cc << cycle;
+    const int ns = _col->getNs();
+    // Write all physical nodes: indices 1 to nxn-1 (inclusive).
+    // In file-per-process output each rank independently records its
+    // local domain; boundary nodes shared with neighbouring ranks are
+    // intentionally duplicated (overlap of 1 node per direction).
+    const auto nx = _grid->getNXN() - 1;
+    const auto ny = _grid->getNYN() - 1;
+    const auto nz = _grid->getNZN() - 1;
+    const PSK::Dimens dims(nx, ny, nz);
+
+    // --- B field ---
+    if (cfg.writeB) {
+      this->output_adaptor.write("/fields/Bx/cycle_" + cc.str(), dims, _field->getBxTot());
+      this->output_adaptor.write("/fields/By/cycle_" + cc.str(), dims, _field->getByTot());
+      this->output_adaptor.write("/fields/Bz/cycle_" + cc.str(), dims, _field->getBzTot());
+    }
+
+    // --- E field ---
+    if (cfg.writeE) {
+      this->output_adaptor.write("/fields/Ex/cycle_" + cc.str(), dims, _field->getEx());
+      this->output_adaptor.write("/fields/Ey/cycle_" + cc.str(), dims, _field->getEy());
+      this->output_adaptor.write("/fields/Ez/cycle_" + cc.str(), dims, _field->getEz());
+    }
+
+    // --- Per-species rho ---
+    for (int si : cfg.rhoSpecies) {
+      this->output_adaptor.write("/moments/species_" + std::to_string(si) + "/rho/cycle_" + cc.str(),
+        dims, si, _field->getRHOns(), 4*3.1415926535897);
+    }
+
+    // --- Total rho ---
+    if (cfg.writeRhoTot) {
+      this->output_adaptor.write("/moments/rho/cycle_" + cc.str(), dims, _field->getRHOn());
+    }
+
+    // --- Per-species J ---
+    for (int si : cfg.JSpecies) {
+      string s = std::to_string(si);
+      this->output_adaptor.write("/moments/species_" + s + "/Jx/cycle_" + cc.str(), dims, si, _field->getJxs());
+      this->output_adaptor.write("/moments/species_" + s + "/Jy/cycle_" + cc.str(), dims, si, _field->getJys());
+      this->output_adaptor.write("/moments/species_" + s + "/Jz/cycle_" + cc.str(), dims, si, _field->getJzs());
+    }
+
+    // --- Total J ---
+    if (cfg.writeJTot) {
+      _field->sumOverSpeciesJ();
+      this->output_adaptor.write("/moments/Jx/cycle_" + cc.str(), dims, _field->getJx());
+      this->output_adaptor.write("/moments/Jy/cycle_" + cc.str(), dims, _field->getJy());
+      this->output_adaptor.write("/moments/Jz/cycle_" + cc.str(), dims, _field->getJz());
+    }
+
+    // --- Per-species pressure tensor ---
+    auto writePressureComponent = [&](const char* name, const std::set<int>& species, arr4_double arr) {
+      for (int si : species)
+        this->output_adaptor.write("/moments/species_" + std::to_string(si) + "/" + name + "/cycle_" + cc.str(),
+          dims, si, arr);
+    };
+    writePressureComponent("pXX", cfg.PXXSpecies, _field->getpXXsn());
+    writePressureComponent("pXY", cfg.PXYSpecies, _field->getpXYsn());
+    writePressureComponent("pXZ", cfg.PXZSpecies, _field->getpXZsn());
+    writePressureComponent("pYY", cfg.PYYSpecies, _field->getpYYsn());
+    writePressureComponent("pYZ", cfg.PYZSpecies, _field->getpYZsn());
+    writePressureComponent("pZZ", cfg.PZZSpecies, _field->getpZZsn());
+
+    // --- Total pressure tensor ---
+    auto writePressureTot = [&](const char* name, bool doWrite, auto getter4) {
+      if (!doWrite) return;
+      std::vector<double> tmp(nx * ny * nz);
+      for (int iz = 0; iz < nz; iz++)
+        for (int iy = 0; iy < ny; iy++)
+          for (int ix = 0; ix < nx; ix++) {
+            double sum = 0.0;
+            for (int s = 0; s < ns; s++)
+              sum += getter4(ix+1, iy+1, iz+1, s);
+            tmp[(size_t)iz * ny * nx + (size_t)iy * nx + ix] = sum;
+          }
+      this->output_adaptor.write("/moments/" + std::string(name) + "_tot/cycle_" + cc.str(), dims, tmp.data());
+    };
+    writePressureTot("pXX", cfg.writePXXTot, [&](int x,int y,int z,int s){ return _field->getpXXsn(x,y,z,s); });
+    writePressureTot("pXY", cfg.writePXYTot, [&](int x,int y,int z,int s){ return _field->getpXYsn(x,y,z,s); });
+    writePressureTot("pXZ", cfg.writePXZTot, [&](int x,int y,int z,int s){ return _field->getpXZsn(x,y,z,s); });
+    writePressureTot("pYY", cfg.writePYYTot, [&](int x,int y,int z,int s){ return _field->getpYYsn(x,y,z,s); });
+    writePressureTot("pYZ", cfg.writePYZTot, [&](int x,int y,int z,int s){ return _field->getpYZsn(x,y,z,s); });
+    writePressureTot("pZZ", cfg.writePZZTot, [&](int x,int y,int z,int s){ return _field->getpZZsn(x,y,z,s); });
   }
 
   void output(const string & tag, int cycle, int sample) {

@@ -22,12 +22,14 @@
 #include <fstream>
 
 #include "ParallelIO.h"
+#include "OutputTagConfig.h"
 #include "MPIdata.h"
+#include "debug.h"
 #include "TimeTasks.h"
 #include "Collective.h"
 #include "Grid3DCU.h"
 #include "VCtopology3D.h"
-#include "Particles3D.h"
+#include "ParticleSoAHost.h"
 #include "EMfields3D.h"
 #include "math.h"
 #include <algorithm>
@@ -36,15 +38,13 @@
 #include <sstream>
 
 /*! Function used to write the EM fields using the parallel HDF5 library */
-void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, Particles3Dcomm *part, CollectiveIO *col, VCtopology3D *vct, int cycle){
+void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle, const OutputTagConfig& cfg){
 
 #ifdef PHDF5
   timeTasks_set_task(TimeTasks::WRITE_FIELDS);
 
   stringstream filenmbr;
   string       filename;
-
-  bool         bp;
 
   /* ------------------- */
   /* Setup the file name */
@@ -71,37 +71,124 @@ void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, Particles3Dcomm *part,
 
   PHDF5fileClass outputfile(filename, 3, vct->getCoordinates(), vct->getFieldComm());
 
-  bp = false;
-  if (col->getParticlesOutputCycle() > 0) bp = true;
+  const bool bp = (col->getParticlesOutputCycle() > 0);
 
   outputfile.CreatePHDF5file(L, dglob, dlocl, bp);
 
-  // write electromagnetic field
-  //
-  outputfile.WritePHDF5dataset("Fields", "Ex", EMf->getEx(), nxc-2, nyc-2, nzc-2);
-  outputfile.WritePHDF5dataset("Fields", "Ey", EMf->getEy(), nxc-2, nyc-2, nzc-2);
-  outputfile.WritePHDF5dataset("Fields", "Ez", EMf->getEz(), nxc-2, nyc-2, nzc-2);
-  outputfile.WritePHDF5dataset("Fields", "Bx", EMf->getBxc(), nxc-2, nyc-2, nzc-2);
-  outputfile.WritePHDF5dataset("Fields", "By", EMf->getByc(), nxc-2, nyc-2, nzc-2);
-  outputfile.WritePHDF5dataset("Fields", "Bz", EMf->getBzc(), nxc-2, nyc-2, nzc-2);
+  /* ----------------------------------------------------------------- */
+  /* All quantities on the node grid: global = Nxc+1,                  */
+  /* interior local = nxc-2, upper-boundary local = nxc-1, data from 1 */
+  /*                                                                   */
+  /* This matches the VTK convention:                                  */
+  /*   VTK lx = nxn - 3 = nxc - 2  (interior)                         */
+  /*   VTK lx = nxn - 3 + 1 = nxc - 1  (upper boundary)              */
+  /* ----------------------------------------------------------------- */
+  const bool xu = vct->isXupper();
+  const bool yu = vct->isYupper();
+  const bool zu = vct->isZupper();
+  const hsize_t gdim[3] = { (hsize_t)(col->getNxc()+1),
+                            (hsize_t)(col->getNyc()+1),
+                            (hsize_t)(col->getNzc()+1) };
+  const hsize_t ldim[3] = { (hsize_t)(nxc-2 + (xu?1:0)),
+                            (hsize_t)(nyc-2 + (yu?1:0)),
+                            (hsize_t)(nzc-2 + (zu?1:0)) };
+  const hsize_t foff[3] = { (hsize_t)(vct->getCoordinates(0)*(nxc-2)),
+                            (hsize_t)(vct->getCoordinates(1)*(nyc-2)),
+                            (hsize_t)(vct->getCoordinates(2)*(nzc-2)) };
 
-  /* ---------------------------------------- */
-  /* Write the charge moments for each species */
-  /* ---------------------------------------- */
+  const int ns = col->getNs();
 
-  for (int is = 0; is < col->getNs(); is++)
+  // --- B field ---
+  if (cfg.writeB) {
+    outputfile.WritePHDF5dataset("Fields", "Bx", EMf->getBxTot(), 1,1,1, gdim, ldim, foff);
+    outputfile.WritePHDF5dataset("Fields", "By", EMf->getByTot(), 1,1,1, gdim, ldim, foff);
+    outputfile.WritePHDF5dataset("Fields", "Bz", EMf->getBzTot(), 1,1,1, gdim, ldim, foff);
+  }
+
+  // --- E field ---
+  if (cfg.writeE) {
+    outputfile.WritePHDF5dataset("Fields", "Ex", EMf->getEx(), 1,1,1, gdim, ldim, foff);
+    outputfile.WritePHDF5dataset("Fields", "Ey", EMf->getEy(), 1,1,1, gdim, ldim, foff);
+    outputfile.WritePHDF5dataset("Fields", "Ez", EMf->getEz(), 1,1,1, gdim, ldim, foff);
+  }
+
+  // --- Per-species rho ---
+  for (int si : cfg.rhoSpecies) {
+    outputfile.WritePHDF5dataset("Fields", "rho_"+std::to_string(si),
+      EMf->getRHOns(si), 1,1,1, gdim, ldim, foff, 4*3.1415926535897);
+  }
+
+  // --- Total rho ---
+  if (cfg.writeRhoTot) {
+    outputfile.WritePHDF5dataset("Fields", "rho_tot",
+      EMf->getRHOn(), 1,1,1, gdim, ldim, foff);
+  }
+
+  // --- Per-species J ---
+  for (int si : cfg.JSpecies) {
+    string s = std::to_string(si);
+    outputfile.WritePHDF5dataset("Fields", "Jx_"+s, EMf->getJxs(si), 1,1,1, gdim, ldim, foff);
+    outputfile.WritePHDF5dataset("Fields", "Jy_"+s, EMf->getJys(si), 1,1,1, gdim, ldim, foff);
+    outputfile.WritePHDF5dataset("Fields", "Jz_"+s, EMf->getJzs(si), 1,1,1, gdim, ldim, foff);
+  }
+
+  // --- Total J ---
+  if (cfg.writeJTot) {
+    EMf->sumOverSpeciesJ();
+    outputfile.WritePHDF5dataset("Fields", "Jx_tot", EMf->getJx(), 1,1,1, gdim, ldim, foff);
+    outputfile.WritePHDF5dataset("Fields", "Jy_tot", EMf->getJy(), 1,1,1, gdim, ldim, foff);
+    outputfile.WritePHDF5dataset("Fields", "Jz_tot", EMf->getJz(), 1,1,1, gdim, ldim, foff);
+  }
+
+  // --- Per-species pressure tensor ---
   {
-    stringstream ss;
-    ss << is;
-    string s_is = ss.str();
+    struct PDesc { const char* name; const std::set<int>& species;
+                   arr3_double (EMfields3D::*getter)(int); };
+    PDesc pdescs[] = {
+      {"pXX", cfg.PXXSpecies, &EMfields3D::getpXXsn},
+      {"pXY", cfg.PXYSpecies, &EMfields3D::getpXYsn},
+      {"pXZ", cfg.PXZSpecies, &EMfields3D::getpXZsn},
+      {"pYY", cfg.PYYSpecies, &EMfields3D::getpYYsn},
+      {"pYZ", cfg.PYZSpecies, &EMfields3D::getpYZsn},
+      {"pZZ", cfg.PZZSpecies, &EMfields3D::getpZZsn},
+    };
+    for (auto &pd : pdescs)
+      for (int si : pd.species)
+        outputfile.WritePHDF5dataset("Fields",
+          string(pd.name)+"_"+std::to_string(si),
+          (EMf->*(pd.getter))(si), 1,1,1, gdim, ldim, foff);
+  }
 
-    // Keep legacy PHDF5 output consistent with the active IOManager path:
-    // densities are written in rhoINIT-style scaling (4*pi * rho_physical).
-    outputfile.WritePHDF5dataset("Fields", "rho_"+s_is, EMf->getRHOcs(is), nxc-2, nyc-2, nzc-2, 4*3.1415926535897);
-    // current (on node grid, same as pvtk output)
-    outputfile.WritePHDF5dataset("Fields", "Jx_"+s_is, EMf->getJxs(is), nxc-2, nyc-2, nzc-2);
-    outputfile.WritePHDF5dataset("Fields", "Jy_"+s_is, EMf->getJys(is), nxc-2, nyc-2, nzc-2);
-    outputfile.WritePHDF5dataset("Fields", "Jz_"+s_is, EMf->getJzs(is), nxc-2, nyc-2, nzc-2);
+  // --- Total pressure tensor ---
+  if (cfg.needsAnyPTot()) {
+    const int nxn = grid->getNXN();
+    const int nyn = grid->getNYN();
+    const int nzn = grid->getNZN();
+    // Temporary buffer sized for full local node array (including ghosts).
+    // We write from index 1 via the WritePHDF5dataset(i0=1) overload.
+    arr3_double tmp(nxn, nyn, nzn);
+
+    auto writePTot = [&](const char* name, bool doWrite,
+                         double (EMfields3D::*g4)(int,int,int,int) const) {
+      if (!doWrite) return;
+      for (int i = 0; i < (int)ldim[0]; i++)
+        for (int j = 0; j < (int)ldim[1]; j++)
+          for (int k = 0; k < (int)ldim[2]; k++) {
+            double sum = 0.0;
+            for (int s = 0; s < ns; s++)
+              sum += (EMf->*g4)(i+1, j+1, k+1, s);
+            tmp[i+1][j+1][k+1] = sum;
+          }
+      outputfile.WritePHDF5dataset("Fields", string(name)+"_tot",
+                                   tmp, 1,1,1, gdim, ldim, foff);
+    };
+
+    writePTot("pXX", cfg.writePXXTot, &EMfields3D::getpXXsn);
+    writePTot("pXY", cfg.writePXYTot, &EMfields3D::getpXYsn);
+    writePTot("pXZ", cfg.writePXZTot, &EMfields3D::getpXZsn);
+    writePTot("pYY", cfg.writePYYTot, &EMfields3D::getpYYsn);
+    writePTot("pYZ", cfg.writePYZTot, &EMfields3D::getpYZsn);
+    writePTot("pZZ", cfg.writePZZTot, &EMfields3D::getpZZsn);
   }
 
   outputfile.ClosePHDF5file();
@@ -117,7 +204,7 @@ void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, Particles3Dcomm *part,
 }
 
 /*! Function to write the EM fields using the H5hut library. */
-void WriteFieldsH5hut(int nspec, Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle){
+void WriteFieldsH5hut(int nspec, Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle, const OutputTagConfig& cfg){
   if(col->field_output_is_off())
     return;
 #ifdef USEH5HUT
@@ -125,54 +212,102 @@ void WriteFieldsH5hut(int nspec, Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *
 
   H5output file;
 
-
-  /* ---------------- */
-  /* Write the fields */
-  /* ---------------- */
-
   string filename = col->getSaveDirName() + "/" + col->getSimName();
 
   file.SetNameCycle(filename, cycle);
 
   file.OpenFieldsFile("Node", nspec, col->getNxc()+1, col->getNyc()+1, col->getNzc()+1, vct->getCoordinates(), vct->getDims(), vct->getFieldComm());
 
-  file.WriteFields(EMf->getEx(), "Ex", grid->getNXN(), grid->getNYN(), grid->getNZN());
-  file.WriteFields(EMf->getEy(), "Ey", grid->getNXN(), grid->getNYN(), grid->getNZN());
-  file.WriteFields(EMf->getEz(), "Ez", grid->getNXN(), grid->getNYN(), grid->getNZN());
-  file.WriteFields(EMf->getBx(), "Bx", grid->getNXN(), grid->getNYN(), grid->getNZN());
-  file.WriteFields(EMf->getBy(), "By", grid->getNXN(), grid->getNYN(), grid->getNZN());
-  file.WriteFields(EMf->getBz(), "Bz", grid->getNXN(), grid->getNYN(), grid->getNZN());
+  const int nxn = grid->getNXN();
+  const int nyn = grid->getNYN();
+  const int nzn = grid->getNZN();
+  const int ns  = col->getNs();
 
-  for (int is=0; is<nspec; is++) {
-    stringstream  ss;
-    ss << is;
-    string s_is = ss.str();
-    file.WriteFields(EMf->getRHOns(is), "rho_"+ s_is, grid->getNXN(), grid->getNYN(), grid->getNZN());
+  // --- B field (includes B_ext) ---
+  if (cfg.writeB) {
+    file.WriteFields(EMf->getBxTot(), "Bx", nxn, nyn, nzn);
+    file.WriteFields(EMf->getByTot(), "By", nxn, nyn, nzn);
+    file.WriteFields(EMf->getBzTot(), "Bz", nxn, nyn, nzn);
+  }
+
+  // --- E field ---
+  if (cfg.writeE) {
+    file.WriteFields(EMf->getEx(), "Ex", nxn, nyn, nzn);
+    file.WriteFields(EMf->getEy(), "Ey", nxn, nyn, nzn);
+    file.WriteFields(EMf->getEz(), "Ez", nxn, nyn, nzn);
+  }
+
+  // --- Per-species rho ---
+  for (int si : cfg.rhoSpecies) {
+    file.WriteFields(EMf->getRHOns(si), "rho_" + std::to_string(si), nxn, nyn, nzn);
+  }
+
+  // --- Total rho ---
+  if (cfg.writeRhoTot) {
+    file.WriteFields(EMf->getRHOn(), "rho_tot", nxn, nyn, nzn);
+  }
+
+  // --- Per-species J ---
+  for (int si : cfg.JSpecies) {
+    string s = std::to_string(si);
+    file.WriteFields(EMf->getJxs(si), "Jx_" + s, nxn, nyn, nzn);
+    file.WriteFields(EMf->getJys(si), "Jy_" + s, nxn, nyn, nzn);
+    file.WriteFields(EMf->getJzs(si), "Jz_" + s, nxn, nyn, nzn);
+  }
+
+  // --- Total J ---
+  if (cfg.writeJTot) {
+    EMf->sumOverSpeciesJ();
+    file.WriteFields(EMf->getJx(), "Jx_tot", nxn, nyn, nzn);
+    file.WriteFields(EMf->getJy(), "Jy_tot", nxn, nyn, nzn);
+    file.WriteFields(EMf->getJz(), "Jz_tot", nxn, nyn, nzn);
+  }
+
+  // --- Per-species pressure tensor ---
+  {
+    struct PDesc { const char* name; const std::set<int>& species;
+                   arr3_double (EMfields3D::*getter)(int); };
+    PDesc pdescs[] = {
+      {"pXX", cfg.PXXSpecies, &EMfields3D::getpXXsn},
+      {"pXY", cfg.PXYSpecies, &EMfields3D::getpXYsn},
+      {"pXZ", cfg.PXZSpecies, &EMfields3D::getpXZsn},
+      {"pYY", cfg.PYYSpecies, &EMfields3D::getpYYsn},
+      {"pYZ", cfg.PYZSpecies, &EMfields3D::getpYZsn},
+      {"pZZ", cfg.PZZSpecies, &EMfields3D::getpZZsn},
+    };
+    for (auto &pd : pdescs)
+      for (int si : pd.species)
+        file.WriteFields((EMf->*(pd.getter))(si),
+          string(pd.name) + "_" + std::to_string(si), nxn, nyn, nzn);
+  }
+
+  // --- Total pressure tensor ---
+  if (cfg.needsAnyPTot()) {
+    arr3_double tmp(nxn, nyn, nzn);
+
+    auto writePTot = [&](const char* name, bool doWrite,
+                         double (EMfields3D::*g4)(int,int,int,int) const) {
+      if (!doWrite) return;
+      for (int i = 0; i < nxn; i++)
+        for (int j = 0; j < nyn; j++)
+          for (int k = 0; k < nzn; k++) {
+            double sum = 0.0;
+            for (int s = 0; s < ns; s++)
+              sum += (EMf->*g4)(i, j, k, s);
+            tmp[i][j][k] = sum;
+          }
+      file.WriteFields(tmp, string(name) + "_tot", nxn, nyn, nzn);
+    };
+
+    writePTot("pXX", cfg.writePXXTot, &EMfields3D::getpXXsn);
+    writePTot("pXY", cfg.writePXYTot, &EMfields3D::getpXYsn);
+    writePTot("pXZ", cfg.writePXZTot, &EMfields3D::getpXZsn);
+    writePTot("pYY", cfg.writePYYTot, &EMfields3D::getpYYsn);
+    writePTot("pYZ", cfg.writePYZTot, &EMfields3D::getpYZsn);
+    writePTot("pZZ", cfg.writePZZTot, &EMfields3D::getpZZsn);
   }
 
   file.CloseFieldsFile();
-
-//--- SAVE FIELDS IN THE CELLS:
-//
-//  file.OpenFieldsFile("Cell", nspec, col->getNxc(), col->getNyc(), col->getNzc(), vct->getCoordinates(), vct->getDims(), vct->getComm());
-//
-//  file.WriteFields(EMf->getExc(), "Exc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  file.WriteFields(EMf->getEyc(), "Eyc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  file.WriteFields(EMf->getEzc(), "Ezc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  file.WriteFields(EMf->getBxc(), "Bxc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  file.WriteFields(EMf->getByc(), "Byc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  file.WriteFields(EMf->getBzc(), "Bzc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//
-//  for (int is=0; is<nspec; is++) {
-//    stringstream  ss;
-//    ss << is;
-//    string s_is = ss.str();
-//    file.WriteFields(EMf->getRHOcs(is), "rhoc_"+ s_is, grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  }
-//
-//  file.CloseFieldsFile();
-//
-//--- END SAVE FIELDS IN THE CELLS.
 
 #else  
   eprintf(
@@ -185,7 +320,7 @@ void WriteFieldsH5hut(int nspec, Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *
 }
 
 /*! Function to write the particles using the H5hut library. */
-void WritePartclH5hut(int nspec, Grid3DCU *grid, Particles3Dcomm *part, CollectiveIO *col, VCtopology3D *vct, int cycle){
+void WritePartclH5hut(int nspec, Grid3DCU *grid, ParticleSoAHost **part, CollectiveIO *col, VCtopology3D *vct, int cycle){
 #ifdef USEH5HUT
   timeTasks_set_task(TimeTasks::WRITE_PARTICLES);
 
@@ -201,16 +336,15 @@ void WritePartclH5hut(int nspec, Grid3DCU *grid, Particles3Dcomm *part, Collecti
 
   file.OpenPartclFile(nspec, vct->getFieldComm());
   for (int i=0; i<nspec; i++){
-    // this is a hack
-    part[i].convertParticlesToSynched();
-    file.WriteParticles(i, part[i].getNOP(),
-                           part[i].getQall(),
-                           part[i].getXall(),
-                           part[i].getYall(),
-                           part[i].getZall(),
-                           part[i].getUall(),
-                           part[i].getVall(),
-                           part[i].getWall(),
+    // SoA data is authoritative — no conversion needed
+    file.WriteParticles(i, part[i]->getNOP(),
+                           part[i]->getQall(),
+                           part[i]->getXall(),
+                           part[i]->getYall(),
+                           part[i]->getZall(),
+                           part[i]->getUall(),
+                           part[i]->getVall(),
+                           part[i]->getWall(),
                            vct->getFieldComm());
   }
   file.ClosePartclFile();
@@ -226,7 +360,7 @@ void WritePartclH5hut(int nspec, Grid3DCU *grid, Particles3Dcomm *part, Collecti
 }
 
 #if 0
-void ReadPartclH5hut(int nspec, Particles3Dcomm *part, Collective *col, VCtopology3D *vct, Grid3DCU *grid){
+void ReadPartclH5hut(int nspec, ParticleSoAHost **part, Collective *col, VCtopology3D *vct, Grid3DCU *grid){
 #ifdef USEH5HUT
 
   H5input infile;
@@ -238,15 +372,15 @@ void ReadPartclH5hut(int nspec, Particles3Dcomm *part, Collective *col, VCtopolo
   infile.ReadParticles(vct->getCartesian_rank(), vct->getNproc(), vct->getDims(), L, vct->getFieldComm());
 
   for (int s = 0; s < nspec; s++){
-    part[s].allocate(s, infile.GetNp(s), col, vct, grid);
+    part[s]->allocate(s, infile.GetNp(s), col, vct, grid);
 
-    infile.DumpPartclX(part[s].getXref(), s);
-    infile.DumpPartclY(part[s].getYref(), s);
-    infile.DumpPartclZ(part[s].getZref(), s);
-    infile.DumpPartclU(part[s].getUref(), s);
-    infile.DumpPartclV(part[s].getVref(), s);
-    infile.DumpPartclW(part[s].getWref(), s);
-    infile.DumpPartclQ(part[s].getQref(), s);
+    infile.DumpPartclX(part[s]->getXref(), s);
+    infile.DumpPartclY(part[s]->getYref(), s);
+    infile.DumpPartclZ(part[s]->getZref(), s);
+    infile.DumpPartclU(part[s]->getUref(), s);
+    infile.DumpPartclV(part[s]->getVref(), s);
+    infile.DumpPartclW(part[s]->getWref(), s);
+    infile.DumpPartclQ(part[s]->getQref(), s);
   }
   infile.ClosePartclFile();
 
@@ -367,1157 +501,648 @@ void ReadFieldsH5hut(int nspec, EMfields3D *EMf, Collective *col, VCtopology3D *
 #endif
 
 
-template<typename T, int sz>
-int size(T(&)[sz])
+#include <functional>
+
+// ─── VTK MPI-IO helpers ──────────────────────────────────────────────
+
+/** Common grid geometry for VTK writers. */
+struct VTKGridInfo {
+	int nxn, nyn, nzn;     // local node counts (excluding ghosts, +1 for upper boundary)
+	int dimX, dimY, dimZ;  // global node counts
+	double spaceX, spaceY, spaceZ;
+	int nPoints;
+	int cycle;             // simulation cycle (used by nonblocking writers)
+	int lx, ly, lz;       // local write sizes (interior nodes excluding 3 ghost layers)
+};
+
+static VTKGridInfo getVTKGridInfo(Grid3DCU *grid, CollectiveIO *col, VCtopology3D *vct) {
+	VTKGridInfo g;
+	g.nxn  = grid->getNXN() + (vct->isXupper() ? 1 : 0);
+	g.nyn  = grid->getNYN() + (vct->isYupper() ? 1 : 0);
+	g.nzn  = grid->getNZN() + (vct->isZupper() ? 1 : 0);
+	g.dimX = col->getNxc() + 1;
+	g.dimY = col->getNyc() + 1;
+	g.dimZ = col->getNzc() + 1;
+	g.spaceX = g.dimX > 1 ? col->getLx() / (g.dimX - 1) : col->getLx();
+	g.spaceY = g.dimY > 1 ? col->getLy() / (g.dimY - 1) : col->getLy();
+	g.spaceZ = g.dimZ > 1 ? col->getLz() / (g.dimZ - 1) : col->getLz();
+	g.nPoints = g.dimX * g.dimY * g.dimZ;
+	g.cycle = 0;
+	g.lx = g.nxn - 3;
+	g.ly = g.nyn - 3;
+	g.lz = g.nzn - 3;
+	return g;
+}
+
+/**
+ * @brief Write a 3-component vector VTK file via MPI-IO.
+ */
+static void writeVectorVTK(
+	Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,
+	const std::string &filepath, const std::string &vectorName,
+	const std::string &description,
+	float**** buf, const VTKGridInfo &g,
+	std::function<void(float****,int,int,int)> fillFn)
 {
-    return sz;
-}
+	const int lx = g.nxn - 3, ly = g.nyn - 3, lz = g.nzn - 3;
 
-void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & outputTag ,int cycle){
+	fillFn(buf, lx, ly, lz);
 
-	//All VTK output at grid nodes excluding ghost nodes
-	// Upper-boundary processes include the last physical boundary node
-	const int nxn  =grid->getNXN() + (vct->isXupper() ? 1 : 0);
-	const int nyn  =grid->getNYN() + (vct->isYupper() ? 1 : 0);
-	const int nzn  =grid->getNZN() + (vct->isZupper() ? 1 : 0);
-	// Global dimensions = total node count = global cells + 1
-	const int dimX =col->getNxc()+1 ,dimY = col->getNyc()+1, dimZ=col->getNzc()+1;
-	const double spaceX = dimX>1 ?col->getLx()/(dimX-1) :col->getLx();
-	const double spaceY = dimY>1 ?col->getLy()/(dimY-1) :col->getLy();
-	const double spaceZ = dimZ>1 ?col->getLz()/(dimZ-1) :col->getLz();
-	const int    nPoints = dimX*dimY*dimZ;
-	MPI_File     fh;
-	MPI_Status   status;
-
-	if (outputTag.find("B", 0) != string::npos || outputTag.find("E", 0) != string::npos
-			 || outputTag.find("Je", 0) != string::npos || outputTag.find("Ji", 0) != string::npos){
-
-		const string tags0[]={"B", "E", "Je", "Ji"};
-		float writebuffer[nzn-3][nyn-3][nxn-3][3];
-		float tmpX, tmpY, tmpZ;
-
-		for(int tagid=0;tagid<4;tagid++){
-		 if (outputTag.find(tags0[tagid], 0) == string::npos) continue;
-
-		 char   header[1024];
-		 if (tags0[tagid].compare("B") == 0){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  tmpX = (float)EMf->getBxTot(ix+1, iy+1, iz+1);
-						  tmpY = (float)EMf->getByTot(ix+1, iy+1, iz+1);
-						  tmpZ = (float)EMf->getBzTot(ix+1, iy+1, iz+1);
-
-						  writebuffer[iz][iy][ix][0] =  (fabs(tmpX) < 1E-16) ?0.0 : tmpX;
-						  writebuffer[iz][iy][ix][1] =  (fabs(tmpY) < 1E-16) ?0.0 : tmpY;
-						  writebuffer[iz][iy][ix][2] =  (fabs(tmpZ) < 1E-16) ?0.0 : tmpZ;
-					  }
-
-	      //Write VTK header
-		  sprintf(header, "# vtk DataFile Version 2.0\n"
-						   "Magnetic Field from iPIC3D\n"
-						   "BINARY\n"
-						   "DATASET STRUCTURED_POINTS\n"
-						   "DIMENSIONS %d %d %d\n"
-						   "ORIGIN 0 0 0\n"
-						   "SPACING %f %f %f\n"
-						   "POINT_DATA %d\n"
-						   "VECTORS B float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-
-		 }else if (tags0[tagid].compare("E") == 0){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  writebuffer[iz][iy][ix][0] = (float)EMf->getEx(ix+1, iy+1, iz+1);
-						  writebuffer[iz][iy][ix][1] = (float)EMf->getEy(ix+1, iy+1, iz+1);
-						  writebuffer[iz][iy][ix][2] = (float)EMf->getEz(ix+1, iy+1, iz+1);
-					  }
-
-		  //Write VTK header
-		   sprintf(header, "# vtk DataFile Version 2.0\n"
-						   "Electric Field from iPIC3D\n"
-						   "BINARY\n"
-						   "DATASET STRUCTURED_POINTS\n"
-						   "DIMENSIONS %d %d %d\n"
-						   "ORIGIN 0 0 0\n"
-						   "SPACING %f %f %f\n"
-						   "POINT_DATA %d \n"
-						   "VECTORS E float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-
-		 }else if (tags0[tagid].compare("Je") == 0){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  writebuffer[iz][iy][ix][0] = (float)EMf->getJxs(ix+1, iy+1, iz+1, 0);
-						  writebuffer[iz][iy][ix][1] = (float)EMf->getJys(ix+1, iy+1, iz+1, 0);
-						  writebuffer[iz][iy][ix][2] = (float)EMf->getJzs(ix+1, iy+1, iz+1, 0);
-					  }
-
-		  //Write VTK header
-		   sprintf(header, "# vtk DataFile Version 2.0\n"
-						   "Electron current from iPIC3D\n"
-						   "BINARY\n"
-						   "DATASET STRUCTURED_POINTS\n"
-						   "DIMENSIONS %d %d %d\n"
-						   "ORIGIN 0 0 0\n"
-						   "SPACING %f %f %f\n"
-						   "POINT_DATA %d \n"
-						   "VECTORS Je float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-
-		 }else if (tags0[tagid].compare("Ji") == 0){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  writebuffer[iz][iy][ix][0] = (float)EMf->getJxs(ix+1, iy+1, iz+1, 1);
-						  writebuffer[iz][iy][ix][1] = (float)EMf->getJys(ix+1, iy+1, iz+1, 1);
-						  writebuffer[iz][iy][ix][2] = (float)EMf->getJzs(ix+1, iy+1, iz+1, 1);
-					  }
-
-		  //Write VTK header
-		   sprintf(header, "# vtk DataFile Version 2.0\n"
-						   "Ion current from iPIC3D\n"
-						   "BINARY\n"
-						   "DATASET STRUCTURED_POINTS\n"
-						   "DIMENSIONS %d %d %d\n"
-						   "ORIGIN 0 0 0\n"
-						   "SPACING %f %f %f\n"
-						   "POINT_DATA %d \n"
-						   "VECTORS Ji float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-		 }
-
-
-		 if(EMf->isLittleEndian()){
-
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  ByteSwap((unsigned char*) &writebuffer[iz][iy][ix][0],4);
-						  ByteSwap((unsigned char*) &writebuffer[iz][iy][ix][1],4);
-						  ByteSwap((unsigned char*) &writebuffer[iz][iy][ix][2],4);
-					  }
-		 }
-
-		  int nelem = strlen(header);
-		  int charsize=sizeof(char);
-		  MPI_Offset disp = nelem*charsize;
-
-		  ostringstream filename;
-		  filename << col->getSaveDirName() << "/" << col->getSimName() << "_"<< tags0[tagid] << "_" << cycle << ".vtk";
-		  MPI_File_open(vct->getFieldComm(),filename.str().c_str(), MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
-
-		  MPI_File_set_view(fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL);
-		  if (vct->getCartesian_rank()==0){
-			  MPI_File_write(fh, header, nelem, MPI_BYTE, &status);
-		  }
-
-	      int err = MPI_File_set_view(fh, disp, EMf->getXYZeType(), EMf->getProcviewXYZ(), "native", MPI_INFO_NULL);
-	      if(err){
-	          dprintf("Error in MPI_File_set_view\n");
-
-	          int error_code = status.MPI_ERROR;
-	          if (error_code != MPI_SUCCESS) {
-	              char error_string[100];
-	              int length_of_error_string, error_class;
-
-	              MPI_Error_class(error_code, &error_class);
-	              MPI_Error_string(error_class, error_string, &length_of_error_string);
-	              dprintf("Error %s\n", error_string);
-	          }
-	      }
-
-	      err = MPI_File_write_all(fh, writebuffer[0][0][0],3*(nxn-3)*(nyn-3)*(nzn-3),MPI_FLOAT, &status);
-	      if(err){
-		      int tcount=0;
-		      MPI_Get_count(&status, MPI_DOUBLE, &tcount);
-			  dprintf(" wrote %i",  tcount);
-	          dprintf("Error in write1\n");
-	          int error_code = status.MPI_ERROR;
-	          if (error_code != MPI_SUCCESS) {
-	              char error_string[100];
-	              int length_of_error_string, error_class;
-
-	              MPI_Error_class(error_code, &error_class);
-	              MPI_Error_string(error_class, error_string, &length_of_error_string);
-	              dprintf("Error %s\n", error_string);
-	          }
-	      }
-	      MPI_File_close(&fh);
-		}
+	if (EMf->isLittleEndian()) {
+		for (int iz = 0; iz < lz; iz++)
+			for (int iy = 0; iy < ly; iy++)
+				for (int ix = 0; ix < lx; ix++) {
+					ByteSwap((unsigned char*)&buf[iz][iy][ix][0], 4);
+					ByteSwap((unsigned char*)&buf[iz][iy][ix][1], 4);
+					ByteSwap((unsigned char*)&buf[iz][iy][ix][2], 4);
+				}
 	}
 
-	if (outputTag.find("rho", 0) != string::npos){
+	char header[1024];
+	sprintf(header,
+		"# vtk DataFile Version 2.0\n"
+		"%s from iPIC3D\n"
+		"BINARY\n"
+		"DATASET STRUCTURED_POINTS\n"
+		"DIMENSIONS %d %d %d\n"
+		"ORIGIN 0 0 0\n"
+		"SPACING %f %f %f\n"
+		"POINT_DATA %d\n"
+		"VECTORS %s float\n",
+		description.c_str(),
+		g.dimX, g.dimY, g.dimZ,
+		g.spaceX, g.spaceY, g.spaceZ,
+		g.nPoints,
+		vectorName.c_str());
 
-		float writebufferRhoe[nzn-3][nyn-3][nxn-3];
-		float writebufferRhoi[nzn-3][nyn-3][nxn-3];
-		char   headerRhoe[1024];
-		char   headerRhoi[1024];
+	int nelem = strlen(header);
+	MPI_Offset disp = nelem * sizeof(char);
+	MPI_File fh;
+	MPI_Status status;
 
-		for(int iz=0;iz<nzn-3;iz++)
-		  for(int iy=0;iy<nyn-3;iy++)
-			  for(int ix= 0;ix<nxn-3;ix++){
-				  writebufferRhoe[iz][iy][ix] = (float)EMf->getRHOns(ix+1, iy+1, iz+1, 0)*4*3.1415926535897;
-				  writebufferRhoi[iz][iy][ix] = (float)EMf->getRHOns(ix+1, iy+1, iz+1, 1)*4*3.1415926535897;
-			  }
+	MPI_File_open(vct->getFieldComm(), filepath.c_str(),
+		MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+	if (vct->getCartesian_rank() == 0)
+		MPI_File_write(fh, header, nelem, MPI_BYTE, &status);
 
-		//Write VTK header
-		sprintf(headerRhoe, "# vtk DataFile Version 2.0\n"
-						   "Electron density from iPIC3D\n"
-						   "BINARY\n"
-						   "DATASET STRUCTURED_POINTS\n"
-						   "DIMENSIONS %d %d %d\n"
-						   "ORIGIN 0 0 0\n"
-						   "SPACING %f %f %f\n"
-						   "POINT_DATA %d \n"
-						   "SCALARS rhoe float\n"
-						   "LOOKUP_TABLE default\n",  dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-
-		sprintf(headerRhoi, "# vtk DataFile Version 2.0\n"
-						   "Ion density from iPIC3D\n"
-						   "BINARY\n"
-						   "DATASET STRUCTURED_POINTS\n"
-						   "DIMENSIONS %d %d %d\n"
-						   "ORIGIN 0 0 0\n"
-						   "SPACING %f %f %f\n"
-						   "POINT_DATA %d \n"
-						   "SCALARS rhoi float\n"
-						   "LOOKUP_TABLE default\n",  dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-
-		 if(EMf->isLittleEndian()){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  ByteSwap((unsigned char*) &writebufferRhoe[iz][iy][ix],4);
-						  ByteSwap((unsigned char*) &writebufferRhoi[iz][iy][ix],4);
-					  }
-		 }
-
-		  int nelem = strlen(headerRhoe);
-		  int charsize=sizeof(char);
-		  MPI_Offset disp = nelem*charsize;
-
-		  ostringstream filename;
-		  filename << col->getSaveDirName() << "/" << col->getSimName() << "_rhoe_" << cycle << ".vtk";
-		  MPI_File_open(vct->getFieldComm(),filename.str().c_str(), MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
-
-		  MPI_File_set_view(fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL);
-		  if (vct->getCartesian_rank()==0){
-			  MPI_File_write(fh, headerRhoe, nelem, MPI_BYTE, &status);
-		  }
-
-	      int err = MPI_File_set_view(fh, disp, MPI_FLOAT, EMf->getProcview(), "native", MPI_INFO_NULL);
-	      if(err){
-	          dprintf("Error in MPI_File_set_view\n");
-
-	          int error_code = status.MPI_ERROR;
-	          if (error_code != MPI_SUCCESS) {
-	              char error_string[100];
-	              int length_of_error_string, error_class;
-
-	              MPI_Error_class(error_code, &error_class);
-	              MPI_Error_string(error_class, error_string, &length_of_error_string);
-	              dprintf("Error %s\n", error_string);
-	          }
-	      }
-
-	      err = MPI_File_write_all(fh, writebufferRhoe[0][0],(nxn-3)*(nyn-3)*(nzn-3),MPI_FLOAT, &status);
-	      if(err){
-		      int tcount=0;
-		      MPI_Get_count(&status, MPI_DOUBLE, &tcount);
-			  dprintf(" wrote %i",  tcount);
-	          dprintf("Error in write1\n");
-	          int error_code = status.MPI_ERROR;
-	          if (error_code != MPI_SUCCESS) {
-	              char error_string[100];
-	              int length_of_error_string, error_class;
-
-	              MPI_Error_class(error_code, &error_class);
-	              MPI_Error_string(error_class, error_string, &length_of_error_string);
-	              dprintf("Error %s\n", error_string);
-	          }
-	      }
-	      MPI_File_close(&fh);
-
-	      nelem = strlen(headerRhoi);
-	      disp  = nelem*charsize;
-
-	      filename.str("");
-	      filename << col->getSaveDirName() << "/" << col->getSimName() << "_rhoi_" << cycle << ".vtk";
-	      MPI_File_open(vct->getFieldComm(),filename.str().c_str(), MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
-
-	      MPI_File_set_view(fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL);
-		  if (vct->getCartesian_rank()==0){
-			  MPI_File_write(fh, headerRhoi, nelem, MPI_BYTE, &status);
-		  }
-
-	      err = MPI_File_set_view(fh, disp, MPI_FLOAT, EMf->getProcview(), "native", MPI_INFO_NULL);
-		  if(err){
-			  dprintf("Error in MPI_File_set_view\n");
-
-			  int error_code = status.MPI_ERROR;
-			  if (error_code != MPI_SUCCESS) {
-				  char error_string[100];
-				  int length_of_error_string, error_class;
-
-				  MPI_Error_class(error_code, &error_class);
-				  MPI_Error_string(error_class, error_string, &length_of_error_string);
-				  dprintf("Error %s\n", error_string);
-			  }
-		  }
-
-		  err = MPI_File_write_all(fh, writebufferRhoi[0][0],(nxn-3)*(nyn-3)*(nzn-3),MPI_FLOAT, &status);
-		  if(err){
-			  int tcount=0;
-			  MPI_Get_count(&status, MPI_DOUBLE, &tcount);
-			  dprintf(" wrote %i",  tcount);
-			  dprintf("Error in write1\n");
-			  int error_code = status.MPI_ERROR;
-			  if (error_code != MPI_SUCCESS) {
-				  char error_string[100];
-				  int length_of_error_string, error_class;
-
-				  MPI_Error_class(error_code, &error_class);
-				  MPI_Error_string(error_class, error_string, &length_of_error_string);
-				  dprintf("Error %s\n", error_string);
-			  }
-		  }
-		  MPI_File_close(&fh);
+	int ec = MPI_File_set_view(fh, disp, EMf->getXYZeType(),
+		EMf->getProcviewXYZ(), "native", MPI_INFO_NULL);
+	if (ec != MPI_SUCCESS) {
+		char es[100]; int len, cls;
+		MPI_Error_class(ec, &cls); MPI_Error_string(cls, es, &len);
+		dprintf("Error in MPI_File_set_view: %s\n", es);
 	}
+	ec = MPI_File_write_all(fh, buf[0][0][0], lx * ly * lz, EMf->getXYZeType(), &status);
+	if (ec != MPI_SUCCESS) {
+		char es[100]; int len, cls;
+		MPI_Error_class(ec, &cls); MPI_Error_string(cls, es, &len);
+		dprintf("Error in MPI_File_write_all: %s\n", es);
+	}
+	MPI_File_close(&fh);
 }
+
+/**
+ * @brief Write a scalar VTK file via MPI-IO.
+ */
+static void writeScalarVTK(
+	Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,
+	const std::string &filepath, const std::string &scalarName,
+	const std::string &description,
+	float*** buf, const VTKGridInfo &g,
+	std::function<void(float***,int,int,int)> fillFn)
+{
+	const int lx = g.nxn - 3, ly = g.nyn - 3, lz = g.nzn - 3;
+
+	fillFn(buf, lx, ly, lz);
+
+	if (EMf->isLittleEndian()) {
+		for (int iz = 0; iz < lz; iz++)
+			for (int iy = 0; iy < ly; iy++)
+				for (int ix = 0; ix < lx; ix++)
+					ByteSwap((unsigned char*)&buf[iz][iy][ix], 4);
+	}
+
+	char header[1024];
+	sprintf(header,
+		"# vtk DataFile Version 2.0\n"
+		"%s from iPIC3D\n"
+		"BINARY\n"
+		"DATASET STRUCTURED_POINTS\n"
+		"DIMENSIONS %d %d %d\n"
+		"ORIGIN 0 0 0\n"
+		"SPACING %f %f %f\n"
+		"POINT_DATA %d\n"
+		"SCALARS %s float\n"
+		"LOOKUP_TABLE default\n",
+		description.c_str(),
+		g.dimX, g.dimY, g.dimZ,
+		g.spaceX, g.spaceY, g.spaceZ,
+		g.nPoints,
+		scalarName.c_str());
+
+	int nelem = strlen(header);
+	MPI_Offset disp = nelem * sizeof(char);
+	MPI_File fh;
+	MPI_Status status;
+
+	MPI_File_open(vct->getFieldComm(), filepath.c_str(),
+		MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+	if (vct->getCartesian_rank() == 0)
+		MPI_File_write(fh, header, nelem, MPI_BYTE, &status);
+
+	int ec = MPI_File_set_view(fh, disp, MPI_FLOAT,
+		EMf->getProcview(), "native", MPI_INFO_NULL);
+	if (ec != MPI_SUCCESS) {
+		char es[100]; int len, cls;
+		MPI_Error_class(ec, &cls); MPI_Error_string(cls, es, &len);
+		dprintf("Error in MPI_File_set_view: %s\n", es);
+	}
+	ec = MPI_File_write_all(fh, buf[0][0], lx * ly * lz, MPI_FLOAT, &status);
+	if (ec != MPI_SUCCESS) {
+		char es[100]; int len, cls;
+		MPI_Error_class(ec, &cls); MPI_Error_string(cls, es, &len);
+		dprintf("Error in MPI_File_write_all: %s\n", es);
+	}
+	MPI_File_close(&fh);
+}
+
+/** Build a VTK output file path. */
+static std::string vtkPath(CollectiveIO *col, const std::string &tag, int cycle) {
+	ostringstream ss;
+	ss << col->getSaveDirName() << "/" << col->getSimName() << "_" << tag << "_" << cycle << ".vtk";
+	return ss.str();
+}
+
+// ─── WriteFieldsVTK (new: uses OutputTagConfig, B and E only) ────────
 
 void WriteFieldsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & outputTag ,int cycle,float**** fieldwritebuffer){
 
-	//All VTK output at grid nodes excluding ghost nodes
-	// Upper-boundary processes include the last physical boundary node
-	const int nxn  =grid->getNXN() + (vct->isXupper() ? 1 : 0);
-	const int nyn  =grid->getNYN() + (vct->isYupper() ? 1 : 0);
-	const int nzn  =grid->getNZN() + (vct->isZupper() ? 1 : 0);
-	// Global dimensions = total node count = global cells + 1
-	const int dimX =col->getNxc()+1 ,dimY = col->getNyc()+1, dimZ=col->getNzc()+1;
-	const double spaceX = dimX>1 ?col->getLx()/(dimX-1) :col->getLx();
-	const double spaceY = dimY>1 ?col->getLy()/(dimY-1) :col->getLy();
-	const double spaceZ = dimZ>1 ?col->getLz()/(dimZ-1) :col->getLz();
-	const int    nPoints = dimX*dimY*dimZ;
-	MPI_File     fh;
-	MPI_Status   status;
-	const string fieldtags[]={"B", "E", "Je", "Ji","Je2", "Ji3"};
-	const int    tagsize = size(fieldtags);
-	const string outputtag = col->getFieldOutputTag();
+	const OutputTagConfig &cfg = col->getOutputConfig();
+	VTKGridInfo g = getVTKGridInfo(grid, col, vct);
 
-	for(int tagid=0; tagid<tagsize; tagid++){
+	if (cfg.writeB) {
+		writeVectorVTK(grid, EMf, col, vct,
+			vtkPath(col, "B", cycle), "B", "Magnetic Field",
+			fieldwritebuffer, g,
+			[&](float**** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++) {
+							buf[iz][iy][ix][0] = (float)EMf->getBxTot(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][1] = (float)EMf->getByTot(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][2] = (float)EMf->getBzTot(ix+1, iy+1, iz+1);
+						}
+			});
+	}
 
-	 if (outputTag.find(fieldtags[tagid], 0) == string::npos) continue;
-
-	 char   header[1024];
-	 if (fieldtags[tagid].compare("B") == 0){
-		 for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++){
-					  fieldwritebuffer[iz][iy][ix][0] =  (float)EMf->getBxTot(ix+1, iy+1, iz+1);
-					  fieldwritebuffer[iz][iy][ix][1] =  (float)EMf->getByTot(ix+1, iy+1, iz+1);
-					  fieldwritebuffer[iz][iy][ix][2] =  (float)EMf->getBzTot(ix+1, iy+1, iz+1);
-				  }
-
-		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
-					   "Magnetic Field from iPIC3D\n"
-					   "BINARY\n"
-					   "DATASET STRUCTURED_POINTS\n"
-					   "DIMENSIONS %d %d %d\n"
-					   "ORIGIN 0 0 0\n"
-					   "SPACING %f %f %f\n"
-					   "POINT_DATA %d\n"
-					   "VECTORS B float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-
-	 }else if (fieldtags[tagid].compare("E") == 0){
-		 for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++){
-					  fieldwritebuffer[iz][iy][ix][0] = (float)EMf->getEx(ix+1, iy+1, iz+1);
-					  fieldwritebuffer[iz][iy][ix][1] = (float)EMf->getEy(ix+1, iy+1, iz+1);
-					  fieldwritebuffer[iz][iy][ix][2] = (float)EMf->getEz(ix+1, iy+1, iz+1);
-				  }
-
-		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
-					   "Electric Field from iPIC3D\n"
-					   "BINARY\n"
-					   "DATASET STRUCTURED_POINTS\n"
-					   "DIMENSIONS %d %d %d\n"
-					   "ORIGIN 0 0 0\n"
-					   "SPACING %f %f %f\n"
-					   "POINT_DATA %d \n"
-					   "VECTORS E float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-
-	 }else if (fieldtags[tagid].compare("Je") == 0){
-		 for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++){
-					  fieldwritebuffer[iz][iy][ix][0] = (float)EMf->getJxs(ix+1, iy+1, iz+1, 0);
-					  fieldwritebuffer[iz][iy][ix][1] = (float)EMf->getJys(ix+1, iy+1, iz+1, 0);
-					  fieldwritebuffer[iz][iy][ix][2] = (float)EMf->getJzs(ix+1, iy+1, iz+1, 0);
-				  }
-
-		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
-					   "Electron current from iPIC3D\n"
-					   "BINARY\n"
-					   "DATASET STRUCTURED_POINTS\n"
-					   "DIMENSIONS %d %d %d\n"
-					   "ORIGIN 0 0 0\n"
-					   "SPACING %f %f %f\n"
-					   "POINT_DATA %d \n"
-					   "VECTORS Je float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-
-	 }else if (fieldtags[tagid].compare("Ji") == 0){
-		 for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++){
-					  fieldwritebuffer[iz][iy][ix][0] = (float)EMf->getJxs(ix+1, iy+1, iz+1, 1);
-					  fieldwritebuffer[iz][iy][ix][1] = (float)EMf->getJys(ix+1, iy+1, iz+1, 1);
-					  fieldwritebuffer[iz][iy][ix][2] = (float)EMf->getJzs(ix+1, iy+1, iz+1, 1);
-				  }
-
-		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
-					   "Ion current from iPIC3D\n"
-					   "BINARY\n"
-					   "DATASET STRUCTURED_POINTS\n"
-					   "DIMENSIONS %d %d %d\n"
-					   "ORIGIN 0 0 0\n"
-					   "SPACING %f %f %f\n"
-					   "POINT_DATA %d \n"
-					   "VECTORS Ji float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-	 }else if (fieldtags[tagid].compare("Je2") == 0){
-		 for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++){
-					  fieldwritebuffer[iz][iy][ix][0] = (float)EMf->getJxs(ix+1, iy+1, iz+1, 2);
-					  fieldwritebuffer[iz][iy][ix][1] = (float)EMf->getJys(ix+1, iy+1, iz+1, 2);
-					  fieldwritebuffer[iz][iy][ix][2] = (float)EMf->getJzs(ix+1, iy+1, iz+1, 2);
-				  }
-
-		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
-				 "Electron2 current from iPIC3D\n"
-					   "BINARY\n"
-					   "DATASET STRUCTURED_POINTS\n"
-					   "DIMENSIONS %d %d %d\n"
-					   "ORIGIN 0 0 0\n"
-					   "SPACING %f %f %f\n"
-					   "POINT_DATA %d \n"
-					   "VECTORS Je float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-
-	 }else if (fieldtags[tagid].compare("Ji3") == 0){
-		 for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++){
-					  fieldwritebuffer[iz][iy][ix][0] = (float)EMf->getJxs(ix+1, iy+1, iz+1, 3);
-					  fieldwritebuffer[iz][iy][ix][1] = (float)EMf->getJys(ix+1, iy+1, iz+1, 3);
-					  fieldwritebuffer[iz][iy][ix][2] = (float)EMf->getJzs(ix+1, iy+1, iz+1, 3);
-				  }
-
-		 //Write VTK header
-		 sprintf(header, "# vtk DataFile Version 2.0\n"
-				 "Ion3 current from iPIC3D\n"
-					   "BINARY\n"
-					   "DATASET STRUCTURED_POINTS\n"
-					   "DIMENSIONS %d %d %d\n"
-					   "ORIGIN 0 0 0\n"
-					   "SPACING %f %f %f\n"
-					   "POINT_DATA %d \n"
-					   "VECTORS Ji float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-	 }
-
-	 if(EMf->isLittleEndian()){
-		 for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++){
-					  ByteSwap((unsigned char*) &fieldwritebuffer[iz][iy][ix][0],4);
-					  ByteSwap((unsigned char*) &fieldwritebuffer[iz][iy][ix][1],4);
-					  ByteSwap((unsigned char*) &fieldwritebuffer[iz][iy][ix][2],4);
-				  }
-	 }
-
-	  int nelem = strlen(header);
-	  int charsize=sizeof(char);
-	  MPI_Offset disp = nelem*charsize;
-
-	  ostringstream filename;
-	  filename << col->getSaveDirName() << "/" << col->getSimName() << "_"<< fieldtags[tagid] << "_" << cycle << ".vtk";
-	  MPI_File_open(vct->getFieldComm(),filename.str().c_str(), MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
-
-	  if (vct->getCartesian_rank()==0){
-		  MPI_File_write(fh, header, nelem, MPI_BYTE, &status);
-	  }
-
-      int error_code = MPI_File_set_view(fh, disp, EMf->getXYZeType(), EMf->getProcviewXYZ(), "native", MPI_INFO_NULL);
-      if (error_code != MPI_SUCCESS) {
-		char error_string[100];
-		int length_of_error_string, error_class;
-
-		MPI_Error_class(error_code, &error_class);
-		MPI_Error_string(error_class, error_string, &length_of_error_string);
-		dprintf("Error in MPI_File_set_view: %s\n", error_string);
-	  }
-
-      error_code = MPI_File_write_all(fh, fieldwritebuffer[0][0][0],(nxn-3)*(nyn-3)*(nzn-3),EMf->getXYZeType(), &status);
-      if(error_code != MPI_SUCCESS){
-	      int tcount=0;
-	      MPI_Get_count(&status, EMf->getXYZeType(), &tcount);
-          char error_string[100];
-          int length_of_error_string, error_class;
-          MPI_Error_class(error_code, &error_class);
-          MPI_Error_string(error_class, error_string, &length_of_error_string);
-          dprintf("Error in MPI_File_write_all: %s, wrote %d EMf->getXYZeType()\n", error_string,tcount);
-      }
-      MPI_File_close(&fh);
+	if (cfg.writeE) {
+		writeVectorVTK(grid, EMf, col, vct,
+			vtkPath(col, "E", cycle), "E", "Electric Field",
+			fieldwritebuffer, g,
+			[&](float**** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++) {
+							buf[iz][iy][ix][0] = (float)EMf->getEx(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][1] = (float)EMf->getEy(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][2] = (float)EMf->getEz(ix+1, iy+1, iz+1);
+						}
+			});
 	}
 }
+
+// ─── WriteMomentsVTK (new: uses OutputTagConfig, numeric species naming) ──
 
 void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, const string & outputTag ,int cycle, float*** momentswritebuffer){
 
-	//All VTK output at grid nodes excluding ghost nodes
-	// Upper-boundary processes include the last physical boundary node
-	const int nxn  =grid->getNXN() + (vct->isXupper() ? 1 : 0);
-	const int nyn  =grid->getNYN() + (vct->isYupper() ? 1 : 0);
-	const int nzn  =grid->getNZN() + (vct->isZupper() ? 1 : 0);
-	// Global dimensions = total node count = global cells + 1
-	const int dimX =col->getNxc()+1 ,dimY = col->getNyc()+1, dimZ=col->getNzc()+1;
-	const double spaceX = dimX>1 ?col->getLx()/(dimX-1) :col->getLx();
-	const double spaceY = dimY>1 ?col->getLy()/(dimY-1) :col->getLy();
-	const double spaceZ = dimZ>1 ?col->getLz()/(dimZ-1) :col->getLz();
-	const int    nPoints = dimX*dimY*dimZ;
-	MPI_File     fh;
-	MPI_Status   status;
-	const string momentstags[]={"rho", "PXX", "PXY", "PXZ", "PYY", "PYZ", "PZZ"};
-	const int    tagsize = size(momentstags);
-	const string outputtag = col->getMomentsOutputTag();
+	const OutputTagConfig &cfg = col->getOutputConfig();
+	VTKGridInfo g = getVTKGridInfo(grid, col, vct);
 	const int ns = col->getNs();
 
-	for(int tagid=0; tagid<tagsize; tagid++){
-		 if (outputtag.find(momentstags[tagid], 0) == string::npos) continue;
+	// --- Per-species rho ---
+	for (int si : cfg.rhoSpecies) {
+		writeScalarVTK(grid, EMf, col, vct,
+			vtkPath(col, "rho" + std::to_string(si), cycle),
+			"rho" + std::to_string(si),
+			"Species " + std::to_string(si) + " density",
+			momentswritebuffer, g,
+			[&](float*** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++)
+							buf[iz][iy][ix] = (float)(EMf->getRHOns(ix+1, iy+1, iz+1, si) * 4.0 * 3.1415926535897);
+			});
+	}
 
-		 for(int si=0;si<ns;si++){
-			 char  header[1024];
-			 if (momentstags[tagid].compare("rho") == 0){
-				for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++)
-						  momentswritebuffer[iz][iy][ix] = (float)EMf->getRHOns(ix+1, iy+1, iz+1, si)*4*3.1415926535897;
+	// --- Total rho ---
+	if (cfg.writeRhoTot) {
+		writeScalarVTK(grid, EMf, col, vct,
+			vtkPath(col, "rho_tot", cycle), "rho_tot",
+			"Total charge density",
+			momentswritebuffer, g,
+			[&](float*** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++)
+							buf[iz][iy][ix] = (float)(EMf->getRHOn(ix+1, iy+1, iz+1) * 4.0 * 3.1415926535897);
+			});
+	}
 
-				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
-								   "%s%d density from iPIC3D\n"
-								   "BINARY\n"
-								   "DATASET STRUCTURED_POINTS\n"
-								   "DIMENSIONS %d %d %d\n"
-								   "ORIGIN 0 0 0\n"
-								   "SPACING %f %f %f\n"
-								   "POINT_DATA %d \n"
-								   "SCALARS %s float\n"
-					"LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",si,dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"rhoe":"rhoi");
-		 }else if(momentstags[tagid].compare("PXX") == 0){
-				for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-				    for(int ix= 0;ix<nxn-3;ix++)
-				      momentswritebuffer[iz][iy][ix] = (float)EMf->getpXXsn(ix+1, iy+1, iz+1, si);
+	// --- Per-species J and Total J ---
+	// J is a vector quantity and uses the field (vector) write buffer.
+	// These are written by WriteMomentsJVTK(), called separately from IOManager.
 
-				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
-						"%s%d pressure PXX from iPIC3D\n"
-								   "BINARY\n"
-								   "DATASET STRUCTURED_POINTS\n"
-								   "DIMENSIONS %d %d %d\n"
-								   "ORIGIN 0 0 0\n"
-								   "SPACING %f %f %f\n"
-								   "POINT_DATA %d \n"
-								   "SCALARS %s float\n"
-					"LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",si,dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PXXe":"PXXi");
-		}else if(momentstags[tagid].compare("PXY") == 0){
+	// --- Per-species pressure tensor components ---
+	struct PDesc {
+		const char* name;
+		const std::set<int>& species;
+		bool writeTot;
+		std::function<double(int,int,int,int)> getter;
+	};
+	PDesc pdescs[] = {
+		{"PXX", cfg.PXXSpecies, cfg.writePXXTot, [&](int x,int y,int z,int s){ return EMf->getpXXsn(x,y,z,s); }},
+		{"PXY", cfg.PXYSpecies, cfg.writePXYTot, [&](int x,int y,int z,int s){ return EMf->getpXYsn(x,y,z,s); }},
+		{"PXZ", cfg.PXZSpecies, cfg.writePXZTot, [&](int x,int y,int z,int s){ return EMf->getpXZsn(x,y,z,s); }},
+		{"PYY", cfg.PYYSpecies, cfg.writePYYTot, [&](int x,int y,int z,int s){ return EMf->getpYYsn(x,y,z,s); }},
+		{"PYZ", cfg.PYZSpecies, cfg.writePYZTot, [&](int x,int y,int z,int s){ return EMf->getpYZsn(x,y,z,s); }},
+		{"PZZ", cfg.PZZSpecies, cfg.writePZZTot, [&](int x,int y,int z,int s){ return EMf->getpZZsn(x,y,z,s); }},
+	};
 
-			for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++)
-					  momentswritebuffer[iz][iy][ix] = (float)EMf->getpXYsn(ix+1, iy+1, iz+1, si);
-
-			//Write VTK header
-			sprintf(header, "# vtk DataFile Version 2.0\n"
-					"%s%d pressure PXY from iPIC3D\n"
-							   "BINARY\n"
-							   "DATASET STRUCTURED_POINTS\n"
-							   "DIMENSIONS %d %d %d\n"
-							   "ORIGIN 0 0 0\n"
-							   "SPACING %f %f %f\n"
-							   "POINT_DATA %d \n"
-							   "SCALARS %s float\n"
-				"LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",si,dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PXYe":"PXYi");
-		}else if(momentstags[tagid].compare("PXZ") == 0){
-
-			for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++)
-					  momentswritebuffer[iz][iy][ix] = (float)EMf->getpXZsn(ix+1, iy+1, iz+1, si);
-
-			//Write VTK header
-			sprintf(header, "# vtk DataFile Version 2.0\n"
-							   "%s%d pressure PXZ from iPIC3D\n"
-							   "BINARY\n"
-							   "DATASET STRUCTURED_POINTS\n"
-							   "DIMENSIONS %d %d %d\n"
-							   "ORIGIN 0 0 0\n"
-							   "SPACING %f %f %f\n"
-							   "POINT_DATA %d \n"
-							   "SCALARS %s float\n"
-				"LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",si,dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PXZe":"PXZi");
-		}else if(momentstags[tagid].compare("PYY") == 0){
-
-			for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++)
-					  momentswritebuffer[iz][iy][ix] = (float)EMf->getpYYsn(ix+1, iy+1, iz+1, si);
-
-			//Write VTK header
-			sprintf(header, "# vtk DataFile Version 2.0\n"
-							   "%s%d pressure PYY from iPIC3D\n"
-							   "BINARY\n"
-							   "DATASET STRUCTURED_POINTS\n"
-							   "DIMENSIONS %d %d %d\n"
-							   "ORIGIN 0 0 0\n"
-							   "SPACING %f %f %f\n"
-							   "POINT_DATA %d \n"
-							   "SCALARS %s float\n"
-				"LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",si,dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PYYe":"PYYi");
-		}else if(momentstags[tagid].compare("PYZ") == 0){
-
-			for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++)
-					  momentswritebuffer[iz][iy][ix] = (float)EMf->getpYZsn(ix+1, iy+1, iz+1, si);
-
-			//Write VTK header
-			sprintf(header, "# vtk DataFile Version 2.0\n"
-							   "%s%d pressure PYZ from iPIC3D\n"
-							   "BINARY\n"
-							   "DATASET STRUCTURED_POINTS\n"
-							   "DIMENSIONS %d %d %d\n"
-							   "ORIGIN 0 0 0\n"
-							   "SPACING %f %f %f\n"
-							   "POINT_DATA %d \n"
-							   "SCALARS %s float\n"
-				"LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",si,dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PYZe":"PYZi");
-		}else if(momentstags[tagid].compare("PZZ") == 0){
-
-			for(int iz=0;iz<nzn-3;iz++)
-			  for(int iy=0;iy<nyn-3;iy++)
-				  for(int ix= 0;ix<nxn-3;ix++)
-					  momentswritebuffer[iz][iy][ix] = (float)EMf->getpZZsn(ix+1, iy+1, iz+1, si);
-
-			//Write VTK header
-			sprintf(header, "# vtk DataFile Version 2.0\n"
-							   "%s%d pressure PZZ from iPIC3D\n"
-							   "BINARY\n"
-							   "DATASET STRUCTURED_POINTS\n"
-							   "DIMENSIONS %d %d %d\n"
-							   "ORIGIN 0 0 0\n"
-							   "SPACING %f %f %f\n"
-							   "POINT_DATA %d \n"
-							   "SCALARS %s float\n"
-				"LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",si,dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PZZe":"PZZi");
+	for (auto &pd : pdescs) {
+		// Per-species
+		for (int si : pd.species) {
+			std::string tag = std::string(pd.name) + std::to_string(si);
+			writeScalarVTK(grid, EMf, col, vct,
+				vtkPath(col, tag, cycle), tag,
+				"Species " + std::to_string(si) + " pressure " + pd.name,
+				momentswritebuffer, g,
+				[&](float*** buf, int lx, int ly, int lz) {
+					for (int iz = 0; iz < lz; iz++)
+						for (int iy = 0; iy < ly; iy++)
+							for (int ix = 0; ix < lx; ix++)
+								buf[iz][iy][ix] = (float)pd.getter(ix+1, iy+1, iz+1, si);
+				});
 		}
+		// Total (sum over all species on-the-fly)
+		if (pd.writeTot) {
+			std::string tag = std::string(pd.name) + "_tot";
+			writeScalarVTK(grid, EMf, col, vct,
+				vtkPath(col, tag, cycle), tag,
+				"Total pressure " + std::string(pd.name),
+				momentswritebuffer, g,
+				[&](float*** buf, int lx, int ly, int lz) {
+					for (int iz = 0; iz < lz; iz++)
+						for (int iy = 0; iy < ly; iy++)
+							for (int ix = 0; ix < lx; ix++) {
+								double sum = 0.0;
+								for (int s = 0; s < ns; s++)
+									sum += pd.getter(ix+1, iy+1, iz+1, s);
+								buf[iz][iy][ix] = (float)sum;
+							}
+				});
+		}
+	}
+}
 
-		 if(EMf->isLittleEndian()){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  ByteSwap((unsigned char*) &momentswritebuffer[iz][iy][ix],4);
-					  }
-		 }
+/**
+ * @brief Write per-species and total J as vector VTK files.
+ *
+ * Called from IOManager after field writes (needs the vector write buffer).
+ */
+void WriteMomentsJVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,
+                      int cycle, float**** fieldwritebuffer)
+{
+	const OutputTagConfig &cfg = col->getOutputConfig();
+	VTKGridInfo g = getVTKGridInfo(grid, col, vct);
+	const int ns = col->getNs();
 
-		  int nelem = strlen(header);
-		  int charsize=sizeof(char);
-		  MPI_Offset disp = nelem*charsize;
+	// Per-species J
+	for (int si : cfg.JSpecies) {
+		writeVectorVTK(grid, EMf, col, vct,
+			vtkPath(col, "J" + std::to_string(si), cycle),
+			"J" + std::to_string(si),
+			"Species " + std::to_string(si) + " current",
+			fieldwritebuffer, g,
+			[&](float**** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++) {
+							buf[iz][iy][ix][0] = (float)EMf->getJxs(ix+1, iy+1, iz+1, si);
+							buf[iz][iy][ix][1] = (float)EMf->getJys(ix+1, iy+1, iz+1, si);
+							buf[iz][iy][ix][2] = (float)EMf->getJzs(ix+1, iy+1, iz+1, si);
+						}
+			});
+	}
 
-		  ostringstream filename;
-		  filename << col->getSaveDirName() << "/" << col->getSimName() << "_" << momentstags[tagid] << ((si%2==0)?"e":"i")<< si  << "_" << cycle << ".vtk";
-		  MPI_File_open(vct->getFieldComm(),filename.str().c_str(), MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
-
-		  if (vct->getCartesian_rank()==0){
-			  MPI_File_write(fh, header, nelem, MPI_BYTE, &status);
-		  }
-
-	      int error_code = MPI_File_set_view(fh, disp, MPI_FLOAT, EMf->getProcview(), "native", MPI_INFO_NULL);
-	      if (error_code != MPI_SUCCESS) {
-			char error_string[100];
-			int length_of_error_string, error_class;
-			MPI_Error_class(error_code, &error_class);
-			MPI_Error_string(error_class, error_string, &length_of_error_string);
-			dprintf("Error in MPI_File_set_view: %s\n", error_string);
-		  }
-
-	      error_code = MPI_File_write_all(fh, momentswritebuffer[0][0],(nxn-3)*(nyn-3)*(nzn-3),MPI_FLOAT, &status);
-	      if(error_code != MPI_SUCCESS){
-		      int tcount=0;
-		      MPI_Get_count(&status, MPI_FLOAT, &tcount);
-	          char error_string[100];
-	          int length_of_error_string, error_class;
-	          MPI_Error_class(error_code, &error_class);
-	          MPI_Error_string(error_class, error_string, &length_of_error_string);
-	          dprintf("Error in MPI_File_write_all: %s, wrote %d MPI_FLOAT\n", error_string,tcount);
-	      }
-	      MPI_File_close(&fh);
-		 }//END OF SPECIES
-	}//END OF TAGS
+	// Total J
+	if (cfg.writeJTot) {
+		writeVectorVTK(grid, EMf, col, vct,
+			vtkPath(col, "J_tot", cycle), "J_tot",
+			"Total current",
+			fieldwritebuffer, g,
+			[&](float**** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++) {
+							buf[iz][iy][ix][0] = (float)EMf->getJx(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][1] = (float)EMf->getJy(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][2] = (float)EMf->getJz(ix+1, iy+1, iz+1);
+						}
+			});
+	}
 }
 
 
-// ─── Total charge density (scalar) VTK output ─────────────────
-//
-// Writes the total charge density rhon (sum over all species)
-// as a scalar VTK file.  rhon is already computed by
-// EMfields3D::sumOverSpecies() which is called in MomentsAwait().
-//
-void WriteRhoTotalVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col,
-                      VCtopology3D *vct, int cycle,
-                      float*** momentswritebuffer)
+// ─── Non-blocking VTK helpers (shared grid setup) ────────────────────────────
+
+static void nbcVectorWrite(EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,
+                           float**** fieldwritebuffer, int counter,
+                           const VTKGridInfo &g, const std::string &tag,
+                           const std::string &desc,
+                           std::function<void(float****,int,int,int)> fill,
+                           MPI_File *fhArr)
 {
-	// Node grid excluding ghost nodes; upper-boundary procs include last physical node
-	const int nxn  = grid->getNXN() + (vct->isXupper() ? 1 : 0);
-	const int nyn  = grid->getNYN() + (vct->isYupper() ? 1 : 0);
-	const int nzn  = grid->getNZN() + (vct->isZupper() ? 1 : 0);
-	// Global dimensions = total node count = global cells + 1
-	const int dimX = col->getNxc() + 1;
-	const int dimY = col->getNyc() + 1;
-	const int dimZ = col->getNzc() + 1;
-	const double spaceX = dimX > 1 ? col->getLx() / (dimX - 1) : col->getLx();
-	const double spaceY = dimY > 1 ? col->getLy() / (dimY - 1) : col->getLy();
-	const double spaceZ = dimZ > 1 ? col->getLz() / (dimZ - 1) : col->getLz();
-	const int nPoints = dimX * dimY * dimZ;
+	float**** buf = &fieldwritebuffer[counter * g.lz];
+	fill(buf, g.lx, g.ly, g.lz);
 
-	// Fill buffer with total charge density (rhon) multiplied by 4*pi
-	for (int iz = 0; iz < nzn - 3; iz++)
-		for (int iy = 0; iy < nyn - 3; iy++)
-			for (int ix = 0; ix < nxn - 3; ix++)
-				momentswritebuffer[iz][iy][ix] =
-					(float)(EMf->getRHOn(ix + 1, iy + 1, iz + 1) * 4.0 * 3.1415926535897);
-
-	// Byte-swap for big-endian VTK binary format on little-endian machines
 	if (EMf->isLittleEndian()) {
-		for (int iz = 0; iz < nzn - 3; iz++)
-			for (int iy = 0; iy < nyn - 3; iy++)
-				for (int ix = 0; ix < nxn - 3; ix++)
-					ByteSwap((unsigned char*)&momentswritebuffer[iz][iy][ix], 4);
+		for (int iz = 0; iz < g.lz; iz++)
+			for (int iy = 0; iy < g.ly; iy++)
+				for (int ix = 0; ix < g.lx; ix++) {
+					ByteSwap((unsigned char*)&buf[iz][iy][ix][0], 4);
+					ByteSwap((unsigned char*)&buf[iz][iy][ix][1], 4);
+					ByteSwap((unsigned char*)&buf[iz][iy][ix][2], 4);
+				}
 	}
 
-	// VTK header (scalar field)
 	char header[1024];
 	sprintf(header, "# vtk DataFile Version 2.0\n"
-	                "Total charge density from iPIC3D\n"
+	                "%s from iPIC3D\n"
 	                "BINARY\n"
 	                "DATASET STRUCTURED_POINTS\n"
 	                "DIMENSIONS %d %d %d\n"
 	                "ORIGIN 0 0 0\n"
 	                "SPACING %f %f %f\n"
 	                "POINT_DATA %d\n"
-	                "SCALARS rho_total float\n"
-	                "LOOKUP_TABLE default\n",
-	                dimX, dimY, dimZ,
-	                spaceX, spaceY, spaceZ,
-	                nPoints);
+	                "VECTORS %s float\n",
+	                desc.c_str(), g.dimX, g.dimY, g.dimZ,
+	                g.spaceX, g.spaceY, g.spaceZ, g.nPoints, tag.c_str());
 
 	int nelem = strlen(header);
-	int charsize = sizeof(char);
-	MPI_Offset disp = nelem * charsize;
+	MPI_Offset disp = nelem * sizeof(char);
 
-	MPI_File   fh;
-	MPI_Status status;
+	std::string filename = vtkPath(col, tag, 0); // cycle filled below
+	{
+		std::ostringstream ss;
+		ss << col->getSaveDirName() << "/" << col->getSimName() << "_" << tag << "_" << g.cycle << ".vtk";
+		filename = ss.str();
+	}
 
-	ostringstream filename;
-	filename << col->getSaveDirName() << "/" << col->getSimName()
-	         << "_rho_total_" << cycle << ".vtk";
-
-	MPI_File_open(vct->getFieldComm(), filename.str().c_str(),
-	              MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+	MPI_File_open(vct->getFieldComm(), filename.c_str(),
+	              MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fhArr[counter]);
 
 	if (vct->getCartesian_rank() == 0) {
-		MPI_File_write(fh, header, nelem, MPI_BYTE, &status);
+		MPI_Status status;
+		MPI_File_write(fhArr[counter], header, nelem, MPI_BYTE, &status);
 	}
 
-	int error_code = MPI_File_set_view(fh, disp, MPI_FLOAT,
-	                                    EMf->getProcview(),
-	                                    "native", MPI_INFO_NULL);
-	if (error_code != MPI_SUCCESS) {
-		char error_string[100];
-		int length_of_error_string, error_class;
-		MPI_Error_class(error_code, &error_class);
-		MPI_Error_string(error_class, error_string, &length_of_error_string);
-		dprintf("Error in MPI_File_set_view: %s\n", error_string);
+	int ec = MPI_File_set_view(fhArr[counter], disp, EMf->getXYZeType(),
+	                           EMf->getProcviewXYZ(), "native", MPI_INFO_NULL);
+	if (ec != MPI_SUCCESS) {
+		char es[100]; int len, cls;
+		MPI_Error_class(ec, &cls);
+		MPI_Error_string(cls, es, &len);
+		dprintf("Error in MPI_File_set_view: %s\n", es);
 	}
 
-	error_code = MPI_File_write_all(fh, momentswritebuffer[0][0],
-	                                (nxn - 3) * (nyn - 3) * (nzn - 3),
-	                                MPI_FLOAT, &status);
-	if (error_code != MPI_SUCCESS) {
-		int tcount = 0;
-		MPI_Get_count(&status, MPI_FLOAT, &tcount);
-		char error_string[100];
-		int length_of_error_string, error_class;
-		MPI_Error_class(error_code, &error_class);
-		MPI_Error_string(error_class, error_string, &length_of_error_string);
-		dprintf("Error in MPI_File_write_all: %s, wrote %d MPI_FLOAT\n",
-		        error_string, tcount);
+	ec = MPI_File_write_all_begin(fhArr[counter], buf[0][0][0],
+	                              g.lx * g.ly * g.lz, EMf->getXYZeType());
+	if (ec != MPI_SUCCESS) {
+		char es[100]; int len, cls;
+		MPI_Error_class(ec, &cls);
+		MPI_Error_string(cls, es, &len);
+		dprintf("Error in MPI_File_iwrite: %s\n", es);
 	}
-
-	MPI_File_close(&fh);
 }
 
+static void nbcScalarWrite(EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,
+                            float*** momentswritebuffer, int counter,
+                            const VTKGridInfo &g, const std::string &tag,
+                            const std::string &desc,
+                            std::function<void(float***,int,int,int)> fill,
+                            MPI_File *fhArr)
+{
+	float*** buf = &momentswritebuffer[counter * g.lz];
+	fill(buf, g.lx, g.ly, g.lz);
 
-int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,int cycle,
-		float**** fieldwritebuffer,MPI_Request requestArr[4],MPI_File fhArr[4]){
+	if (EMf->isLittleEndian()) {
+		for (int iz = 0; iz < g.lz; iz++)
+			for (int iy = 0; iy < g.ly; iy++)
+				for (int ix = 0; ix < g.lx; ix++)
+					ByteSwap((unsigned char*)&buf[iz][iy][ix], 4);
+	}
 
-	//All VTK output at grid nodes excluding ghost nodes
-	// Upper-boundary processes include the last physical boundary node
-	const int nxn  =grid->getNXN() + (vct->isXupper() ? 1 : 0);
-	const int nyn  =grid->getNYN() + (vct->isYupper() ? 1 : 0);
-	const int nzn  =grid->getNZN() + (vct->isZupper() ? 1 : 0);
-	// Global dimensions = total node count = global cells + 1
-	const int dimX =col->getNxc()+1 ,dimY = col->getNyc()+1, dimZ=col->getNzc()+1;
-	const double spaceX = dimX>1 ?col->getLx()/(dimX-1) :col->getLx();
-	const double spaceY = dimY>1 ?col->getLy()/(dimY-1) :col->getLy();
-	const double spaceZ = dimZ>1 ?col->getLz()/(dimZ-1) :col->getLz();
-	const int    nPoints = dimX*dimY*dimZ;
-	const string fieldtags[]={"B", "E", "Je", "Ji"};
-	const int fieldtagsize = size(fieldtags);
-	const string fieldoutputtag = col->getFieldOutputTag();
-	int counter=0,error_code;
+	char header[1024];
+	sprintf(header, "# vtk DataFile Version 2.0\n"
+	                "%s from iPIC3D\n"
+	                "BINARY\n"
+	                "DATASET STRUCTURED_POINTS\n"
+	                "DIMENSIONS %d %d %d\n"
+	                "ORIGIN 0 0 0\n"
+	                "SPACING %f %f %f\n"
+	                "POINT_DATA %d\n"
+	                "SCALARS %s float\n"
+	                "LOOKUP_TABLE default\n",
+	                desc.c_str(), g.dimX, g.dimY, g.dimZ,
+	                g.spaceX, g.spaceY, g.spaceZ, g.nPoints, tag.c_str());
 
-	for(int tagid=0; tagid<fieldtagsize; tagid++){
-		 if (fieldoutputtag.find(fieldtags[tagid], 0) == string::npos) continue;
+	int nelem = strlen(header);
+	MPI_Offset disp = nelem * sizeof(char);
 
-		 fieldwritebuffer = &(fieldwritebuffer[counter]);
-		 char  header[1024];
-		 if (fieldtags[tagid].compare("B") == 0){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  fieldwritebuffer[iz][iy][ix][0] =  (float)EMf->getBxTot(ix+1, iy+1, iz+1);
-						  fieldwritebuffer[iz][iy][ix][1] =  (float)EMf->getByTot(ix+1, iy+1, iz+1);
-						  fieldwritebuffer[iz][iy][ix][2] =  (float)EMf->getBzTot(ix+1, iy+1, iz+1);
-					  }
+	std::ostringstream ss;
+	ss << col->getSaveDirName() << "/" << col->getSimName() << "_" << tag << "_" << g.cycle << ".vtk";
 
-			 //Write VTK header
-			 sprintf(header, "# vtk DataFile Version 2.0\n"
-						   "Magnetic Field from iPIC3D\n"
-						   "BINARY\n"
-						   "DATASET STRUCTURED_POINTS\n"
-						   "DIMENSIONS %d %d %d\n"
-						   "ORIGIN 0 0 0\n"
-						   "SPACING %f %f %f\n"
-						   "POINT_DATA %d\n"
-						   "VECTORS B float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
+	MPI_File_open(vct->getFieldComm(), ss.str().c_str(),
+	              MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fhArr[counter]);
 
-		 }else if (fieldtags[tagid].compare("E") == 0){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  fieldwritebuffer[iz][iy][ix][0] = (float)EMf->getEx(ix+1, iy+1, iz+1);
-						  fieldwritebuffer[iz][iy][ix][1] = (float)EMf->getEy(ix+1, iy+1, iz+1);
-						  fieldwritebuffer[iz][iy][ix][2] = (float)EMf->getEz(ix+1, iy+1, iz+1);
-					  }
+	if (vct->getCartesian_rank() == 0) {
+		MPI_Status status;
+		MPI_File_write(fhArr[counter], header, nelem, MPI_BYTE, &status);
+	}
 
-			 //Write VTK header
-			 sprintf(header, "# vtk DataFile Version 2.0\n"
-						   "Electric Field from iPIC3D\n"
-						   "BINARY\n"
-						   "DATASET STRUCTURED_POINTS\n"
-						   "DIMENSIONS %d %d %d\n"
-						   "ORIGIN 0 0 0\n"
-						   "SPACING %f %f %f\n"
-						   "POINT_DATA %d \n"
-						   "VECTORS E float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
+	int ec = MPI_File_set_view(fhArr[counter], disp, MPI_FLOAT,
+	                           EMf->getProcview(), "native", MPI_INFO_NULL);
+	if (ec != MPI_SUCCESS) {
+		char es[100]; int len, cls;
+		MPI_Error_class(ec, &cls);
+		MPI_Error_string(cls, es, &len);
+		dprintf("Error in MPI_File_set_view: %s\n", es);
+	}
 
-		 }else if (fieldtags[tagid].compare("Je") == 0){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  fieldwritebuffer[iz][iy][ix][0] = (float)EMf->getJxs(ix+1, iy+1, iz+1, 0);
-						  fieldwritebuffer[iz][iy][ix][1] = (float)EMf->getJys(ix+1, iy+1, iz+1, 0);
-						  fieldwritebuffer[iz][iy][ix][2] = (float)EMf->getJzs(ix+1, iy+1, iz+1, 0);
-					  }
+	ec = MPI_File_write_all_begin(fhArr[counter], buf[0][0],
+	                              g.lx * g.ly * g.lz, MPI_FLOAT);
+	if (ec != MPI_SUCCESS) {
+		char es[100]; int len, cls;
+		MPI_Error_class(ec, &cls);
+		MPI_Error_string(cls, es, &len);
+		dprintf("Error in MPI_File_iwrite: %s\n", es);
+	}
+}
 
-			 //Write VTK header
-			 sprintf(header, "# vtk DataFile Version 2.0\n"
-						   "Electron current from iPIC3D\n"
-						   "BINARY\n"
-						   "DATASET STRUCTURED_POINTS\n"
-						   "DIMENSIONS %d %d %d\n"
-						   "ORIGIN 0 0 0\n"
-						   "SPACING %f %f %f\n"
-						   "POINT_DATA %d \n"
-						   "VECTORS Je float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
+// ─── WriteFieldsVTKNonblk (new: OutputTagConfig, B + E + per-species J + J_tot) ──
 
-		 }else if (fieldtags[tagid].compare("Ji") == 0){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  fieldwritebuffer[iz][iy][ix][0] = (float)EMf->getJxs(ix+1, iy+1, iz+1, 1);
-						  fieldwritebuffer[iz][iy][ix][1] = (float)EMf->getJys(ix+1, iy+1, iz+1, 1);
-						  fieldwritebuffer[iz][iy][ix][2] = (float)EMf->getJzs(ix+1, iy+1, iz+1, 1);
-					  }
+int WriteFieldsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle,
+                          float**** fieldwritebuffer, MPI_Request requestArr[], MPI_File fhArr[])
+{
+	const OutputTagConfig &cfg = col->getOutputConfig();
+	VTKGridInfo g = getVTKGridInfo(grid, col, vct);
+	g.cycle = cycle;
+	int counter = 0;
 
-			 //Write VTK header
-			 sprintf(header, "# vtk DataFile Version 2.0\n"
-						   "Ion current from iPIC3D\n"
-						   "BINARY\n"
-						   "DATASET STRUCTURED_POINTS\n"
-						   "DIMENSIONS %d %d %d\n"
-						   "ORIGIN 0 0 0\n"
-						   "SPACING %f %f %f\n"
-						   "POINT_DATA %d \n"
-						   "VECTORS Ji float\n", dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints);
-		 }
+	if (cfg.writeB) {
+		nbcVectorWrite(EMf, col, vct, fieldwritebuffer, counter, g, "B", "Magnetic Field",
+			[&](float**** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++) {
+							buf[iz][iy][ix][0] = (float)EMf->getBxTot(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][1] = (float)EMf->getByTot(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][2] = (float)EMf->getBzTot(ix+1, iy+1, iz+1);
+						}
+			}, fhArr);
+		counter++;
+	}
 
-		 if(EMf->isLittleEndian()){
-			 for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++){
-						  ByteSwap((unsigned char*) &fieldwritebuffer[iz][iy][ix][0],4);
-						  ByteSwap((unsigned char*) &fieldwritebuffer[iz][iy][ix][1],4);
-						  ByteSwap((unsigned char*) &fieldwritebuffer[iz][iy][ix][2],4);
-					  }
-		 }
+	if (cfg.writeE) {
+		nbcVectorWrite(EMf, col, vct, fieldwritebuffer, counter, g, "E", "Electric Field",
+			[&](float**** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++) {
+							buf[iz][iy][ix][0] = (float)EMf->getEx(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][1] = (float)EMf->getEy(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][2] = (float)EMf->getEz(ix+1, iy+1, iz+1);
+						}
+			}, fhArr);
+		counter++;
+	}
 
-		  int nelem = strlen(header);
-		  int charsize=sizeof(char);
-		  MPI_Offset disp = nelem*charsize;
+	for (int si : cfg.JSpecies) {
+		nbcVectorWrite(EMf, col, vct, fieldwritebuffer, counter, g,
+			"J" + std::to_string(si), "Species " + std::to_string(si) + " current",
+			[&](float**** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++) {
+							buf[iz][iy][ix][0] = (float)EMf->getJxs(ix+1, iy+1, iz+1, si);
+							buf[iz][iy][ix][1] = (float)EMf->getJys(ix+1, iy+1, iz+1, si);
+							buf[iz][iy][ix][2] = (float)EMf->getJzs(ix+1, iy+1, iz+1, si);
+						}
+			}, fhArr);
+		counter++;
+	}
 
-		  ostringstream filename;
-		  filename << col->getSaveDirName() << "/" << col->getSimName() << "_"<< fieldtags[tagid] << "_" << cycle << ".vtk";
-		  MPI_File_open(vct->getFieldComm(),filename.str().c_str(), MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &(fhArr[counter]));
+	if (cfg.writeJTot) {
+		nbcVectorWrite(EMf, col, vct, fieldwritebuffer, counter, g, "J_tot", "Total current",
+			[&](float**** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++) {
+							buf[iz][iy][ix][0] = (float)EMf->getJx(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][1] = (float)EMf->getJy(ix+1, iy+1, iz+1);
+							buf[iz][iy][ix][2] = (float)EMf->getJz(ix+1, iy+1, iz+1);
+						}
+			}, fhArr);
+		counter++;
+	}
 
-		  if (vct->getCartesian_rank()==0){
-			  MPI_Status   status;
-			  MPI_File_write(fhArr[counter], header, nelem, MPI_BYTE, &status);
-		  }
-
-		  error_code = MPI_File_set_view(fhArr[counter], disp, EMf->getXYZeType(), EMf->getProcviewXYZ(), "native", MPI_INFO_NULL);
-	      if(error_code!= MPI_SUCCESS){
-              char error_string[100];
-              int length_of_error_string, error_class;
-              MPI_Error_class(error_code, &error_class);
-              MPI_Error_string(error_class, error_string, &length_of_error_string);
-              dprintf("Error in MPI_File_set_view: %s\n", error_string);
-	      }
-
-	      error_code = MPI_File_write_all_begin(fhArr[counter],fieldwritebuffer[0][0][0],(nxn-3)*(nyn-3)*(nzn-3),EMf->getXYZeType());
-	      //error_code = MPI_File_iwrite(fhArr[counter], fieldwritebuffer[0][0][0],(nxn-3)*(nyn-3)*(nzn-3),EMf->getXYZeType(), &(requestArr[counter]));
-	      if(error_code!= MPI_SUCCESS){
-              char error_string[100];
-              int length_of_error_string, error_class;
-              MPI_Error_class(error_code, &error_class);
-              MPI_Error_string(error_class, error_string, &length_of_error_string);
-              dprintf("Error in MPI_File_iwrite: %s", error_string);
-	      }
-	      counter ++;
-		}
 	return counter;
 }
 
+// ─── WriteMomentsVTKNonblk (new: OutputTagConfig, numeric species naming) ─────
 
-int  WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct,int cycle,
-		float*** momentswritebuffer,MPI_Request requestArr[14],MPI_File fhArr[14]){
+int WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle,
+                           float*** momentswritebuffer, MPI_Request requestArr[], MPI_File fhArr[])
+{
+	const OutputTagConfig &cfg = col->getOutputConfig();
+	VTKGridInfo g = getVTKGridInfo(grid, col, vct);
+	g.cycle = cycle;
+	const int ns = col->getNs();
+	int counter = 0;
 
-	//All VTK output at grid nodes excluding ghost nodes
-	// Upper-boundary processes include the last physical boundary node
-	const int nxn  =grid->getNXN() + (vct->isXupper() ? 1 : 0);
-	const int nyn  =grid->getNYN() + (vct->isYupper() ? 1 : 0);
-	const int nzn  =grid->getNZN() + (vct->isZupper() ? 1 : 0);
-	// Global dimensions = total node count = global cells + 1
-	const int dimX =col->getNxc()+1 ,dimY = col->getNyc()+1, dimZ=col->getNzc()+1;
-	const double spaceX = dimX>1 ?col->getLx()/(dimX-1) :col->getLx();
-	const double spaceY = dimY>1 ?col->getLy()/(dimY-1) :col->getLy();
-	const double spaceZ = dimZ>1 ?col->getLz()/(dimZ-1) :col->getLz();
-	const int    nPoints = dimX*dimY*dimZ;
-	const string momentstags[]={"rho", "PXX", "PXY", "PXZ", "PYY", "PYZ", "PZZ"};
-	const int    tagsize = size(momentstags);
-	const string outputtag = col->getMomentsOutputTag();
-	int counter=0,err;
-
-	for(int tagid=0; tagid<tagsize; tagid++){
-		 if (outputtag.find(momentstags[tagid], 0) == string::npos) continue;
-
-		 for(int si=0;si<=1;si++){
-			 momentswritebuffer = &(momentswritebuffer[counter]);
-			 char  header[1024];
-			 if (momentstags[tagid].compare("rho") == 0){
-
-				for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++)
-						  momentswritebuffer[iz][iy][ix] = (float)EMf->getRHOns(ix+1, iy+1, iz+1, si)*4*3.1415926535897;
-
-				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
-								   "%s density from iPIC3D\n"
-								   "BINARY\n"
-								   "DATASET STRUCTURED_POINTS\n"
-								   "DIMENSIONS %d %d %d\n"
-								   "ORIGIN 0 0 0\n"
-								   "SPACING %f %f %f\n"
-								   "POINT_DATA %d \n"
-								   "SCALARS %s float\n"
-								   "LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"rhoe":"rhoi");
-			 }else if(momentstags[tagid].compare("PXX") == 0){
-
-				for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++)
-						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpXXsn(ix+1, iy+1, iz+1, si);
-
-				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
-								   "%s pressure PXX from iPIC3D\n"
-								   "BINARY\n"
-								   "DATASET STRUCTURED_POINTS\n"
-								   "DIMENSIONS %d %d %d\n"
-								   "ORIGIN 0 0 0\n"
-								   "SPACING %f %f %f\n"
-								   "POINT_DATA %d \n"
-								   "SCALARS %s float\n"
-								   "LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PXXe":"PXXi");
-			 }else if(momentstags[tagid].compare("PXY") == 0){
-
-				for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++)
-						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpXYsn(ix+1, iy+1, iz+1, si);
-
-				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
-								   "%s pressure PXY from iPIC3D\n"
-								   "BINARY\n"
-								   "DATASET STRUCTURED_POINTS\n"
-								   "DIMENSIONS %d %d %d\n"
-								   "ORIGIN 0 0 0\n"
-								   "SPACING %f %f %f\n"
-								   "POINT_DATA %d \n"
-								   "SCALARS %s float\n"
-								   "LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PXYe":"PXYi");
-			}else if(momentstags[tagid].compare("PXZ") == 0){
-
-				for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++)
-						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpXZsn(ix+1, iy+1, iz+1, si);
-
-				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
-								   "%s pressure PXZ from iPIC3D\n"
-								   "BINARY\n"
-								   "DATASET STRUCTURED_POINTS\n"
-								   "DIMENSIONS %d %d %d\n"
-								   "ORIGIN 0 0 0\n"
-								   "SPACING %f %f %f\n"
-								   "POINT_DATA %d \n"
-								   "SCALARS %s float\n"
-								   "LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PXZe":"PXZi");
-			}else if(momentstags[tagid].compare("PYY") == 0){
-
-				for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++)
-						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpYYsn(ix+1, iy+1, iz+1, si);
-
-				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
-								   "%s pressure PYY from iPIC3D\n"
-								   "BINARY\n"
-								   "DATASET STRUCTURED_POINTS\n"
-								   "DIMENSIONS %d %d %d\n"
-								   "ORIGIN 0 0 0\n"
-								   "SPACING %f %f %f\n"
-								   "POINT_DATA %d \n"
-								   "SCALARS %s float\n"
-								   "LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PYYe":"PYYi");
-			}else if(momentstags[tagid].compare("PYZ") == 0){
-
-				for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++)
-						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpYZsn(ix+1, iy+1, iz+1, si);
-
-				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
-								   "%s pressure PYZ from iPIC3D\n"
-								   "BINARY\n"
-								   "DATASET STRUCTURED_POINTS\n"
-								   "DIMENSIONS %d %d %d\n"
-								   "ORIGIN 0 0 0\n"
-								   "SPACING %f %f %f\n"
-								   "POINT_DATA %d \n"
-								   "SCALARS %s float\n"
-								   "LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PYZe":"PYZi");
-			}else if(momentstags[tagid].compare("PZZ") == 0){
-
-				for(int iz=0;iz<nzn-3;iz++)
-				  for(int iy=0;iy<nyn-3;iy++)
-					  for(int ix= 0;ix<nxn-3;ix++)
-						  momentswritebuffer[iz][iy][ix] = (float)EMf->getpZZsn(ix+1, iy+1, iz+1, si);
-
-				//Write VTK header
-				sprintf(header, "# vtk DataFile Version 2.0\n"
-								   "%s pressure PZZ from iPIC3D\n"
-								   "BINARY\n"
-								   "DATASET STRUCTURED_POINTS\n"
-								   "DIMENSIONS %d %d %d\n"
-								   "ORIGIN 0 0 0\n"
-								   "SPACING %f %f %f\n"
-								   "POINT_DATA %d \n"
-								   "SCALARS %s float\n"
-								   "LOOKUP_TABLE default\n",(si%2==0)?"Electron":"Ion",dimX,dimY,dimZ, spaceX,spaceY,spaceZ, nPoints,(si%2==0)?"PZZe":"PZZi");
-			}
-
-			 if(EMf->isLittleEndian()){
-				 for(int iz=0;iz<nzn-3;iz++)
-					  for(int iy=0;iy<nyn-3;iy++)
-						  for(int ix= 0;ix<nxn-3;ix++){
-							  ByteSwap((unsigned char*) &momentswritebuffer[iz][iy][ix],4);
-						  }
-			 }
-
-		  int nelem = strlen(header);
-		  int charsize=sizeof(char);
-		  MPI_Offset disp = nelem*charsize;
-
-		  ostringstream filename;
-		  filename << col->getSaveDirName() << "/" << col->getSimName() << "_" << momentstags[tagid] << ((si%2==0)?"e":"i") << "_" << cycle << ".vtk";
-		  MPI_File_open(vct->getFieldComm(),filename.str().c_str(), MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, &fhArr[counter]);
-
-		  if (vct->getCartesian_rank()==0){
-			  MPI_Status   status;
-			  MPI_File_write(fhArr[counter], header, nelem, MPI_BYTE, &status);
-		  }
-
-	      int error_code = MPI_File_set_view(fhArr[counter], disp, MPI_FLOAT, EMf->getProcview(), "native", MPI_INFO_NULL);
-	      if (error_code != MPI_SUCCESS) {
-			char error_string[100];
-			int length_of_error_string, error_class;
-			MPI_Error_class(error_code, &error_class);
-			MPI_Error_string(error_class, error_string, &length_of_error_string);
-			dprintf("Error in MPI_File_set_view: %s\n", error_string);
-		  }
-
-	      error_code = MPI_File_write_all_begin(fhArr[counter],momentswritebuffer[0][0],(nxn-3)*(nyn-3)*(nzn-3),MPI_FLOAT);
-	      //error_code = MPI_File_iwrite(fhArr[counter], momentswritebuffer[0][0],(nxn-3)*(nyn-3)*(nzn-3),MPI_FLOAT, &(requestArr[counter]));
-	      if(error_code != MPI_SUCCESS){
-	          char error_string[100];
-	          int length_of_error_string, error_class;
-	          MPI_Error_class(error_code, &error_class);
-	          MPI_Error_string(error_class, error_string, &length_of_error_string);
-	          dprintf("Error in MPI_File_iwrite: %s \n", error_string);
-	      }
-	      counter ++;
-		 }//END OF SPECIES
+	// Per-species rho
+	for (int si : cfg.rhoSpecies) {
+		nbcScalarWrite(EMf, col, vct, momentswritebuffer, counter, g,
+			"rho" + std::to_string(si), "Species " + std::to_string(si) + " density",
+			[&](float*** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++)
+							buf[iz][iy][ix] = (float)(EMf->getRHOns(ix+1, iy+1, iz+1, si) * 4.0 * 3.1415926535897);
+			}, fhArr);
+		counter++;
 	}
+
+	// Total rho
+	if (cfg.writeRhoTot) {
+		nbcScalarWrite(EMf, col, vct, momentswritebuffer, counter, g,
+			"rho_tot", "Total charge density",
+			[&](float*** buf, int lx, int ly, int lz) {
+				for (int iz = 0; iz < lz; iz++)
+					for (int iy = 0; iy < ly; iy++)
+						for (int ix = 0; ix < lx; ix++)
+							buf[iz][iy][ix] = (float)(EMf->getRHOn(ix+1, iy+1, iz+1) * 4.0 * 3.1415926535897);
+			}, fhArr);
+		counter++;
+	}
+
+	// Per-species and total pressure tensor components
+	struct PDesc {
+		const char* name;
+		const std::set<int>& species;
+		bool writeTot;
+		std::function<double(int,int,int,int)> getter;
+	};
+	PDesc pdescs[] = {
+		{"PXX", cfg.PXXSpecies, cfg.writePXXTot, [&](int x,int y,int z,int s){ return EMf->getpXXsn(x,y,z,s); }},
+		{"PXY", cfg.PXYSpecies, cfg.writePXYTot, [&](int x,int y,int z,int s){ return EMf->getpXYsn(x,y,z,s); }},
+		{"PXZ", cfg.PXZSpecies, cfg.writePXZTot, [&](int x,int y,int z,int s){ return EMf->getpXZsn(x,y,z,s); }},
+		{"PYY", cfg.PYYSpecies, cfg.writePYYTot, [&](int x,int y,int z,int s){ return EMf->getpYYsn(x,y,z,s); }},
+		{"PYZ", cfg.PYZSpecies, cfg.writePYZTot, [&](int x,int y,int z,int s){ return EMf->getpYZsn(x,y,z,s); }},
+		{"PZZ", cfg.PZZSpecies, cfg.writePZZTot, [&](int x,int y,int z,int s){ return EMf->getpZZsn(x,y,z,s); }},
+	};
+
+	for (auto &pd : pdescs) {
+		for (int si : pd.species) {
+			std::string tag = std::string(pd.name) + std::to_string(si);
+			nbcScalarWrite(EMf, col, vct, momentswritebuffer, counter, g,
+				tag, "Species " + std::to_string(si) + " pressure " + pd.name,
+				[&](float*** buf, int lx, int ly, int lz) {
+					for (int iz = 0; iz < lz; iz++)
+						for (int iy = 0; iy < ly; iy++)
+							for (int ix = 0; ix < lx; ix++)
+								buf[iz][iy][ix] = (float)pd.getter(ix+1, iy+1, iz+1, si);
+				}, fhArr);
+			counter++;
+		}
+		if (pd.writeTot) {
+			std::string tag = std::string(pd.name) + "_tot";
+			nbcScalarWrite(EMf, col, vct, momentswritebuffer, counter, g,
+				tag, "Total pressure " + std::string(pd.name),
+				[&](float*** buf, int lx, int ly, int lz) {
+					for (int iz = 0; iz < lz; iz++)
+						for (int iy = 0; iy < ly; iy++)
+							for (int ix = 0; ix < lx; ix++) {
+								double sum = 0.0;
+								for (int s = 0; s < ns; s++)
+									sum += pd.getter(ix+1, iy+1, iz+1, s);
+								buf[iz][iy][ix] = (float)sum;
+							}
+				}, fhArr);
+			counter++;
+		}
+	}
+
 	return counter;
 }
 
@@ -1534,7 +1159,7 @@ void ByteSwap(unsigned char * b, int n)
    }
 }
 
-void WriteTestPclsVTK(int nspec, Grid3DCU *grid, Particles3D *testpart, EMfields3D *EMf,
+void WriteTestPclsVTK(int nspec, Grid3DCU *grid, ParticleSoAHost **testpart, EMfields3D *EMf,
 		CollectiveIO *col, VCtopology3D *vct, const string & tag, int cycle,MPI_Request *testpartMPIReq, MPI_File *fh){
 	/* the below is nonblocking collective IO
 	 * const int nop = testpart[0].getNOP();
@@ -1712,14 +1337,14 @@ void WriteTestPclsVTK(int nspec, Grid3DCU *grid, Particles3D *testpart, EMfields
 					"		</Points>\n"
 					"	</Piece>\n"
 					"	</UnstructuredGrid>\n"
-					"</VTKFile>", (EMf->isLittleEndian() ?"LittleEndian":"BigEndian"),testpart[is].getNOP());
+					"</VTKFile>", (EMf->isLittleEndian() ?"LittleEndian":"BigEndian"),testpart[is]->getNOP());
 
 	int nelem = strlen(header);
 	int charsize=sizeof(char);
 	MPI_Offset disp = nelem*charsize;
 
 	ostringstream filename;
-	filename << col->getSaveDirName() << "/" << col->getSimName() << "_testparticle"<< testpart[is].get_species_num() << "_cycle" << cycle << ".vtu";
+	filename << col->getSaveDirName() << "/" << col->getSimName() << "_testparticle"<< testpart[is]->get_species_num() << "_cycle" << cycle << ".vtu";
 	MPI_File_open(vct->getFieldComm(),filename.str().c_str(), MPI_MODE_CREATE|MPI_MODE_WRONLY, MPI_INFO_NULL, fh);
 
 	MPI_File_set_view(*fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL);

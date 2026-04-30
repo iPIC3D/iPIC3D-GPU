@@ -331,6 +331,73 @@ int PHDF5fileClass::WritePHDF5dataset(string grpname, string datasetname, const_
   return 0;
 }
 
+int PHDF5fileClass::WritePHDF5dataset(string grpname, string datasetname,
+                                       const_arr3_double data,
+                                       int i0, int j0, int k0,
+                                       const hsize_t *gdim,
+                                       const hsize_t *ldim,
+                                       const hsize_t *foff,
+                                       double scale)
+{
+  hid_t const h5type = H5T_NATIVE_DOUBLE;
+
+  const int nx = (int)ldim[0];
+  const int ny = (int)ldim[1];
+  const int nz = (int)ldim[2];
+
+  /* Copy data to buffer, starting from (i0, j0, k0) */
+
+  double *buffer = new double[nx*ny*nz];
+  int l = 0;
+  for (int i = 0; i < nx; i++)
+    for (int j = 0; j < ny; j++)
+      for (int k = 0; k < nz; k++)
+        buffer[l++] = data[i+i0][j+j0][k+k0] * scale;
+
+  /* Set up hyperslab selection */
+
+  hsize_t stride[3] = {1, 1, 1};
+  hsize_t count [3] = {1, 1, 1};
+  hsize_t block [3] = {ldim[0], ldim[1], ldim[2]};
+  hsize_t offset[3] = {foff[0], foff[1], foff[2]};
+
+  hid_t glob_dspace = H5Screate_simple(ndim, gdim, NULL);
+  hid_t locl_dspace = H5Screate_simple(ndim, ldim, NULL);
+
+  /* Use the class-member chunk size (cell-grid interior block) for
+     consistent chunking across all ranks, even when the local write
+     size differs for upper-boundary processes. */
+  hid_t dataset_prop = H5Pcreate(H5P_DATASET_CREATE);
+  H5Pset_chunk(dataset_prop, ndim, chdim);
+
+  string dname = "/"+grpname+"/"+datasetname;
+  hid_t dataset = H5Dcreate2(file_id, dname.c_str(), h5type, glob_dspace,
+                              H5P_DEFAULT, dataset_prop, H5P_DEFAULT);
+  H5Pclose(dataset_prop);
+
+  hid_t dataspace = H5Dget_space(dataset);
+  H5Sselect_hyperslab(dataspace, H5S_SELECT_SET, offset, stride, count, block);
+
+  hid_t dataset_xfer = H5Pcreate(H5P_DATASET_XFER);
+  #ifdef USING_PARALLEL_HDF5
+  H5Pset_dxpl_mpio(dataset_xfer, H5FD_MPIO_COLLECTIVE);
+  #else
+  eprintf("WriteMethod==Parallel in input file "
+          "requires setting USING_PARALLEL_HDF5 in ipicdefs.h");
+  #endif
+
+  H5Dwrite(dataset, h5type, locl_dspace, dataspace, dataset_xfer, buffer);
+
+  delete [] buffer;
+  H5Pclose(dataset_xfer);
+  H5Sclose(dataspace);
+  H5Dclose(dataset);
+  H5Sclose(locl_dspace);
+  H5Sclose(glob_dspace);
+
+  return 0;
+}
+
 void PHDF5fileClass::ReadPHDF5param(){
 
   herr_t  status;

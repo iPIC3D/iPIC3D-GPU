@@ -32,6 +32,8 @@
 #include "PSKhdf5adaptor.h"
 #endif
 
+struct OutputTagConfig;
+
 using namespace PSK;
 
 class OutputWrapperFPP
@@ -52,12 +54,12 @@ class OutputWrapperFPP
     VCtopology3D  *vct,
     Grid3DCU      *grid,
     EMfields3D    *EMf,
-    Particles3D   *part,
+    ParticleSoAHost   **part,
     int 		  ns,
-    Particles3D   *testpart,
+    ParticleSoAHost   **testpart,
     int 		  nstestpart);
-  void append_output(const char* tag, int cycle);
   void append_output(const char* tag, int cycle, int sample);
+  void append_field_moment_output(const OutputTagConfig& cfg, int cycle);
   void append_restart(int cycle);
 };
 

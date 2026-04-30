@@ -39,6 +39,10 @@ public:
     /**
      * @brief Construct with references to simulation configuration, grid, and topology.
      *        Allocates persistent per-species particle buffers and RNGs for all planetary species.
+     *
+     * @param collective Simulation input/configuration object.
+     * @param grid Local grid descriptor for the current MPI rank.
+     * @param topology MPI topology descriptor for the current rank.
      */
     ExosphereIonization(const Collective* collective, const Grid3DCU* grid, const VCtopology3D* topology);
 
@@ -75,10 +79,16 @@ public:
 
     /**
      * @brief Get the injected charge for a specific planetary species from the last call.
+     *
+     * @param speciesIndex Global species index for the requested planetary species.
      */
     double getSpeciesInjectedCharge(int speciesIndex) const;
 
-    /** @brief Number of particles produced by the last call for a given species. */
+    /**
+     * @brief Get the number of particles produced by the last call for one species.
+     *
+     * @param speciesIndex Global species index for the requested planetary species.
+     */
     int getLastInjectedCount(int speciesIndex) const;
 
 private:
@@ -103,6 +113,18 @@ private:
      * Replaces the global-rand()-based sample_maxwellian() with a per-species
      * RNG reference. Generates 3 normal variates (two via paired Box-Muller,
      * one via an independent Box-Muller pair, discarding the second).
+     *
+     * @param u Output x-velocity sample.
+     * @param v Output y-velocity sample.
+     * @param w Output z-velocity sample.
+     * @param ut Thermal speed in x.
+     * @param vt Thermal speed in y.
+     * @param wt Thermal speed in z.
+     * @param u0 Drift speed in x.
+     * @param v0 Drift speed in y.
+     * @param w0 Drift speed in z.
+     * @param rng Per-species pseudo-random generator.
+     * @param dist Uniform random distribution bound to @p rng.
      */
     static void sampleMaxwellianThreadSafe(
         double& u, double& v, double& w,

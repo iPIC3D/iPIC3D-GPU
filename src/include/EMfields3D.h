@@ -18,7 +18,10 @@
  * limitations under the License.
  */
 
-/*!************************************************************************* EMfields3D.h - ElectroMagnetic fields definition ------------------- begin : May 2008 copyright : KU Leuven developers : Stefano Markidis, Giovanni Lapenta ************************************************************************* */
+/**
+ * @file EMfields3D.h
+ * @brief Electromagnetic field storage and solver interface for one local domain.
+ */
 
 #ifndef EMfields3D_H
 #define EMfields3D_H
@@ -31,119 +34,279 @@
 
 #include "cudaTypeDef.cuh"
 
-/*! Electromagnetic fields and sources defined for each local grid, and for an implicit maxwell's solver @date May 2008 @par Copyright: (C) 2008 KUL @author Stefano Markidis, Giovanni Lapenta. @version 3.0 */
-
 // dimension of vectors used in fieldForPcls
 const int DFIELD_3or4=4; // 4 pads with garbage but is needed for alignment
 
+/**
+ * @brief Electromagnetic fields, sources, and implicit-solver work arrays for one MPI rank.
+ *
+ * The solver uses this class to initialize case-dependent fields, advance the
+ * implicit Maxwell system, accumulate and reduce particle moments, and prepare
+ * field buffers consumed by the GPU particle mover.
+ */
 class EMfields3D                // :public Field
 {
   public:
-    /*! constructor */
+    // ======= Construction and lifetime =======
+
+    /**
+     * @brief Construct field storage and solver work arrays for the local domain.
+     *
+     * @param col Collective input/configuration object.
+     * @param grid Local grid descriptor.
+     * @param vct MPI topology descriptor.
+     */
     EMfields3D(Collective * col, Grid * grid, VirtualTopology3D *vct);
-    /*! destructor */
+    /** @brief Destroy the field container and its owned work buffers. */
     ~EMfields3D();
 
-    /*! initialize the electromagnetic fields with constant values */
+    // ======= Solver-facing initialization routines =======
+
+    /** @brief Initialize the default field state or restart-provided state. */
     void init();
-    /*! init beam */
+    /**
+     * @brief Initialize the beam test configuration.
+     *
+     * @param x_center Beam-center x coordinate.
+     * @param y_center Beam-center y coordinate.
+     * @param z_center Beam-center z coordinate.
+     * @param radius Beam radius.
+     */
     void initBEAM(double x_center, double y_center, double z_center, double radius);
-    /*! initialize GEM challenge */
+    /** @brief Initialize the standard GEM challenge configuration. */
     void initGEM();
+    /** @brief Single Harris sheet with optional GEM/hump perturbations and optional Ampère current. */
+    void initGEMHarris();
     void initOriginalGEM();
+    /** @brief Initialize the double-Harris-sheet GEM configuration. */
     void initGEMDoubleHarris();
     void initDoublePeriodicHarrisWithGaussianHumpPerturbation();
+    /** @brief Initialize the hump-perturbation configuration. */
     void initHumpPerturbation();
-    /*! initialize GEM challenge with dipole-like tail without perturbation */
+    /** @brief Initialize GEM with a dipole-like tail and no perturbation. */
     void initGEMDipoleLikeTailNoPert();
-    /*! initialize GEM challenge with no Perturbation */
+    /** @brief Initialize GEM without the perturbation term. */
     void initGEMnoPert();
 #ifdef BATSRUS
-    /*! initialize from BATSRUS */
+    /** @brief Initialize fields from BATSRUS input data. */
     void initBATSRUS();
 #endif
-    /*! Random initial field */
+    /** @brief Initialize the random-field test case. */
     void initRandomField();
-    /*! Init Force Free (JxB=0) */
+    /** @brief Initialize the force-free equilibrium case. */
     void initForceFree();
-    /*! initialized with rotated magnetic field */
+    /**
+     * @brief Initialize a uniform rotated magnetic field.
+     *
+     * @param B Magnetic-field magnitude.
+     * @param theta Rotation angle.
+     */
     void initEM_rotate(double B, double theta);
-    /*! add a perturbattion to charge density */
+    /**
+     * @brief Add a perturbation to the charge density.
+     *
+     * @param deltaBoB Magnetic perturbation amplitude normalized by the background field.
+     * @param kx Perturbation wave number in x.
+     * @param ky Perturbation wave number in y.
+     * @param Bx_mod Bx perturbation amplitude.
+     * @param By_mod By perturbation amplitude.
+     * @param Bz_mod Bz perturbation amplitude.
+     * @param ne_mod Electron-density perturbation amplitude.
+     * @param ne_phase Electron-density perturbation phase.
+     * @param ni_mod Ion-density perturbation amplitude.
+     * @param ni_phase Ion-density perturbation phase.
+     * @param B0 Background magnetic-field magnitude.
+     * @param grid Local grid descriptor.
+     */
     void AddPerturbationRho(double deltaBoB, double kx, double ky, double Bx_mod, double By_mod, double Bz_mod, double ne_mod, double ne_phase, double ni_mod, double ni_phase, double B0, Grid * grid);
-    /*! add a perturbattion to the EM field */
+    /**
+     * @brief Add a perturbation to the electromagnetic field.
+     *
+     * @param deltaBoB Magnetic perturbation amplitude normalized by the background field.
+     * @param kx Perturbation wave number in x.
+     * @param ky Perturbation wave number in y.
+     * @param Ex_mod Ex perturbation amplitude.
+     * @param Ex_phase Ex perturbation phase.
+     * @param Ey_mod Ey perturbation amplitude.
+     * @param Ey_phase Ey perturbation phase.
+     * @param Ez_mod Ez perturbation amplitude.
+     * @param Ez_phase Ez perturbation phase.
+     * @param Bx_mod Bx perturbation amplitude.
+     * @param Bx_phase Bx perturbation phase.
+     * @param By_mod By perturbation amplitude.
+     * @param By_phase By perturbation phase.
+     * @param Bz_mod Bz perturbation amplitude.
+     * @param Bz_phase Bz perturbation phase.
+     * @param B0 Background magnetic-field magnitude.
+     * @param grid Local grid descriptor.
+     */
     void AddPerturbation(double deltaBoB, double kx, double ky, double Ex_mod, double Ex_phase, double Ey_mod, double Ey_phase, double Ez_mod, double Ez_phase, double Bx_mod, double Bx_phase, double By_mod, double By_phase, double Bz_mod, double Bz_phase, double B0, Grid * grid);
-    /*! Initialise a combination of magnetic dipoles */
+    /** @brief Initialize the 3D magnetic-dipole planetary case. */
     void initDipole();
+    /** @brief Initialize the 2D magnetic-dipole planetary case. */
     void initDipole2D();
-    /*! Initialise magnetic nulls */
+    /** @brief Initialize the magnetic-null-points configuration. */
     void initNullPoints();
-    /*! Initialise Taylor-Green flow */
+    /** @brief Initialize the Taylor-Green configuration. */
     void initTaylorGreen();
-    /*! Calculate Electric field using the implicit Maxwell solver */
+
+    // ======= Solver-facing field updates =======
+
+    /**
+     * @brief Advance the electric field with the implicit Maxwell solver.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void calculateE(int cycle);
-    /*! Image of Poisson Solver (for SOLVER) */
+    /**
+     * @brief Apply the Poisson image operator used by the linear solver.
+     *
+     * @param image Output image vector.
+     * @param vector Input Krylov vector.
+     */
     void PoissonImage(double *image, double *vector);
-    /*! Image of Maxwell Solver (for Solver) */
+    /**
+     * @brief Apply the Maxwell image operator used by the linear solver.
+     *
+     * @param im Output image vector.
+     * @param vector Input Krylov vector.
+     */
     void MaxwellImage(double *im, double *vector);
-    /*! Image of Maxwell Solver without communication (for Solver preconditioner) */
+    /**
+     * @brief Apply the local Maxwell image operator used by the preconditioner.
+     *
+     * @param im Output image vector.
+     * @param vector Input Krylov vector.
+     */
     void MaxwellImageLocal(double *im, double *vector);
-    /*! Maxwell source term (for SOLVER) */
+    /**
+     * @brief Build the Maxwell right-hand-side source term.
+     *
+     * @param bkrylov Output right-hand-side vector.
+     */
     void MaxwellSource(double *bkrylov);
-    /*! Impose a constant charge inside a spherical zone of the domain */
+    /**
+     * @brief Impose a constant charge inside the 3D planet sphere.
+     *
+     * @param R Planet radius.
+     * @param x_center Planet-center x coordinate.
+     * @param y_center Planet-center y coordinate.
+     * @param z_center Planet-center z coordinate.
+     */
     void ConstantChargePlanet(double R, double x_center, double y_center, double z_center);
+    /**
+     * @brief Impose a constant charge inside the 2D XZ-plane planet mask.
+     *
+     * @param R Planet radius.
+     * @param x_center Planet-center x coordinate.
+     * @param z_center Planet-center z coordinate.
+     */
     void ConstantChargePlanet2DPlaneXZ(double R, double x_center, double z_center);
-    /*! Impose a constant charge in the OpenBC boundaries */
+    /** @brief Impose a constant charge in the open-boundary layers. */
     void ConstantChargeOpenBC();
-    /*! Impose a constant charge in the OpenBC boundaries */
+    /** @brief Alternate constant-charge treatment for open boundaries. */
     void ConstantChargeOpenBCv2();
-    /*! Calculate Magnetic field with the implicit solver: calculate B defined on nodes With E(n+ theta) computed, the magnetic field is evaluated from Faraday's law */
+    /**
+     * @brief Advance the magnetic field after the electric-field solve.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void calculateB(int cycle);
-    /*! Apply divergence cleaning: solve laplacian(PSI) = div(B), then B = B - grad(PSI) on boundary layers */
+    /** @brief Apply divergence cleaning to the magnetic field. */
     void applyDivBCleaning();
-    /*! fix B on the boundary for gem challange */
+    /** @brief Fix magnetic-field boundary values for the GEM challenge. */
     void fixBcGEM();
     void fixBnGEM();
-    /*! fix B on the boundary for gem challange */
+    /** @brief Fix magnetic-field boundary values for the force-free case. */
     void fixBforcefree();
 
-    /*! Calculate the three components of Pi(implicit pressure) cross image vector */
+    // ======= Solver-facing moment post-processing =======
+
+    /**
+     * @brief Apply the implicit pressure tensor to a vector field.
+     *
+     * @param PIdotX Output x component of the tensor product.
+     * @param PIdotY Output y component of the tensor product.
+     * @param PIdotZ Output z component of the tensor product.
+     * @param vectX Input x component.
+     * @param vectY Input y component.
+     * @param vectZ Input z component.
+     * @param ns Species index.
+     */
     void PIdot(arr3_double PIdotX, arr3_double PIdotY, arr3_double PIdotZ,
       const_arr3_double vectX, const_arr3_double vectY, const_arr3_double vectZ, int ns);
-    /*! Calculate the three components of mu (implicit permeattivity) cross image vector */
+    /**
+     * @brief Apply the implicit permeability tensor to a vector field.
+     *
+     * @param MUdotX Output x component of the tensor product.
+     * @param MUdotY Output y component of the tensor product.
+     * @param MUdotZ Output z component of the tensor product.
+     * @param vectX Input x component.
+     * @param vectY Input y component.
+     * @param vectZ Input z component.
+     */
     void MUdot(arr3_double MUdotX, arr3_double MUdotY, arr3_double MUdotZ,
       const_arr3_double vectX, const_arr3_double vectY, const_arr3_double vectZ);
-    /*! Calculate rho hat, Jx hat, Jy hat, Jz hat */
+    /** @brief Build the hat quantities used by the implicit field solve. */
     void calculateHatFunctions();
 
 
-    /*! communicate ghost for densities and interp rho from node to center */
+    /** @brief Interpolate nodal densities to cell centers. */
     void interpDensitiesN2C();
-    /*! set to 0 all the densities fields */
+    /** @brief Zero all density-related fields. */
     void setZeroDensities();
-    /*! set to 0 primary moments */
+    /** @brief Zero the per-species primary moments. */
     void setZeroPrimaryMoments();
-    /*! set to 0 all densities derived from primary moments */
+    /** @brief Zero the aggregate moments derived from the primary moments. */
     void setZeroDerivedMoments();
-    /*! Sum rhon over species */
+    /** @brief Sum nodal charge density over all species. */
     void sumOverSpecies();
-    /*! Sum current over different species */
+    /** @brief Sum nodal current density over all species. */
     void sumOverSpeciesJ();
-    /*! Smoothing after the interpolation* */
+    /**
+     * @brief Smooth a cell-centered scalar field after interpolation.
+     *
+     * @param vector Field to smooth in place.
+     * @param type Smoothing mode selector.
+     */
     void smooth(arr3_double vector, int type);
-    /*! SPECIES: Smoothing after the interpolation for species fields* */
+    /**
+     * @brief Smooth a per-species field after interpolation.
+     *
+     * @param value Constant fill value used by the smoother.
+     * @param vector Per-species field to smooth in place.
+     * @param is Species index.
+     * @param type Smoothing mode selector.
+     */
     void smooth(double value, arr4_double vector, int is, int type);
-    /*! smooth the electric field */
+    /** @brief Smooth the electric field components. */
     void smoothE();
 
-    /*! copy the field data to the array used to move the particles */
+    /** @brief Populate the legacy nodal field buffer used by the particle mover. */
     void set_fieldForPcls();
 
+    /**
+     * @brief Pack field data into the cell-centered GPU mover buffer.
+     *
+     * The packed layout stores the four XY-plane corner nodes needed by the GPU
+     * mover for each cell slab in Z.
+     *
+     * @param fieldForPclsOnCenter Output packed field buffer.
+     */
     void set_fieldForPclsToCenter(cudaFieldType *fieldForPclsOnCenter);
 
-    /*! communicate ghost for grid -> Particles interpolation */
+    /**
+     * @brief Communicate per-species moments before particle-to-grid reductions.
+     *
+     * @param ns Number of particle species.
+     */
     void communicateGhostP2G(int ns);
 
-    /*! adjust densities on boundaries that are not periodic */
+    /**
+     * @brief Adjust densities on non-periodic boundaries.
+     *
+     * @param is Species index.
+     */
     void adjustNonPeriodicDensities(int is);
 
 
@@ -251,6 +414,13 @@ class EMfields3D                // :public Field
     arr4_double getpZZsn() { return pZZsn; }
     double getpZZsn(int X,int Y,int Z,int is)const{return pZZsn.get(is,X,Y,Z);}
 
+    // per-species 3D slice accessors (node grid) for parallel HDF5 / H5hut output
+    arr3_double getpXXsn(int is){return arr3_double(pXXsn.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getpXYsn(int is){return arr3_double(pXYsn.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getpXZsn(int is){return arr3_double(pXZsn.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getpYYsn(int is){return arr3_double(pYYsn.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getpYZsn(int is){return arr3_double(pYZsn.fetch_arr4()[is], nxn, nyn, nzn);}
+    arr3_double getpZZsn(int is){return arr3_double(pZZsn.fetch_arr4()[is], nxn, nyn, nzn);}
 
     double getJx(int X, int Y, int Z) const { return Jx.get(X,Y,Z);}
     double getJy(int X, int Y, int Z) const { return Jy.get(X,Y,Z);}

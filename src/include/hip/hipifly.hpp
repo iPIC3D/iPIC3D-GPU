@@ -77,9 +77,24 @@
 #define cudaLaunchKernel hipLaunchKernelGGL
 
 
+// Memory Info
+#define cudaMemGetInfo hipMemGetInfo
+
 // warp primitive
 #define __shfl_down_sync(x, y, z) __shfl_down(y, z)
 #define __shfl_sync(x, y, z) __shfl(y, z)
+#define __ballot_sync(mask, predicate) __ballot(predicate)
+#define __activemask() __ballot(1)
+#define __popc(x) __popcll(static_cast<unsigned long long>(x))
+#define __ffs(x) __ffsll(static_cast<unsigned long long>(x))
+
+// cuRAND → hipRAND
+#define curandStatePhilox4_32_10_t hiprandStatePhilox4_32_10_t
+#define curand_init              hiprand_init
+#define curand_normal_double     hiprand_normal_double
+#define curand_uniform_double    hiprand_uniform_double
+#define curand_normal            hiprand_normal
+#define curand_uniform           hiprand_uniform
 
 
 

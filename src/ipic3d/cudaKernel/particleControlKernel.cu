@@ -7,17 +7,20 @@
 #include "particleArrayCUDA.cuh"
 #include "particleExchange.cuh"
 
+// ======= Merge kernel =======
 
 /**
-* @brief Merging kernel, merging particle pairs with similar velocity in the same cell
-*
-* @param cellOffsetList absolute Offset of the cells in the pclArray, the pclArray must be sorted
-* @param cellBinCountList Number of particles in each cell
-* @param grid Pointer to the grid structure
-* @param pcl Pointer to the particle array
-* @param departureArray Pointer to the departure array, for delete mark
-* @details one warp for each cell
-*/
+ * @brief Merge close-velocity particle pairs inside a cell-sorted SoA buffer.
+ *
+ * Each warp owns one cell. The kernel looks for the closest not-yet-deleted
+ * partner for each lead particle, merges charges and phase-space coordinates
+ * conservatively, and marks the absorbed particle for deletion.
+ * @param cellOffsetList Per-cell starting offsets in the sorted particle buffer.
+ * @param cellBinCountList Per-cell particle counts.
+ * @param grid Device grid metadata used to compute cell statistics.
+ * @param pclArray Cell-sorted particle SoA buffer.
+ * @param departureArray Per-particle destination metadata used for deletion flags.
+ */
 __global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList, grid3DCUDA* grid, particleArrayCUDA* pclArray, departureArrayType* departureArray) {
 
     const uint pid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -26,7 +29,14 @@ __global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList, grid3D
 
     // return if pid > number of particle rounded up to warpsize
     const int nop = pclArray->getNOP();
-    auto pcl = pclArray->getpcls();
+    // SoA field pointers
+    auto soaU = pclArray->getU();
+    auto soaV = pclArray->getV();
+    auto soaW = pclArray->getW();
+    auto soaQ = pclArray->getQ();
+    auto soaX = pclArray->getX();
+    auto soaY = pclArray->getY();
+    auto soaZ = pclArray->getZ();
     auto dArray = departureArray->getArray();
     const uint cellNum = ((grid->nxc) * (grid->nyc) * (grid->nzc));
     if (cellId >= cellNum) return;
@@ -38,7 +48,7 @@ __global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList, grid3D
 
     const int initialPIC = pclArray->getInitialNOP() / ((grid->nxc-2) * (grid->nyc-2) * (grid->nzc-2));
 
-    if(numPIC <= initialPIC) return; // no merging if less than 32 particles in the cell
+    if(numPIC <= initialPIC) return; // already at or below the target occupancy
 
     int cellMergeCount = 0; // number of particles merged in this cell
 
@@ -60,16 +70,13 @@ __global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList, grid3D
             if (dArray[pId].dest != 0) continue;
 
             // calculate the VV norm
-            const auto& p1 = pcl[mainPId];
-            const auto& p2 = pcl[pId];
+            const auto u1 = soaU[mainPId];
+            const auto v1 = soaV[mainPId];
+            const auto w1 = soaW[mainPId];
 
-            const auto& u1 = p1.get_u();
-            const auto& v1 = p1.get_v();
-            const auto& w1 = p1.get_w();
-
-            const auto& u2 = p2.get_u();
-            const auto& v2 = p2.get_v();
-            const auto& w2 = p2.get_w();
+            const auto u2 = soaU[pId];
+            const auto v2 = soaV[pId];
+            const auto w2 = soaW[pId];
 
             const auto norm = (u1 - u2) * (u1 - u2) + (v1 - v2) * (v1 - v2) + (w1 - w2) * (w1 - w2); // not distance, reduce the sqrt
 
@@ -95,43 +102,35 @@ __global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList, grid3D
 
         // lane 0 holds the minimum norm
         if (laneId == 0) {
-            const auto& p1 = pcl[mainPId];
-            const auto& u1 = p1.get_u();
-            const auto& v1 = p1.get_v();
-            const auto& w1 = p1.get_w();
+            const auto u1 = soaU[mainPId];
+            const auto v1 = soaV[mainPId];
+            const auto w1 = soaW[mainPId];
 
             if (localNorm < (threshold * (u1*u1 + v1*v1 + w1*w1))) { // merge!
             //if (true) { // merge!
                 dArray[localPId].dest = departureArrayElementType::DELETE;
 
-                SpeciesParticle mergedParticle;
-
-                const auto& p2 = pcl[localPId];
+                const auto q1 = soaQ[mainPId];
+                const auto x1 = soaX[mainPId];
+                const auto y1 = soaY[mainPId];
+                const auto z1 = soaZ[mainPId];
     
-                const auto& q1 = p1.get_q();
-                const auto& x1 = p1.get_x();
-                const auto& y1 = p1.get_y();
-                const auto& z1 = p1.get_z();
-    
-                const auto& u2 = p2.get_u();
-                const auto& v2 = p2.get_v();
-                const auto& w2 = p2.get_w();
-                const auto& q2 = p2.get_q();
-                const auto& x2 = p2.get_x();
-                const auto& y2 = p2.get_y();
-                const auto& z2 = p2.get_z();
+                const auto u2 = soaU[localPId];
+                const auto v2 = soaV[localPId];
+                const auto w2 = soaW[localPId];
+                const auto q2 = soaQ[localPId];
+                const auto x2 = soaX[localPId];
+                const auto y2 = soaY[localPId];
+                const auto z2 = soaZ[localPId];
 
                 const auto newQ = q1 + q2;
-                mergedParticle.set_u((u1*q1 + u2*q2) / newQ);
-                mergedParticle.set_v((v1*q1 + v2*q2) / newQ);
-                mergedParticle.set_w((w1*q1 + w2*q2) / newQ);
-                mergedParticle.set_q(newQ);
-                mergedParticle.set_x((x1*q1 + x2*q2) / newQ);
-                mergedParticle.set_y((y1*q1 + y2*q2) / newQ);
-                mergedParticle.set_z((z1*q1 + z2*q2) / newQ);
-
-                
-                pcl[mainPId] = mergedParticle; // merge the particles
+                soaU[mainPId] = (u1*q1 + u2*q2) / newQ;
+                soaV[mainPId] = (v1*q1 + v2*q2) / newQ;
+                soaW[mainPId] = (w1*q1 + w2*q2) / newQ;
+                soaQ[mainPId] = newQ;
+                soaX[mainPId] = (x1*q1 + x2*q2) / newQ;
+                soaY[mainPId] = (y1*q1 + y2*q2) / newQ;
+                soaZ[mainPId] = (z1*q1 + z2*q2) / newQ;
 
                 cellMergeCount++; 
 
@@ -146,10 +145,17 @@ __global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList, grid3D
 
 using commonType = cudaParticleType;
 
-// Particle number control 
+// ======= Particle splitting kernels =======
 
-// Particle splitting kernel to use when the number of particles to be generated is < number available particles
-// launch the kernel with number of threads = deltaPcl --> each thread splits a particle randomly choosen
+/**
+ * @brief Split a subset of particles when fewer new particles are needed than currently exist.
+ *
+ * The launch uses `deltaPcl` threads. Each thread selects one source particle,
+ * halves its charge, offsets the original and clone within the same cell, and
+ * writes the new particle at the end of the SoA buffer.
+ * @param moverParam Mover context holding the particle buffer to expand.
+ * @param grid Device grid metadata used to keep daughter particles in-cell.
+ */
 template <>
 __global__ void particleSplittingKernel<false>(moverParameter* moverParam, grid3DCUDA* grid)
 {   
@@ -180,12 +186,19 @@ __global__ void particleSplittingKernel<false>(moverParameter* moverParam, grid3
     // select particle to split
     const uint pidx = tidx * batch + idxRNG;
 
-    // copy the particle
-    SpeciesParticle *pcl = pclsArray->getpcls() + pidx;
-    SpeciesParticle newPcl = *pcl;
-    const auto x0 = pcl->get_x();
-    const auto y0 = pcl->get_y();
-    const auto z0 = pcl->get_z();
+    // copy the particle from SoA
+    auto soaU = pclsArray->getU();
+    auto soaV = pclsArray->getV();
+    auto soaW = pclsArray->getW();
+    auto soaQ = pclsArray->getQ();
+    auto soaX = pclsArray->getX();
+    auto soaY = pclsArray->getY();
+    auto soaZ = pclsArray->getZ();
+    auto soaT = pclsArray->getT();
+
+    const auto x0 = soaX[pidx];
+    const auto y0 = soaY[pidx];
+    const auto z0 = soaZ[pidx];
 
     // index of the grid point to the right of the particle
     const int ix = 2 + int(floor((x0 - xstart) * inv_dx));
@@ -209,20 +222,16 @@ __global__ void particleSplittingKernel<false>(moverParameter* moverParam, grid3
     if (zi1 < delta) delta = zi1;
             
     delta /= 20;
-    pcl->set_x(x0 - delta);
-    pcl->set_y(y0 - delta);
-    pcl->set_z(z0 - delta);
-    newPcl.set_x(x0 + delta);
-    newPcl.set_y(y0 + delta);
-    newPcl.set_z(z0 + delta);
-    
-    // update weights
-    const auto q = pcl->get_q(); 
-    pcl->set_q( 0.5 * q );
-    newPcl.set_q( 0.5 * q );
-    
-    newPcl.set_t(114515.0);
+    // Update original particle position in SoA
+    soaX[pidx] = x0 - delta;
+    soaY[pidx] = y0 - delta;
+    soaZ[pidx] = z0 - delta;
 
+    // Update charge consistently for both daughter particles.
+    const auto q = soaQ[pidx]; 
+    soaQ[pidx] = 0.5 * q;
+
+    // Write new split particle to SoA at the end of the array
     const auto index = pclsArray->getNOP() + tidx;
     // check memory overflow
     if (index >= moverParam->pclsArray->getSize()) {
@@ -230,15 +239,23 @@ __global__ void particleSplittingKernel<false>(moverParameter* moverParam, grid3
         //__trap();
         return;
     }
-    memcpy(moverParam->pclsArray->getpcls() + index, &newPcl, sizeof(SpeciesParticle));
+    soaU[index] = soaU[pidx];
+    soaV[index] = soaV[pidx];
+    soaW[index] = soaW[pidx];
+    soaQ[index] = 0.5 * q;
+    soaX[index] = x0 + delta;
+    soaY[index] = y0 + delta;
+    soaZ[index] = z0 + delta;
+    soaT[index] = 114515.0;
 }
-
-
-
-
-// Particle splitting kernel to use when the number of particles to be generated is > number available particles
-// launch the kernel with number of threads = pclsArray->getNOP() --> each thread splits a particle splittingTimes times
-
+/**
+ * @brief Split every existing particle multiple times when the deficit exceeds the current population.
+ *
+ * Each thread repeatedly clones the particle it owns until the requested
+ * particle deficit has been filled.
+ * @param moverParam Mover context holding the particle buffer to expand.
+ * @param grid Device grid metadata used to keep daughter particles in-cell.
+ */
 template <>
 __global__ void particleSplittingKernel<true>(moverParameter* moverParam, grid3DCUDA* grid)
 {  
@@ -259,16 +276,23 @@ __global__ void particleSplittingKernel<true>(moverParameter* moverParam, grid3D
     const commonType& ystart = grid->yStart;
     const commonType& zstart = grid->zStart;
     
+    // SoA field pointers
+    auto soaU = pclsArray->getU();
+    auto soaV = pclsArray->getV();
+    auto soaW = pclsArray->getW();
+    auto soaQ = pclsArray->getQ();
+    auto soaX = pclsArray->getX();
+    auto soaY = pclsArray->getY();
+    auto soaZ = pclsArray->getZ();
+    auto soaT = pclsArray->getT();
+
     for(int i = 0; i < splittingTimes; i ++)
     {
         const uint pidx = i * pclsArray->getNOP() + tidx;
-        // copy the particle
-        SpeciesParticle *pcl = pclsArray->getpcls() + pidx;
-        SpeciesParticle newPcl = *pcl;
 
-        const auto x0 = pcl->get_x();
-        const auto y0 = pcl->get_y();
-        const auto z0 = pcl->get_z();
+        const auto x0 = soaX[pidx];
+        const auto y0 = soaY[pidx];
+        const auto z0 = soaZ[pidx];
 
         // index of the grid point to the right of the particle
         const int ix = 2 + int(floor((x0 - xstart) * inv_dx));
@@ -292,20 +316,16 @@ __global__ void particleSplittingKernel<true>(moverParameter* moverParam, grid3D
         if (zi1 < delta) delta = zi1;
                 
         delta /= 20;
-        pcl->set_x(x0 - delta);
-        pcl->set_y(y0 - delta);
-        pcl->set_z(z0 - delta);
-        newPcl.set_x(x0 + delta);
-        newPcl.set_y(y0 + delta);
-        newPcl.set_z(z0 + delta);
-        
-        
-        const auto q = pcl->get_q(); 
-        pcl->set_q( 0.5 * q );
-        newPcl.set_q( 0.5 * q );
-        
-        newPcl.set_t(114515.0);
+        // Update original particle position in SoA
+        soaX[pidx] = x0 - delta;
+        soaY[pidx] = y0 - delta;
+        soaZ[pidx] = z0 - delta;
 
+        // Update charge consistently for both daughter particles.
+        const auto q = soaQ[pidx]; 
+        soaQ[pidx] = 0.5 * q;
+
+        // Write new split particle to SoA at the end of the array
         const auto index = pclsArray->getNOP() + pidx;
         // check memory overflow
         if (index >= moverParam->pclsArray->getSize()) {
@@ -313,7 +333,14 @@ __global__ void particleSplittingKernel<true>(moverParameter* moverParam, grid3D
             //__trap();
             return;
         }
-        memcpy(moverParam->pclsArray->getpcls() + index, &newPcl, sizeof(SpeciesParticle));
+        soaU[index] = soaU[pidx];
+        soaV[index] = soaV[pidx];
+        soaW[index] = soaW[pidx];
+        soaQ[index] = 0.5 * q;
+        soaX[index] = x0 + delta;
+        soaY[index] = y0 + delta;
+        soaZ[index] = z0 + delta;
+        soaT[index] = 114515.0;
     }
 
 }

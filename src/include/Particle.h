@@ -28,16 +28,6 @@
 //
 #define AoS_PCLS_AT_A_TIME 2
 
-namespace ParticleType
-{
-  enum Type
-  {
-    AoS = 0,
-    SoA,
-    synched
-  };
-}
-
 
 template <class T>
 class Larray;

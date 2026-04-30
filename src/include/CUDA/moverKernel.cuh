@@ -1,7 +1,7 @@
 #ifndef _MOVERKERNEL_CUH_
 #define _MOVERKERNEL_CUH_
 
-#include "Particles3D.h"
+#include "ParticleSoAHost.h"
 #include "cudaTypeDef.cuh"
 #include "particleArrayCUDA.cuh"
 #include "EMfields3D.h"
@@ -9,17 +9,22 @@
 #include "particleExchange.cuh"
 #include "hashedSum.cuh"
 
-
+/**
+ * @brief Device-side parameter bundle consumed by the GPU mover kernels.
+ *
+ * The solver populates one instance per species with particle-array pointers,
+ * departure bookkeeping, scalar species constants, and boundary-condition flags.
+ */
 class moverParameter
 {
 
-public: //particle arrays
+public: // particle arrays
 
-    particleArrayCUDA* pclsArray; // default main array
+    particleArrayCUDA* pclsArray; // main device particle array
 
-    departureArrayType* departureArray; // a helper array for marking exiting particles
+    departureArrayType* departureArray; // device departure flags
 
-    hashedSum* hashedSumArray; // 8 hashed sum
+    hashedSum* hashedSumArray; // departure-direction hashed sums
 
 
 public: // common parameter
@@ -63,21 +68,34 @@ public: // common parameter
 public:
 
 
-    __host__ moverParameter(Particles3D* p3D, VirtualTopology3D* vct)
-        : dt(p3D->dt), qom(p3D->qom), c(p3D->c), NiterMover(p3D->NiterMover), DFIELD_3or4(::DFIELD_3or4),
-        umax(p3D->umax), umin(p3D->umin), vmax(p3D->vmax), vmin(p3D->vmin), wmax(p3D->wmax), wmin(p3D->wmin)
+    __host__ moverParameter(ParticleSoAHost* pclHost, VirtualTopology3D* vct)
+        : dt(pclHost->timeStep_), qom(pclHost->chargeOverMass_), c(pclHost->speedOfLight_),
+        NiterMover(pclHost->numMoverIterations_), DFIELD_3or4(::DFIELD_3or4),
+        umax(pclHost->velocityCapMaxX_), umin(pclHost->velocityCapMinX_),
+        vmax(pclHost->velocityCapMaxY_), vmin(pclHost->velocityCapMinY_),
+        wmax(pclHost->velocityCapMaxZ_), wmin(pclHost->velocityCapMinZ_)
     {
         // create the particle array, stream 0
-        pclsArray = particleArrayCUDA(p3D).copyToDevice();
-        departureArray = departureArrayType(p3D->getNOP() * 1.5).copyToDevice();
+        pclsArray = particleArrayCUDA(pclHost).copyToDevice();
+        departureArray = departureArrayType(pclHost->getNOP() * 1.5).copyToDevice();
 
     }
 
-    //! @param pclsArrayCUDAPtr It should be a device pointer
-    __host__ moverParameter(Particles3D* p3D, particleArrayCUDA* pclsArrayCUDAPtr, 
+    /**
+     * @brief Construct a mover parameter bundle from existing device buffers.
+     *
+     * @param pclHost Host-side particle metadata source for scalar species parameters.
+     * @param pclsArrayCUDAPtr      Device pointer to the species SoA container.
+     * @param departureArrayCUDAPtr Device pointer to the departure array.
+     * @param hashedSumArrayCUDAPtr Device pointer to the hashed-sum bucket array.
+     */
+    __host__ moverParameter(ParticleSoAHost* pclHost, particleArrayCUDA* pclsArrayCUDAPtr, 
                             departureArrayType* departureArrayCUDAPtr, hashedSum* hashedSumArrayCUDAPtr)
-        : dt(p3D->dt), qom(p3D->qom), c(p3D->c), NiterMover(p3D->NiterMover), DFIELD_3or4(::DFIELD_3or4),
-        umax(p3D->umax), umin(p3D->umin), vmax(p3D->vmax), vmin(p3D->vmin), wmax(p3D->wmax), wmin(p3D->wmin)
+        : dt(pclHost->timeStep_), qom(pclHost->chargeOverMass_), c(pclHost->speedOfLight_),
+        NiterMover(pclHost->numMoverIterations_), DFIELD_3or4(::DFIELD_3or4),
+        umax(pclHost->velocityCapMaxX_), umin(pclHost->velocityCapMinX_),
+        vmax(pclHost->velocityCapMaxY_), vmin(pclHost->velocityCapMinY_),
+        wmax(pclHost->velocityCapMaxZ_), wmin(pclHost->velocityCapMinZ_)
     {
         // create the particle array, stream 0
         pclsArray = pclsArrayCUDAPtr;
@@ -87,11 +105,27 @@ public:
     }
 };
 
+/**
+ * @brief Advance one species with the standard predictor-corrector mover.
+ *
+ * @param moverParam Device-side mover parameter bundle for one species.
+ * @param fieldForPcls Packed mover field buffer sampled from the grid.
+ * @param grid Device-side grid descriptor.
+ */
 __global__ void moverKernel(moverParameter *moverParam,
                             cudaTypeArray1<cudaFieldType> fieldForPcls,
                             grid3DCUDA *grid);
 
-// mover with adaptive subcycling --> divides dt by eight times the particle gyroperiod and performs a relativistic velocity update
+/**
+ * @brief Advance one species with the adaptive-subcycling mover used for planet cases.
+ *
+ * The timestep is split into subcycles based on the local gyroperiod and the
+ * velocity update is performed in relativistic form.
+ *
+ * @param moverParam Device-side mover parameter bundle for one species.
+ * @param fieldForPcls Packed mover field buffer sampled from the grid.
+ * @param grid Device-side grid descriptor.
+ */
 __global__ void moverSubcyclesKernel(moverParameter *moverParam,
                             cudaTypeArray1<cudaFieldType> fieldForPcls,
                             grid3DCUDA *grid);

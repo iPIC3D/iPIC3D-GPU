@@ -51,3 +51,5 @@ typedef aligned_vector(double) vector_double;
 
 typedef aligned_vector_registered(SpeciesParticle) vector_SpeciesParticle_registered;
 
+#include "cudaTypeDef.cuh"
+typedef aligned_vector_registered(cudaParticleType) vector_cudaParticleType_registered;

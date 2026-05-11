@@ -2038,48 +2038,35 @@ void EMfields3D::communicateGhostP2G(int ns)
  */
 void EMfields3D::setZeroDerivedMoments()
 {
-  for (int i = 0; i < nxn; i++)
-    for (int j = 0; j < nyn; j++)
-      for (int k = 0; k < nzn; k++)
-      {
-        Jx[i][j][k] = 0.0;
-        Jxh[i][j][k] = 0.0;
-        Jy[i][j][k] = 0.0;
-        Jyh[i][j][k] = 0.0;
-        Jz[i][j][k] = 0.0;
-        Jzh[i][j][k] = 0.0;
-        rhon[i][j][k] = 0.0;
-      }
-  for (int i = 0; i < nxc; i++)
-    for (int j = 0; j < nyc; j++)
-      for (int k = 0; k < nzc; k++)
-      {
-        rhoc[i][j][k] = 0.0;
-        rhoh[i][j][k] = 0.0;
-      }
+  const size_t nNode = (size_t)nxn * nyn * nzn * sizeof(double);
+  memset(Jx.fetch_arr(),   0, nNode);
+  memset(Jxh.fetch_arr(),  0, nNode);
+  memset(Jy.fetch_arr(),   0, nNode);
+  memset(Jyh.fetch_arr(),  0, nNode);
+  memset(Jz.fetch_arr(),   0, nNode);
+  memset(Jzh.fetch_arr(),  0, nNode);
+  memset(rhon.fetch_arr(), 0, nNode);
+
+  const size_t nCell = (size_t)nxc * nyc * nzc * sizeof(double);
+  memset(rhoc.fetch_arr(), 0, nCell);
+  memset(rhoh.fetch_arr(), 0, nCell);
 }
 
 void EMfields3D::setZeroPrimaryMoments()
 {
-
-  // set primary moments to zero
-  //
-  for (int kk = 0; kk < ns; kk++)
-    for (int i = 0; i < nxn; i++)
-      for (int j = 0; j < nyn; j++)
-        for (int k = 0; k < nzn; k++)
-        {
-          rhons[kk][i][j][k] = 0.0;
-          Jxs[kk][i][j][k] = 0.0;
-          Jys[kk][i][j][k] = 0.0;
-          Jzs[kk][i][j][k] = 0.0;
-          pXXsn[kk][i][j][k] = 0.0;
-          pXYsn[kk][i][j][k] = 0.0;
-          pXZsn[kk][i][j][k] = 0.0;
-          pYYsn[kk][i][j][k] = 0.0;
-          pYZsn[kk][i][j][k] = 0.0;
-          pZZsn[kk][i][j][k] = 0.0;
-        }
+  // All per-species nodal arrays are laid out as [ns][nxn][nyn][nzn] in one
+  // contiguous allocation, so a single memset covers every species at once.
+  const size_t nSpeciesNodes = (size_t)ns * nxn * nyn * nzn * sizeof(double);
+  memset(rhons.fetch_arr(),  0, nSpeciesNodes);
+  memset(Jxs.fetch_arr(),    0, nSpeciesNodes);
+  memset(Jys.fetch_arr(),    0, nSpeciesNodes);
+  memset(Jzs.fetch_arr(),    0, nSpeciesNodes);
+  memset(pXXsn.fetch_arr(),  0, nSpeciesNodes);
+  memset(pXYsn.fetch_arr(),  0, nSpeciesNodes);
+  memset(pXZsn.fetch_arr(),  0, nSpeciesNodes);
+  memset(pYYsn.fetch_arr(),  0, nSpeciesNodes);
+  memset(pYZsn.fetch_arr(),  0, nSpeciesNodes);
+  memset(pZZsn.fetch_arr(),  0, nSpeciesNodes);
 }
 /*! set to 0 all the densities fields */
 void EMfields3D::setZeroDensities()
@@ -2090,35 +2077,53 @@ void EMfields3D::setZeroDensities()
 
 /**
  * @brief Sum nodal charge density over all species.
+ *
+ * rhon is expected to have been zeroed by setZeroDerivedMoments() before this
+ * call. Output writers read rhon directly without re-calling this function, so
+ * there is no double-accumulation risk (unlike sumOverSpeciesJ).
  */
 void EMfields3D::sumOverSpecies()
 {
+  const int nNodes = nxn * nyn * nzn;
+  double* rho = rhon.fetch_arr();
   for (int is = 0; is < ns; is++)
-    for (int i = 0; i < nxn; i++)
-      for (int j = 0; j < nyn; j++)
-        for (int k = 0; k < nzn; k++)
-          rhon[i][j][k] += rhons[is][i][j][k];
+  {
+    const double* rhos = rhons.get_arr() + is * nNodes;
+    for (int n = 0; n < nNodes; n++)
+      rho[n] += rhos[n];
+  }
 }
 
 /**
  * @brief Sum nodal current density over all species.
+ *
+ * Zeroes Jx/Jy/Jz before accumulating so the function is safe to call
+ * from any context (output writers, main loop) without requiring the caller
+ * to zero the buffers beforehand.
  */
 void EMfields3D::sumOverSpeciesJ()
 {
-  const size_t nodeSize = static_cast<size_t>(nxn) * nyn * nzn;
-  std::fill_n(Jx.fetch_arr(), nodeSize, 0.0);
-  std::fill_n(Jy.fetch_arr(), nodeSize, 0.0);
-  std::fill_n(Jz.fetch_arr(), nodeSize, 0.0);
+  const int nNodes = nxn * nyn * nzn;
+  double* jx = Jx.fetch_arr();
+  double* jy = Jy.fetch_arr();
+  double* jz = Jz.fetch_arr();
+
+  memset(jx, 0, nNodes * sizeof(double));
+  memset(jy, 0, nNodes * sizeof(double));
+  memset(jz, 0, nNodes * sizeof(double));
 
   for (int is = 0; is < ns; is++)
-    for (int i = 0; i < nxn; i++)
-      for (int j = 0; j < nyn; j++)
-        for (int k = 0; k < nzn; k++)
-        {
-          Jx[i][j][k] += Jxs[is][i][j][k];
-          Jy[i][j][k] += Jys[is][i][j][k];
-          Jz[i][j][k] += Jzs[is][i][j][k];
-        }
+  {
+    const double* jxs = Jxs.get_arr() + is * nNodes;
+    const double* jys = Jys.get_arr() + is * nNodes;
+    const double* jzs = Jzs.get_arr() + is * nNodes;
+    for (int n = 0; n < nNodes; n++)
+    {
+      jx[n] += jxs[n];
+      jy[n] += jys[n];
+      jz[n] += jzs[n];
+    }
+  }
 }
 
 /*! Calculate the susceptibility on the boundary leftX */

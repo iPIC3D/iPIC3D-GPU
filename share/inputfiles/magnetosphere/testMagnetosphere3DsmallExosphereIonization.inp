@@ -36,7 +36,7 @@ B1z = 2.0
 
 #  %%%%%%%%%%%%%%%%%%% TIME %%%%%%%%%%%%%%%%%%
 dt = 0.15                   # dt = time step  
-ncycles = 42		 #!!!    # cycles
+ncycles = 1000		 #!!!    # cycles
 th = 1.0                     # th = decentering parameter
 c = 1.0                      # c = light speed 
 
@@ -49,25 +49,25 @@ divBCorrection = yes           # Enable divergence-of-B cleaning (default no)
 divBCorrectionCycle = 10       # Apply div(B) correction every N cycles (default 10)
 
 # %%%%%%%%%%%%%%%%%% BOX SIZE %%%%%%%%%%%%%%%
-Lx =   10.0                  # Lx = simulation box length - x direction   
-Ly =   10.0                  # Ly = simulation box length - y direction
-Lz =   10.0                  # Lz = simulation box length - z direction   
+Lx =   12.0                  # Lx = simulation box length - x direction   
+Ly =   12.0                  # Ly = simulation box length - y direction
+Lz =   12.0                  # Lz = simulation box length - z direction   
 
-x_center_dipole =   6.0       # center of the dipole - X
-y_center_dipole =   5.0       # center of the dipole - Y
-z_center_dipole =   5.0       # center of the dipole - Z  
-x_center_planet =   6.0       # center of the planet - X
-y_center_planet =   5.0       # center of the planet - Y
-z_center_planet =   5.0       # center of the planet - Z  
+x_center_dipole =   6.5       # center of the dipole - X
+y_center_dipole =   6.0       # center of the dipole - Y
+z_center_dipole =   6.0       # center of the dipole - Z  
+x_center_planet =   6.5       # center of the planet - X
+y_center_planet =   6.0       # center of the planet - Y
+z_center_planet =   6.0       # center of the planet - Z  
 L_square =   0.5             # radius of the planet
 
-nxc =  64                  # nxc = number of cells - x direction        
-nyc =  64                  # nyc = number of cells - y direction
-nzc =  64                   # nzc = number of cells - z direction        
+nxc =  80                  # nxc = number of cells - x direction        
+nyc =  80                  # nyc = number of cells - y direction
+nzc =  80                   # nzc = number of cells - z direction        
 
 # %%%%%%%%%%%%%% MPI TOPOLOGY %%%%%%%%%%%%%%
 # number of MPI subdomains in each direction
-XLEN = 2
+XLEN = 1
 YLEN = 2
 ZLEN = 2
 # topology (1=true, 0=false): USE PERIODIC IN ALL DIRECTIONS
@@ -95,11 +95,11 @@ rhoINIT =  1.0  1.0  0.0  0.0  0.0  0.0
 rhoINJECT =  1.0  1.0  0.0  0.0  0.0  0.0
 
 # npcelx = number of particles per cell - Direction X 
-npcelx =  3  3  0  0  0  0
+npcelx =  4  4  0  0  0  0
 # npcely = number of particles per cell - Direction Y 
-npcely =  3  3  0  0  0  0
+npcely =  4  4  0  0  0  0
 # npcelz = number of particles per cell - Direction Z 
-npcelz =  3  3  0  0  0  0
+npcelz =  4  4  0  0  0  0
 
 # qom = charge to mass ratio for different species
 #        SW_e    SW_i    PL_e1   PL_i1   PL_e2   PL_i2
@@ -119,6 +119,27 @@ v0 = 0.0   0.0   0.0  0.0  0.0  0.0
 # w0 = drift velocity   - Direction Z
 w0 = 0.0   0.0   0.0  0.0  0.0  0.0
 
+SortingCycle=1
+
+# %%%%%%%%%%%%%% MACROCELL VELOCITY SPECTRA %%%%%%%%%%%%%%%%%
+# Per-subdomain macrocell tiling for the (v_par, v_perp) 2D velocity
+# spectra in the GPU data-analysis pipeline. Set all three to 0 to
+# disable the feature at run time (compile flag MACROCELL_SPECTRA_ENABLE
+# must also be on).
+#
+# Interior cells per subdomain in this run:
+#   Nx_int = nxc/XLEN = 80/1 = 80
+#   Ny_int = nyc/YLEN = 80/2 = 40
+#   Nz_int = nzc/ZLEN = 80/2 = 40
+# With (Cx,Cy,Cz)=(10,10,10) -> 8 x 4 x 4 = 128 macrocells per subdomain.
+MacrocellNx = 10
+MacrocellNy = 10
+MacrocellNz = 10
+
+# Per-species on/off mask for the (v_par, v_perp) macrocell spectra.
+# 1 = compute spectra for that species, 0 = skip. Default (omitted) = all off.
+# Order matches the species index used everywhere else (SW e-, SW i+, PL e1-, PL i1+, PL e2-, PL i2+).
+VelocitySpectraSpecies = 1 1 0 0 1
 
 # %%%%%%%%%%%%%% EXOSPHERE IONIZATION %%%%%%%%%%%%%%%%%
 # Photoionization of Chamberlain neutral exosphere
@@ -170,19 +191,15 @@ MacroParticleWeightRatio =   400.0       400.0       400.0       400.0       # m
 #    2 = reemission (injection) - delete particles in 3 cells layer, resample from maxwellian + reflect particles outside the domain resampling velocity from maxwellian
 #    3 = open boundary - open bcs with an effective particle buffer in ghost cells to avoid over depletion 
 #    Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
-    bcPfaceXright = 3 // outflow
+    bcPfaceXright = 3  #outflow
     bcPfaceXleft =  2
     bcPfaceYright = 2
     bcPfaceYleft =  2
     bcPfaceZright = 2
     bcPfaceZleft =  2
 
-# Apply E-field inflow BCs (image constraint in GMRes) — default 1 (true)
-# Inflow is applied per face where bcPface == 2 (reemission)
-ApplyInflowBcsEImage = 1
-
 # Reflection type for electrons not removed from the planet volume
-# 0 - mirror reflection (default 0)
+# 0 - hard collision -> normal reflection (default 0)
 # 1 - isotropic scattering
 planetReflectionType = 1
 
@@ -199,10 +216,11 @@ planetReflectionType = 1
     NiterMover = 8
 # Output for field
    FieldOutputCycle = 100
-   FieldOutputTag   = B+E+Je+Ji+rho
-   MomentsOutputTag = rho+PXX+PXY+PXZ+PYY+PYZ+PZZ
+   FieldOutputTag   = B+E+rho
+   #MomentsOutputTag = rho+PXX+PXY+PXZ+PYY+PYZ+PZZ
+   MomentsOutputTag = rho
 # Output for particles if 0 it doesnt save particles data
-   ParticlesOutputCycle = 200
+   ParticlesOutputCycle = 0
    ParticlesOutputTag = position+velocity+q 
 # restart cycle
    RestartOutputCycle = 0

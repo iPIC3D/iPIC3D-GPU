@@ -144,8 +144,8 @@ bcPHIfaceZleft  = 1
    NiterMover  = 3
 # Output for field
    FieldOutputCycle = 50
-   FieldOutputTag   = B+E+Je+Ji
-   MomentsOutputTag = rho+PXX+PXY+PXZ+PYY+PYZ+PZZ
+   FieldOutputTag   = B+E
+   MomentsOutputTag = rho+J+PXX+PXY+PXZ+PYY+PYZ+PZZ
 # Output for particles if 0 it doesnt save particles data
    ParticlesOutputCycle = 0
    ParticlesOutputTag = position+velocity+q

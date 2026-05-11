@@ -8,9 +8,9 @@ namespace DAConfig {
 
 
 // General configuration
-inline constexpr bool DATA_ANALYSIS_ENABLED = false;
-inline constexpr bool VELOCITY_HISTOGRAM_ENABLE = DATA_ANALYSIS_ENABLED && true;
-inline constexpr bool GMM_ENABLE = VELOCITY_HISTOGRAM_ENABLE && true;
+inline constexpr bool DATA_ANALYSIS_ENABLED = true;
+inline constexpr bool VELOCITY_HISTOGRAM_ENABLE = DATA_ANALYSIS_ENABLED && false;
+inline constexpr bool GMM_ENABLE = VELOCITY_HISTOGRAM_ENABLE && false;
 
 inline const std::string DATA_ANALYSIS_OUTPUT_DIR = "./";
 inline constexpr int DATA_ANALYSIS_EVERY_CYCLE = 50; 
@@ -33,6 +33,19 @@ inline constexpr cudaCommonType MIN_VELOCITY_HIST_E = -0.2;
 inline constexpr cudaCommonType MAX_VELOCITY_HIST_E = 0.2;
 inline constexpr cudaCommonType MIN_VELOCITY_HIST_I = -0.09;
 inline constexpr cudaCommonType MAX_VELOCITY_HIST_I = 0.09;
+
+// Macrocell (v_par, v_perp) spectra configuration
+// Macrocell sizes Cx, Cy, Cz are read from the input file
+// (MacrocellNx, MacrocellNy, MacrocellNz). Setting any of them to 0
+// disables the feature at runtime even if MACROCELL_SPECTRA_ENABLE is true.
+inline constexpr bool MACROCELL_SPECTRA_ENABLE = DATA_ANALYSIS_ENABLED && true;
+inline constexpr bool MACROCELL_SPECTRA_OUTPUT = MACROCELL_SPECTRA_ENABLE && true;
+inline const std::string MACROCELL_SPECTRA_OUTPUT_DIR = DATA_ANALYSIS_OUTPUT_DIR + "macrocellSpectra/";
+inline constexpr int MACROCELL_BINS_VPAR  = 64;
+inline constexpr int MACROCELL_BINS_VPERP = 64;
+// Floor on |B| below which a particle is dropped from the spectra
+// (avoids division by ~0 in v_par computation).
+inline constexpr cudaCommonType MACROCELL_BMIN = 1e-12;
 
 // GMM configuration
 

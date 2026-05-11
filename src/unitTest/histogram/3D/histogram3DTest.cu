@@ -5,13 +5,11 @@
 
 #include "dataAnalysis.cuh"
 #include "dataAnalysisConfig.cuh"
-#include "particleArraySoACUDA.cuh"
+#include "particleArraySoAView.cuh"
 #include "velocityHistogram.cuh"
 
 
-//using velocitySoA = particleArraySoA::particleArraySoACUDA<cudaCommonType, 0, 3>;
 using namespace velocityHistogram;
-using SoAElements = particleArraySoA::particleArraySoAElement;
 
 using namespace DAConfig;
 
@@ -41,10 +39,10 @@ int main(){
     auto wCPU = new cudaCommonType[nop];
     auto qCPU = new cudaCommonType[nop];
 
-    auto uPtr = pclArray.getElement(SoAElements::U);
-    auto vPtr = pclArray.getElement(SoAElements::V);
-    auto wPtr = pclArray.getElement(SoAElements::W);
-    auto qPtr = pclArray.getElement(SoAElements::Q);
+    auto uPtr = pclArray.getElement(0);  // U
+    auto vPtr = pclArray.getElement(1);  // V
+    auto wPtr = pclArray.getElement(2);  // W
+    auto qPtr = pclArray.getElement(3);  // Q
 
     for(int i = 0; i < nop; i++){
         uCPU[i] = dis(gen) > 0.0 ? normalDist1(gen) : normalDist2(gen);

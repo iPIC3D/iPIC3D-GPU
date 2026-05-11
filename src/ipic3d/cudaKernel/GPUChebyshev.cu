@@ -8,7 +8,6 @@
 #ifdef GPU_SOLVER
 
 #include "GPUChebyshev.cuh"
-#include <cuda_runtime.h>
 
 // =========================================================================
 //  Step 1 kernel:  z = b/theta,  y = coeff_b*b + coeff_Ab*Ab

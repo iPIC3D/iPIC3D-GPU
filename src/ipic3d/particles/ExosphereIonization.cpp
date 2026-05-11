@@ -126,23 +126,23 @@ double ExosphereIonization::getSpeciesInjectedCharge(int speciesIndex) const
     return speciesInjectedCharge[neutralIndex];
 }
 
-// ─────────────────────────────────────────────────────────────────────
-//  Sample ionized exosphere particles for one species (CPU-side)
-//
-//  Thread safety:
-//    - Each species accesses only its own RNG, buffer, and charge accumulator.
-//    - Grid and Collective accessors are read-only (const).
-//    - No global mutable state (rand()) is used.
-//    - Safe for concurrent calls with different speciesIndex values.
-//
-//  Performance optimizations:
-//    1. Persistent per-species buffer: no malloc/free per timestep.
-//    2. Loop-invariant pre-computation of injection rate constant.
-//    3. Squared-distance boundary check to avoid sqrt.
-//    4. Early exit for zero density/frequency.
-//    5. Per-species std::mt19937_64 RNG (no global lock contention).
-// ─────────────────────────────────────────────────────────────────────
-
+/**
+ * @brief Sample ionized exosphere particles for one planetary species on the CPU.
+ *
+ * Thread safety:
+ * Each species accesses only its own RNG, output buffer, and charge accumulator.
+ * Grid and Collective accessors are read-only, and no global mutable RNG state
+ * is used, so concurrent calls for different `speciesIndex` values are safe.
+ *
+ * Performance notes:
+ * Persistent per-species buffers avoid per-step allocation, the injection-rate
+ * constant is precomputed once per call, squared-distance checks avoid extra
+ * square roots, and the function exits early when injection parameters are zero.
+ *
+ * @param speciesIndex Global species index of the planetary species to sample.
+ * @param maxParticles Optional upper bound on the number of injected particles.
+ * @return Reference to the persistent per-species output buffer for this call.
+ */
 const std::vector<SpeciesParticle>&
 ExosphereIonization::sampleIonizedParticles(int speciesIndex, int maxParticles)
 {

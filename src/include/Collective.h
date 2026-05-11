@@ -33,9 +33,11 @@
 #endif
 #include <string>
 #include <memory>
+#include <vector>
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "aligned_vector.h"
+#include "OutputTagConfig.h"
 
 class ConfigFile;
 using namespace std;
@@ -112,6 +114,19 @@ class Collective
     int getXLEN()const{ return (XLEN); }
     int getYLEN()const{ return (YLEN); }
     int getZLEN()const{ return (ZLEN); }
+
+    // ── Macrocell (v_par, v_perp) spectra ──
+    // Macrocell size in cells along each axis (interior cells only).
+    // 0 disables the feature at runtime.
+    int getMacrocellNx()const{ return (MacrocellNx); }
+    int getMacrocellNy()const{ return (MacrocellNy); }
+    int getMacrocellNz()const{ return (MacrocellNz); }
+    /*! Per-species enable mask for the (v_par,v_perp) macrocell spectra.
+     *  Returns false (off) if the input file did not list the species. */
+    bool getVelocitySpectraSpecies(int s)const{
+        return (s >= 0 && s < (int)VelocitySpectraSpecies.size())
+               && (VelocitySpectraSpecies[s] != 0);
+    }
     bool getPERIODICX()const{ return (PERIODICX); }
     bool getPERIODICY()const{ return (PERIODICY); }
     bool getPERIODICZ()const{ return (PERIODICZ); }
@@ -182,6 +197,14 @@ class Collective
     double getB1x()const{ return (B1x); }
     double getB1y()const{ return (B1y); }
     double getB1z()const{ return (B1z); }
+    double getPertGEM()const{ return pertGEM; }
+    double getPertHump()const{ return pertHump; }
+    double getDeltaxHump()const{ return deltaxHump; }
+    double getDeltayHump()const{ return deltayHump; }
+    double getKxHump()const{ return kxHump; }
+    double getKyHump()const{ return kyHump; }
+    int    getCurrentFromAmpere()const{ return currentFromAmpere; }
+    int    getSpatiallyVaryingThermal()const{ return spatiallyVaryingThermal; }
     //bool getVerbose()const{ return (verbose); }
     //bool getTrackParticleID(int nspecies)const{ return (TrackParticleID[nspecies]); }
     int getRestart_status()const{ return (restart_status); }
@@ -193,6 +216,7 @@ class Collective
     string getWriteMethod()const{ return (wmethod); }
     string getFieldOutputTag()const{return FieldOutputTag;}
     string getMomentsOutputTag()const{return MomentsOutputTag;}
+    const OutputTagConfig& getOutputConfig()const{return outputConfig_;}
     string getPclOutputTag()const{return ParticlesOutputTag;}
     string getPoissonCorrection()const{ return (PoissonCorrection); }
     int getPoissonCorrectionCycle()const{ return (PoissonCorrectionCycle); }
@@ -217,6 +241,7 @@ class Collective
     int getTestParticlesOutputCycle()const{ return (TestParticlesOutputCycle); }
     int getRestartOutputCycle()const{ return (RestartOutputCycle); }
     int getDiagnosticsOutputCycle()const{ return (DiagnosticsOutputCycle); }
+    int getSortingCycle()const{ return (SortingCycle); }
     bool getCallFinalize()const{ return (CallFinalize); }
     bool particle_output_is_off()const;
     bool testparticle_output_is_off()const;
@@ -257,6 +282,14 @@ class Collective
     int SmoothNiter;
     /*! number of time cycles */
     int ncycles;
+    /*! macrocell size (interior cells) for the (v_par,v_perp) spectra
+     *  data-analysis module.  0 on any axis disables the feature. */
+    int MacrocellNx;
+    int MacrocellNy;
+    int MacrocellNz;
+    /*! Per-species on/off mask for the (v_par,v_perp) macrocell spectra.
+     *  Empty / unset means off for all species. */
+    std::vector<int> VelocitySpectraSpecies;
     /*! physical space dimensions */
     int dim;
     /*! simulation box length - X direction */
@@ -378,6 +411,8 @@ class Collective
     int PoissonCorrectionCycle;
     string divBCorrection;
     int divBCorrectionCycle;
+    /*! Sort particles every SortingCycle cycles (0=disabled) */
+    int SortingCycle;
     /*! TrackParticleID */
     //bool *TrackParticleID;
     /*! SaveDirName */
@@ -451,6 +486,15 @@ class Collective
     double B1y;
     double B1z;
 
+    /*! GEMHarris perturbation parameters */
+    double pertGEM;           ///< GEM perturbation amplitude [fraction of B0x]
+    double pertHump;          ///< hump perturbation amplitude [fraction of B0x]
+    double deltaxHump;        ///< hump x-width [units of delta]
+    double deltayHump;        ///< hump y-width [units of delta]
+    double kxHump;            ///< hump x-wavenumber (<0 = 2*PI/Lx)
+    double kyHump;            ///< hump y-wavenumber (<0 = PI/Ly)
+    int    currentFromAmpere; ///< 1 = J from curl(B) with u0 weights, 0 = J from u0 drift
+    int    spatiallyVaryingThermal; ///< 1 = use reference-state pressure for local vth, 0 = global uth
 
     /*! boolean value for verbose results */
     //bool verbose;
@@ -492,6 +536,7 @@ class Collective
     int FieldOutputCycle;
     string  FieldOutputTag;
     string  MomentsOutputTag;
+    OutputTagConfig outputConfig_;
     /*! Output for particles */
     int ParticlesOutputCycle;
     string ParticlesOutputTag;

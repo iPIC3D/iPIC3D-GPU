@@ -286,7 +286,12 @@ __device__ __inline__ T postProcess(T value, U* postProcOprand) {
 }
 
 /**
- * @brief with preprocess and weight
+ * @brief Reduce an input array after applying an optional preprocessing step.
+ * @param g_idata Input array.
+ * @param g_odata Per-block output partial sums.
+ * @param n Number of valid input elements.
+ * @param preProcOprand Auxiliary operand consumed by the selected preprocessing rule.
+ * @param weight Optional per-element weights, used only when `ifWeight` is true.
  */
 template <typename T, unsigned int blockSize, PreProcessType preProc, typename U, typename V = int, bool ifWeight = false>
 __global__ void reduceSumPreProcess(T* g_idata, T* g_odata, unsigned int n, U* preProcOprand, V* weight = nullptr) {

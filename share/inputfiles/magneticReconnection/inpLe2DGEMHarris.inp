@@ -1,0 +1,156 @@
+# INPUT FILE for double GEM challenge case
+# 2 Species
+
+#  %%%%%%%%%%%%%%%%%%% Input/Output flags %%%%%%%%%%%%%%%%%%
+SaveDirName    = Le2GEM15ppc    # Output directory
+RestartDirName = Le2GEM15ppc    # Restart directory (for WriteMethod=default)
+
+#  %%%%%%%%%%%%%%%%%%% Input/Output flags %%%%%%%%%%%%%%%%%%
+
+Case              = GEMHarris                             # Case [ GEM | Dipole | ... ]
+WriteMethod       = pvtk                        # Output method [ default | Parallel ]
+PoissonCorrection = no                             # Poisson correction [ yes | no ]
+SimulationName    = GEMHarris                       # Simulation name for the output
+
+
+#  %%%%%%%%%%%%%%%%%%% Magnetic Reconnection %%%%%%%%%%%%%%%%%%
+B0x = 0.025
+B0y = 0.00
+B0z = 0.01 #0.0097 #0.02231
+
+delta = 0.5
+
+# %%%%%%%%%%%%%%%%%%% GEMHarris perturbation and Ampere init %%%%%%%%%%%%%%%%%%
+pertGEM              = 0.0       # GEM tearing perturbation amplitude
+pertHump             = 0.12566        # Gaussian hump perturbation (off)
+deltaxHump           = 1.0        # Hump x-envelope width [units of delta]
+deltayHump           = 1.0        # Hump y-envelope width [units of delta]
+kxHump               = 0.62832     # Hump x-wavenumber (<0 = 2*PI/Lx)
+kyHump               = 0.62832     # Hump y-wavenumber (<0 = PI/Ly)
+currentFromAmpere    = 1          # J from curl(B) with normalized u0/v0/w0 weights
+spatiallyVaryingThermal = 1       # Reference-state pressure for local thermal velocity
+
+# --- To match GEM case exactly (pertX=0.4, delta=0.5), set: ---
+# pertGEM              = 0.0
+# pertHump             = 0.12566   # 0.4*PI/10
+# deltaxHump           = 1.0
+# deltayHump           = 1.0
+# kxHump               = 0.62832   # PI/(10*delta) = PI/5
+# kyHump               = 0.62832   # PI/(10*delta) = PI/5
+# currentFromAmpere    = 0
+# spatiallyVaryingThermal = 0
+
+#  %%%%%%%%%%%%%%%%%%% TIME %%%%%%%%%%%%%%%%%%
+dt = .065 #0.125               # dt = time step  
+ncycles = 12001           # cycles
+th = 1.0               # th =   decentering parameter
+c = 1.0                # c = light speed 
+
+#  %%%%%%%%%%%%%%%%%%% SMOOTH %%%%%%%%%%%%%%%%%%
+Smooth = 0.2           # Smoothing value (5-points stencil) Value =1.0 menas no-smoothing
+
+
+
+# %%%%%%%%%%%%%%%%%% BOX SIZE %%%%%%%%%%%%%%%
+Lx =   20.0            # Lx = simulation box length - x direction   
+Ly =   10.0            # Ly = simulation box length - y direction
+Lz =   1.0             # Lz = simulation box length - z direction   
+
+nxc =  512 #384              # nxc = number of cells - x direction        
+nyc =  256 #512             # nyc = number of cells - y direction
+nzc =  1               # nzc = number of cells - z direction        
+
+# %%%%%%%%%%%%%%%%%% MPI TOPOLOGY %%%%%%%%%%%%%%%
+XLEN = 2               # Number of subdomains in the X direction
+YLEN = 2               # Number of subdomains in the X direction
+ZLEN = 1               # Number of subdomains in the X direction
+
+# %%%%%%%%%%%%%% PARTICLES %%%%%%%%%%%%%%%%%
+#    0 = electrons
+#    1 = protons
+#    2,3,4,5,... = ions
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+ns = 4                                # Number of particles
+rhoINIT         = 0.969	0.969	0.23 	0.23 # Initial density (make sure you are neutral)
+rhoINJECT       = 0  0	0 	0  # Injection density (make sure you are neutral)
+TrackParticleID = 0  0	0 	0    # TrackParticleID[species] = 1=true, 0=false 
+
+npcelx          = 8  8  8  8   # Particles per cell in X
+npcely          = 8  8  8  8   # Particles per cell in Y
+npcelz          = 8  8  8  8   # Particles per cell in Z
+
+qom             = -400.0  1.0     -400.0  1.0   # Charge/mass ratio
+uth             = 0.146  0.0163   0.127   0.0142  # Thermal velocity in X
+vth             = 0.146  0.0163   0.127   0.0142 # Thermal velocity in Y
+wth             = 0.146  0.0163   0.127   0.0142 # Thermal velocity in Z
+u0              = 0.0     0.0     0.0     0.0    # Drift velocity in X
+v0              = 0.0     0.0     0.0     0.0    # Drift velocity in X
+w0              = 0.0042 -0.0021  0.0    0.0 #0.00325 -0.01624 0.0      0.0    # Drift velocity in X
+
+
+SortingCycle=1
+
+# %%%%%%%%%%%% Periodicity in each direction %%%%%%%%%%%%%%%
+PERIODICX       = 1                  # In direction X (1=true, 0=false)
+PERIODICY       = 0                  # In direction Y (1=true, 0=false)
+PERIODICZ       = 1                  # In direction Z (1=true, 0=false)
+
+# %%%%%%%%%%%% boundary conditions %%%%%%%%%%%%%%%
+# If the PERIODIC flag is active in the previous section
+# periodic boundary conditions will be imposed
+#
+# PHI Electrostatic Potential     
+# 0,1 = Dirichilet boundary condition ;     
+# 2   = Neumann boundary condition
+    bcPHIfaceXright = 1
+    bcPHIfaceXleft  = 1
+    bcPHIfaceYright = 1
+    bcPHIfaceYleft  = 1
+    bcPHIfaceZright = 1
+    bcPHIfaceZleft  = 1
+    
+#    EM field boundary condition
+#    0 = perfect conductor
+#    1 = magnetic mirror
+    bcEMfaceXright = 0
+    bcEMfaceXleft =  0
+    bcEMfaceYright = 0
+    bcEMfaceYleft =  0
+    bcEMfaceZright = 0
+    bcEMfaceZleft =  0
+    
+#    Particles Boundary condition
+#    0 = exit
+#    1 = perfect mirror
+#    2 = riemission
+    bcPfaceXright = 1
+    bcPfaceXleft =  1
+    bcPfaceYright = 1
+    bcPfaceYleft =  1
+    bcPfaceZright = 1
+    bcPfaceZleft =  1
+
+# %%%%%%%%%%%% Numerics options %%%%%%%%%%%%%%%
+verbose                = 1        # Print to video results
+Vinj                   = 0.0      # Velocity of the injection from the wall
+CGtol                  = 1E-3     # CG solver stopping criterium tolerance
+GMREStol               = 1E-5    # GMRES solver stopping criterium tolerance
+NiterMover             = 3        # mover predictor corrector iteration
+
+# %%%%%%%%%% Output
+
+FieldOutputCycle       = 200       # Output for field
+
+# Output for field
+   FieldOutputCycle = 200
+   FieldOutputTag   = B+E
+   MomentsOutputTag = rho+J+PXX+PXY+PXZ+PYY+PYZ+PZZ
+# Output for particles if 0 it doesnt save particles data
+   ParticlesOutputCycle = 0
+   ParticlesOutputTag = position+velocity+q
+# restart cycle
+   RestartOutputCycle = 0
+   CallFinalize=1

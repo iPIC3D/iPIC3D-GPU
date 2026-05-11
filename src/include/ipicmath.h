@@ -23,6 +23,7 @@
 #include "assert.h"
 #include "math.h"
 #include "stdlib.h" // for rand
+#include <random>   // for std::mt19937_64
 
 // valid if roundup power is representable.
 inline int
@@ -151,6 +152,64 @@ inline void sample_maxwellian(
   double u0, double v0, double w0)
 {
   sample_standard_maxwellian(u,v,w);
+  u = u0 + ut*u;
+  v = v0 + vt*v;
+  w = w0 + wt*w;
+}
+
+// ====== Thread-safe overloads using std::mt19937_64 ======
+
+inline double sample_clopen_u_double(std::mt19937_64& rng)
+{
+  std::uniform_real_distribution<double> dist(0.0, 1.0);
+  return 1.0 - 0.999999 * dist(rng);
+}
+
+inline double sample_u_double(std::mt19937_64& rng)
+{
+  std::uniform_real_distribution<double> dist(0.0, 1.0);
+  return dist(rng);
+}
+
+inline void sample_standard_maxwellian(double& u, std::mt19937_64& rng)
+{
+  const double prob = sqrt(-2.0 * log(sample_clopen_u_double(rng)));
+  const double theta = 2.0 * M_PI * sample_u_double(rng);
+  u = prob * cos(theta);
+}
+
+inline void sample_standard_maxwellian(double& u, double& v, std::mt19937_64& rng)
+{
+  const double prob = sqrt(-2.0 * log(sample_clopen_u_double(rng)));
+  const double theta = 2.0 * M_PI * sample_u_double(rng);
+  u = prob * cos(theta);
+  v = prob * sin(theta);
+}
+
+inline void sample_standard_maxwellian(double& u, double& v, double& w,
+  std::mt19937_64& rng)
+{
+  sample_standard_maxwellian(u, v, rng);
+  sample_standard_maxwellian(w, rng);
+}
+
+inline void sample_maxwellian(double& u, double& v, double& w,
+  double ut, double vt, double wt,
+  std::mt19937_64& rng)
+{
+  sample_standard_maxwellian(u, v, w, rng);
+  u *= ut;
+  v *= vt;
+  w *= wt;
+}
+
+inline void sample_maxwellian(
+  double& u, double& v, double& w,
+  double ut, double vt, double wt,
+  double u0, double v0, double w0,
+  std::mt19937_64& rng)
+{
+  sample_standard_maxwellian(u, v, w, rng);
   u = u0 + ut*u;
   v = v0 + vt*v;
   w = w0 + wt*w;

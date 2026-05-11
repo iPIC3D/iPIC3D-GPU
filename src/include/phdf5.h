@@ -44,7 +44,17 @@ class PHDF5fileClass{
     void OpenPHDF5file();
     void ReadPHDF5dataset_double(string dataset, arr3_double data);
     void ReadPHDF5param();
-    int  WritePHDF5dataset(string grpname, string datasetname, const_arr3_double data, int nx, int ny, int nz);
+    int  WritePHDF5dataset(string grpname, string datasetname, const_arr3_double data, int nx, int ny, int nz, double scale = 1.0);
+    /** Write a dataset with explicit global/local dimensions, file offset, and data start indices.
+     *  This overload supports node-grid quantities whose local/global sizes
+     *  differ from the cell-grid sizes stored in the class members. */
+    int  WritePHDF5dataset(string grpname, string datasetname,
+                           const_arr3_double data,
+                           int i0, int j0, int k0,
+                           const hsize_t *gdim,
+                           const hsize_t *ldim,
+                           const hsize_t *foff,
+                           double scale = 1.0);
 
     int  getPHDF5ndim();
     int  getPHDF5ncx();

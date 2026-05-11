@@ -58,10 +58,28 @@ cmake .. # using CUDA by default
 cmake -DHIP_ON=ON .. # use HIP
 ```
 
-If you's like to use HIP, notice the GPU architecture in [CMakeLists.txt](./CMakeLists.txt), change it according to your hardware to get bet performance:
+#### CMake options
 
-``` cmake 
-set_property(TARGET iPIC3Dlib PROPERTY HIP_ARCHITECTURES gfx90a) 
+| Option | Default | Description |
+|--------|---------|-------------|
+| `CUDA_ARCH` | `75` | CUDA compute capability (minimum `75` for double-precision `atomicAdd`). Example: `-DCUDA_ARCH=80` for A100 |
+| `HIP_ON` | `OFF` | Set `ON` to compile with HIP instead of CUDA |
+| `HIP_ARCH` | `gfx90a` | HIP GPU architecture (e.g. `gfx90a` for MI250X, `gfx940` for MI300). Example: `-DHIP_ARCH=gfx940` |
+| `USE_HDF5` | `ON` | Compile HDF5-based I/O backends (serial HDF5, parallel HDF5, H5hut) |
+| `USE_PHDF5` | `ON` | Enable parallel HDF5 field output (requires `USE_HDF5=ON` and MPI-enabled HDF5). Auto-disabled when `USE_HDF5=OFF` |
+| `USE_ADIOS2` | `ON` | Compile ADIOS2 backend for particles and restarts |
+| `USE_CATALYST` | `OFF` | Enable ParaView Catalyst in-situ visualization (requires ParaView ≥ 5.7) |
+| `USE_BATSRUS` | `OFF` | Enable BATS-R-US MHD coupling (adds `BATSRUS` compile definition) |
+| `USE_OPENMP` | `ON` | Enable OpenMP in the CPU solver. **Delete CMake cache when changing this.** |
+| `BENCH_MARK` | `OFF` | Print per-task timing (`LOG_TASKS_TOTAL_TIME`) |
+| `BUILD_SHARED_LIBS` | `ON` | Build shared libraries (`OFF` for static) |
+| `SITE` | `default` | Select a predefined site configuration from `cmake/sites/` |
+
+Example with explicit architecture and selected backends:
+```shell
+cmake -DCUDA_ARCH=80 -DUSE_ADIOS2=ON -DUSE_HDF5=ON -DUSE_PHDF5=ON ..
+# or for HIP:
+cmake -DHIP_ON=ON -DHIP_ARCH=gfx90a -DUSE_ADIOS2=ON ..
 ```
 
 
@@ -93,7 +111,7 @@ If you are on a super-computer, especially a multi-node system, it's likely that
 
 Assigning MPI processes to nodes and GPUs are vital in performance, for it decides the pipeline and subdomains in the program.
 
-It's fine to use more than 1 MPI process per GPU. The following example uses 4 nodes, each equipped with 4 GPU:
+It's fine to use more than 1 MPI process per GPU, but the **number of MPI ranks per node must be evenly divisible by the number of GPUs on that node**. The following example uses 4 nodes, each equipped with 4 GPU:
 
 ``` shell
 # 1 MPI process per GPU
@@ -106,7 +124,7 @@ srun --nodes=4 --ntasks=32 --ntasks-per-node=8 ./iPIC3D ../share/benchmark/GEM3D
 
 ### Result
 
-This iPIC3D-GPU will create folder (usually named `data`) for the output results if it doesn't exist. However, **it will delete everything in the folder if it already exits**.
+This iPIC3D-GPU will create folder (usually named `data`) for the output results if it doesn't exist. On a **fresh start**, existing contents of the output folder are deleted. On a **restart**, the output folder is left intact and new data is appended.
 
 
 ## Build Options
@@ -156,16 +174,10 @@ Without `restart`, the simulation always starts fresh from the initial condition
 
 ### Restart files
 
-Restart checkpoints are written as ADIOS2 BP5 files (one per MPI rank) into the `RestartDirName` directory:
+Restart checkpoints are written as one file per MPI rank into `RestartDirName`. The file format depends on the compile-time backend:
 
-```
-data/restart_0.bp
-data/restart_1.bp
-...
-data/restart_N.bp
-```
-
-Each file contains multiple ADIOS2 *steps*, one per checkpoint. On restart, the code reads the **last step** from `restart_0.bp` to determine the cycle number, then loads fields and particles from the corresponding per-rank file.
+- **ADIOS2** (`USE_ADIOS2=ON`, default): BP5 directories `restart_0.bp` ... `restart_N.bp`, each containing multiple steps (one per checkpoint). On restart the last step is read.
+- **Serial HDF5** (`USE_ADIOS2=OFF`, `USE_HDF5=ON`): HDF5 files `restart0.hdf` ... `restartN.hdf`.
 
 **Important:** you must restart with the **same number of MPI processes** as the original run, since each rank reads its own file.
 
@@ -195,13 +207,13 @@ For a fresh start (no `restart` keyword), `last_cycle = -1`, so `first_cycle = 0
 ### What happens during restart initialisation
 
 1. **Input file is read** — all simulation parameters (grid, species, BCs, etc.) are taken from the input file, same as a fresh start.
-2. **Fields** — the case-specific field initialiser (`initGEM`, `initDipole`, etc.) runs first, then `read_field_restart()` **overwrites** B, E, and rho with the data from the restart file.
+2. **Fields** — the case-specific field initialiser is called, but on restart most cases (GEM, Dipole, etc.) detect the restart flag internally and delegate to `init()`, which calls `read_field_restart()` to load B, E, and rho from the checkpoint. Some cases (e.g. Dipole) still set up auxiliary data (external dipolar field) before loading the checkpoint.
 3. **Particles** — instead of generating particles from a distribution function, `restartLoad()` reads positions, velocities, charges, and IDs from the per-rank restart file.
-4. **Output directory** — the output folder is **not** cleared on restart. ADIOS2 output files are opened in `Append` mode so new data is added to existing files.
+4. **Output directory** — the output folder is **not** cleared on restart. Output files are opened in append mode.
 
 ### Requirements
 
-- Restart reading requires **ADIOS2** (`USE_ADIOS2=ON` at compile time). Without ADIOS2, attempting a restart will produce a fatal error.
+- Restart requires either **ADIOS2** (`USE_ADIOS2=ON`) or **HDF5** (`USE_HDF5=ON`) at compile time. If neither is available, restart will produce a fatal error. The HDF5 restart path is less tested than ADIOS2.
 - The MPI topology (`XLEN × YLEN × ZLEN`) must match between the original and restarted runs.
 
 ## Simulation Cases
@@ -215,13 +227,15 @@ The simulation case is selected via the `Case` parameter in the input file (e.g.
 | `GEM` | **GEM magnetic reconnection challenge.** Single Harris current sheet with $B_x = B_{0x} \tanh\!\bigl((y - L_y/2)/\delta\bigr)$ and a localized Gaussian flux perturbation. Density has a $1/\cosh^2$ profile plus a uniform background. Ions carry the initial drift current. | `share/inputfiles/magneticReconnection/testGEM3D*.inp` |
 | `GEMnoPert` | Same Harris equilibrium as GEM but **without** the magnetic perturbation. Useful for stability studies or when perturbations are applied externally. | — |
 | `GEMDoubleHarris` | **Double Harris sheet.** Two oppositely-directed current sheets centred at $L_y/4$ and $3L_y/4$, each with its own drift population. Creates two reconnection sites in a periodic domain. | — |
-| `ForceFree` | **Force-free current sheet.** Harris $B_x$ profile with $B_z = B_0/\cosh\!\bigl((y - L_y/2)/\delta\bigr)$ so that $\mathbf{J}\times\mathbf{B}=0$. Both electrons and ions share the current. Used for studying tearing instabilities without pressure gradients. | `share/inputfiles/magneticReconnection/testForceFree*.inp` |
-| `Dipole` | **3-D planetary magnetosphere.** Magnetic dipole field ($B \propto 1/r^3$) centred in the domain with solar-wind inflow electric field. A spherical planet region is voided of particles. Boundary conditions apply `ConstantChargePlanet` on restarts. | `share/inputfiles/magnetosphere/testMagnetosphere3Dsmall.inp` |
-| `Dipole2D` | **2-D dipole** (in the $xz$-plane). Same physics as `Dipole` but configured for a 2-D simulation with `ConstantChargePlanet2DPlaneXZ` boundary treatment. | — |
+| `ForceFree` | **Force-free current sheet.** Harris $B_x$ profile with $B_z = B_0/\cosh\!\bigl((y - L_y/2)/\delta\bigr)$ so that $\mathbf{J}\times\mathbf{B}=0$. **Note:** field initialisation works, but particle initialisation (`force_free()`) is currently a stub that aborts. Fresh starts will fail; usable only via restart from pre-existing checkpoint data. | `share/inputfiles/magneticReconnection/testForceFree*.inp` |
+| `Dipole` | **3-D planetary magnetosphere.** Magnetic dipole field ($B \propto 1/r^3$) centred in the domain with solar-wind inflow electric field. A spherical planet region is voided of particles. `ConstantChargePlanet` is enforced every cycle. | `share/inputfiles/magnetosphere/testMagnetosphere3Dsmall.inp` |
+| `Dipole2D` | **2-D dipole** (in the $xz$-plane). Same physics as `Dipole` but configured for a 2-D simulation. `ConstantChargePlanet2DPlaneXZ` is enforced every cycle. | — |
 | `NullPoints` | **Magnetic null-point topology.** Periodic field with components like $B_x \propto -\sin x\,\cos y\,\cos z$ creating a network of null points. Electron current is initialised from $\nabla\times\mathbf{B}$; ions are at rest. | — |
-| `TaylorGreen` | **Taylor-Green vortex.** 3-D periodic velocity field ($u_e \propto \sin x\,\cos y$, etc.) combined with a periodic magnetic field. Used for testing decaying MHD turbulence and energy transfer. | `share/inputfiles/turbulence/testTurbulence3D.inp` |
-| `RandomCase` | **Random-perturbation reconnection.** Harris current sheet (like GEM) overlaid with a multi-mode random magnetic perturbation ($k_x$, $k_y$, $k_z$ harmonics with random phases and $1/k$ amplitude scaling). | — |
-| `BATSRUS` | **Coupling with BATS-R-US MHD code.** Reads fluid fields (density, velocity, pressure, B) from an external MHD solution and initialises Maxwellian particle distributions cell-by-cell to match the MHD moments. Requires `#ifdef BATSRUS` at compile time. | — |
+| `TaylorGreen` | **Taylor-Green vortex.** 3-D periodic velocity/magnetic field. Particle initialisation reuses `maxwellianNullPoints()` (drift from $\nabla\times\mathbf{B}$). Used for testing decaying MHD turbulence and energy transfer. | `share/inputfiles/turbulence/testTurbulence3D.inp` |
+| `RandomCase` | **Random multi-mode magnetic field.** Divergence-free superposition of 49 Fourier modes (7×7, fixed pseudo-random phases) with a uniform $B_{0z}$ guide field. Uniform density; particles initialised with generic `maxwellian()`. No Harris sheet. | — |
+| `GEMHarris` | **Generalised Harris sheet.** Combines a Harris $B_x$ profile with optional GEM perturbation (`pertGEM`) and/or hump perturbation (`pertHump`). Supports Ampere-consistent current initialisation (`currentFromAmpere = 1`) and spatially varying thermal velocity (`spatiallyVaryingThermal = 1`). When `currentFromAmpere = 1`, drift velocities are derived from $\nabla\times\mathbf{B}$; the per-species `u0`, `v0`, `w0` are used component-wise as charge-sign-weighted species fractions controlling current partition. | `share/inputfiles/magneticReconnection/inpLe2DGEMHarris.inp` |
+| `HumpPert` | **Magnetic hump perturbation.** Uniform density with a localised $\operatorname{sech}^2$ magnetic-pressure hump centred at the domain midpoint superimposed on $\mathbf{B}_0$. Hump width is hard-coded as multiples of `delta` ($8\delta$ in x, $4\delta$ in y). The input parameters `pertHump`/`deltaxHump`/`deltayHump` are **not** used by this case (they apply to `GEMHarris`). | — |
+| `BATSRUS` | **Coupling with BATS-R-US MHD code.** Reads fluid fields from an external MHD solution. Requires `USE_BATSRUS=ON` at compile time. **Note:** field initialisation works with the compile flag, but GPU particle initialisation aborts (`ParticleSoAHost` not supported). Without the flag, the case falls through to default initialisation. | — |
 
 Any unrecognised `Case` string falls through to a **default** initialisation: uniform density, constant background $\mathbf{B}$, zero electric field. A warning is printed to standard output.
 
@@ -235,6 +249,8 @@ Some cases apply additional boundary-condition fixes during the time loop:
 | `ForceFree` | `fixBforcefree` — enforce force-free B profile at $y$-boundaries |
 | `Dipole` | `ConstantChargePlanet` — maintain fixed charge inside the planet sphere (every cycle) |
 | `Dipole2D` | `ConstantChargePlanet2DPlaneXZ` — 2-D variant of the above (every cycle) |
+| `GEMHarris` | None |
+| `HumpPert` | None |
 
 ### Setting the case
 
@@ -245,6 +261,105 @@ Case = GEM
 ```
 
 The `Case` string is **case-sensitive** and must match one of the names in the table above exactly.
+
+### Case-specific input parameters
+
+Some cases use additional input-file parameters beyond the common ones:
+
+| Parameter | Default | Used by | Description |
+|-----------|---------|---------|-------------|
+| `delta` | `0.5` | GEM, GEMnoPert, GEMDoubleHarris, ForceFree, GEMHarris, HumpPert | Current sheet half-thickness |
+| `pertGEM` | `0.0` | GEM, GEMHarris | GEM flux perturbation amplitude |
+| `pertHump` | `0.0` | GEMHarris | Hump perturbation amplitude |
+| `deltaxHump` | `8.0` | GEMHarris | Hump width in x (multiplied by `delta`) |
+| `deltayHump` | `4.0` | GEMHarris | Hump width in y (multiplied by `delta`) |
+| `kxHump` | `-1.0` | GEMHarris | Hump wave number x (if ≥ 0) |
+| `kyHump` | `-1.0` | GEMHarris | Hump wave number y (if ≥ 0) |
+| `currentFromAmpere` | `0` | GEMHarris | `1`: derive drift velocity from $\nabla\times\mathbf{B}$ instead of using `u0`/`v0`/`w0` directly |
+| `spatiallyVaryingThermal` | `0` | GEMHarris | `1`: use spatially varying thermal velocity (requires `currentFromAmpere = 1`) |
+
+## Output Control
+
+Output is controlled through **cycle parameters** (how often to write) and **tag strings** (what to write).
+
+### Output cycles
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `FieldOutputCycle` | `100` | Write field/moments data every N cycles. `0` disables field output. |
+| `ParticlesOutputCycle` | `0` | Write particle data every N cycles. `0` disables particle output. |
+| `RestartOutputCycle` | `5000` | Write restart checkpoint every N cycles. `0` disables periodic checkpoints. |
+| `DiagnosticsOutputCycle` | `FieldOutputCycle` | Write scalar diagnostics (energy, etc.) every N cycles. Defaults to `FieldOutputCycle` if not set. |
+| `TestPartOutputCycle` | `0` | Write test-particle trajectory data every N cycles. |
+| `SortingCycle` | `0` | Re-sort particles by cell every N cycles for cache efficiency. `0` disables. |
+
+### Field output tags (`FieldOutputTag`)
+
+A `+`-separated string selecting which grid-level fields to write. Example: `FieldOutputTag = B+E+rho`
+
+| Token | Data written |
+|-------|-------------|
+| `B` | Magnetic field ($B_x$, $B_y$, $B_z$) |
+| `E` | Electric field ($E_x$, $E_y$, $E_z$) |
+| `Je` | Current density for species 0 ($J_{x,0}$, $J_{y,0}$, $J_{z,0}$) |
+| `Ji` | Current density for species 1 |
+| `Je2` | Current density for species 2 |
+| `Ji3` | Current density for species 3 |
+| `rho` | Total charge density |
+
+### Moments output tags (`MomentsOutputTag`)
+
+A `+`-separated string selecting which per-species or total moments to write. Example: `MomentsOutputTag = rho+J+PXX+PYY+PZZ`
+
+**All-species** (writes one file per species):
+
+| Token | Data |
+|-------|------|
+| `rho` | Charge density |
+| `J` | Current density |
+| `P` | Full pressure tensor (all 6 components) |
+| `PXX`, `PXY`, `PXZ`, `PYY`, `PYZ`, `PZZ` | Individual pressure tensor components |
+
+**Species-indexed** (single species `s`):
+
+| Pattern | Example | Data |
+|---------|---------|------|
+| `rho<s>` | `rho0` | Density of species 0 |
+| `J<s>` | `J1` | Current of species 1 |
+| `P<s>` | `P0` | Full pressure tensor of species 0 |
+| `PXX<s>` ... `PZZ<s>` | `PXX2` | Single component for species 2 |
+
+**Summed totals** (sum over all species):
+
+| Token | Data |
+|-------|------|
+| `rho_tot` | Total charge density |
+| `J_tot` | Total current density |
+| `P_tot` | Total pressure tensor |
+| `PXX_tot` ... `PZZ_tot` | Individual total pressure components |
+
+### Particle output tags (`ParticlesOutputTag`)
+
+A `+`-separated string selecting which particle data to write. Example: `ParticlesOutputTag = position+velocity+q+ID`
+
+| Token | Data |
+|-------|------|
+| `position` | Particle positions ($x$, $y$, $z$) |
+| `velocity` | Particle velocities ($u$, $v$, $w$) |
+| `q` | Particle charge |
+| `ID` | Particle ID |
+
+Additional ADIOS2-only tokens used for restart data: `proc_topology`, `E`, `B`, `Js`, `rhos`, `pressure`.
+
+### Other output parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `WriteMethod` | — | Field output backend (see [I/O Backends](#io-backends) below) |
+| `SaveDirName` | `data` | Output directory. **Warning:** existing contents are deleted on fresh start. |
+| `RestartDirName` | `data` | Directory for restart checkpoint files |
+| `CallFinalize` | `1` | Write a final restart checkpoint when the simulation ends (requires `RestartOutputCycle > 0`) |
+| `ParaviewScriptPath` | `""` | Path to ParaView Catalyst Python script (requires `USE_CATALYST`) |
 
 ## I/O Backends
 

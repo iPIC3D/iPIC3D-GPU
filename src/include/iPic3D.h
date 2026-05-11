@@ -41,10 +41,13 @@ using std::string;
 #include "momentKernel.cuh"
 #include "particleArrayCUDA.cuh"
 #include "gridCUDA.cuh"
+#include "cellSortBuffers.cuh"
 #include "particleExchange.cuh"
 #include "planetKernel.cuh"
 #include "threadPool.hpp"
 #include "ExosphereIonization.h"
+#include "ParticleSoAHost.h"
+#include "ParticleCommInjection.h"
 
 #include <fstream>
 
@@ -52,6 +55,25 @@ class IOManager;   // modular I/O manager (see IOManager.h)
 
 namespace iPic3D {
   class c_Solver;
+
+  /**
+   * @brief Simulation case identifiers resolved once during solver initialization.
+   */
+  enum class CaseType {
+    GEMnoPert,
+    ForceFree,
+    GEM,
+    GEMDoubleHarris,
+    BATSRUS,
+    Dipole,
+    Dipole2D,
+    NullPoints,
+    TaylorGreen,
+    HumpPert,
+    RandomCase,
+    GEMHarris,
+    Default         // unknown string → default initialisation
+  };
 }
 
 namespace dataAnalysis {
@@ -60,6 +82,13 @@ namespace dataAnalysis {
 
 namespace iPic3D {
 
+  /**
+   * @brief Top-level iPIC3D solver orchestrator.
+   *
+   * The solver owns MPI/topology state, fields, particle containers, CUDA
+   * runtime objects, and output backends. Runtime control flows through the
+   * methods declared here and implemented in `iPIC3Dlib.cu`.
+   */
   class c_Solver {
 
   friend dataAnalysis::dataAnalysisPipelineImpl;
@@ -71,7 +100,10 @@ namespace iPic3D {
       vct(0),
       grid(0),
       EMf(0),
-      part(0),
+      particlesCommInj(nullptr),
+      particlesHost(nullptr),
+      testpart(nullptr),
+      exosphereIonization(nullptr),
       ioManager(0),
       Ke(0),
       BulkEnergy(0),
@@ -81,29 +113,100 @@ namespace iPic3D {
       my_clock(0)
     {}
 
-
+    // ======= Initialization and lifecycle =======
+    /**
+     * @brief Initialize the full solver state from input arguments.
+     *
+     * @param argc Command-line argument count.
+     * @param argv Command-line argument vector.
+     * @return Zero on success; non-zero on failure.
+     */
     int Init(int argc, char **argv);
+    /**
+     * @brief Allocate and initialize all CUDA-side solver resources.
+     *
+     * @return Zero on success; non-zero on failure.
+     */
     int initCUDA();
+    /**
+     * @brief Release all CUDA-side solver resources.
+     *
+     * @return Zero on success; non-zero on failure.
+     */
     int deInitCUDA();
-    
+
+    // ======= Particle and field advance =======
     void CalculateMoments();
+    /**
+     * @brief Advance the electric field solve for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void CalculateField(int cycle);
-    int cudaLauncherAsync(int species);
-    bool ParticlesMoverMomentAsync();
-    bool MoverAwaitAndPclExchange();
+    /**
+     * @brief Launch the GPU mover pipeline for one species.
+     *
+     * @param species Species index.
+     * @param doMomentsInLauncher True when moments are deposited in the same async path.
+     * @return Status code from the launch path.
+     */
+    int cudaLauncherAsync(int species, bool doMomentsInLauncher);
+    /**
+     * @brief Launch mover and moment work for all species asynchronously.
+     *
+     * @param cycle Current simulation cycle.
+     * @return True when the mover pipeline completed successfully.
+     */
+    bool ParticlesMoverMomentAsync(int cycle);
+    /**
+     * @brief Wait for mover completion, exchange particles, and handle injections.
+     *
+     * @param cycle Current simulation cycle.
+     * @return True when the exchange path completed successfully.
+     */
+    bool MoverAwaitAndPclExchange(int cycle);
     void processPlanetParticles();
     void injectExosphereParticles();
+    void sortAllSpecies();
+    /**
+     * @brief Advance the magnetic field for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void CalculateB(int cycle);
     void MomentsAwait();
 
-    //
-    // output methods
-    //
+    // ======= Output and diagnostics =======
+    /**
+     * @brief Write per-species particle counts for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void writeParticleNum(int cycle);
+    /**
+     * @brief Write conserved-quantity diagnostics for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void WriteConserved(int cycle);
+    /**
+     * @brief Write the velocity-distribution diagnostic for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void WriteVelocityDistribution(int cycle);
     void WriteVirtualSatelliteTraces();
+    /**
+     * @brief Schedule or execute GPU-to-host copies needed for output.
+     *
+     * @param cycle Current simulation cycle, or -1 for the final flush path.
+     */
     void outputCopyAsync(int cycle);
+    /**
+     * @brief Write configured outputs for one cycle.
+     *
+     * @param cycle Current simulation cycle.
+     */
     void WriteOutput(int cycle);
     void Finalize();
 
@@ -113,12 +216,25 @@ namespace iPic3D {
 
   private:
     void pad_particle_capacities();
-    void convertParticlesToSoA();
-    void convertParticlesToAoS();
-    void convertOutputParticlesToSynched();
     void sortParticles();
+    /**
+     * @brief Copy one species' moment buffer from device to host.
+     *
+     * @param species Species index.
+     * @param stream CUDA stream used for the asynchronous copy.
+     */
     void copyMomentsD2H(int species, cudaStream_t stream);
+    /**
+     * @brief Register one species' host moment arrays as pinned memory.
+     *
+     * @param species Species index.
+     */
     void registerMomentsPinnedMemory(int species);
+    /**
+     * @brief Unregister one species' host moment arrays from pinned memory.
+     *
+     * @param species Species index.
+     */
     void unregisterMomentsPinnedMemory(int species);
 
   private:
@@ -127,9 +243,9 @@ namespace iPic3D {
     VCtopology3D  *vct; // mpi topology 
     Grid3DCU      *grid; // 3d cartesion grid, local grid
     EMfields3D    *EMf; // 
-    Particles3D   *part; // only used for particle exchange during the simulation
-    Particles3D   *outputPart; // buffers for all particle copy back, registered to IOManager
-    Particles3D   *testpart;
+    ParticleCommInjection **particlesCommInj; // MPI exchange + injection engine (per species)
+    ParticleSoAHost **particlesHost; // lightweight SoA host mirror (no communicator)
+    ParticleSoAHost **testpart;
     ExosphereIonization *exosphereIonization; // exosphere photoionization source (CPU sampling)
     int numSolarWindSpecies;                     // cached: col->getNumSolarWindSpecies()
     int numPlanetarySpecies;                     // cached: ns - numSolarWindSpecies
@@ -147,41 +263,49 @@ namespace iPic3D {
 
     int cudaDeviceOnNode; // the device this rank should use
     cudaStream_t*       streams;
-    cudaStream_t        planetStream;  // dedicated stream for planet BC processing
+    cudaStream_t        planetStream;     // dedicated stream for planet BC processing
+    cudaStream_t        outputStream;     // dedicated stream for output D->H copies
+    cudaStream_t        fieldH2DStream;   // dedicated stream for fieldForPcl H->D copy
 
     std::future<int>* exitingResults;
     int* stayedParticle; // stayed particles for each species
 
-	//! Host pointers of objects, to be copied to device, for management later
-	  particleArrayCUDA**   pclsArrayHostPtr;       // array of pointer, point to objects on host
+    // ======= Host-side metadata objects mirrored to the device =======
+	  particleArrayCUDA**   pclsArrayHostPtr;       // array of pointers to host-resident metadata objects
     departureArrayType**  departureArrayHostPtr;  // for every species
     hashedSum**           hashedSumArrayHostPtr;      // species * 8
     exitingArray**        exitingArrayHostPtr;        // species
+    arrayCUDA<SpeciesParticle>** incomingStagingHostPtr;  // per-species AoS staging for H→D incoming particles
     fillerBuffer**        fillerBufferArrayHostPtr;   // species
-    grid3DCUDA* 		      grid3DCUDAHostPtr;      // one grid, used in all specieses
+    grid3DCUDA* 		      grid3DCUDAHostPtr;      // one shared grid descriptor for all species
     moverParameter**      moverParamHostPtr;		  // for every species
     momentParameter**     momentParamHostPtr;		  // for every species
+    injectionParameter**  injectionParamHostPtr;  // for every species (GPU injection)
 
-    int* cellCountHostPtr;
-    int* cellOffsetHostPtr;
+    CellSorter* cellSorters;  // per-species GPU cell sorter (counting sort)
+
+    int  sortingCycle_;    // cached from col->getSortingCycle() (0=disabled)
+    bool sortThisCycle_;   // true when this cycle uses the sorted pipeline
+
+    CaseType caseType_;  // resolved once in Init() from col->getCase()
+    bool     doPlanet_;  // true when caseType_ is Dipole or Dipole2D
     
-	//! CUDA pointers of objects, have been copied to device
-    particleArrayCUDA**   pclsArrayCUDAPtr;           // array of pointer, point to pclsArray on device
+    // ======= Device-side metadata objects =======
+    particleArrayCUDA**   pclsArrayCUDAPtr;           // array of pointers to device-resident particle metadata
     departureArrayType**  departureArrayCUDAPtr;      // for every species
     hashedSum**           hashedSumArrayCUDAPtr;      // species * 8
     exitingArray**        exitingArrayCUDAPtr;        // species
+    arrayCUDA<SpeciesParticle>** incomingStagingCUDAPtr;  // per-species device copy of staging metadata
     fillerBuffer**        fillerBufferArrayCUDAPtr;   // species
-    grid3DCUDA* 		      grid3DCUDACUDAPtr;    	    // one grid, used in all specieses
+    grid3DCUDA* 		      grid3DCUDACUDAPtr;    	    // one shared grid descriptor for all species
     moverParameter**      moverParamCUDAPtr;		      // for every species
     momentParameter**     momentParamCUDAPtr;		      // for every species
+    injectionParameter**  injectionParamCUDAPtr;      // for every species (GPU injection)
 
-    int* cellCountCUDAPtr;
-    int* cellOffsetCUDAPtr;
-
-	//! simple device buffers
-    // [10][nxn][nyn][nzn], a piece of cuda memory to hold the moment
+    // ======= Shared device buffers =======
+    // [10][nxn][nyn][nzn] packed moment storage per species.
     cudaTypeArray1<cudaMomentType>* momentsCUDAPtr; // for every species
-    // [nxn][nyn][nzn][2*4], a piece of cuda memory to hold E and B from host
+    // Packed field-interpolation buffer copied from host for mover kernels.
     cudaTypeArray1<cudaFieldType> fieldForPclCUDAPtr; // for all species
 
     cudaTypeArray1<cudaFieldType> fieldForPclHostPtr;
@@ -189,10 +313,27 @@ namespace iPic3D {
     ThreadPool *threadPoolPtr;
 
     cudaEvent_t event0, eventOutputCopy;
-    cudaEvent_t solverDoneEvent; ///< recorded on solverStream_ after field solve
-    cudaEvent_t* moverEvent1_; ///< persistent per-species events for mover→moment sync
-    cudaEvent_t* moverEvent2_; ///< persistent per-species events for exiting→sorting sync
-    cudaStream_t outputStream_; ///< dedicated stream for output D2H copies
+    cudaEvent_t solverDoneEvent; ///< recorded on solverStream_ after field solve; GPU_SOLVER only
+    // Per-species end-of-cycle event, recorded on streams[i] right after
+    // copyMomentsD2H(i, streams[i]) at the end of MoverAwaitAndPclExchange.
+    // Captures both: (a) all in-place SoA writes for cycle i are complete,
+    // and (b) per-species moment D->H copy has finished. Used by:
+    //   - MomentsAwait()        (host-side cudaEventSynchronize)
+    //   - outputCopyAsync()     (cudaStreamWaitEvent on outputStream)
+    cudaEvent_t* cycleEndEvent;          // [ns]
+    // Persistent per-species replacements for the previously per-call
+    // event1/event2 created inside cudaLauncherAsync. Hoisted out to avoid
+    // per-cycle create/destroy overhead.
+    cudaEvent_t* moverHashedReadyEvt;    // [ns] : recorded on streams[i]   after mover writes hashedSums
+    cudaEvent_t* auxHashedReadyEvt;      // [ns] : recorded on streams[i+ns] after exitingKernel completes
+    // Per-species event recorded on streams[i] right AFTER momentKernelStayed
+    // (unsorted pipeline only). Used by the OpenBC append-count handling on
+    // streams[i+ns] to ensure the device-side memset of appendCountAtomic and
+    // the H->D rewrite of particleArrayCUDA metadata happen-after the kernel
+    // that reads them. Without this edge, momentKernelStayed can observe a
+    // reset counter or a torn nop_ value, dropping or double-counting OpenBC-
+    // appended particles in the moment deposition.
+    cudaEvent_t* stayedMomentsDoneEvt;   // [ns]
 
     //bool verbose;
     string SaveDirName;
@@ -217,7 +358,7 @@ namespace iPic3D {
     int mergeIdx = -1;
     int* toBeMerged;
 
-    //! Planet quasi-neutral BC data structures
+    // ======= Planet quasi-neutral boundary-condition state =======
     planetArray**       planetArrayHostPtr;      // per species, host-pinned metadata
     planetArray**       planetArrayCUDAPtr;      // per species, device metadata
     int*                planetPclCount;           // per species, planet particle count this cycle

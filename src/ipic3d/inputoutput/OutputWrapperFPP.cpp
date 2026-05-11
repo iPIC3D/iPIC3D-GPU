@@ -21,19 +21,20 @@
 
 #include "mpi.h"
 #include "OutputWrapperFPP.h"
+#include "OutputTagConfig.h"
 #include "VCtopology3D.h"
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
-#include "Particles3D.h"
+#include "ParticleSoAHost.h"
 
 void OutputWrapperFPP::init_output_files(
 	    Collective    *col,
 	    VCtopology3D  *vct,
 	    Grid3DCU      *grid,
 	    EMfields3D    *EMf,
-	    Particles3D   *part,
+	    ParticleSoAHost   **part,
 	    int 		  ns,
-	    Particles3D   *testpart,
+	    ParticleSoAHost   **testpart,
 	    int 		  nstestpart)
 {
 #ifndef NO_HDF5
@@ -51,10 +52,10 @@ void OutputWrapperFPP::init_output_files(
     hdf5_agent.set_simulation_pointers(EMf, grid, vct, col);
 
     for (int i = 0; i < ns; ++i){
-      hdf5_agent.set_simulation_pointers_part(&part[i]);
+      hdf5_agent.set_simulation_pointers_part(part[i]);
     }
     for (int i = 0; i < nstestpart; ++i){
-      hdf5_agent.set_simulation_pointers_part(&testpart[i]);
+      hdf5_agent.set_simulation_pointers_part(testpart[i]);
     }
 
     // Add the HDF5 output agent to the Output Manager's list
@@ -95,20 +96,20 @@ void OutputWrapperFPP::init_output_files(
 #endif
 }
 
-void OutputWrapperFPP::append_output(const char* tag, int cycle)
-{
-#ifndef NO_HDF5
-    hdf5_agent.open_append(output_file);
-    output_mgr.output(tag, cycle);
-    hdf5_agent.close();
-#endif
-}
-
 void OutputWrapperFPP::append_output(const char* tag, int cycle, int sample)
 {
 #ifndef NO_HDF5
     hdf5_agent.open_append(output_file);
     output_mgr.output(tag, cycle, sample);
+    hdf5_agent.close();
+#endif
+}
+
+void OutputWrapperFPP::append_field_moment_output(const OutputTagConfig& cfg, int cycle)
+{
+#ifndef NO_HDF5
+    hdf5_agent.open_append(output_file);
+    hdf5_agent.outputFieldsMoments(cfg, cycle);
     hdf5_agent.close();
 #endif
 }

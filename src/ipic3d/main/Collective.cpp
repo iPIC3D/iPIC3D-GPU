@@ -23,6 +23,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sstream>
 #include <vector>
 #include "input_array.h"
 #include "Collective.h"
@@ -98,6 +99,12 @@ void Collective::ReadInput(string inputfile) {
     ncycles = config.read < int >("ncycles");
     th = config.read < double >("th",1.0);
 
+    // Macrocell sizes for (v_par, v_perp) spectra data analysis.
+    // Default 0 disables the feature at runtime.
+    MacrocellNx = config.read < int >("MacrocellNx", 0);
+    MacrocellNy = config.read < int >("MacrocellNy", 0);
+    MacrocellNz = config.read < int >("MacrocellNz", 0);
+
     Smooth = config.read < double >("Smooth",1.0);
     SmoothNiter = config.read < int >("SmoothNiter",6);
 
@@ -105,6 +112,20 @@ void Collective::ReadInput(string inputfile) {
     RestartDirName = config.read < string > ("RestartDirName","data");
     ns = config.read < int >("ns");
     nstestpart = config.read < int >("nsTestPart", 0);
+
+    // Per-species enable mask for the (v_par,v_perp) macrocell spectra.
+    // Read as a free-form list ("1 0 1 ..."); missing trailing entries
+    // default to 0, extra entries are silently ignored. Default: all off.
+    {
+        VelocitySpectraSpecies.assign(ns, 0);
+        const std::string raw = config.read<std::string>("VelocitySpectraSpecies", std::string());
+        std::istringstream iss(raw);
+        for (int s = 0; s < ns; ++s) {
+            int v = 0;
+            if (!(iss >> v)) break;            // run out of tokens -> remaining stay 0
+            VelocitySpectraSpecies[s] = v ? 1 : 0;
+        }
+    }
     NpMaxNpRatio = config.read < double >("NpMaxNpRatio",1.5);
     assert_ge(NpMaxNpRatio, 1.);
     // mode parameters for second order in time
@@ -137,6 +158,15 @@ void Collective::ReadInput(string inputfile) {
     B1z = config.read <double>("B1z",0.0);
 
     delta = config.read < double >("delta",0.5);
+
+    pertGEM           = config.read<double>("pertGEM",    0.0);
+    pertHump          = config.read<double>("pertHump",   0.0);
+    deltaxHump        = config.read<double>("deltaxHump", 8.0);
+    deltayHump        = config.read<double>("deltayHump", 4.0);
+    kxHump            = config.read<double>("kxHump",     -1.0);
+    kyHump            = config.read<double>("kyHump",     -1.0);
+    currentFromAmpere = config.read<int>("currentFromAmpere", 0);
+    spatiallyVaryingThermal = config.read<int>("spatiallyVaryingThermal", 0);
 
     Case              = config.read<string>("Case");
     wmethod           = config.read<string>("WriteMethod");
@@ -199,10 +229,12 @@ void Collective::ReadInput(string inputfile) {
     FieldOutputTag     =   config.read <string>("FieldOutputTag","");
     ParticlesOutputTag =   config.read <string>("ParticlesOutputTag","");
     MomentsOutputTag   =   config.read <string>("MomentsOutputTag","");
+    outputConfig_ = parseOutputTags(FieldOutputTag, MomentsOutputTag, ns);
     TestParticlesOutputCycle = config.read < int >("TestPartOutputCycle",0);
     testPartFlushCycle = config.read < int >("TestParticlesOutputCycle",10);
     RestartOutputCycle = config.read < int >("RestartOutputCycle",5000);
     DiagnosticsOutputCycle = config.read < int >("DiagnosticsOutputCycle", FieldOutputCycle);
+    SortingCycle = config.read < int >("SortingCycle", 0);
     ParaviewScriptPath     =   config.read <string>("ParaviewScriptPath", "");
     CallFinalize = config.read < bool >("CallFinalize", true);
   }
@@ -845,6 +877,141 @@ void Collective::Print() {
 
   }
 
+  cout << endl;
+  cout << "CFL Condition (c*dt/dx < 1):  " << endl;
+  cout << "---------------------" << endl;
+  cout << "Speed of light c     = " << c << endl;
+  cout << "Time step dt         = " << dt << endl;
+  cout << "Grid spacing dx      = " << dx << endl;
+  cout << "Grid spacing dy      = " << dy << endl;
+  cout << "Grid spacing dz      = " << dz << endl;
+  double cfl_x = c * dt / dx;
+  double cfl_y = c * dt / dy;
+  double cfl_z = c * dt / dz;
+  double cfl_max = cfl_x;
+  if (cfl_y > cfl_max) cfl_max = cfl_y;
+  if (nzc > 1 && cfl_z > cfl_max) cfl_max = cfl_z;
+  cout << "c*dt/dx              = " << cfl_x;
+  if (cfl_x < 1.0) cout << "  OK" << endl; else cout << "  WARNING: CFL VIOLATED!" << endl;
+  cout << "c*dt/dy              = " << cfl_y;
+  if (cfl_y < 1.0) cout << "  OK" << endl; else cout << "  WARNING: CFL VIOLATED!" << endl;
+  if (nzc > 1) {
+    cout << "c*dt/dz              = " << cfl_z;
+    if (cfl_z < 1.0) cout << "  OK" << endl; else cout << "  WARNING: CFL VIOLATED!" << endl;
+  }
+  // Multi-dimensional CFL: c*dt * sqrt(1/dx^2 + 1/dy^2 + 1/dz^2) < 1
+  double cfl_multi = c * dt * sqrt(1.0/(dx*dx) + 1.0/(dy*dy) + (nzc > 1 ? 1.0/(dz*dz) : 0.0));
+  cout << "c*dt*|1/dx|          = " << cfl_multi;
+  if (cfl_multi < 1.0) cout << "  OK" << endl; else cout << "  WARNING: multi-dim CFL VIOLATED!" << endl;
+
+  cout << endl;
+  cout << "Numerical Resolution Parameters:  " << endl;
+  cout << "---------------------" << endl;
+  // Larmor radius / grid spacing (using thermal velocity and B0)
+  // In Gaussian CGS: Omega_s = |q/m|_s * B0 / c, so r_L = v_th * c / (|q/m| * B0)
+  double B0 = sqrt(B0x*B0x + B0y*B0y + B0z*B0z);
+  if (B0 > 0.0) {
+    for (int is = 0; is < ns; is++) {
+      // Use single-component thermal speed as proxy for perpendicular v_th
+      double rL = uth[is] * c / (fabs(qom[is]) * B0);
+      cout << "Larmor radius / dx (species " << is << ") = " << rL / dx
+           << "  (rL = " << rL << ", Omega_c*dt = " << fabs(qom[is]) * B0 / c * dt << ")" << endl;
+    }
+  }
+  // Plasma frequency: omega_ps^2 = 4*pi * n_s * |q/m|_s  (CGS)
+  // Since rhoINIT = 4*pi * n_s: omega_ps = sqrt(|qom| * rhoINIT)
+  for (int is = 0; is < ns; is++) {
+    double omega_p = sqrt(fabs(qom[is]) * rhoINIT[is]);
+    double skin_depth = c / omega_p;
+    double omega_p_dt = omega_p * dt;
+    cout << "Species " << is << " (qom=" << qom[is] << "): omega_p = " << omega_p
+         << ", d_s/dx = " << skin_depth / dx
+         << ", omega_p*dt = " << omega_p_dt;
+    if (omega_p_dt < 2.0) cout << "  OK" << endl; else cout << "  WARNING: plasma oscillations under-resolved!" << endl;
+  }
+
+  // ======= Estimated Memory Usage Per Rank =======
+  cout << endl;
+  cout << "Estimated Memory Per Rank" << endl;
+  cout << "---------------------" << endl;
+
+  auto ceilDiv = [](int a, int b) { return (a + b - 1) / b; };
+  const int nxc_loc = ceilDiv(nxc, XLEN) + 2;  // +2 ghost cells
+  const int nyc_loc = ceilDiv(nyc, YLEN) + 2;
+  const int nzc_loc = ceilDiv(nzc, ZLEN) + 2;
+  const int nxn_loc = nxc_loc + 1;
+  const int nyn_loc = nyc_loc + 1;
+  const int nzn_loc = nzc_loc + 1;
+  const long long gridN = (long long)nxn_loc * nyn_loc * nzn_loc;
+  const long long gridC = (long long)nxc_loc * nyc_loc * nzc_loc;
+  const long long fieldSize = (long long)nzn_loc * (nyn_loc - 1) * (nxn_loc - 1);
+  const double MB = 1024.0 * 1024.0;
+
+  cout << "Local grid (with ghosts): "
+       << nxc_loc << "x" << nyc_loc << "x" << nzc_loc << " cells, "
+       << nxn_loc << "x" << nyn_loc << "x" << nzn_loc << " nodes" << endl;
+
+  // Interior cell counts (no ghost layers) — used for particle estimates
+  const int nxc_r = nxc_loc - 2, nyc_r = nyc_loc - 2, nzc_r = nzc_loc - 2;
+
+  // --- HOST ---
+  // EMfields3D: 50 node-3D + 15 cell-3D + 10*ns node-4D + ns cell-4D + fieldForPcls + Krylov
+  double hostEMf = (50.0 * gridN + 15.0 * gridC
+                    + (10.0 * ns) * gridN + ns * gridC
+                    + gridN * 8.0 + 6.0 * 3 * gridN) * 8;
+  double hostFieldBuf = fieldSize * 24.0 * 8;       // pinned field buffer
+  double hostPcl = 0, hostComm = 0;
+  for (int i = 0; i < ns; i++) {
+    long long nop_i = (long long)npcel[i] * nxc_r * nyc_r * nzc_r;  // interior cells (same as device)
+    hostPcl  += nop_i * 8.0 * 8;        // 8 SoA arrays * 8 bytes
+    hostComm += 0.1 * nop_i * 64.0;     // MPI comm buffer (AoS)
+  }
+  double hostTotal = (hostEMf + hostFieldBuf + hostPcl + hostComm) / MB;
+
+  cout << "HOST:   EMfields = " << hostEMf / MB << " MB"
+       << ", particles = " << hostPcl / MB << " MB"
+       << ", comm = " << hostComm / MB << " MB"
+       << ", field buf = " << hostFieldBuf / MB << " MB" << endl;
+  cout << "        TOTAL = " << hostTotal << " MB (" << hostTotal / 1024 << " GB)" << endl;
+
+  // --- DEVICE ---
+  // GPU allocations use actual NOP from maxwellian (interior cells only, no ghosts)
+  const double CAP_FACTOR = 1.4, AUX_FRAC = 0.1, PLANET_FRAC = 0.05;
+  bool isDipole = (Case == "Dipole" || Case == "Dipole2D");
+
+  double devFieldBuf = fieldSize * 24.0 * 8;
+  double devMoments  = ns * gridN * 10.0 * 8;
+  double devPcl = 0, devBuf = 0, devSort = 0, devPlanet = 0;
+
+  for (int i = 0; i < ns; i++) {
+    long long nop_i = (long long)npcel[i] * nxc_r * nyc_r * nzc_r;  // actual NOP (interior cells)
+    long long cap_i = (long long)(nop_i * CAP_FACTOR);
+
+    devPcl += cap_i * 8.0 * 8;                                    // SoA arrays
+    devBuf += cap_i * 8.0                                          // departure
+            + AUX_FRAC * nop_i * (64.0 + 4.0 + 64.0);            // exiting + filler + staging
+
+    if (SortingCycle > 0)
+      devSort += 3.0 * gridC * 4 + cap_i * (4.0 + 8.0);          // histograms + indices + scratch
+
+    if (isDipole)
+      devPlanet += PLANET_FRAC * nop_i * 64.0;
+  }
+  double devTotal = (devFieldBuf + devMoments + devPcl + devBuf + devSort + devPlanet) / MB;
+
+  cout << "DEVICE: particles = " << devPcl / MB << " MB"
+       << ", buffers = " << devBuf / MB << " MB"
+       << ", moments = " << devMoments / MB << " MB"
+       << ", field = " << devFieldBuf / MB << " MB";
+  if (devSort > 0)   cout << ", sort = " << devSort / MB << " MB";
+  if (devPlanet > 0) cout << ", planet = " << devPlanet / MB << " MB";
+  cout << endl;
+  cout << "        TOTAL = " << devTotal << " MB (" << devTotal / 1024 << " GB)"
+       << "  (+ 500 MB CUDA context)" << endl;
+
+  cout << "COMBINED = " << (hostTotal + devTotal) << " MB ("
+       << (hostTotal + devTotal) / 1024 << " GB)" << endl;
+  cout << "---------------------" << endl;
 
 }
 /*! Print Simulation Parameters */

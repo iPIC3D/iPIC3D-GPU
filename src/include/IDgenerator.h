@@ -44,6 +44,15 @@ class doubleIDgenerator
   {
     return counter[omp_get_thread_num()]++;
   }
+  /** Reserve a contiguous block of IDs for GPU injection.
+   *  Returns the base ID; caller assigns base + 0..count-1.
+   *  Must be called single-threaded (before kernel launch). */
+  double reserveIDBlock(int count)
+  {
+    double base = counter[0];
+    counter[0] += count;
+    return base;
+  }
 };
 
 #endif // IDgenerator_h

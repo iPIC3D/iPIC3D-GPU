@@ -2196,15 +2196,19 @@ void EMfields3D::gpuCommunicateGhostP2G_AllSpecies()
 
 void EMfields3D::gpuSetZeroDerivedMoments()
 {
-  d_Jx.setAll(0.0, solverStream_);
-  d_Jy.setAll(0.0, solverStream_);
-  d_Jz.setAll(0.0, solverStream_);
-  d_Jxh.setAll(0.0, solverStream_);
-  d_Jyh.setAll(0.0, solverStream_);
-  d_Jzh.setAll(0.0, solverStream_);
+  // d_Jx/y/z:  gpuSumOverSpeciesJ() self-zeroes before accumulating, and is
+  //            only called when writeJTot=true, the same condition under which
+  //            getJx() is ever read.  No pre-zero needed here.
+  // d_Jxh/y/zh: gpuCalculateHatFunctions() calls gpuSetAll0_N() on these
+  //             before any accumulation.  No pre-zero needed here.
+  // d_rhoc:    gpuSmooth() issues an MPI ghost exchange before the stencil
+  //            reads ghost cells; even when Smooth==1.0 the stale ghost cells
+  //            only flow into d_rhoh ghost cells which are overwritten by
+  //            gpuCommunicateCenterBC_P.  No pre-zero needed here.
+  // d_rhoh:    gpuEq(centSize) overwrites all elements, then
+  //            gpuCommunicateCenterBC_P overwrites ghost cells.  No pre-zero needed.
+  // d_rhon:    gpuSumOverSpecies() accumulates with +=, so must be pre-zeroed.
   d_rhon.setAll(0.0, solverStream_);
-  d_rhoc.setAll(0.0, solverStream_);
-  d_rhoh.setAll(0.0, solverStream_);
 }
 
 // =========================================================================

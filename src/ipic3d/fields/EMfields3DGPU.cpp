@@ -1225,8 +1225,8 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov)
     const string& simCase = col->getCase();
     if (simCase == "ForceFree")
       gpuFixBforcefree();
-    if (simCase == "GEM" || simCase == "GEMnoPert" || simCase == "GEMDoubleHarris")
-      gpuFixBnGEM();
+    // CPU MaxwellSource intentionally does not call fixBnGEM here: the source
+    // curl below reads cell-centered B only.
   }
 
   // OpenBC: apply inflow BCs on center B
@@ -1276,19 +1276,24 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov)
                 d_tempZ.devPtr(), d_Ez.devPtr(), d_temp2Z.devPtr(),
                 nodeSize, solverStream_);
 
+  // CPU perfectConductor*S uses ebc = -(ue0,ve0,we0) x (B0x,B0y,B0z).
+  const cudaSolverType ebc0 = -(ve0 * B0z - we0 * B0y);
+  const cudaSolverType ebc1 = -(we0 * B0x - ue0 * B0z);
+  const cudaSolverType ebc2 = -(ue0 * B0y - ve0 * B0x);
+
   // Perfect conductor BCs for source
   if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 0)
-    gpuPerfectConductorLeftS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), nxn, nyn, nzn, 0, solverStream_);
+    gpuPerfectConductorLeftS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn, 0, solverStream_);
   if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 0)
-    gpuPerfectConductorRightS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), nxn, nyn, nzn, 0, solverStream_);
+    gpuPerfectConductorRightS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn, 0, solverStream_);
   if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 0)
-    gpuPerfectConductorLeftS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), nxn, nyn, nzn, 1, solverStream_);
+    gpuPerfectConductorLeftS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn, 1, solverStream_);
   if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 0)
-    gpuPerfectConductorRightS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), nxn, nyn, nzn, 1, solverStream_);
+    gpuPerfectConductorRightS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn, 1, solverStream_);
   if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 0)
-    gpuPerfectConductorLeftS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), nxn, nyn, nzn, 2, solverStream_);
+    gpuPerfectConductorLeftS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn, 2, solverStream_);
   if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 0)
-    gpuPerfectConductorRightS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), nxn, nyn, nzn, 2, solverStream_);
+    gpuPerfectConductorRightS(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn, 2, solverStream_);
 
   // OpenBC: zero source on inflow boundary nodes
   gpuOpenBoundaryInflowESource(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(), nxn, nyn, nzn);
@@ -1979,6 +1984,8 @@ void EMfields3D::gpuCalculateB(int cycle)
     const string& simCase = col->getCase();
     if (simCase == "GEM" || simCase == "GEMnoPert" || simCase == "GEMDoubleHarris")
       gpuFixBcGEM();
+    if (simCase == "ForceFree")
+      gpuFixBforcefree();
   }
 
   // Boundary interpC2N (ghost + BC + fixup data now available)
@@ -1997,6 +2004,8 @@ void EMfields3D::gpuCalculateB(int cycle)
     const string& simCase = col->getCase();
     if (simCase == "GEM" || simCase == "GEMnoPert" || simCase == "GEMDoubleHarris")
       gpuFixBcGEM();
+    if (simCase == "ForceFree")
+      gpuFixBforcefree();
   }
 
   // Interpolate center → node
@@ -2012,8 +2021,6 @@ void EMfields3D::gpuCalculateB(int cycle)
   // Case-specific fixes on node-based B
   {
     const string& simCase = col->getCase();
-    if (simCase == "ForceFree")
-      gpuFixBforcefree();
     if (simCase == "GEM" || simCase == "GEMnoPert" || simCase == "GEMDoubleHarris")
       gpuFixBnGEM();
   }

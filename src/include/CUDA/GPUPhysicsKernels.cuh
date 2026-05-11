@@ -131,11 +131,13 @@ void gpuPerfectConductorRight(
 /**
  * @brief GPU perfect conductor BC for source term (LEFT boundary).
  *
- * Simpler version used in MaxwellSource:
- *   vectorX[bnd] = 0 (tangential components zeroed).
+ * Version used in MaxwellSource.  Matches the CPU perfectConductorLeftS:
+ * the normal source component is zeroed and tangential components are set to
+ * ebc = -(u0 x B0).
  */
 void gpuPerfectConductorLeftS(
     cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,
+    cudaSolverType ebc0, cudaSolverType ebc1, cudaSolverType ebc2,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream = 0);
@@ -143,6 +145,7 @@ void gpuPerfectConductorLeftS(
 /** Same as gpuPerfectConductorLeftS but for the RIGHT boundary. */
 void gpuPerfectConductorRightS(
     cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,
+    cudaSolverType ebc0, cudaSolverType ebc1, cudaSolverType ebc2,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream = 0);

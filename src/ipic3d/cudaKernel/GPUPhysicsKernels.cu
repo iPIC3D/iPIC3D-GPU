@@ -427,85 +427,97 @@ __global__ void k_perfectConductorRightZ(
 }
 
 // =========================================================================
-//  Perfect conductor source kernels (zero tangential components)
+//  Perfect conductor source kernels
 // =========================================================================
 
 template<typename T>
 __global__ void k_perfectConductorLeftSX(
     T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
+    T ebc1, T ebc2,
     int nyn, int nzn)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (j > nyn - 2 || k > nzn - 2) return;
     int idx = 1 * nyn * nzn + j * nzn + k;
-    vY[idx] = 0.0;
-    vZ[idx] = 0.0;
+    vX[idx] = 0.0;
+    vY[idx] = ebc1;
+    vZ[idx] = ebc2;
 }
 
 template<typename T>
 __global__ void k_perfectConductorLeftSY(
     T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
+    T ebc0, T ebc2,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > nxn - 2 || k > nzn - 2) return;
     int idx = i * nyn * nzn + 1 * nzn + k;
-    vX[idx] = 0.0;
-    vZ[idx] = 0.0;
+    vX[idx] = ebc0;
+    vY[idx] = 0.0;
+    vZ[idx] = ebc2;
 }
 
 template<typename T>
 __global__ void k_perfectConductorLeftSZ(
     T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
+    T ebc0, T ebc1,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > nxn - 2 || j > nyn - 2) return;
     int idx = i * nyn * nzn + j * nzn + 1;
-    vX[idx] = 0.0;
-    vY[idx] = 0.0;
+    vX[idx] = ebc0;
+    vY[idx] = ebc1;
+    vZ[idx] = 0.0;
 }
 
 template<typename T>
 __global__ void k_perfectConductorRightSX(
     T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
+    T ebc1, T ebc2,
     int nxn, int nyn, int nzn)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (j > nyn - 2 || k > nzn - 2) return;
     int idx = (nxn - 2) * nyn * nzn + j * nzn + k;
-    vY[idx] = 0.0;
-    vZ[idx] = 0.0;
+    vX[idx] = 0.0;
+    vY[idx] = ebc1;
+    vZ[idx] = ebc2;
 }
 
 template<typename T>
 __global__ void k_perfectConductorRightSY(
     T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
+    T ebc0, T ebc2,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > nxn - 2 || k > nzn - 2) return;
     int idx = i * nyn * nzn + (nyn - 2) * nzn + k;
-    vX[idx] = 0.0;
-    vZ[idx] = 0.0;
+    vX[idx] = ebc0;
+    vY[idx] = 0.0;
+    vZ[idx] = ebc2;
 }
 
 template<typename T>
 __global__ void k_perfectConductorRightSZ(
     T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
+    T ebc0, T ebc1,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > nxn - 2 || j > nyn - 2) return;
     int idx = i * nyn * nzn + j * nzn + (nzn - 2);
-    vX[idx] = 0.0;
-    vY[idx] = 0.0;
+    vX[idx] = ebc0;
+    vY[idx] = ebc1;
+    vZ[idx] = 0.0;
 }
 
 // =========================================================================
@@ -601,6 +613,7 @@ void gpuPerfectConductorRight(
 
 void gpuPerfectConductorLeftS(
     cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,
+    cudaSolverType ebc0, cudaSolverType ebc1, cudaSolverType ebc2,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream)
@@ -608,15 +621,15 @@ void gpuPerfectConductorLeftS(
     switch (dir) {
     case 0: {
         dim3 grid = faceGrid2D(nyn, nzn);
-        k_perfectConductorLeftSX<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, nyn, nzn);
+        k_perfectConductorLeftSX<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, ebc1, ebc2, nyn, nzn);
     } break;
     case 1: {
         dim3 grid = faceGrid2D(nxn, nzn);
-        k_perfectConductorLeftSY<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, nxn, nyn, nzn);
+        k_perfectConductorLeftSY<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, ebc0, ebc2, nxn, nyn, nzn);
     } break;
     case 2: {
         dim3 grid = faceGrid2D(nxn, nyn);
-        k_perfectConductorLeftSZ<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, nxn, nyn, nzn);
+        k_perfectConductorLeftSZ<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, ebc0, ebc1, nxn, nyn, nzn);
     } break;
     }
     cudaErrChk(cudaGetLastError());
@@ -624,6 +637,7 @@ void gpuPerfectConductorLeftS(
 
 void gpuPerfectConductorRightS(
     cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,
+    cudaSolverType ebc0, cudaSolverType ebc1, cudaSolverType ebc2,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream)
@@ -631,15 +645,15 @@ void gpuPerfectConductorRightS(
     switch (dir) {
     case 0: {
         dim3 grid = faceGrid2D(nyn, nzn);
-        k_perfectConductorRightSX<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, nxn, nyn, nzn);
+        k_perfectConductorRightSX<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, ebc1, ebc2, nxn, nyn, nzn);
     } break;
     case 1: {
         dim3 grid = faceGrid2D(nxn, nzn);
-        k_perfectConductorRightSY<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, nxn, nyn, nzn);
+        k_perfectConductorRightSY<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, ebc0, ebc2, nxn, nyn, nzn);
     } break;
     case 2: {
         dim3 grid = faceGrid2D(nxn, nyn);
-        k_perfectConductorRightSZ<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, nxn, nyn, nzn);
+        k_perfectConductorRightSZ<<<grid, faceBlock2D, 0, stream>>>(vectorX, vectorY, vectorZ, ebc0, ebc1, nxn, nyn, nzn);
     } break;
     }
     cudaErrChk(cudaGetLastError());

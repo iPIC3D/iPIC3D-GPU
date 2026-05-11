@@ -36,9 +36,9 @@
 // Step 1: compute  z = b/theta  and  y = coeff_b*b + coeff_Ab*A(b)
 //   coeff_b  = 4*rho / delta
 //   coeff_Ab = -2*rho / (delta*theta)
-void gpuChebyshevStep1(double* d_y, double* d_z,
-                       const double* d_b, const double* d_Ab,
-                       double theta, double delta, double rho,
+void gpuChebyshevStep1(cudaSolverType* d_y, cudaSolverType* d_z,
+                       const cudaSolverType* d_b, const cudaSolverType* d_Ab,
+                       cudaSolverType theta, cudaSolverType delta, cudaSolverType rho,
                        int n, cudaStream_t stream);
 
 // Step N: compute  w = fY*y + fB*b + fAy*A(y) + fZ*z
@@ -46,11 +46,11 @@ void gpuChebyshevStep1(double* d_y, double* d_z,
 //   fB  = rho * 2 / delta
 //   fAy = -rho * 2 / delta          (sign encodes b - A(y))
 //   fZ  = -rho * rhoOld
-void gpuChebyshevStepN(double* d_w,
-                       const double* d_y, const double* d_z,
-                       const double* d_b, const double* d_Ay,
-                       double delta, double sigma,
-                       double rho, double rhoOld,
+void gpuChebyshevStepN(cudaSolverType* d_w,
+                       const cudaSolverType* d_y, const cudaSolverType* d_z,
+                       const cudaSolverType* d_b, const cudaSolverType* d_Ay,
+                       cudaSolverType delta, cudaSolverType sigma,
+                       cudaSolverType rho, cudaSolverType rhoOld,
                        int n, cudaStream_t stream);
 
 #endif // GPU_SOLVER

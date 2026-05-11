@@ -38,6 +38,7 @@
 #include "mic_particles.h"
 #include "TimeTasks.h"
 #include "ipicmath.h" // for roundup_to_multiple
+#include <algorithm>
 #include "Alloc.h"
 #include "asserts.h"
 #ifndef NO_HDF5
@@ -2104,6 +2105,11 @@ void EMfields3D::sumOverSpecies()
  */
 void EMfields3D::sumOverSpeciesJ()
 {
+  const size_t nodeSize = static_cast<size_t>(nxn) * nyn * nzn;
+  std::fill_n(Jx.fetch_arr(), nodeSize, 0.0);
+  std::fill_n(Jy.fetch_arr(), nodeSize, 0.0);
+  std::fill_n(Jz.fetch_arr(), nodeSize, 0.0);
+
   for (int is = 0; is < ns; is++)
     for (int i = 0; i < nxn; i++)
       for (int j = 0; j < nyn; j++)

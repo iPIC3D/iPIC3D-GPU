@@ -50,16 +50,17 @@ static inline dim3 interiorGrid(int nx, int ny, int nz)
 //  Output:  10 center-sized arrays.
 // =========================================================================
 
+template<typename T>
 __global__ void k_maxwellLocalCenterOps(
-    double* __restrict__ gExX, double* __restrict__ gExY, double* __restrict__ gExZ,
-    double* __restrict__ gEyX, double* __restrict__ gEyY, double* __restrict__ gEyZ,
-    double* __restrict__ gEzX, double* __restrict__ gEzY, double* __restrict__ gEzZ,
-    double* __restrict__ divD,
-    const double* __restrict__ vX, const double* __restrict__ vY, const double* __restrict__ vZ,
-    const double* __restrict__ dX, const double* __restrict__ dY, const double* __restrict__ dZ,
+    T* __restrict__ gExX, T* __restrict__ gExY, T* __restrict__ gExZ,
+    T* __restrict__ gEyX, T* __restrict__ gEyY, T* __restrict__ gEyZ,
+    T* __restrict__ gEzX, T* __restrict__ gEzY, T* __restrict__ gEzZ,
+    T* __restrict__ divD,
+    const T* __restrict__ vX, const T* __restrict__ vY, const T* __restrict__ vZ,
+    const T* __restrict__ dX, const T* __restrict__ dY, const T* __restrict__ dZ,
     int nxc, int nyc, int nzc,
     int nyn, int nzn,
-    double invdx, double invdy, double invdz)
+    T invdx, T invdy, T invdz)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
     int j = blockIdx.y * BY + threadIdx.y + 1;
@@ -77,18 +78,18 @@ __global__ void k_maxwellLocalCenterOps(
     // in registers across the block if beneficial.
 
     const int ci = i * nyc * nzc + j * nzc + k;   // flat center index
-    const double Q = 0.25;
+    const T Q = 0.25;
 
     // ---- gradN2C(Ex) → gExX, gExY, gExZ ----
     {
-        double n000 = vX[NI(i  , j  , k  )];
-        double n001 = vX[NI(i  , j  , k+1)];
-        double n010 = vX[NI(i  , j+1, k  )];
-        double n011 = vX[NI(i  , j+1, k+1)];
-        double n100 = vX[NI(i+1, j  , k  )];
-        double n101 = vX[NI(i+1, j  , k+1)];
-        double n110 = vX[NI(i+1, j+1, k  )];
-        double n111 = vX[NI(i+1, j+1, k+1)];
+        T n000 = vX[NI(i  , j  , k  )];
+        T n001 = vX[NI(i  , j  , k+1)];
+        T n010 = vX[NI(i  , j+1, k  )];
+        T n011 = vX[NI(i  , j+1, k+1)];
+        T n100 = vX[NI(i+1, j  , k  )];
+        T n101 = vX[NI(i+1, j  , k+1)];
+        T n110 = vX[NI(i+1, j+1, k  )];
+        T n111 = vX[NI(i+1, j+1, k+1)];
 
         gExX[ci] = Q * invdx * ((n100-n000) + (n101-n001) + (n110-n010) + (n111-n011));
         gExY[ci] = Q * invdy * ((n010-n000) + (n011-n001) + (n110-n100) + (n111-n101));
@@ -97,14 +98,14 @@ __global__ void k_maxwellLocalCenterOps(
 
     // ---- gradN2C(Ey) → gEyX, gEyY, gEyZ ----
     {
-        double n000 = vY[NI(i  , j  , k  )];
-        double n001 = vY[NI(i  , j  , k+1)];
-        double n010 = vY[NI(i  , j+1, k  )];
-        double n011 = vY[NI(i  , j+1, k+1)];
-        double n100 = vY[NI(i+1, j  , k  )];
-        double n101 = vY[NI(i+1, j  , k+1)];
-        double n110 = vY[NI(i+1, j+1, k  )];
-        double n111 = vY[NI(i+1, j+1, k+1)];
+        T n000 = vY[NI(i  , j  , k  )];
+        T n001 = vY[NI(i  , j  , k+1)];
+        T n010 = vY[NI(i  , j+1, k  )];
+        T n011 = vY[NI(i  , j+1, k+1)];
+        T n100 = vY[NI(i+1, j  , k  )];
+        T n101 = vY[NI(i+1, j  , k+1)];
+        T n110 = vY[NI(i+1, j+1, k  )];
+        T n111 = vY[NI(i+1, j+1, k+1)];
 
         gEyX[ci] = Q * invdx * ((n100-n000) + (n101-n001) + (n110-n010) + (n111-n011));
         gEyY[ci] = Q * invdy * ((n010-n000) + (n011-n001) + (n110-n100) + (n111-n101));
@@ -113,14 +114,14 @@ __global__ void k_maxwellLocalCenterOps(
 
     // ---- gradN2C(Ez) → gEzX, gEzY, gEzZ ----
     {
-        double n000 = vZ[NI(i  , j  , k  )];
-        double n001 = vZ[NI(i  , j  , k+1)];
-        double n010 = vZ[NI(i  , j+1, k  )];
-        double n011 = vZ[NI(i  , j+1, k+1)];
-        double n100 = vZ[NI(i+1, j  , k  )];
-        double n101 = vZ[NI(i+1, j  , k+1)];
-        double n110 = vZ[NI(i+1, j+1, k  )];
-        double n111 = vZ[NI(i+1, j+1, k+1)];
+        T n000 = vZ[NI(i  , j  , k  )];
+        T n001 = vZ[NI(i  , j  , k+1)];
+        T n010 = vZ[NI(i  , j+1, k  )];
+        T n011 = vZ[NI(i  , j+1, k+1)];
+        T n100 = vZ[NI(i+1, j  , k  )];
+        T n101 = vZ[NI(i+1, j  , k+1)];
+        T n110 = vZ[NI(i+1, j+1, k  )];
+        T n111 = vZ[NI(i+1, j+1, k+1)];
 
         gEzX[ci] = Q * invdx * ((n100-n000) + (n101-n001) + (n110-n010) + (n111-n011));
         gEzY[ci] = Q * invdy * ((n010-n000) + (n011-n001) + (n110-n100) + (n111-n101));
@@ -131,19 +132,19 @@ __global__ void k_maxwellLocalCenterOps(
     //   ∇·D = d(Dx)/dx + d(Dy)/dy + d(Dz)/dz
     {
         // d(Dx)/dx
-        double compX = Q * invdx * (
+        T compX = Q * invdx * (
             (dX[NI(i+1,j  ,k  )] - dX[NI(i,j  ,k  )]) +
             (dX[NI(i+1,j  ,k+1)] - dX[NI(i,j  ,k+1)]) +
             (dX[NI(i+1,j+1,k  )] - dX[NI(i,j+1,k  )]) +
             (dX[NI(i+1,j+1,k+1)] - dX[NI(i,j+1,k+1)]));
         // d(Dy)/dy
-        double compY = Q * invdy * (
+        T compY = Q * invdy * (
             (dY[NI(i  ,j+1,k  )] - dY[NI(i  ,j,k  )]) +
             (dY[NI(i  ,j+1,k+1)] - dY[NI(i  ,j,k+1)]) +
             (dY[NI(i+1,j+1,k  )] - dY[NI(i+1,j,k  )]) +
             (dY[NI(i+1,j+1,k+1)] - dY[NI(i+1,j,k+1)]));
         // d(Dz)/dz
-        double compZ = Q * invdz * (
+        T compZ = Q * invdz * (
             (dZ[NI(i  ,j  ,k+1)] - dZ[NI(i  ,j  ,k)]) +
             (dZ[NI(i+1,j  ,k+1)] - dZ[NI(i+1,j  ,k)]) +
             (dZ[NI(i  ,j+1,k+1)] - dZ[NI(i  ,j+1,k)]) +
@@ -170,20 +171,21 @@ __global__ void k_maxwellLocalCenterOps(
 //  Output:  3 interleaved doubles in the Krylov vector d_im.
 // =========================================================================
 
+template<typename T>
 __global__ void k_maxwellLocalNodeFused(
-    double* __restrict__ d_im,
+    T* __restrict__ d_im,
     // 9 center arrays: gradients of E (for Laplacian via divC2N)
-    const double* __restrict__ gExX, const double* __restrict__ gExY, const double* __restrict__ gExZ,
-    const double* __restrict__ gEyX, const double* __restrict__ gEyY, const double* __restrict__ gEyZ,
-    const double* __restrict__ gEzX, const double* __restrict__ gEzY, const double* __restrict__ gEzZ,
+    const T* __restrict__ gExX, const T* __restrict__ gExY, const T* __restrict__ gExZ,
+    const T* __restrict__ gEyX, const T* __restrict__ gEyY, const T* __restrict__ gEyZ,
+    const T* __restrict__ gEzX, const T* __restrict__ gEzY, const T* __restrict__ gEzZ,
     // 1 center array: divergence of D (for gradient via gradC2N)
-    const double* __restrict__ divD,
+    const T* __restrict__ divD,
     // 6 node arrays
-    const double* __restrict__ vX, const double* __restrict__ vY, const double* __restrict__ vZ,
-    const double* __restrict__ dX, const double* __restrict__ dY, const double* __restrict__ dZ,
+    const T* __restrict__ vX, const T* __restrict__ vY, const T* __restrict__ vZ,
+    const T* __restrict__ dX, const T* __restrict__ dY, const T* __restrict__ dZ,
     int nxn, int nyn, int nzn,
-    double invdx, double invdy, double invdz,
-    double dt2)
+    T invdx, T invdy, T invdz,
+    T dt2)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
     int j = blockIdx.y * BY + threadIdx.y + 1;
@@ -209,7 +211,7 @@ __global__ void k_maxwellLocalNodeFused(
     int c111 = CI(i  , j  , k  );
     #undef CI
 
-    const double Q = 0.25;
+    const T Q = 0.25;
 
     // ================================================================
     //  Compute lapX = divC2N( gExX, gExY, gExZ )
@@ -231,9 +233,9 @@ __global__ void k_maxwellLocalNodeFused(
        + Q * invdz * ((arrZ[c111] - arrZ[c110]) + (arrZ[c101] - arrZ[c100]) \
                     + (arrZ[c011] - arrZ[c010]) + (arrZ[c001] - arrZ[c000])))
 
-    double lapX = DIVC2N(gExX, gExY, gExZ);
-    double lapY = DIVC2N(gEyX, gEyY, gEyZ);
-    double lapZ = DIVC2N(gEzX, gEzY, gEzZ);
+    T lapX = DIVC2N(gExX, gExY, gExZ);
+    T lapY = DIVC2N(gEyX, gEyY, gEyZ);
+    T lapZ = DIVC2N(gEzX, gEzY, gEzZ);
 
     // ================================================================
     //  Compute gdivX/Y/Z = gradC2N( divD )
@@ -244,14 +246,14 @@ __global__ void k_maxwellLocalNodeFused(
     //    gradZ = 0.25*invdz * [(c111-c110)+(c101-c100)+(c011-c010)+(c001-c000)]
     // ================================================================
 
-    double dd000 = divD[c000], dd001 = divD[c001];
-    double dd010 = divD[c010], dd011 = divD[c011];
-    double dd100 = divD[c100], dd101 = divD[c101];
-    double dd110 = divD[c110], dd111 = divD[c111];
+    T dd000 = divD[c000], dd001 = divD[c001];
+    T dd010 = divD[c010], dd011 = divD[c011];
+    T dd100 = divD[c100], dd101 = divD[c101];
+    T dd110 = divD[c110], dd111 = divD[c111];
 
-    double gdivX = Q * invdx * ((dd111 - dd011) + (dd110 - dd010) + (dd101 - dd001) + (dd100 - dd000));
-    double gdivY = Q * invdy * ((dd111 - dd101) + (dd110 - dd100) + (dd011 - dd001) + (dd010 - dd000));
-    double gdivZ = Q * invdz * ((dd111 - dd110) + (dd101 - dd100) + (dd011 - dd010) + (dd001 - dd000));
+    T gdivX = Q * invdx * ((dd111 - dd011) + (dd110 - dd010) + (dd101 - dd001) + (dd100 - dd000));
+    T gdivY = Q * invdy * ((dd111 - dd101) + (dd110 - dd100) + (dd011 - dd001) + (dd010 - dd000));
+    T gdivZ = Q * invdz * ((dd111 - dd110) + (dd101 - dd100) + (dd011 - dd010) + (dd001 - dd000));
 
     #undef DIVC2N
 
@@ -267,16 +269,16 @@ __global__ void k_maxwellLocalNodeFused(
 
     int nidx = i * nyn * nzn + j * nzn + k;
 
-    double ex = vX[nidx];
-    double ey = vY[nidx];
-    double ez = vZ[nidx];
-    double dxv = dX[nidx];
-    double dyv = dY[nidx];
-    double dzv = dZ[nidx];
+    T ex = vX[nidx];
+    T ey = vY[nidx];
+    T ez = vZ[nidx];
+    T dxv = dX[nidx];
+    T dyv = dY[nidx];
+    T dzv = dZ[nidx];
 
-    double imX = dt2 * (-lapX - gdivX) + dxv + ex;
-    double imY = dt2 * (-lapY - gdivY) + dyv + ey;
-    double imZ = dt2 * (-lapZ - gdivZ) + dzv + ez;
+    T imX = dt2 * (-lapX - gdivX) + dxv + ex;
+    T imY = dt2 * (-lapY - gdivY) + dyv + ey;
+    T imZ = dt2 * (-lapZ - gdivZ) + dzv + ez;
 
     // ================================================================
     //  Pack to Krylov solver vector (phys2solver interleaved layout)
@@ -298,14 +300,14 @@ __global__ void k_maxwellLocalNodeFused(
 // =========================================================================
 
 void gpuMaxwellLocalCenterOps(
-    double* gExX, double* gExY, double* gExZ,
-    double* gEyX, double* gEyY, double* gEyZ,
-    double* gEzX, double* gEzY, double* gEzZ,
-    double* divD,
-    const double* vX, const double* vY, const double* vZ,
-    const double* dX, const double* dY, const double* dZ,
+    cudaSolverType* gExX, cudaSolverType* gExY, cudaSolverType* gExZ,
+    cudaSolverType* gEyX, cudaSolverType* gEyY, cudaSolverType* gEyZ,
+    cudaSolverType* gEzX, cudaSolverType* gEzY, cudaSolverType* gEzZ,
+    cudaSolverType* divD,
+    const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
+    const cudaSolverType* dX, const cudaSolverType* dY, const cudaSolverType* dZ,
     int nxc, int nyc, int nzc,
-    double invdx, double invdy, double invdz,
+    cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
     cudaStream_t stream)
 {
     int nyn = nyc + 1, nzn = nzc + 1;
@@ -324,16 +326,16 @@ void gpuMaxwellLocalCenterOps(
 }
 
 void gpuMaxwellLocalNodeFused(
-    double* d_im,
-    const double* gExX, const double* gExY, const double* gExZ,
-    const double* gEyX, const double* gEyY, const double* gEyZ,
-    const double* gEzX, const double* gEzY, const double* gEzZ,
-    const double* divD,
-    const double* vX, const double* vY, const double* vZ,
-    const double* dX, const double* dY, const double* dZ,
+    cudaSolverType* d_im,
+    const cudaSolverType* gExX, const cudaSolverType* gExY, const cudaSolverType* gExZ,
+    const cudaSolverType* gEyX, const cudaSolverType* gEyY, const cudaSolverType* gEyZ,
+    const cudaSolverType* gEzX, const cudaSolverType* gEzY, const cudaSolverType* gEzZ,
+    const cudaSolverType* divD,
+    const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
+    const cudaSolverType* dX, const cudaSolverType* dY, const cudaSolverType* dZ,
     int nxn, int nyn, int nzn,
-    double invdx, double invdy, double invdz,
-    double dt2,
+    cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
+    cudaSolverType dt2,
     cudaStream_t stream)
 {
     dim3 grid = interiorGrid(nxn, nyn, nzn);

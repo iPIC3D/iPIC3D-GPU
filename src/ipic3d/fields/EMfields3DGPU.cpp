@@ -37,6 +37,7 @@
 #include "TimeTasks.h"
 
 #include "cudaTypeDef.cuh"
+#include "GPUSolverMPITypes.h"
 #include "GPUBlas.cuh"
 #include "GPUStencils.cuh"
 #include "GPUPhysicsKernels.cuh"
@@ -181,22 +182,22 @@ void EMfields3D::gpuSolverAllocate()
   d_smoothTemp = GPUFieldArray3(nxn, nyn, nzn);
 
   // ---- Device copy of qom ----
-  cudaErrChk(cudaMalloc(&d_qom, ns * sizeof(double)));
-  cudaErrChk(cudaMemcpy(d_qom, qom, ns * sizeof(double), cudaMemcpyHostToDevice));
+  cudaErrChk(cudaMalloc(&d_qom, ns * sizeof(cudaSolverType)));
+  cudaErrChk(cudaMemcpy(d_qom, qom, ns * sizeof(cudaSolverType), cudaMemcpyHostToDevice));
 
   // ---- BLAS reduction scratch ----
   // Need (m+2) doubles for gpuBatchedDotNorm in GMRES (m=20 → 22 doubles).
   // Also used as 1-double scratch for individual gpuDot/gpuNorm2 calls.
-  cudaErrChk(cudaMalloc(&d_blasScratch, (GMRES_M + 2) * sizeof(double)));
+  cudaErrChk(cudaMalloc(&d_blasScratch, (GMRES_M + 2) * sizeof(cudaSolverType)));
 
   // ---- Pinned host buffers for GMRES reductions ----
-  cudaErrChk(cudaHostAlloc(&h_gmresReduceLocal,  GMRES_MP1 * sizeof(double), cudaHostAllocDefault));
-  cudaErrChk(cudaHostAlloc(&h_gmresReduceGlobal, GMRES_MP1 * sizeof(double), cudaHostAllocDefault));
-  cudaErrChk(cudaHostAlloc(&h_gmresH,  (size_t)GMRES_MP1 * GMRES_M * sizeof(double), cudaHostAllocDefault));
-  cudaErrChk(cudaHostAlloc(&h_gmresG,  GMRES_MP1 * sizeof(double), cudaHostAllocDefault));
-  cudaErrChk(cudaHostAlloc(&h_gmresCS, GMRES_M * sizeof(double), cudaHostAllocDefault));
-  cudaErrChk(cudaHostAlloc(&h_gmresSN, GMRES_M * sizeof(double), cudaHostAllocDefault));
-  cudaErrChk(cudaHostAlloc(&h_gmresY,  GMRES_MP1 * sizeof(double), cudaHostAllocDefault));
+  cudaErrChk(cudaHostAlloc(&h_gmresReduceLocal,  GMRES_MP1 * sizeof(cudaSolverType), cudaHostAllocDefault));
+  cudaErrChk(cudaHostAlloc(&h_gmresReduceGlobal, GMRES_MP1 * sizeof(cudaSolverType), cudaHostAllocDefault));
+  cudaErrChk(cudaHostAlloc(&h_gmresH,  (size_t)GMRES_MP1 * GMRES_M * sizeof(cudaSolverType), cudaHostAllocDefault));
+  cudaErrChk(cudaHostAlloc(&h_gmresG,  GMRES_MP1 * sizeof(cudaSolverType), cudaHostAllocDefault));
+  cudaErrChk(cudaHostAlloc(&h_gmresCS, GMRES_M * sizeof(cudaSolverType), cudaHostAllocDefault));
+  cudaErrChk(cudaHostAlloc(&h_gmresSN, GMRES_M * sizeof(cudaSolverType), cudaHostAllocDefault));
+  cudaErrChk(cudaHostAlloc(&h_gmresY,  GMRES_MP1 * sizeof(cudaSolverType), cudaHostAllocDefault));
 
   // ---- GMRES workspace (lazy allocation in gpuCalculateE) ----
   d_gmresV    = nullptr;
@@ -359,12 +360,12 @@ void EMfields3D::gpuAllocateHaloBuffers()
     size_t maxPerField = faceSz[d];
     if (edgeSz[d]  > maxPerField) maxPerField = edgeSz[d];
     if (cornerSz   > maxPerField) maxPerField = cornerSz;
-    size_t bytes = maxPerField * HALO_MAX_BATCH * sizeof(double);
+    size_t bytes = maxPerField * HALO_MAX_BATCH * sizeof(cudaSolverType);
     cudaErrChk(cudaMalloc(&d_haloBuf_send_[d], bytes));
     cudaErrChk(cudaMalloc(&d_haloBuf_recv_[d], bytes));
   }
-  cudaErrChk(cudaMalloc(&d_ptrArray_, HALO_MAX_BATCH * sizeof(double*)));
-  cudaErrChk(cudaHostAlloc(&h_ptrArray_, HALO_MAX_BATCH * sizeof(double*), cudaHostAllocDefault));
+  cudaErrChk(cudaMalloc(&d_ptrArray_, HALO_MAX_BATCH * sizeof(cudaSolverType*)));
+  cudaErrChk(cudaHostAlloc(&h_ptrArray_, HALO_MAX_BATCH * sizeof(cudaSolverType*), cudaHostAllocDefault));
 
   haloBufsAllocated_ = true;
 }
@@ -467,7 +468,7 @@ void EMfields3D::gpuSolverSyncD2H(cudaStream_t stream)
   // cause "invalid argument" errors.
   {
     const size_t speciesSlice = (size_t)nxn * nyn * nzn;
-    const size_t sliceBytes   = speciesSlice * sizeof(double);
+    const size_t sliceBytes   = speciesSlice * sizeof(cudaSolverType);
     for (int is = 0; is < ns; is++) {
       cudaErrChk(cudaMemcpyAsync(rhons.fetch_arr() + is * speciesSlice,
                                   d_rhons.speciesPtr(is), sliceBytes,
@@ -555,7 +556,7 @@ void EMfields3D::gpuSmooth(GPUFieldArray3& arr, int type)
 
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
 #ifdef HALO_OVERLAP
-    double* ptr1[1] = { arr.devPtr() };
+    cudaSolverType* ptr1[1] = { arr.devPtr() };
     gpuBatchedHaloBeginExchange(ptr1, 1, nx, ny, nz,
                                 isCenter, true, false, true, solverStream_);
     gpuSmoothStep_interior(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
@@ -585,7 +586,7 @@ void EMfields3D::gpuSmoothE()
 
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
 #ifdef HALO_OVERLAP
-    double* eptrs[3] = { d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr() };
+    cudaSolverType* eptrs[3] = { d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr() };
     gpuBatchedHaloBeginExchange(eptrs, 3, nxn, nyn, nzn,
                                 false, true, false, false, solverStream_);
     gpuSmoothStep_interior(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn, alpha, beta3D, solverStream_);
@@ -630,7 +631,7 @@ void EMfields3D::gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArra
 
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
 #ifdef HALO_OVERLAP
-    double* s3ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
+    cudaSolverType* s3ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
     gpuBatchedHaloBeginExchange(s3ptrs, 3, nx, ny, nz,
                                 isCenter, true, false, true, solverStream_);
     gpuSmoothStep_interior(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha, beta3D, solverStream_);
@@ -725,7 +726,7 @@ void EMfields3D::gpuLapN2N_3(
 
 #ifdef HALO_OVERLAP
   // ---- Begin halo exchange: pack faces + post MPI ----
-  double* ptrs9[9] = { d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
+  cudaSolverType* ptrs9[9] = { d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
                        d_divC.devPtr(), d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
                        d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr() };
   gpuBatchedHaloBeginExchange(ptrs9, 9, nxc, nyc, nzc,
@@ -797,7 +798,7 @@ void EMfields3D::gpuLapN2N_3(
 //  GPU MaxwellImage:  im = A * vector  (Krylov ↔ Krylov)
 // =========================================================================
 
-void EMfields3D::gpuMaxwellImage(double* d_im, double* d_vector)
+void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im, cudaSolverType* d_vector)
 {
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
@@ -808,7 +809,7 @@ void EMfields3D::gpuMaxwellImage(double* d_im, double* d_vector)
   size_t nodeSize = (size_t)nxn * nyn * nzn;
 
   // Zero work arrays (9 memsets batched)
-  double* zptrs[9] = { d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
+  cudaSolverType* zptrs[9] = { d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
                        d_tempX.devPtr(),  d_tempY.devPtr(),  d_tempZ.devPtr(),
                        d_Dx.devPtr(),     d_Dy.devPtr(),     d_Dz.devPtr() };
   gpuSetAll0_N(zptrs, 9, nodeSize, solverStream_);
@@ -833,7 +834,7 @@ void EMfields3D::gpuMaxwellImage(double* d_im, double* d_vector)
 
 #ifdef HALO_OVERLAP
   // ---- Begin halo on divC ----
-  double* ptr1[1] = { d_divC.devPtr() };
+  cudaSolverType* ptr1[1] = { d_divC.devPtr() };
   gpuBatchedHaloBeginExchange(ptr1, 1, nxc, nyc, nzc,
                               true, false, false, false, solverStream_);
 
@@ -924,7 +925,7 @@ void EMfields3D::gpuMaxwellImage(double* d_im, double* d_vector)
 //                  d_imageX (first centSize elems)     (div D)
 // =========================================================================
 
-void EMfields3D::gpuMaxwellImageLocal(double* d_im, double* d_vector)
+void EMfields3D::gpuMaxwellImageLocal(cudaSolverType* d_im, cudaSolverType* d_vector)
 {
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
@@ -939,17 +940,17 @@ void EMfields3D::gpuMaxwellImageLocal(double* d_im, double* d_vector)
   // gpuGradN2C / gpuDivN2C only write interior cells; ghost cells must be
   // pre-zeroed so the subsequent divC2N / gradC2N stencils read zeros at
   // subdomain boundaries.
-  cudaErrChk(cudaMemsetAsync(d_tempXC.devPtr(),     0, centSize * sizeof(double), solverStream_));
-  cudaErrChk(cudaMemsetAsync(d_tempYC.devPtr(),     0, centSize * sizeof(double), solverStream_));
-  cudaErrChk(cudaMemsetAsync(d_tempZC.devPtr(),     0, centSize * sizeof(double), solverStream_));
-  cudaErrChk(cudaMemsetAsync(d_divC.devPtr(),       0, centSize * sizeof(double), solverStream_));
-  cudaErrChk(cudaMemsetAsync(d_poissonTemp.devPtr(),0, centSize * sizeof(double), solverStream_));
-  cudaErrChk(cudaMemsetAsync(d_poissonIm.devPtr(),  0, centSize * sizeof(double), solverStream_));
-  cudaErrChk(cudaMemsetAsync(d_divBwork.devPtr(),   0, centSize * sizeof(double), solverStream_));
-  cudaErrChk(cudaMemsetAsync(d_divE_work.devPtr(),  0, centSize * sizeof(double), solverStream_));
-  cudaErrChk(cudaMemsetAsync(d_tempC.devPtr(),      0, centSize * sizeof(double), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_tempXC.devPtr(),     0, centSize * sizeof(cudaSolverType), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_tempYC.devPtr(),     0, centSize * sizeof(cudaSolverType), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_tempZC.devPtr(),     0, centSize * sizeof(cudaSolverType), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_divC.devPtr(),       0, centSize * sizeof(cudaSolverType), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_poissonTemp.devPtr(),0, centSize * sizeof(cudaSolverType), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_poissonIm.devPtr(),  0, centSize * sizeof(cudaSolverType), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_divBwork.devPtr(),   0, centSize * sizeof(cudaSolverType), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_divE_work.devPtr(),  0, centSize * sizeof(cudaSolverType), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_tempC.devPtr(),      0, centSize * sizeof(cudaSolverType), solverStream_));
   // 10th center array: reuse first centSize doubles of d_imageX (node-sized, > centSize)
-  cudaErrChk(cudaMemsetAsync(d_imageX.devPtr(),     0, centSize * sizeof(double), solverStream_));
+  cudaErrChk(cudaMemsetAsync(d_imageX.devPtr(),     0, centSize * sizeof(cudaSolverType), solverStream_));
 
   // ---- Step 1: Krylov → physical space ----
   gpuSolver2Phys3(d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(),
@@ -1028,8 +1029,8 @@ void EMfields3D::gpuMaxwellImageLocal(double* d_im, double* d_vector)
 //  GPU Chebyshev: estimate λ_max via power iteration (Rayleigh quotient)
 // =========================================================================
 
-double EMfields3D::gpuEstimateMaxEigenvalue(
-    void (EMfields3D::*GpuImage)(double*, double*),
+cudaSolverType EMfields3D::gpuEstimateMaxEigenvalue(
+    void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*),
     int n, int nIter, MPI_Comm fieldcomm)
 {
   // Lazy allocate Chebyshev workspace (needed for d_chebTmp as scratch)
@@ -1038,10 +1039,10 @@ double EMfields3D::gpuEstimateMaxEigenvalue(
     if (d_chebW)   cudaFree(d_chebW);
     if (d_chebZ)   cudaFree(d_chebZ);
     if (d_chebTmp) cudaFree(d_chebTmp);
-    cudaErrChk(cudaMalloc(&d_chebY,   (size_t)n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_chebW,   (size_t)n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_chebZ,   (size_t)n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_chebTmp, (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebY,   (size_t)n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_chebW,   (size_t)n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_chebZ,   (size_t)n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_chebTmp, (size_t)n * sizeof(cudaSolverType)));
     chebAlloc = n;
   }
 
@@ -1063,7 +1064,7 @@ double EMfields3D::gpuEstimateMaxEigenvalue(
 
     double localBuf[2] = { h_gmresReduceLocal[0], h_gmresReduceLocal[1] };
     double globalBuf[2];
-    MPI_Allreduce(localBuf, globalBuf, 2, MPI_DOUBLE, MPI_SUM, fieldcomm);
+    MPI_Allreduce(localBuf, globalBuf, 2, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
 
     double vw = globalBuf[0];  // (v, Av)
     double ww = globalBuf[1];  // ||Av||²
@@ -1091,9 +1092,9 @@ double EMfields3D::gpuEstimateMaxEigenvalue(
 // =========================================================================
 
 void EMfields3D::gpuChebyshevSolve(
-    double* d_x, int n, double* d_b,
-    void (EMfields3D::*GpuImage)(double*, double*),
-    int maxIter, double eigMin, double eigMax,
+    cudaSolverType* d_x, int n, cudaSolverType* d_b,
+                          void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*),
+    int maxIter, cudaSolverType eigMin, cudaSolverType eigMax,
     MPI_Comm fieldcomm)
 {
   const VirtualTopology3D* vct = &get_vct();
@@ -1104,10 +1105,10 @@ void EMfields3D::gpuChebyshevSolve(
     if (d_chebW)   cudaFree(d_chebW);
     if (d_chebZ)   cudaFree(d_chebZ);
     if (d_chebTmp) cudaFree(d_chebTmp);
-    cudaErrChk(cudaMalloc(&d_chebY,   (size_t)n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_chebW,   (size_t)n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_chebZ,   (size_t)n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_chebTmp, (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebY,   (size_t)n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_chebW,   (size_t)n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_chebZ,   (size_t)n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_chebTmp, (size_t)n * sizeof(cudaSolverType)));
     chebAlloc = n;
   }
 
@@ -1129,7 +1130,7 @@ void EMfields3D::gpuChebyshevSolve(
   cudaErrChk(cudaStreamSynchronize(solverStream_));
   double localNorm = h_gmresReduceLocal[0];
   double globalNorm;
-  MPI_Allreduce(&localNorm, &globalNorm, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+  MPI_Allreduce(&localNorm, &globalNorm, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
   double initial_error = sqrt(globalNorm);
   if (vct->getCartesian_rank() == 0)
     printf("  [Chebyshev] Initial residual: %g  (eigMin=%.4g, eigMax=%.4g, %d steps)\n",
@@ -1183,7 +1184,7 @@ void EMfields3D::gpuChebyshevSolve(
   gpuNorm2_async(d_chebW, n, d_blasScratch, &h_gmresReduceLocal[0], solverStream_);
   cudaErrChk(cudaStreamSynchronize(solverStream_));
   localNorm = h_gmresReduceLocal[0];
-  MPI_Allreduce(&localNorm, &globalNorm, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+  MPI_Allreduce(&localNorm, &globalNorm, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
   double final_error = sqrt(globalNorm);
   if (vct->getCartesian_rank() == 0)
     printf("  [Chebyshev] Final residual: %g  (reduction: %.2e)\n",
@@ -1194,7 +1195,7 @@ void EMfields3D::gpuChebyshevSolve(
 //  GPU MaxwellSource:  build RHS of Maxwell system
 // =========================================================================
 
-void EMfields3D::gpuMaxwellSource(double* d_bkrylov)
+void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov)
 {
   const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
@@ -1208,7 +1209,7 @@ void EMfields3D::gpuMaxwellSource(double* d_bkrylov)
 
   // Zero work arrays (batched) — tempC is centSize, others are nodeSize
   d_tempC.setAll(0.0, solverStream_);
-  double* zptrs2[9] = { d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
+  cudaSolverType* zptrs2[9] = { d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
                          d_tempXN.devPtr(), d_tempYN.devPtr(), d_tempZN.devPtr(),
                          d_temp2X.devPtr(), d_temp2Y.devPtr(), d_temp2Z.devPtr() };
   gpuSetAll0_N(zptrs2, 9, nodeSize, solverStream_);
@@ -1311,21 +1312,21 @@ void EMfields3D::gpuMaxwellSource(double* d_bkrylov)
 // =========================================================================
 
 static void gpuGMRES_impl(EMfields3D* field,
-                          void (EMfields3D::*GpuImage)(double*, double*),
-                          double* d_x, int n, double* d_b,
-                          int m, int max_iter, double tol,
-                          double* d_scratch,
-                          double*& d_gmresV, double*& d_gmresW, int& gmresVAlloc,
+                          void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*),
+                          cudaSolverType* d_x, int n, cudaSolverType* d_b,
+                          int m, int max_iter, cudaSolverType tol,
+                          cudaSolverType* d_scratch,
+                          cudaSolverType*& d_gmresV, cudaSolverType*& d_gmresW, int& gmresVAlloc,
                           MPI_Comm fieldcomm,
                           cudaStream_t stream,
                           // Persistent PINNED host buffers (from EMfields3D members)
-                          double* h_reduceLocal,
-                          double* h_reduceGlobal,
-                          double* H,    // [mp1 * m]
-                          double* g,    // [mp1]
-                          double* cs,   // [m]
-                          double* sn,   // [m]
-                          double* y)    // [mp1]
+                          cudaSolverType* h_reduceLocal,
+                          cudaSolverType* h_reduceGlobal,
+                          cudaSolverType* H,    // [mp1 * m]
+                          cudaSolverType* g,    // [mp1]
+                          cudaSolverType* cs,   // [m]
+                          cudaSolverType* sn,   // [m]
+                          cudaSolverType* y)    // [mp1]
 {
   const int mp1 = m + 1;
 
@@ -1333,12 +1334,12 @@ static void gpuGMRES_impl(EMfields3D* field,
   if (gmresVAlloc < mp1 * n) {
     if (d_gmresV) cudaFree(d_gmresV);
     if (d_gmresW) cudaFree(d_gmresW);
-    cudaErrChk(cudaMalloc(&d_gmresV, (size_t)mp1 * n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_gmresW, (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_gmresV, (size_t)mp1 * n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_gmresW, (size_t)n * sizeof(cudaSolverType)));
     gmresVAlloc = mp1 * n;
   }
-  double* d_V = d_gmresV;
-  double* d_w = d_gmresW;
+  cudaSolverType* d_V = d_gmresV;
+  cudaSolverType* d_w = d_gmresW;
 
   // r = b - A*x  →  V[0]
   (field->*GpuImage)(d_w, d_x);          // w = A*x
@@ -1349,7 +1350,7 @@ static void gpuGMRES_impl(EMfields3D* field,
   gpuNorm2_async(d_V, n, d_scratch, &h_reduceLocal[0], stream);
   cudaErrChk(cudaStreamSynchronize(stream));
   double initial_error;
-  MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+  MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
   initial_error = sqrt(initial_error);
   if (initial_error < 1e-30) return;
 
@@ -1360,7 +1361,7 @@ static void gpuGMRES_impl(EMfields3D* field,
   gpuNorm2_async(d_b, n, d_scratch, &h_reduceLocal[0], stream);
   cudaErrChk(cudaStreamSynchronize(stream));
   double normb;
-  MPI_Allreduce(&h_reduceLocal[0], &normb, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+  MPI_Allreduce(&h_reduceLocal[0], &normb, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
   normb = sqrt(normb);
   if (normb == 0.0) normb = 1.0;
   if (gmresRank == 0)
@@ -1371,10 +1372,10 @@ static void gpuGMRES_impl(EMfields3D* field,
 
   for (int restart = 0; restart < max_iter; restart++) {
     // Zero persistent host arrays
-    memset(H,  0, (size_t)mp1 * m * sizeof(double));
-    memset(g,  0, mp1 * sizeof(double));
-    memset(cs, 0, m * sizeof(double));
-    memset(sn, 0, m * sizeof(double));
+    memset(H,  0, (size_t)mp1 * m * sizeof(cudaSolverType));
+    memset(g,  0, mp1 * sizeof(cudaSolverType));
+    memset(cs, 0, m * sizeof(cudaSolverType));
+    memset(sn, 0, m * sizeof(cudaSolverType));
     g[0] = error;
     int kEnd = m - 1;
 
@@ -1386,11 +1387,11 @@ static void gpuGMRES_impl(EMfields3D* field,
       // ONE kernel launch → ONE async D→H copy → ONE sync → ONE MPI_Allreduce
       gpuBatchedDotNorm(d_w, d_V, (size_t)n, k, (size_t)n, d_scratch, stream);
       cudaErrChk(cudaMemcpyAsync(h_reduceLocal, d_scratch,
-                                  (k + 2) * sizeof(double),
+                                  (k + 2) * sizeof(cudaSolverType),
                                   cudaMemcpyDeviceToHost, stream));
       cudaErrChk(cudaStreamSynchronize(stream));
       MPI_Allreduce(h_reduceLocal, h_reduceGlobal,
-                    k + 2, MPI_DOUBLE, MPI_SUM, fieldcomm);
+                    k + 2, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
 
       // Store H[j][k] and apply orthogonalisation updates
       for (int j = 0; j <= k; j++) {
@@ -1404,7 +1405,7 @@ static void gpuGMRES_impl(EMfields3D* field,
       gpuNorm2_async(d_w, n, d_scratch, &h_reduceLocal[0], stream);
       cudaErrChk(cudaStreamSynchronize(stream));
       double global_wNorm;
-      MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+      MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
       H[(k + 1) * m + k] = sqrt(global_wNorm);
 
       // Re-orthogonalise if needed (matches CPU GMRES)
@@ -1415,13 +1416,13 @@ static void gpuGMRES_impl(EMfields3D* field,
           gpuDot_async(d_w, d_V + (size_t)j * n, n, d_scratch, &h_reduceLocal[0], stream);
           cudaErrChk(cudaStreamSynchronize(stream));
           double htmp;
-          MPI_Allreduce(&h_reduceLocal[0], &htmp, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+          MPI_Allreduce(&h_reduceLocal[0], &htmp, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
           H[j * m + k] += htmp;
           gpuAddscale(-htmp, d_w, d_V + (size_t)j * n, n, stream);
         }
         gpuNorm2_async(d_w, n, d_scratch, &h_reduceLocal[0], stream);
         cudaErrChk(cudaStreamSynchronize(stream));
-        MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
         H[(k + 1) * m + k] = sqrt(global_wNorm);
       }
 
@@ -1477,7 +1478,7 @@ static void gpuGMRES_impl(EMfields3D* field,
 
     gpuNorm2_async(d_V, n, d_scratch, &h_reduceLocal[0], stream);
     cudaErrChk(cudaStreamSynchronize(stream));
-    MPI_Allreduce(&h_reduceLocal[0], &error, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+    MPI_Allreduce(&h_reduceLocal[0], &error, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
     error = sqrt(error);
 
     if (error / initial_error < tol) {
@@ -1502,16 +1503,16 @@ static void gpuGMRES_impl(EMfields3D* field,
 
 static void gpuFGMRES_impl(
     EMfields3D* field,
-    void (EMfields3D::*GpuImage)(double*, double*),
-    void (EMfields3D::*GpuPrecond)(double*, double*),
-    double* d_x, int n, double* d_b,
-    int m, int max_iter, double tol,
-    double* d_scratch,
-    double*& d_gmresV, double*& d_gmresW, int& gmresVAlloc,
-    double*& d_fgmresZ, int& fgmresZAlloc,
+    void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*),
+    void (EMfields3D::*GpuPrecond)(cudaSolverType*, cudaSolverType*),
+    cudaSolverType* d_x, int n, cudaSolverType* d_b,
+    int m, int max_iter, cudaSolverType tol,
+    cudaSolverType* d_scratch,
+    cudaSolverType*& d_gmresV, cudaSolverType*& d_gmresW, int& gmresVAlloc,
+    cudaSolverType*& d_fgmresZ, int& fgmresZAlloc,
     MPI_Comm fieldcomm, cudaStream_t stream,
-    double* h_reduceLocal, double* h_reduceGlobal,
-    double* H, double* g, double* cs, double* sn, double* y,
+    cudaSolverType* h_reduceLocal, cudaSolverType* h_reduceGlobal,
+    cudaSolverType* H, cudaSolverType* g, cudaSolverType* cs, cudaSolverType* sn, cudaSolverType* y,
     const char* label)
 {
   const int mp1 = m + 1;
@@ -1520,19 +1521,19 @@ static void gpuFGMRES_impl(
   if (gmresVAlloc < mp1 * n) {
     if (d_gmresV) cudaFree(d_gmresV);
     if (d_gmresW) cudaFree(d_gmresW);
-    cudaErrChk(cudaMalloc(&d_gmresV, (size_t)mp1 * n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_gmresW, (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_gmresV, (size_t)mp1 * n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_gmresW, (size_t)n * sizeof(cudaSolverType)));
     gmresVAlloc = mp1 * n;
   }
   // Allocate Z[m*n] (FGMRES-only, lazy)
   if (fgmresZAlloc < m * n) {
     if (d_fgmresZ) cudaFree(d_fgmresZ);
-    cudaErrChk(cudaMalloc(&d_fgmresZ, (size_t)m * n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_fgmresZ, (size_t)m * n * sizeof(cudaSolverType)));
     fgmresZAlloc = m * n;
   }
-  double* d_V = d_gmresV;
-  double* d_w = d_gmresW;
-  double* d_Z = d_fgmresZ;
+  cudaSolverType* d_V = d_gmresV;
+  cudaSolverType* d_w = d_gmresW;
+  cudaSolverType* d_Z = d_fgmresZ;
 
   // r = b - A*x → V[0]
   (field->*GpuImage)(d_w, d_x);
@@ -1543,7 +1544,7 @@ static void gpuFGMRES_impl(
   gpuNorm2_async(d_V, n, d_scratch, &h_reduceLocal[0], stream);
   cudaErrChk(cudaStreamSynchronize(stream));
   double initial_error;
-  MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+  MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
   initial_error = sqrt(initial_error);
   if (initial_error < 1e-30) return;
 
@@ -1553,7 +1554,7 @@ static void gpuFGMRES_impl(
   gpuNorm2_async(d_b, n, d_scratch, &h_reduceLocal[0], stream);
   cudaErrChk(cudaStreamSynchronize(stream));
   double normb;
-  MPI_Allreduce(&h_reduceLocal[0], &normb, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+  MPI_Allreduce(&h_reduceLocal[0], &normb, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
   normb = sqrt(normb);
   if (normb == 0.0) normb = 1.0;
   if (rank == 0)
@@ -1564,10 +1565,10 @@ static void gpuFGMRES_impl(
   double error = initial_error;
 
   for (int restart = 0; restart < max_iter; restart++) {
-    memset(H,  0, (size_t)mp1 * m * sizeof(double));
-    memset(g,  0, mp1 * sizeof(double));
-    memset(cs, 0, m * sizeof(double));
-    memset(sn, 0, m * sizeof(double));
+    memset(H,  0, (size_t)mp1 * m * sizeof(cudaSolverType));
+    memset(g,  0, mp1 * sizeof(cudaSolverType));
+    memset(cs, 0, m * sizeof(cudaSolverType));
+    memset(sn, 0, m * sizeof(cudaSolverType));
     g[0] = error;
 
     int kk = 0;
@@ -1584,11 +1585,11 @@ static void gpuFGMRES_impl(
       // Batched Arnoldi: fuse k+1 dot products + ||w||²
       gpuBatchedDotNorm(d_w, d_V, (size_t)n, k, (size_t)n, d_scratch, stream);
       cudaErrChk(cudaMemcpyAsync(h_reduceLocal, d_scratch,
-                                  (k + 2) * sizeof(double),
+                                  (k + 2) * sizeof(cudaSolverType),
                                   cudaMemcpyDeviceToHost, stream));
       cudaErrChk(cudaStreamSynchronize(stream));
       MPI_Allreduce(h_reduceLocal, h_reduceGlobal,
-                    k + 2, MPI_DOUBLE, MPI_SUM, fieldcomm);
+                    k + 2, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
 
       for (int j = 0; j <= k; j++) {
         double h_jk = h_reduceGlobal[j];
@@ -1599,7 +1600,7 @@ static void gpuFGMRES_impl(
       gpuNorm2_async(d_w, n, d_scratch, &h_reduceLocal[0], stream);
       cudaErrChk(cudaStreamSynchronize(stream));
       double global_wNorm;
-      MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+      MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
       H[(k + 1) * m + k] = sqrt(global_wNorm);
 
       // Re-orthogonalise if needed
@@ -1610,13 +1611,13 @@ static void gpuFGMRES_impl(
           gpuDot_async(d_w, d_V + (size_t)j * n, n, d_scratch, &h_reduceLocal[0], stream);
           cudaErrChk(cudaStreamSynchronize(stream));
           double htmp;
-          MPI_Allreduce(&h_reduceLocal[0], &htmp, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+          MPI_Allreduce(&h_reduceLocal[0], &htmp, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
           H[j * m + k] += htmp;
           gpuAddscale(-htmp, d_w, d_V + (size_t)j * n, n, stream);
         }
         gpuNorm2_async(d_w, n, d_scratch, &h_reduceLocal[0], stream);
         cudaErrChk(cudaStreamSynchronize(stream));
-        MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+        MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
         H[(k + 1) * m + k] = sqrt(global_wNorm);
       }
 
@@ -1667,7 +1668,7 @@ static void gpuFGMRES_impl(
 
     gpuNorm2_async(d_V, n, d_scratch, &h_reduceLocal[0], stream);
     cudaErrChk(cudaStreamSynchronize(stream));
-    MPI_Allreduce(&h_reduceLocal[0], &error, 1, MPI_DOUBLE, MPI_SUM, fieldcomm);
+    MPI_Allreduce(&h_reduceLocal[0], &error, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
     error = sqrt(error);
 
     if (error <= rho_tol) {
@@ -1708,7 +1709,7 @@ static void gpuFGMRES_impl(
 //  via a fused Krylov kernel (no pack/unpack overhead).
 // =========================================================================
 
-void EMfields3D::gpuBlockJacobiPrecond(double* d_x, double* d_b)
+void EMfields3D::gpuBlockJacobiPrecond(cudaSolverType* d_x, cudaSolverType* d_b)
 {
   const Grid* grid = &get_grid();
   const int n = 3 * (nxn - 2) * (nyn - 2) * (nzn - 2);
@@ -1729,7 +1730,7 @@ void EMfields3D::gpuBlockJacobiPrecond(double* d_x, double* d_b)
   // ---- Lazy-allocate D^{-1} storage ----
   if (blockJacobiDinvAlloc < (int)nodeSlice) {
     if (d_blockJacobiDinv) cudaFree(d_blockJacobiDinv);
-    cudaErrChk(cudaMalloc(&d_blockJacobiDinv, 9 * nodeSlice * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_blockJacobiDinv, 9 * nodeSlice * sizeof(cudaSolverType)));
     blockJacobiDinvAlloc = (int)nodeSlice;
     blockJacobiDinvStale = true;
   }
@@ -1782,8 +1783,8 @@ void EMfields3D::gpuBlockJacobiPrecond(double* d_x, double* d_b)
     if (d_bjScratch1) cudaFree(d_bjScratch1);
     if (d_bjScratch2) cudaFree(d_bjScratch2);
     d_bjScratch1 = nullptr; d_bjScratch2 = nullptr;
-    cudaErrChk(cudaMalloc(&d_bjScratch1, (size_t)n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_bjScratch2, (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_bjScratch1, (size_t)n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_bjScratch2, (size_t)n * sizeof(cudaSolverType)));
     bjScratchAlloc = n;
   }
 
@@ -1804,8 +1805,8 @@ void EMfields3D::gpuBlockJacobiPrecond(double* d_x, double* d_b)
 // =========================================================================
 
 void EMfields3D::gpuFGMRES_BlockJacobiPrecond(
-    double* d_x, int n, double* d_b,
-    int m, int max_iter, double tol,
+    cudaSolverType* d_x, int n, cudaSolverType* d_b,
+    int m, int max_iter, cudaSolverType tol,
     MPI_Comm fieldcomm)
 {
   // Diagnostic: print diagScalar so user can evaluate regime
@@ -1952,7 +1953,7 @@ void EMfields3D::gpuCalculateB(int cycle)
   // Communicate center B ghost cells (batched: 3 fields in 1 MPI round)
 #ifdef HALO_OVERLAP
   {
-    double* bptrs[3] = { d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr() };
+    cudaSolverType* bptrs[3] = { d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr() };
     gpuBatchedHaloBeginExchange(bptrs, 3, nxc, nyc, nzc,
                                 true, false, false, false, solverStream_);
 
@@ -2040,7 +2041,7 @@ void EMfields3D::gpuCalculateHatFunctions()
   gpuSmooth(d_rhoc, 0);
 
   // Initialise Jxh/Jyh/Jzh = 0
-  double* jptrs[3] = { d_Jxh.devPtr(), d_Jyh.devPtr(), d_Jzh.devPtr() };
+  cudaSolverType* jptrs[3] = { d_Jxh.devPtr(), d_Jyh.devPtr(), d_Jzh.devPtr() };
   gpuSetAll0_N(jptrs, 3, nodeSize, solverStream_);
 
   for (int is = 0; is < ns; is++) {
@@ -2056,7 +2057,7 @@ void EMfields3D::gpuCalculateHatFunctions()
 
 #ifdef HALO_OVERLAP
     // --- overlap: begin face exchange for 3 centre fields ---
-    double* hatPtrs[3] = { d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr() };
+    cudaSolverType* hatPtrs[3] = { d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr() };
     int hatReqs = gpuBatchedHaloBeginExchange(hatPtrs, 3, nxc, nyc, nzc,
                     /*isCenter=*/true, /*faceOnly=*/false,
                     /*needInterp=*/false, /*isParticle=*/true, solverStream_);
@@ -2114,21 +2115,21 @@ void EMfields3D::gpuCalculateHatFunctions()
 //  GPU moment-processing: D2D scatter from packed moment buffer
 // =========================================================================
 
-void EMfields3D::gpuScatterMomentsD2D(double* momentsSrc, int species, cudaStream_t stream)
+void EMfields3D::gpuScatterMomentsD2D(cudaMomentType* momentsSrc, int species, cudaStream_t stream)
 {
   const size_t gridSize = (size_t)nxn * nyn * nzn;
   // momentsSrc layout: [rhons | Jxs | Jys | Jzs | pXXsn | pXYsn | pXZsn | pYYsn | pYZsn | pZZsn]
   // Each block is gridSize doubles, contiguous.
-  cudaErrChk(cudaMemcpyAsync(d_rhons.speciesPtr(species), momentsSrc + 0*gridSize, gridSize*sizeof(double), cudaMemcpyDeviceToDevice, stream));
-  cudaErrChk(cudaMemcpyAsync(d_Jxs.speciesPtr(species),   momentsSrc + 1*gridSize, gridSize*sizeof(double), cudaMemcpyDeviceToDevice, stream));
-  cudaErrChk(cudaMemcpyAsync(d_Jys.speciesPtr(species),   momentsSrc + 2*gridSize, gridSize*sizeof(double), cudaMemcpyDeviceToDevice, stream));
-  cudaErrChk(cudaMemcpyAsync(d_Jzs.speciesPtr(species),   momentsSrc + 3*gridSize, gridSize*sizeof(double), cudaMemcpyDeviceToDevice, stream));
-  cudaErrChk(cudaMemcpyAsync(d_pXXsn.speciesPtr(species), momentsSrc + 4*gridSize, gridSize*sizeof(double), cudaMemcpyDeviceToDevice, stream));
-  cudaErrChk(cudaMemcpyAsync(d_pXYsn.speciesPtr(species), momentsSrc + 5*gridSize, gridSize*sizeof(double), cudaMemcpyDeviceToDevice, stream));
-  cudaErrChk(cudaMemcpyAsync(d_pXZsn.speciesPtr(species), momentsSrc + 6*gridSize, gridSize*sizeof(double), cudaMemcpyDeviceToDevice, stream));
-  cudaErrChk(cudaMemcpyAsync(d_pYYsn.speciesPtr(species), momentsSrc + 7*gridSize, gridSize*sizeof(double), cudaMemcpyDeviceToDevice, stream));
-  cudaErrChk(cudaMemcpyAsync(d_pYZsn.speciesPtr(species), momentsSrc + 8*gridSize, gridSize*sizeof(double), cudaMemcpyDeviceToDevice, stream));
-  cudaErrChk(cudaMemcpyAsync(d_pZZsn.speciesPtr(species), momentsSrc + 9*gridSize, gridSize*sizeof(double), cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(d_rhons.speciesPtr(species), momentsSrc + 0*gridSize, gridSize*sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(d_Jxs.speciesPtr(species),   momentsSrc + 1*gridSize, gridSize*sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(d_Jys.speciesPtr(species),   momentsSrc + 2*gridSize, gridSize*sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(d_Jzs.speciesPtr(species),   momentsSrc + 3*gridSize, gridSize*sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(d_pXXsn.speciesPtr(species), momentsSrc + 4*gridSize, gridSize*sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(d_pXYsn.speciesPtr(species), momentsSrc + 5*gridSize, gridSize*sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(d_pXZsn.speciesPtr(species), momentsSrc + 6*gridSize, gridSize*sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(d_pYYsn.speciesPtr(species), momentsSrc + 7*gridSize, gridSize*sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(d_pYZsn.speciesPtr(species), momentsSrc + 8*gridSize, gridSize*sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(d_pZZsn.speciesPtr(species), momentsSrc + 9*gridSize, gridSize*sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
 }
 
 
@@ -2151,7 +2152,7 @@ void EMfields3D::gpuCommunicateGhostP2G_AllSpecies()
     const int nFields = nsBatch * nFieldsPerSpecies;
 
     // Gather device pointers for this chunk
-    double* ptrs[HALO_MAX_BATCH];
+    cudaSolverType* ptrs[HALO_MAX_BATCH];
     for (int is = 0; is < nsBatch; is++) {
       int off = is * nFieldsPerSpecies;
       int src = isStart + is;
@@ -2218,6 +2219,25 @@ void EMfields3D::gpuSumOverSpecies()
 }
 
 // =========================================================================
+//  GPU sumOverSpeciesJ: J = sum_s(J_s)
+// =========================================================================
+
+void EMfields3D::gpuSumOverSpeciesJ()
+{
+  size_t nodeSize = (size_t)nxn * nyn * nzn;
+
+  d_Jx.setAll(0.0, solverStream_);
+  d_Jy.setAll(0.0, solverStream_);
+  d_Jz.setAll(0.0, solverStream_);
+
+  for (int is = 0; is < ns; is++) {
+    gpuSum(d_Jx.devPtr(), d_Jxs.speciesPtr(is), nodeSize, solverStream_);
+    gpuSum(d_Jy.devPtr(), d_Jys.speciesPtr(is), nodeSize, solverStream_);
+    gpuSum(d_Jz.devPtr(), d_Jzs.speciesPtr(is), nodeSize, solverStream_);
+  }
+}
+
+// =========================================================================
 //  GPU interpDensitiesN2C: rhoc = interp(rhon)
 // =========================================================================
 
@@ -2230,7 +2250,7 @@ void EMfields3D::gpuInterpDensitiesN2C()
 //  GPU OpenBoundaryInflowESource: zero source RHS on open inflow faces
 // =========================================================================
 
-void EMfields3D::gpuOpenBoundaryInflowESource(double* dX, double* dY, double* dZ,
+void EMfields3D::gpuOpenBoundaryInflowESource(cudaSolverType* dX, cudaSolverType* dY, cudaSolverType* dZ,
                                                int nx, int ny, int nz)
 {
   const VirtualTopology3D* vct = &get_vct();
@@ -2254,8 +2274,8 @@ void EMfields3D::gpuOpenBoundaryInflowESource(double* dX, double* dY, double* dZ
 //  GPU OpenBoundaryInflowEImage: image = vect - injE on open inflow faces
 // =========================================================================
 
-void EMfields3D::gpuOpenBoundaryInflowEImage(double* imX, double* imY, double* imZ,
-                                              const double* vX, const double* vY, const double* vZ,
+void EMfields3D::gpuOpenBoundaryInflowEImage(cudaSolverType* imX, cudaSolverType* imY, cudaSolverType* imZ,
+                                              const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
                                               int nx, int ny, int nz)
 {
   const VirtualTopology3D* vct = &get_vct();
@@ -2284,7 +2304,7 @@ void EMfields3D::gpuOpenBoundaryInflowEImage(double* imX, double* imY, double* i
 //  GPU OpenBoundaryInflowE: SAL blend / Dirichlet on E inflow faces
 // =========================================================================
 
-void EMfields3D::gpuOpenBoundaryInflowE(double* dX, double* dY, double* dZ,
+void EMfields3D::gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY, cudaSolverType* dZ,
                                          int nx, int ny, int nz)
 {
   const VirtualTopology3D* vct = &get_vct();
@@ -2345,7 +2365,7 @@ void EMfields3D::gpuOpenBoundaryInflowE(double* dX, double* dY, double* dZ,
 //  GPU OpenBoundaryInflowB: SAL blend / extrapolation on center B
 // =========================================================================
 
-void EMfields3D::gpuOpenBoundaryInflowB(double* dX, double* dY, double* dZ,
+void EMfields3D::gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY, cudaSolverType* dZ,
                                          int nx, int ny, int nz)
 {
   const VirtualTopology3D* vct = &get_vct();
@@ -2474,7 +2494,7 @@ void EMfields3D::gpuConstantChargePlanet2DPlaneXZ(double R, double x_center, dou
 //  GPU PoissonImage: A*x for Poisson solver (center Laplacian)
 // =========================================================================
 
-void EMfields3D::gpuPoissonImage(double* d_im, double* d_vec)
+void EMfields3D::gpuPoissonImage(cudaSolverType* d_im, cudaSolverType* d_vec)
 {
   const Grid* grid = &get_grid();
   double _invdx = grid->get_invdx();
@@ -2503,7 +2523,7 @@ void EMfields3D::gpuPoissonImage(double* d_im, double* d_vec)
 //  Ghost cells remain zero → zero-Dirichlet local problem.
 // =========================================================================
 
-void EMfields3D::gpuPoissonImageLocal(double* d_im, double* d_vec)
+void EMfields3D::gpuPoissonImageLocal(cudaSolverType* d_im, cudaSolverType* d_vec)
 {
   const Grid* grid = &get_grid();
   double _invdx = grid->get_invdx();
@@ -2590,7 +2610,7 @@ void EMfields3D::computePoissonChebyshevEigenvalues()
 //  Final result is NEGATED so that x ≈ (∇²)⁻¹ b.
 // =========================================================================
 
-void EMfields3D::gpuChebyshevPrecondPoisson(double* d_x, double* d_b)
+void EMfields3D::gpuChebyshevPrecondPoisson(cudaSolverType* d_x, cudaSolverType* d_b)
 {
   const int n = (nxc - 2) * (nyc - 2) * (nzc - 2);
 
@@ -2600,10 +2620,10 @@ void EMfields3D::gpuChebyshevPrecondPoisson(double* d_x, double* d_b)
     if (d_chebW)   cudaFree(d_chebW);
     if (d_chebZ)   cudaFree(d_chebZ);
     if (d_chebTmp) cudaFree(d_chebTmp);
-    cudaErrChk(cudaMalloc(&d_chebY,   (size_t)n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_chebW,   (size_t)n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_chebZ,   (size_t)n * sizeof(double)));
-    cudaErrChk(cudaMalloc(&d_chebTmp, (size_t)n * sizeof(double)));
+    cudaErrChk(cudaMalloc(&d_chebY,   (size_t)n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_chebW,   (size_t)n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_chebZ,   (size_t)n * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_chebTmp, (size_t)n * sizeof(cudaSolverType)));
     chebAlloc = n;
   }
 
@@ -2624,9 +2644,9 @@ void EMfields3D::gpuChebyshevPrecondPoisson(double* d_x, double* d_b)
   double rho    = 1.0 / (2.0 * sigma - rhoOld);
 
   // ---- Preconditioner: x₀ = 0, so r₀ = b ----
-  double* pY  = d_chebY;
-  double* pZ  = d_chebZ;
-  double* pAy = d_chebTmp;
+  cudaSolverType* pY  = d_chebY;
+  cudaSolverType* pZ  = d_chebZ;
+  cudaSolverType* pAy = d_chebTmp;
 
   // Step 0+1: z = b/θ,  y = f(b, (-∇²)(b))
   gpuPoissonImageLocal(pAy, d_b);
@@ -2652,8 +2672,8 @@ void EMfields3D::gpuChebyshevPrecondPoisson(double* d_x, double* d_b)
 // =========================================================================
 
 void EMfields3D::gpuFGMRES_PoissonChebyshev(
-    double* d_x, int n, double* d_b,
-    int m, int max_iter, double tol,
+    cudaSolverType* d_x, int n, cudaSolverType* d_b,
+    int m, int max_iter, cudaSolverType tol,
     MPI_Comm fieldcomm)
 {
   computePoissonChebyshevEigenvalues();

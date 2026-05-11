@@ -31,21 +31,22 @@ static inline dim3 interiorGrid3D(int nxn, int nyn, int nzn)
 //  MUdot kernel
 // =========================================================================
 
+template<typename T>
 __global__ void k_MUdotSpecies(
-    double* __restrict__ MUdotX,
-    double* __restrict__ MUdotY,
-    double* __restrict__ MUdotZ,
-    const double* __restrict__ vX,
-    const double* __restrict__ vY,
-    const double* __restrict__ vZ,
-    const double* __restrict__ Bxn,
-    const double* __restrict__ Byn,
-    const double* __restrict__ Bzn,
-    const double* __restrict__ Bx_ext,
-    const double* __restrict__ By_ext,
-    const double* __restrict__ Bz_ext,
-    const double* __restrict__ rhons_is,
-    double beta, double prefactor,
+    T* __restrict__ MUdotX,
+    T* __restrict__ MUdotY,
+    T* __restrict__ MUdotZ,
+    const T* __restrict__ vX,
+    const T* __restrict__ vY,
+    const T* __restrict__ vZ,
+    const T* __restrict__ Bxn,
+    const T* __restrict__ Byn,
+    const T* __restrict__ Bzn,
+    const T* __restrict__ Bx_ext,
+    const T* __restrict__ By_ext,
+    const T* __restrict__ Bz_ext,
+    const T* __restrict__ rhons_is,
+    T beta, T prefactor,
     int nxn, int nyn, int nzn,
     bool firstSpecies)
 {
@@ -56,18 +57,18 @@ __global__ void k_MUdotSpecies(
 
     int idx = IDX3(i, j, k, nyn, nzn);
 
-    double omcx = beta * (Bxn[idx] + Bx_ext[idx]);
-    double omcy = beta * (Byn[idx] + By_ext[idx]);
-    double omcz = beta * (Bzn[idx] + Bz_ext[idx]);
+    T omcx = beta * (Bxn[idx] + Bx_ext[idx]);
+    T omcy = beta * (Byn[idx] + By_ext[idx]);
+    T omcz = beta * (Bzn[idx] + Bz_ext[idx]);
 
-    double vx = vX[idx], vy = vY[idx], vz = vZ[idx];
-    double edotb = vx * omcx + vy * omcy + vz * omcz;
-    double denom = prefactor * rhons_is[idx] /
+    T vx = vX[idx], vy = vY[idx], vz = vZ[idx];
+    T edotb = vx * omcx + vy * omcy + vz * omcz;
+    T denom = prefactor * rhons_is[idx] /
                    (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
 
-    double dx = (vx + (vy * omcz - vz * omcy + edotb * omcx)) * denom;
-    double dy = (vy + (vz * omcx - vx * omcz + edotb * omcy)) * denom;
-    double dz = (vz + (vx * omcy - vy * omcx + edotb * omcz)) * denom;
+    T dx = (vx + (vy * omcz - vz * omcy + edotb * omcx)) * denom;
+    T dy = (vy + (vz * omcx - vx * omcz + edotb * omcy)) * denom;
+    T dz = (vz + (vx * omcy - vy * omcx + edotb * omcz)) * denom;
 
     if (firstSpecies) {
         MUdotX[idx] = dx;
@@ -80,12 +81,12 @@ __global__ void k_MUdotSpecies(
     }
 }
 
-void gpuMUdotSpecies(double* MUdotX, double* MUdotY, double* MUdotZ,
-                     const double* vX, const double* vY, const double* vZ,
-                     const double* Bxn, const double* Byn, const double* Bzn,
-                     const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-                     const double* rhons_is,
-                     double beta, double prefactor,
+void gpuMUdotSpecies(cudaSolverType* MUdotX, cudaSolverType* MUdotY, cudaSolverType* MUdotZ,
+                     const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
+                     const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+                     const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+                     const cudaSolverType* rhons_is,
+                     cudaSolverType beta, cudaSolverType prefactor,
                      int nxn, int nyn, int nzn,
                      bool firstSpecies,
                      cudaStream_t stream)
@@ -106,20 +107,21 @@ void gpuMUdotSpecies(double* MUdotX, double* MUdotY, double* MUdotZ,
 //  PIdot kernel
 // =========================================================================
 
+template<typename T>
 __global__ void k_PIdotSpecies(
-    double* __restrict__ PIX,
-    double* __restrict__ PIY,
-    double* __restrict__ PIZ,
-    const double* __restrict__ vX,
-    const double* __restrict__ vY,
-    const double* __restrict__ vZ,
-    const double* __restrict__ Bxn,
-    const double* __restrict__ Byn,
-    const double* __restrict__ Bzn,
-    const double* __restrict__ Bx_ext,
-    const double* __restrict__ By_ext,
-    const double* __restrict__ Bz_ext,
-    double beta,
+    T* __restrict__ PIX,
+    T* __restrict__ PIY,
+    T* __restrict__ PIZ,
+    const T* __restrict__ vX,
+    const T* __restrict__ vY,
+    const T* __restrict__ vZ,
+    const T* __restrict__ Bxn,
+    const T* __restrict__ Byn,
+    const T* __restrict__ Bzn,
+    const T* __restrict__ Bx_ext,
+    const T* __restrict__ By_ext,
+    const T* __restrict__ Bz_ext,
+    T beta,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
@@ -129,24 +131,24 @@ __global__ void k_PIdotSpecies(
 
     int idx = IDX3(i, j, k, nyn, nzn);
 
-    double omcx = beta * (Bxn[idx] + Bx_ext[idx]);
-    double omcy = beta * (Byn[idx] + By_ext[idx]);
-    double omcz = beta * (Bzn[idx] + Bz_ext[idx]);
+    T omcx = beta * (Bxn[idx] + Bx_ext[idx]);
+    T omcy = beta * (Byn[idx] + By_ext[idx]);
+    T omcz = beta * (Bzn[idx] + Bz_ext[idx]);
 
-    double vx = vX[idx], vy = vY[idx], vz = vZ[idx];
-    double edotb = vx * omcx + vy * omcy + vz * omcz;
-    double denom = 1.0 / (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
+    T vx = vX[idx], vy = vY[idx], vz = vZ[idx];
+    T edotb = vx * omcx + vy * omcy + vz * omcz;
+    T denom = 1.0 / (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
 
     PIX[idx] += (vx + (vy * omcz - vz * omcy + edotb * omcx)) * denom;
     PIY[idx] += (vy + (vz * omcx - vx * omcz + edotb * omcy)) * denom;
     PIZ[idx] += (vz + (vx * omcy - vy * omcx + edotb * omcz)) * denom;
 }
 
-void gpuPIdotSpecies(double* PIX, double* PIY, double* PIZ,
-                     const double* vX, const double* vY, const double* vZ,
-                     const double* Bxn, const double* Byn, const double* Bzn,
-                     const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-                     double beta,
+void gpuPIdotSpecies(cudaSolverType* PIX, cudaSolverType* PIY, cudaSolverType* PIZ,
+                     const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
+                     const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+                     const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+                     cudaSolverType beta,
                      int nxn, int nyn, int nzn,
                      cudaStream_t stream)
 {
@@ -174,17 +176,18 @@ void gpuPIdotSpecies(double* PIX, double* PIY, double* PIZ,
  * 2D grid over (j,k) ∈ [1, nyn-2] × [1, nzn-2].
  * Thread block: 16×16.
  */
+template<typename T>
 __global__ void k_perfectConductorLeftX(
-    double* __restrict__ imageX, double* __restrict__ imageY, double* __restrict__ imageZ,
-    const double* __restrict__ vX, const double* __restrict__ vY, const double* __restrict__ vZ,
-    const double* __restrict__ Ex,
-    const double* __restrict__ Jxh,
-    const double* __restrict__ Bxn, const double* __restrict__ Byn, const double* __restrict__ Bzn,
-    const double* __restrict__ Bx_ext, const double* __restrict__ By_ext, const double* __restrict__ Bz_ext,
-    const double* __restrict__ rhons,
-    const double* __restrict__ qom_d,
+    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
+    const T* __restrict__ vX, const T* __restrict__ vY, const T* __restrict__ vZ,
+    const T* __restrict__ Ex,
+    const T* __restrict__ Jxh,
+    const T* __restrict__ Bxn, const T* __restrict__ Byn, const T* __restrict__ Bzn,
+    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext, const T* __restrict__ Bz_ext,
+    const T* __restrict__ rhons,
+    const T* __restrict__ qom_d,
     int ns,
-    double dt, double c, double th, double FourPI, double delt,
+    T dt, T c, T th, T FourPI, T delt,
     int nxn, int nyn, int nzn)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -195,14 +198,14 @@ __global__ void k_perfectConductorLeftX(
     int speciesStride = nxn * nyn * nzn;
 
     // Compute sustensor at boundary
-    double susxx = 1.0, susyx = 0.0, suszx = 0.0;
+    T susxx = 1.0, susyx = 0.0, suszx = 0.0;
     for (int is = 0; is < ns; is++) {
-        double beta = 0.5 * qom_d[is] * dt / c;
-        double omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-        double omcy = beta * (Byn[bnd] + By_ext[bnd]);
-        double omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-        double rho = rhons[is * speciesStride + bnd];
-        double denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
+        T beta = 0.5 * qom_d[is] * dt / c;
+        T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
+        T omcy = beta * (Byn[bnd] + By_ext[bnd]);
+        T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
+        T rho = rhons[is * speciesStride + bnd];
+        T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
                        (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
         susxx += (1.0 + omcx * omcx) * denom;
         susyx += (-omcz + omcx * omcy) * denom;
@@ -216,17 +219,18 @@ __global__ void k_perfectConductorLeftX(
     imageZ[bnd] = vZ[bnd];
 }
 
+template<typename T>
 __global__ void k_perfectConductorLeftY(
-    double* __restrict__ imageX, double* __restrict__ imageY, double* __restrict__ imageZ,
-    const double* __restrict__ vX, const double* __restrict__ vY, const double* __restrict__ vZ,
-    const double* __restrict__ Ey,
-    const double* __restrict__ Jyh,
-    const double* __restrict__ Bxn, const double* __restrict__ Byn, const double* __restrict__ Bzn,
-    const double* __restrict__ Bx_ext, const double* __restrict__ By_ext, const double* __restrict__ Bz_ext,
-    const double* __restrict__ rhons,
-    const double* __restrict__ qom_d,
+    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
+    const T* __restrict__ vX, const T* __restrict__ vY, const T* __restrict__ vZ,
+    const T* __restrict__ Ey,
+    const T* __restrict__ Jyh,
+    const T* __restrict__ Bxn, const T* __restrict__ Byn, const T* __restrict__ Bzn,
+    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext, const T* __restrict__ Bz_ext,
+    const T* __restrict__ rhons,
+    const T* __restrict__ qom_d,
     int ns,
-    double dt, double c, double th, double FourPI, double delt,
+    T dt, T c, T th, T FourPI, T delt,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -236,14 +240,14 @@ __global__ void k_perfectConductorLeftY(
     int bnd = IDX3(i, 1, k, nyn, nzn);
     int speciesStride = nxn * nyn * nzn;
 
-    double susxy = 0.0, susyy = 1.0, suszy = 0.0;
+    T susxy = 0.0, susyy = 1.0, suszy = 0.0;
     for (int is = 0; is < ns; is++) {
-        double beta = 0.5 * qom_d[is] * dt / c;
-        double omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-        double omcy = beta * (Byn[bnd] + By_ext[bnd]);
-        double omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-        double rho = rhons[is * speciesStride + bnd];
-        double denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
+        T beta = 0.5 * qom_d[is] * dt / c;
+        T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
+        T omcy = beta * (Byn[bnd] + By_ext[bnd]);
+        T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
+        T rho = rhons[is * speciesStride + bnd];
+        T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
                        (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
         susxy += (omcz + omcx * omcy) * denom;
         susyy += (1.0 + omcy * omcy) * denom;
@@ -256,17 +260,18 @@ __global__ void k_perfectConductorLeftY(
     imageZ[bnd] = vZ[bnd];
 }
 
+template<typename T>
 __global__ void k_perfectConductorLeftZ(
-    double* __restrict__ imageX, double* __restrict__ imageY, double* __restrict__ imageZ,
-    const double* __restrict__ vX, const double* __restrict__ vY, const double* __restrict__ vZ,
-    const double* __restrict__ Ez,
-    const double* __restrict__ Jzh,
-    const double* __restrict__ Bxn, const double* __restrict__ Byn, const double* __restrict__ Bzn,
-    const double* __restrict__ Bx_ext, const double* __restrict__ By_ext, const double* __restrict__ Bz_ext,
-    const double* __restrict__ rhons,
-    const double* __restrict__ qom_d,
+    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
+    const T* __restrict__ vX, const T* __restrict__ vY, const T* __restrict__ vZ,
+    const T* __restrict__ Ez,
+    const T* __restrict__ Jzh,
+    const T* __restrict__ Bxn, const T* __restrict__ Byn, const T* __restrict__ Bzn,
+    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext, const T* __restrict__ Bz_ext,
+    const T* __restrict__ rhons,
+    const T* __restrict__ qom_d,
     int ns,
-    double dt, double c, double th, double FourPI, double delt,
+    T dt, T c, T th, T FourPI, T delt,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -276,14 +281,14 @@ __global__ void k_perfectConductorLeftZ(
     int bnd = IDX3(i, j, 1, nyn, nzn);
     int speciesStride = nxn * nyn * nzn;
 
-    double susxz = 0.0, susyz = 0.0, suszz = 1.0;
+    T susxz = 0.0, susyz = 0.0, suszz = 1.0;
     for (int is = 0; is < ns; is++) {
-        double beta = 0.5 * qom_d[is] * dt / c;
-        double omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-        double omcy = beta * (Byn[bnd] + By_ext[bnd]);
-        double omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-        double rho = rhons[is * speciesStride + bnd];
-        double denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
+        T beta = 0.5 * qom_d[is] * dt / c;
+        T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
+        T omcy = beta * (Byn[bnd] + By_ext[bnd]);
+        T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
+        T rho = rhons[is * speciesStride + bnd];
+        T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
                        (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
         susxz += (-omcy + omcx * omcz) * denom;
         susyz += (omcx + omcy * omcz) * denom;
@@ -298,17 +303,18 @@ __global__ void k_perfectConductorLeftZ(
 
 // ---- RIGHT boundary kernels ----
 
+template<typename T>
 __global__ void k_perfectConductorRightX(
-    double* __restrict__ imageX, double* __restrict__ imageY, double* __restrict__ imageZ,
-    const double* __restrict__ vX, const double* __restrict__ vY, const double* __restrict__ vZ,
-    const double* __restrict__ Ex,
-    const double* __restrict__ Jxh,
-    const double* __restrict__ Bxn, const double* __restrict__ Byn, const double* __restrict__ Bzn,
-    const double* __restrict__ Bx_ext, const double* __restrict__ By_ext, const double* __restrict__ Bz_ext,
-    const double* __restrict__ rhons,
-    const double* __restrict__ qom_d,
+    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
+    const T* __restrict__ vX, const T* __restrict__ vY, const T* __restrict__ vZ,
+    const T* __restrict__ Ex,
+    const T* __restrict__ Jxh,
+    const T* __restrict__ Bxn, const T* __restrict__ Byn, const T* __restrict__ Bzn,
+    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext, const T* __restrict__ Bz_ext,
+    const T* __restrict__ rhons,
+    const T* __restrict__ qom_d,
     int ns,
-    double dt, double c, double th, double FourPI, double delt,
+    T dt, T c, T th, T FourPI, T delt,
     int nxn, int nyn, int nzn)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -318,14 +324,14 @@ __global__ void k_perfectConductorRightX(
     int bnd = IDX3(nxn - 2, j, k, nyn, nzn);
     int speciesStride = nxn * nyn * nzn;
 
-    double susxx = 1.0, susyx = 0.0, suszx = 0.0;
+    T susxx = 1.0, susyx = 0.0, suszx = 0.0;
     for (int is = 0; is < ns; is++) {
-        double beta = 0.5 * qom_d[is] * dt / c;
-        double omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-        double omcy = beta * (Byn[bnd] + By_ext[bnd]);
-        double omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-        double rho = rhons[is * speciesStride + bnd];
-        double denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
+        T beta = 0.5 * qom_d[is] * dt / c;
+        T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
+        T omcy = beta * (Byn[bnd] + By_ext[bnd]);
+        T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
+        T rho = rhons[is * speciesStride + bnd];
+        T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
                        (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
         susxx += (1.0 + omcx * omcx) * denom;
         susyx += (-omcz + omcx * omcy) * denom;
@@ -338,17 +344,18 @@ __global__ void k_perfectConductorRightX(
     imageZ[bnd] = vZ[bnd];
 }
 
+template<typename T>
 __global__ void k_perfectConductorRightY(
-    double* __restrict__ imageX, double* __restrict__ imageY, double* __restrict__ imageZ,
-    const double* __restrict__ vX, const double* __restrict__ vY, const double* __restrict__ vZ,
-    const double* __restrict__ Ey,
-    const double* __restrict__ Jyh,
-    const double* __restrict__ Bxn, const double* __restrict__ Byn, const double* __restrict__ Bzn,
-    const double* __restrict__ Bx_ext, const double* __restrict__ By_ext, const double* __restrict__ Bz_ext,
-    const double* __restrict__ rhons,
-    const double* __restrict__ qom_d,
+    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
+    const T* __restrict__ vX, const T* __restrict__ vY, const T* __restrict__ vZ,
+    const T* __restrict__ Ey,
+    const T* __restrict__ Jyh,
+    const T* __restrict__ Bxn, const T* __restrict__ Byn, const T* __restrict__ Bzn,
+    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext, const T* __restrict__ Bz_ext,
+    const T* __restrict__ rhons,
+    const T* __restrict__ qom_d,
     int ns,
-    double dt, double c, double th, double FourPI, double delt,
+    T dt, T c, T th, T FourPI, T delt,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -358,14 +365,14 @@ __global__ void k_perfectConductorRightY(
     int bnd = IDX3(i, nyn - 2, k, nyn, nzn);
     int speciesStride = nxn * nyn * nzn;
 
-    double susxy = 0.0, susyy = 1.0, suszy = 0.0;
+    T susxy = 0.0, susyy = 1.0, suszy = 0.0;
     for (int is = 0; is < ns; is++) {
-        double beta = 0.5 * qom_d[is] * dt / c;
-        double omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-        double omcy = beta * (Byn[bnd] + By_ext[bnd]);
-        double omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-        double rho = rhons[is * speciesStride + bnd];
-        double denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
+        T beta = 0.5 * qom_d[is] * dt / c;
+        T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
+        T omcy = beta * (Byn[bnd] + By_ext[bnd]);
+        T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
+        T rho = rhons[is * speciesStride + bnd];
+        T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
                        (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
         susxy += (omcz + omcx * omcy) * denom;
         susyy += (1.0 + omcy * omcy) * denom;
@@ -378,17 +385,18 @@ __global__ void k_perfectConductorRightY(
     imageZ[bnd] = vZ[bnd];
 }
 
+template<typename T>
 __global__ void k_perfectConductorRightZ(
-    double* __restrict__ imageX, double* __restrict__ imageY, double* __restrict__ imageZ,
-    const double* __restrict__ vX, const double* __restrict__ vY, const double* __restrict__ vZ,
-    const double* __restrict__ Ez,
-    const double* __restrict__ Jzh,
-    const double* __restrict__ Bxn, const double* __restrict__ Byn, const double* __restrict__ Bzn,
-    const double* __restrict__ Bx_ext, const double* __restrict__ By_ext, const double* __restrict__ Bz_ext,
-    const double* __restrict__ rhons,
-    const double* __restrict__ qom_d,
+    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
+    const T* __restrict__ vX, const T* __restrict__ vY, const T* __restrict__ vZ,
+    const T* __restrict__ Ez,
+    const T* __restrict__ Jzh,
+    const T* __restrict__ Bxn, const T* __restrict__ Byn, const T* __restrict__ Bzn,
+    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext, const T* __restrict__ Bz_ext,
+    const T* __restrict__ rhons,
+    const T* __restrict__ qom_d,
     int ns,
-    double dt, double c, double th, double FourPI, double delt,
+    T dt, T c, T th, T FourPI, T delt,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -398,14 +406,14 @@ __global__ void k_perfectConductorRightZ(
     int bnd = IDX3(i, j, nzn - 2, nyn, nzn);
     int speciesStride = nxn * nyn * nzn;
 
-    double susxz = 0.0, susyz = 0.0, suszz = 1.0;
+    T susxz = 0.0, susyz = 0.0, suszz = 1.0;
     for (int is = 0; is < ns; is++) {
-        double beta = 0.5 * qom_d[is] * dt / c;
-        double omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-        double omcy = beta * (Byn[bnd] + By_ext[bnd]);
-        double omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-        double rho = rhons[is * speciesStride + bnd];
-        double denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
+        T beta = 0.5 * qom_d[is] * dt / c;
+        T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
+        T omcy = beta * (Byn[bnd] + By_ext[bnd]);
+        T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
+        T rho = rhons[is * speciesStride + bnd];
+        T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
                        (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
         susxz += (-omcy + omcx * omcz) * denom;
         susyz += (omcx + omcy * omcz) * denom;
@@ -422,8 +430,9 @@ __global__ void k_perfectConductorRightZ(
 //  Perfect conductor source kernels (zero tangential components)
 // =========================================================================
 
+template<typename T>
 __global__ void k_perfectConductorLeftSX(
-    double* __restrict__ vX, double* __restrict__ vY, double* __restrict__ vZ,
+    T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
     int nyn, int nzn)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -434,8 +443,9 @@ __global__ void k_perfectConductorLeftSX(
     vZ[idx] = 0.0;
 }
 
+template<typename T>
 __global__ void k_perfectConductorLeftSY(
-    double* __restrict__ vX, double* __restrict__ vY, double* __restrict__ vZ,
+    T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -446,8 +456,9 @@ __global__ void k_perfectConductorLeftSY(
     vZ[idx] = 0.0;
 }
 
+template<typename T>
 __global__ void k_perfectConductorLeftSZ(
-    double* __restrict__ vX, double* __restrict__ vY, double* __restrict__ vZ,
+    T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -458,8 +469,9 @@ __global__ void k_perfectConductorLeftSZ(
     vY[idx] = 0.0;
 }
 
+template<typename T>
 __global__ void k_perfectConductorRightSX(
-    double* __restrict__ vX, double* __restrict__ vY, double* __restrict__ vZ,
+    T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
     int nxn, int nyn, int nzn)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -470,8 +482,9 @@ __global__ void k_perfectConductorRightSX(
     vZ[idx] = 0.0;
 }
 
+template<typename T>
 __global__ void k_perfectConductorRightSY(
-    double* __restrict__ vX, double* __restrict__ vY, double* __restrict__ vZ,
+    T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -482,8 +495,9 @@ __global__ void k_perfectConductorRightSY(
     vZ[idx] = 0.0;
 }
 
+template<typename T>
 __global__ void k_perfectConductorRightSZ(
-    double* __restrict__ vX, double* __restrict__ vY, double* __restrict__ vZ,
+    T* __restrict__ vX, T* __restrict__ vY, T* __restrict__ vZ,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -506,15 +520,15 @@ static inline dim3 faceGrid2D(int d1, int d2)
 static const dim3 faceBlock2D(16, 16);
 
 void gpuPerfectConductorLeft(
-    double* imageX, double* imageY, double* imageZ,
-    const double* vectX, const double* vectY, const double* vectZ,
-    const double* Ex, const double* Ey, const double* Ez,
-    const double* Jxh, const double* Jyh, const double* Jzh,
-    const double* Bxn, const double* Byn, const double* Bzn,
-    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-    const double* rhons,
-    const double* d_qom, int ns,
-    double dt, double c, double th, double FourPI, double delt,
+    cudaSolverType* imageX, cudaSolverType* imageY, cudaSolverType* imageZ,
+    const cudaSolverType* vectX, const cudaSolverType* vectY, const cudaSolverType* vectZ,
+    const cudaSolverType* Ex, const cudaSolverType* Ey, const cudaSolverType* Ez,
+    const cudaSolverType* Jxh, const cudaSolverType* Jyh, const cudaSolverType* Jzh,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons,
+    const cudaSolverType* d_qom, int ns,
+    cudaSolverType dt, cudaSolverType c, cudaSolverType th, cudaSolverType FourPI, cudaSolverType delt,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream)
@@ -546,15 +560,15 @@ void gpuPerfectConductorLeft(
 }
 
 void gpuPerfectConductorRight(
-    double* imageX, double* imageY, double* imageZ,
-    const double* vectX, const double* vectY, const double* vectZ,
-    const double* Ex, const double* Ey, const double* Ez,
-    const double* Jxh, const double* Jyh, const double* Jzh,
-    const double* Bxn, const double* Byn, const double* Bzn,
-    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-    const double* rhons,
-    const double* d_qom, int ns,
-    double dt, double c, double th, double FourPI, double delt,
+    cudaSolverType* imageX, cudaSolverType* imageY, cudaSolverType* imageZ,
+    const cudaSolverType* vectX, const cudaSolverType* vectY, const cudaSolverType* vectZ,
+    const cudaSolverType* Ex, const cudaSolverType* Ey, const cudaSolverType* Ez,
+    const cudaSolverType* Jxh, const cudaSolverType* Jyh, const cudaSolverType* Jzh,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons,
+    const cudaSolverType* d_qom, int ns,
+    cudaSolverType dt, cudaSolverType c, cudaSolverType th, cudaSolverType FourPI, cudaSolverType delt,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream)
@@ -586,7 +600,7 @@ void gpuPerfectConductorRight(
 }
 
 void gpuPerfectConductorLeftS(
-    double* vectorX, double* vectorY, double* vectorZ,
+    cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream)
@@ -609,7 +623,7 @@ void gpuPerfectConductorLeftS(
 }
 
 void gpuPerfectConductorRightS(
-    double* vectorX, double* vectorY, double* vectorZ,
+    cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream)
@@ -635,11 +649,12 @@ void gpuPerfectConductorRightS(
 #undef MAX_SPECIES
 
 // =========================================================================
-//  adjustNonPeriodicDensities: double boundary-face values on GPU
+//  adjustNonPeriodicDensities: cudaSolverType boundary-face values on GPU
 // =========================================================================
 
-// Kernel: double values on X-face (i = fixedI)
-__global__ void k_doubleFaceX(double* __restrict__ arr,
+// Kernel: cudaSolverType values on X-face (i = fixedI)
+template<typename T>
+__global__ void k_doubleFaceX(T* __restrict__ arr,
                                int fixedI, int nyn, int nzn)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -648,8 +663,9 @@ __global__ void k_doubleFaceX(double* __restrict__ arr,
     arr[(fixedI * nyn + j) * nzn + k] *= 2.0;
 }
 
-// Kernel: double values on Y-face (j = fixedJ)
-__global__ void k_doubleFaceY(double* __restrict__ arr,
+// Kernel: cudaSolverType values on Y-face (j = fixedJ)
+template<typename T>
+__global__ void k_doubleFaceY(T* __restrict__ arr,
                                int fixedJ, int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -658,8 +674,9 @@ __global__ void k_doubleFaceY(double* __restrict__ arr,
     arr[(i * nyn + fixedJ) * nzn + k] *= 2.0;
 }
 
-// Kernel: double values on Z-face (k = fixedK)
-__global__ void k_doubleFaceZ(double* __restrict__ arr,
+// Kernel: cudaSolverType values on Z-face (k = fixedK)
+template<typename T>
+__global__ void k_doubleFaceZ(T* __restrict__ arr,
                                int fixedK, int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -669,7 +686,8 @@ __global__ void k_doubleFaceZ(double* __restrict__ arr,
 }
 
 // Batched versions: blockIdx.z selects the field from the pointer array
-__global__ void k_batchDoubleFaceX(double* const* __restrict__ ptrs,
+template<typename T>
+__global__ void k_batchDoubleFaceX(T* const* __restrict__ ptrs,
                                     int fixedI, int nyn, int nzn)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -678,7 +696,8 @@ __global__ void k_batchDoubleFaceX(double* const* __restrict__ ptrs,
     ptrs[blockIdx.z][(fixedI * nyn + j) * nzn + k] *= 2.0;
 }
 
-__global__ void k_batchDoubleFaceY(double* const* __restrict__ ptrs,
+template<typename T>
+__global__ void k_batchDoubleFaceY(T* const* __restrict__ ptrs,
                                     int fixedJ, int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -687,7 +706,8 @@ __global__ void k_batchDoubleFaceY(double* const* __restrict__ ptrs,
     ptrs[blockIdx.z][(i * nyn + fixedJ) * nzn + k] *= 2.0;
 }
 
-__global__ void k_batchDoubleFaceZ(double* const* __restrict__ ptrs,
+template<typename T>
+__global__ void k_batchDoubleFaceZ(T* const* __restrict__ ptrs,
                                     int fixedK, int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -698,7 +718,7 @@ __global__ void k_batchDoubleFaceZ(double* const* __restrict__ ptrs,
 
 void gpuAdjustNonPeriodicDensities(
     int nptrs,
-    double* const* d_devPtrs,
+    cudaSolverType* const* d_devPtrs,
     int nxn, int nyn, int nzn,
     bool xLeftNull, bool xRightNull,
     bool yLeftNull, bool yRightNull,
@@ -751,7 +771,8 @@ void gpuAdjustNonPeriodicDensities(
 // =========================================================================
 
 /** Zero 3 arrays on a single face plane (interior [1..n-2]). */
-__global__ void k_zeroFacePlane3(double* X, double* Y, double* Z,
+template<typename T>
+__global__ void k_zeroFacePlane3(T* X, T* Y, T* Z,
                                  int dir, int faceIdx,
                                  int nx, int ny, int nz)
 {
@@ -771,7 +792,7 @@ __global__ void k_zeroFacePlane3(double* X, double* Y, double* Z,
     X[idx] = 0.0; Y[idx] = 0.0; Z[idx] = 0.0;
 }
 
-void gpuOpenBCZeroFace3(double* X, double* Y, double* Z,
+void gpuOpenBCZeroFace3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
                         int dir, int faceIdx,
                         int nx, int ny, int nz, cudaStream_t stream)
 {
@@ -788,9 +809,10 @@ void gpuOpenBCZeroFace3(double* X, double* Y, double* Z,
 }
 
 /** Set image = vect - injE on a single face plane (interior [1..n-2]). */
-__global__ void k_imageDiffFacePlane3(double* imX, double* imY, double* imZ,
-                                      const double* vX, const double* vY, const double* vZ,
-                                      double injE0, double injE1, double injE2,
+template<typename T>
+__global__ void k_imageDiffFacePlane3(T* imX, T* imY, T* imZ,
+                                      const T* vX, const T* vY, const T* vZ,
+                                      T injE0, T injE1, T injE2,
                                       int dir, int faceIdx,
                                       int nx, int ny, int nz)
 {
@@ -812,9 +834,9 @@ __global__ void k_imageDiffFacePlane3(double* imX, double* imY, double* imZ,
     imZ[idx] = vZ[idx] - injE2;
 }
 
-void gpuOpenBCImageDiffFace3(double* imX, double* imY, double* imZ,
-                             const double* vX, const double* vY, const double* vZ,
-                             double injE0, double injE1, double injE2,
+void gpuOpenBCImageDiffFace3(cudaSolverType* imX, cudaSolverType* imY, cudaSolverType* imZ,
+                             const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
+                             cudaSolverType injE0, cudaSolverType injE1, cudaSolverType injE2,
                              int dir, int faceIdx,
                              int nx, int ny, int nz, cudaStream_t stream)
 {
@@ -835,10 +857,11 @@ void gpuOpenBCImageDiffFace3(double* imX, double* imY, double* imZ,
  * dir: 0=X, 1=Y, 2=Z.
  * ascending: true if sal increases from layerStart to layerEnd.
  */
-__global__ void k_salBlend3(double* X, double* Y, double* Z,
-                            double tgtX, double tgtY, double tgtZ,
+template<typename T>
+__global__ void k_salBlend3(T* X, T* Y, T* Z,
+                            T tgtX, T tgtY, T tgtZ,
                             int dir, int layerStart, int layerEnd,
-                            double invNLayers, int ascending,
+                            T invNLayers, int ascending,
                             int nx, int ny, int nz)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -854,8 +877,8 @@ __global__ void k_salBlend3(double* X, double* Y, double* Z,
     int a = rem / d2;
     int b = rem % d2;
     int layer = layerStart + layerOff;
-    double sal = ascending ? (double)(layer - layerStart) * invNLayers
-                           : (double)(layerEnd - layer) * invNLayers;
+    T sal = ascending ? (T)(layer - layerStart) * invNLayers
+                           : (T)(layerEnd - layer) * invNLayers;
     int i, j, k;
     if      (dir == 0) { i = layer; j = a; k = b; }
     else if (dir == 1) { i = a; j = layer; k = b; }
@@ -866,10 +889,10 @@ __global__ void k_salBlend3(double* X, double* Y, double* Z,
     Z[idx] = Z[idx] * sal + tgtZ * (1.0 - sal);
 }
 
-void gpuSALBlendLayers3(double* X, double* Y, double* Z,
-                        double tgtX, double tgtY, double tgtZ,
+void gpuSALBlendLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
+                        cudaSolverType tgtX, cudaSolverType tgtY, cudaSolverType tgtZ,
                         int dir, int layerStart, int layerEnd,
-                        double invNLayers, int ascending,
+                        cudaSolverType invNLayers, int ascending,
                         int nx, int ny, int nz, cudaStream_t stream)
 {
     int nLayers = layerEnd - layerStart + 1;
@@ -886,8 +909,9 @@ void gpuSALBlendLayers3(double* X, double* Y, double* Z,
 }
 
 /** Set 3 arrays to constant values on boundary layers. */
-__global__ void k_setConstLayers3(double* X, double* Y, double* Z,
-                                   double cx, double cy, double cz,
+template<typename T>
+__global__ void k_setConstLayers3(T* X, T* Y, T* Z,
+                                   T cx, T cy, T cz,
                                    int dir, int layerStart, int layerEnd,
                                    int nx, int ny, int nz)
 {
@@ -912,8 +936,8 @@ __global__ void k_setConstLayers3(double* X, double* Y, double* Z,
     X[idx] = cx; Y[idx] = cy; Z[idx] = cz;
 }
 
-void gpuSetConstLayers3(double* X, double* Y, double* Z,
-                        double cx, double cy, double cz,
+void gpuSetConstLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
+                        cudaSolverType cx, cudaSolverType cy, cudaSolverType cz,
                         int dir, int layerStart, int layerEnd,
                         int nx, int ny, int nz, cudaStream_t stream)
 {
@@ -931,7 +955,8 @@ void gpuSetConstLayers3(double* X, double* Y, double* Z,
 }
 
 /** Copy from a constant reference plane to boundary layers. */
-__global__ void k_extrapolateLayers3(double* X, double* Y, double* Z,
+template<typename T>
+__global__ void k_extrapolateLayers3(T* X, T* Y, T* Z,
                                       int dir, int layerStart, int layerEnd,
                                       int refLayer,
                                       int nx, int ny, int nz)
@@ -960,7 +985,7 @@ __global__ void k_extrapolateLayers3(double* X, double* Y, double* Z,
     Z[idx] = Z[ridx];
 }
 
-void gpuExtrapolateLayers3(double* X, double* Y, double* Z,
+void gpuExtrapolateLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
                            int dir, int layerStart, int layerEnd,
                            int refLayer,
                            int nx, int ny, int nz, cudaStream_t stream)
@@ -984,9 +1009,10 @@ void gpuExtrapolateLayers3(double* X, double* Y, double* Z,
 
 /** Fix center-based B for GEM on 3 Y-boundary layers.
  *  side: 0=left (j=0,1,2), 1=right (j=nyc-1, nyc-2, nyc-3). */
-__global__ void k_fixBcGEM(double* Bxc, double* Byc, double* Bzc,
-                           double B0x, double B0y, double B0z,
-                           double yStart, double dy, double LyH, double delta,
+template<typename T>
+__global__ void k_fixBcGEM(T* Bxc, T* Byc, T* Bzc,
+                           T B0x, T B0y, T B0z,
+                           T yStart, T dy, T LyH, T delta,
                            int side, int nxc, int nyc, int nzc)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -996,8 +1022,8 @@ __global__ void k_fixBcGEM(double* Bxc, double* Byc, double* Bzc,
     int j0 = (side == 0) ? 0 : nyc - 1;
     int j1 = (side == 0) ? 1 : nyc - 2;
     int j2 = (side == 0) ? 2 : nyc - 3;
-    double yc0 = yStart + ((double)j0 - 0.5) * dy;
-    double bx_val = B0x * tanh((yc0 - LyH) / delta);
+    T yc0 = yStart + ((T)j0 - 0.5) * dy;
+    T bx_val = B0x * tanh((yc0 - LyH) / delta);
     int idx0 = (i * nyc + j0) * nzc + k;
     int idx1 = (i * nyc + j1) * nzc + k;
     int idx2 = (i * nyc + j2) * nzc + k;
@@ -1006,9 +1032,9 @@ __global__ void k_fixBcGEM(double* Bxc, double* Byc, double* Bzc,
     Bzc[idx0] = B0z; Bzc[idx1] = B0z; Bzc[idx2] = B0z;
 }
 
-void gpuFixBcGEMKernel(double* Bxc, double* Byc, double* Bzc,
-                       double B0x, double B0y, double B0z,
-                       double yStart, double dy, double LyH, double delta,
+void gpuFixBcGEMKernel(cudaSolverType* Bxc, cudaSolverType* Byc, cudaSolverType* Bzc,
+                       cudaSolverType B0x, cudaSolverType B0y, cudaSolverType B0z,
+                       cudaSolverType yStart, cudaSolverType dy, cudaSolverType LyH, cudaSolverType delta,
                        int side, int nxc, int nyc, int nzc, cudaStream_t stream)
 {
     int total = nxc * nzc;
@@ -1022,9 +1048,10 @@ void gpuFixBcGEMKernel(double* Bxc, double* Byc, double* Bzc,
 /** Fix node-based B for GEM on 3 Y-boundary layers.
  *  Uses CENTER Y coordinate for the tanh profile (matches CPU).
  *  side: 0=left (j=0,1,2), 1=right (j=nyn-1, nyn-2, nyn-3). */
-__global__ void k_fixBnGEM(double* Bxn, double* Byn, double* Bzn,
-                           double B0x, double B0y, double B0z,
-                           double yStart, double dy, double LyH, double delta,
+template<typename T>
+__global__ void k_fixBnGEM(T* Bxn, T* Byn, T* Bzn,
+                           T B0x, T B0y, T B0z,
+                           T yStart, T dy, T LyH, T delta,
                            int side, int nxn, int nyn, int nzn, int nyc)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1033,8 +1060,8 @@ __global__ void k_fixBnGEM(double* Bxn, double* Byn, double* Bzn,
     int k = tid % nzn;
     // Center Y index for tanh profile: 0 for left, nyc-1 for right
     int jc = (side == 0) ? 0 : nyc - 1;
-    double yc = yStart + ((double)jc - 0.5) * dy;
-    double bx_val = B0x * tanh((yc - LyH) / delta);
+    T yc = yStart + ((T)jc - 0.5) * dy;
+    T bx_val = B0x * tanh((yc - LyH) / delta);
     int j0 = (side == 0) ? 0 : nyn - 1;
     int j1 = (side == 0) ? 1 : nyn - 2;
     int j2 = (side == 0) ? 2 : nyn - 3;
@@ -1046,9 +1073,9 @@ __global__ void k_fixBnGEM(double* Bxn, double* Byn, double* Bzn,
     Bzn[idx0] = B0z; Bzn[idx1] = B0z; Bzn[idx2] = B0z;
 }
 
-void gpuFixBnGEMKernel(double* Bxn, double* Byn, double* Bzn,
-                       double B0x, double B0y, double B0z,
-                       double yStart, double dy, double LyH, double delta,
+void gpuFixBnGEMKernel(cudaSolverType* Bxn, cudaSolverType* Byn, cudaSolverType* Bzn,
+                       cudaSolverType B0x, cudaSolverType B0y, cudaSolverType B0z,
+                       cudaSolverType yStart, cudaSolverType dy, cudaSolverType LyH, cudaSolverType delta,
                        int side, int nxn, int nyn, int nzn, int nyc,
                        cudaStream_t stream)
 {
@@ -1062,9 +1089,10 @@ void gpuFixBnGEMKernel(double* Bxn, double* Byn, double* Bzn,
 
 /** Fix center-based B for ForceFree on Y-boundary layers.
  *  Bx = B0x*tanh, Bz = B0z/cosh profile on up to 3 layers. */
-__global__ void k_fixBforcefree(double* Bxc, double* Byc, double* Bzc,
-                                double B0x, double B0y, double B0z,
-                                double yStart, double dy, double LyH, double delta,
+template<typename T>
+__global__ void k_fixBforcefree(T* Bxc, T* Byc, T* Bzc,
+                                T B0x, T B0y, T B0z,
+                                T yStart, T dy, T LyH, T delta,
                                 int side, int nxc, int nyc, int nzc)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1074,12 +1102,12 @@ __global__ void k_fixBforcefree(double* Bxc, double* Byc, double* Bzc,
     int j0, j1, j2;
     if (side == 0) { j0 = 0; j1 = 1; j2 = 2; }
     else           { j0 = nyc - 1; j1 = nyc - 2; j2 = nyc - 3; }
-    double yc0 = yStart + ((double)j0 - 0.5) * dy;
-    double yc1 = yStart + ((double)j1 - 0.5) * dy;
-    double yc2 = yStart + ((double)j2 - 0.5) * dy;
-    double arg0 = (yc0 - LyH) / delta;
-    double arg1 = (yc1 - LyH) / delta;
-    double arg2 = (yc2 - LyH) / delta;
+    T yc0 = yStart + ((T)j0 - 0.5) * dy;
+    T yc1 = yStart + ((T)j1 - 0.5) * dy;
+    T yc2 = yStart + ((T)j2 - 0.5) * dy;
+    T arg0 = (yc0 - LyH) / delta;
+    T arg1 = (yc1 - LyH) / delta;
+    T arg2 = (yc2 - LyH) / delta;
     int idx0 = (i * nyc + j0) * nzc + k;
     int idx1 = (i * nyc + j1) * nzc + k;
     int idx2 = (i * nyc + j2) * nzc + k;
@@ -1090,9 +1118,9 @@ __global__ void k_fixBforcefree(double* Bxc, double* Byc, double* Bzc,
     Bzc[idx2] = B0z / cosh(arg2);
 }
 
-void gpuFixBforcefreeKernel(double* Bxc, double* Byc, double* Bzc,
-                            double B0x, double B0y, double B0z,
-                            double yStart, double dy, double LyH, double delta,
+void gpuFixBforcefreeKernel(cudaSolverType* Bxc, cudaSolverType* Byc, cudaSolverType* Bzc,
+                            cudaSolverType B0x, cudaSolverType B0y, cudaSolverType B0z,
+                            cudaSolverType yStart, cudaSolverType dy, cudaSolverType LyH, cudaSolverType delta,
                             int side, int nxc, int nyc, int nzc,
                             cudaStream_t stream)
 {
@@ -1109,11 +1137,12 @@ void gpuFixBforcefreeKernel(double* Bxc, double* Byc, double* Bzc,
 // =========================================================================
 
 /** Set rhons = val inside sphere of radius R centred at (xc,yc,zc). */
-__global__ void k_constantChargePlanet(double* rhons, double val,
-                                       double R2,
-                                       double xc, double yc, double zc,
-                                       double xStart, double yStart, double zStart,
-                                       double dx, double dy, double dz,
+template<typename T>
+__global__ void k_constantChargePlanet(T* rhons, T val,
+                                       T R2,
+                                       T xc, T yc, T zc,
+                                       T xStart, T yStart, T zStart,
+                                       T dx, T dy, T dz,
                                        int nxn, int nyn, int nzn)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1123,17 +1152,17 @@ __global__ void k_constantChargePlanet(double* rhons, double val,
     int rem = tid % (nj * nk);
     int j = rem / nk + 1;
     int k = rem % nk + 1;
-    double xd = xStart + (double)(i - 1) * dx - xc;
-    double yd = yStart + (double)(j - 1) * dy - yc;
-    double zd = zStart + (double)(k - 1) * dz - zc;
+    T xd = xStart + (T)(i - 1) * dx - xc;
+    T yd = yStart + (T)(j - 1) * dy - yc;
+    T zd = zStart + (T)(k - 1) * dz - zc;
     if (xd * xd + yd * yd + zd * zd <= R2)
         rhons[(i * nyn + j) * nzn + k] = val;
 }
 
-void gpuConstantChargePlanetKernel(double* rhons, double val,
-                                   double R, double xc, double yc, double zc,
-                                   double xStart, double yStart, double zStart,
-                                   double dx, double dy, double dz,
+void gpuConstantChargePlanetKernel(cudaSolverType* rhons, cudaSolverType val,
+                                   cudaSolverType R, cudaSolverType xc, cudaSolverType yc, cudaSolverType zc,
+                                   cudaSolverType xStart, cudaSolverType yStart, cudaSolverType zStart,
+                                   cudaSolverType dx, cudaSolverType dy, cudaSolverType dz,
                                    int nxn, int nyn, int nzn,
                                    cudaStream_t stream)
 {
@@ -1146,11 +1175,12 @@ void gpuConstantChargePlanetKernel(double* rhons, double val,
 }
 
 /** 2D version: set rhons inside circle in XZ plane (nyn==4). */
-__global__ void k_constantChargePlanet2D(double* rhons, double val,
-                                          double R2,
-                                          double xc, double zc,
-                                          double xStart, double zStart,
-                                          double dx, double dz,
+template<typename T>
+__global__ void k_constantChargePlanet2D(T* rhons, T val,
+                                          T R2,
+                                          T xc, T zc,
+                                          T xStart, T zStart,
+                                          T dx, T dz,
                                           int nxn, int nyn, int nzn)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1158,18 +1188,18 @@ __global__ void k_constantChargePlanet2D(double* rhons, double val,
     if (tid >= ni * nk) return;
     int i = tid / nk + 1;
     int k = tid % nk + 1;
-    double xd = xStart + (double)(i - 1) * dx - xc;
-    double zd = zStart + (double)(k - 1) * dz - zc;
+    T xd = xStart + (T)(i - 1) * dx - xc;
+    T zd = zStart + (T)(k - 1) * dz - zc;
     if (xd * xd + zd * zd <= R2) {
         rhons[(i * nyn + 1) * nzn + k] = val;
         rhons[(i * nyn + 2) * nzn + k] = val;
     }
 }
 
-void gpuConstantChargePlanet2DKernel(double* rhons, double val,
-                                     double R, double xc, double zc,
-                                     double xStart, double zStart,
-                                     double dx, double dz,
+void gpuConstantChargePlanet2DKernel(cudaSolverType* rhons, cudaSolverType val,
+                                     cudaSolverType R, cudaSolverType xc, cudaSolverType zc,
+                                     cudaSolverType xStart, cudaSolverType zStart,
+                                     cudaSolverType dx, cudaSolverType dz,
                                      int nxn, int nyn, int nzn,
                                      cudaStream_t stream)
 {
@@ -1186,8 +1216,9 @@ void gpuConstantChargePlanet2DKernel(double* rhons, double val,
 // =========================================================================
 
 /** B -= gradPSI on boundary layers [layerStart..layerEnd] in direction dir. */
-__global__ void k_subLayers3(double* BxN, double* ByN, double* BzN,
-                             const double* gX, const double* gY, const double* gZ,
+template<typename T>
+__global__ void k_subLayers3(T* BxN, T* ByN, T* BzN,
+                             const T* gX, const T* gY, const T* gZ,
                              int dir, int layerStart, int layerEnd,
                              int nxn, int nyn, int nzn)
 {
@@ -1214,8 +1245,8 @@ __global__ void k_subLayers3(double* BxN, double* ByN, double* BzN,
     BzN[idx] -= gZ[idx];
 }
 
-void gpuSubBoundaryLayers3(double* BxN, double* ByN, double* BzN,
-                           const double* gX, const double* gY, const double* gZ,
+void gpuSubBoundaryLayers3(cudaSolverType* BxN, cudaSolverType* ByN, cudaSolverType* BzN,
+                           const cudaSolverType* gX, const cudaSolverType* gY, const cudaSolverType* gZ,
                            int dir, int layerStart, int layerEnd,
                            int nxn, int nyn, int nzn, cudaStream_t stream)
 {
@@ -1237,9 +1268,10 @@ void gpuSubBoundaryLayers3(double* BxN, double* ByN, double* BzN,
 // =========================================================================
 
 /** 7-point center Laplacian: lapC = d²f/dx² + d²f/dy² + d²f/dz². */
-__global__ void k_lapC2C(double* lapC, const double* fC,
+template<typename T>
+__global__ void k_lapC2C(T* lapC, const T* fC,
                          int nxc, int nyc, int nzc,
-                         double invdx2, double invdy2, double invdz2)
+                         T invdx2, T invdy2, T invdz2)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int ni = nxc - 2, nj = nyc - 2, nk = nzc - 2;
@@ -1256,9 +1288,9 @@ __global__ void k_lapC2C(double* lapC, const double* fC,
               + (fC[idx - 1]  - 2.0 * fC[idx] + fC[idx + 1])  * invdz2;
 }
 
-void gpuLapC2CKernel(double* lapC, const double* fC,
+void gpuLapC2CKernel(cudaSolverType* lapC, const cudaSolverType* fC,
                      int nxc, int nyc, int nzc,
-                     double invdx2, double invdy2, double invdz2,
+                     cudaSolverType invdx2, cudaSolverType invdy2, cudaSolverType invdz2,
                      cudaStream_t stream)
 {
     int total = (nxc - 2) * (nyc - 2) * (nzc - 2);
@@ -1279,27 +1311,28 @@ void gpuLapC2CKernel(double* lapC, const double* fC,
 
 #define BJK_IDX3(i, j, k, ny, nz) ((i) * (ny) * (nz) + (j) * (nz) + (k))
 
+template<typename T>
 __global__ void k_BlockJacobiPrecond(
-    double* __restrict__ zX,
-    double* __restrict__ zY,
-    double* __restrict__ zZ,
-    const double* __restrict__ rX,
-    const double* __restrict__ rY,
-    const double* __restrict__ rZ,
-    const double* __restrict__ Bxn,
-    const double* __restrict__ Byn,
-    const double* __restrict__ Bzn,
-    const double* __restrict__ Bx_ext,
-    const double* __restrict__ By_ext,
-    const double* __restrict__ Bz_ext,
-    const double* __restrict__ rhons,   // flat [ns][nxn][nyn][nzn]
-    const double* __restrict__ d_qom,   // [ns]
+    T* __restrict__ zX,
+    T* __restrict__ zY,
+    T* __restrict__ zZ,
+    const T* __restrict__ rX,
+    const T* __restrict__ rY,
+    const T* __restrict__ rZ,
+    const T* __restrict__ Bxn,
+    const T* __restrict__ Byn,
+    const T* __restrict__ Bzn,
+    const T* __restrict__ Bx_ext,
+    const T* __restrict__ By_ext,
+    const T* __restrict__ Bz_ext,
+    const T* __restrict__ rhons,   // flat [ns][nxn][nyn][nzn]
+    const T* __restrict__ d_qom,   // [ns]
     int ns,
-    double dt, double c_val, double delt, double FourPI,
-    double diagScalar,   // 1 + δ²/2 * cΣ
-    double wx,           // 1 + δ²/2 / hx²
-    double wy,           // 1 + δ²/2 / hy²
-    double wz,           // 1 + δ²/2 / hz²
+    T dt, T c_val, T delt, T FourPI,
+    T diagScalar,   // 1 + δ²/2 * cΣ
+    T wx,           // 1 + δ²/2 / hx²
+    T wy,           // 1 + δ²/2 / hy²
+    T wz,           // 1 + δ²/2 / hz²
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
@@ -1311,22 +1344,22 @@ __global__ void k_BlockJacobiPrecond(
     size_t nodeSlice = (size_t)nxn * nyn * nzn;
 
     // ---- Build μ tensor at this node (sum over species) ----
-    double mu00 = 0.0, mu01 = 0.0, mu02 = 0.0;
-    double mu10 = 0.0, mu11 = 0.0, mu12 = 0.0;
-    double mu20 = 0.0, mu21 = 0.0, mu22 = 0.0;
+    T mu00 = 0.0, mu01 = 0.0, mu02 = 0.0;
+    T mu10 = 0.0, mu11 = 0.0, mu12 = 0.0;
+    T mu20 = 0.0, mu21 = 0.0, mu22 = 0.0;
 
-    double bx = Bxn[idx] + Bx_ext[idx];
-    double by = Byn[idx] + By_ext[idx];
-    double bz = Bzn[idx] + Bz_ext[idx];
+    T bx = Bxn[idx] + Bx_ext[idx];
+    T by = Byn[idx] + By_ext[idx];
+    T bz = Bzn[idx] + Bz_ext[idx];
 
     for (int is = 0; is < ns; is++) {
-        double beta = 0.5 * d_qom[is] * dt / c_val;
-        double omcx = beta * bx;
-        double omcy = beta * by;
-        double omcz = beta * bz;
-        double omc2 = omcx * omcx + omcy * omcy + omcz * omcz;
-        double prefactor = FourPI / 2.0 * delt * dt / c_val * d_qom[is];
-        double denom = prefactor * rhons[is * nodeSlice + idx] / (1.0 + omc2);
+        T beta = 0.5 * d_qom[is] * dt / c_val;
+        T omcx = beta * bx;
+        T omcy = beta * by;
+        T omcz = beta * bz;
+        T omc2 = omcx * omcx + omcy * omcy + omcz * omcz;
+        T prefactor = FourPI / 2.0 * delt * dt / c_val * d_qom[is];
+        T denom = prefactor * rhons[is * nodeSlice + idx] / (1.0 + omc2);
 
         // μ_s = denom * (I + ω×  + ωωᵀ)
         // Row 0: E_x + (E_y*ωz - E_z*ωy) + (E·ω)*ωx
@@ -1348,25 +1381,25 @@ __global__ void k_BlockJacobiPrecond(
 
     // ---- Build D_i = diagScalar*I + diag(wx,wy,wz) * μ ----
     // D[p][s] = diagScalar * δ_{ps} + w_p * μ_{ps}
-    double D00 = diagScalar + wx * mu00;
-    double D01 =              wx * mu01;
-    double D02 =              wx * mu02;
-    double D10 =              wy * mu10;
-    double D11 = diagScalar + wy * mu11;
-    double D12 =              wy * mu12;
-    double D20 =              wz * mu20;
-    double D21 =              wz * mu21;
-    double D22 = diagScalar + wz * mu22;
+    T D00 = diagScalar + wx * mu00;
+    T D01 =              wx * mu01;
+    T D02 =              wx * mu02;
+    T D10 =              wy * mu10;
+    T D11 = diagScalar + wy * mu11;
+    T D12 =              wy * mu12;
+    T D20 =              wz * mu20;
+    T D21 =              wz * mu21;
+    T D22 = diagScalar + wz * mu22;
 
     // ---- Solve D * z = r via Cramer's rule ----
-    double rx = rX[idx], ry = rY[idx], rz = rZ[idx];
+    T rx = rX[idx], ry = rY[idx], rz = rZ[idx];
 
     // det(D)
-    double det = D00 * (D11 * D22 - D12 * D21)
+    T det = D00 * (D11 * D22 - D12 * D21)
                - D01 * (D10 * D22 - D12 * D20)
                + D02 * (D10 * D21 - D11 * D20);
 
-    double invDet = 1.0 / det;
+    T invDet = 1.0 / det;
 
     // Adjugate (cofactor transpose) applied to r
     zX[idx] = invDet * ( (D11 * D22 - D12 * D21) * rx
@@ -1383,14 +1416,14 @@ __global__ void k_BlockJacobiPrecond(
 }
 
 void gpuBlockJacobiPrecondKernel(
-    double* zX, double* zY, double* zZ,
-    const double* rX, const double* rY, const double* rZ,
-    const double* Bxn, const double* Byn, const double* Bzn,
-    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-    const double* rhons, const double* d_qom,
+    cudaSolverType* zX, cudaSolverType* zY, cudaSolverType* zZ,
+    const cudaSolverType* rX, const cudaSolverType* rY, const cudaSolverType* rZ,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons, const cudaSolverType* d_qom,
     int ns,
-    double dt, double c_val, double delt, double FourPI,
-    double diagScalar, double wx, double wy, double wz,
+    cudaSolverType dt, cudaSolverType c_val, cudaSolverType delt, cudaSolverType FourPI,
+    cudaSolverType diagScalar, cudaSolverType wx, cudaSolverType wy, cudaSolverType wz,
     int nxn, int nyn, int nzn,
     cudaStream_t stream)
 {
@@ -1414,19 +1447,20 @@ void gpuBlockJacobiPrecondKernel(
 //  Stores 9 entries per node in row-major order:
 //    Dinv[(row*3 + col) * nodeSlice + nodeIdx]
 // =========================================================================
+template<typename T>
 __global__ void k_PrecomputeBlockJacobiInv(
-    double* __restrict__ Dinv,
-    const double* __restrict__ Bxn,
-    const double* __restrict__ Byn,
-    const double* __restrict__ Bzn,
-    const double* __restrict__ Bx_ext,
-    const double* __restrict__ By_ext,
-    const double* __restrict__ Bz_ext,
-    const double* __restrict__ rhons,
-    const double* __restrict__ d_qom,
+    T* __restrict__ Dinv,
+    const T* __restrict__ Bxn,
+    const T* __restrict__ Byn,
+    const T* __restrict__ Bzn,
+    const T* __restrict__ Bx_ext,
+    const T* __restrict__ By_ext,
+    const T* __restrict__ Bz_ext,
+    const T* __restrict__ rhons,
+    const T* __restrict__ d_qom,
     int ns,
-    double dt, double c_val, double delt, double FourPI,
-    double diagScalar, double wx, double wy, double wz,
+    T dt, T c_val, T delt, T FourPI,
+    T diagScalar, T wx, T wy, T wz,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
@@ -1437,20 +1471,20 @@ __global__ void k_PrecomputeBlockJacobiInv(
     int idx = BJK_IDX3(i, j, k, nyn, nzn);
     size_t nodeSlice = (size_t)nxn * nyn * nzn;
 
-    double mu00 = 0.0, mu01 = 0.0, mu02 = 0.0;
-    double mu10 = 0.0, mu11 = 0.0, mu12 = 0.0;
-    double mu20 = 0.0, mu21 = 0.0, mu22 = 0.0;
+    T mu00 = 0.0, mu01 = 0.0, mu02 = 0.0;
+    T mu10 = 0.0, mu11 = 0.0, mu12 = 0.0;
+    T mu20 = 0.0, mu21 = 0.0, mu22 = 0.0;
 
-    double bx = Bxn[idx] + Bx_ext[idx];
-    double by = Byn[idx] + By_ext[idx];
-    double bz = Bzn[idx] + Bz_ext[idx];
+    T bx = Bxn[idx] + Bx_ext[idx];
+    T by = Byn[idx] + By_ext[idx];
+    T bz = Bzn[idx] + Bz_ext[idx];
 
     for (int is = 0; is < ns; is++) {
-        double beta = 0.5 * d_qom[is] * dt / c_val;
-        double omcx = beta * bx, omcy = beta * by, omcz = beta * bz;
-        double omc2 = omcx*omcx + omcy*omcy + omcz*omcz;
-        double prefactor = FourPI / 2.0 * delt * dt / c_val * d_qom[is];
-        double denom = prefactor * rhons[is * nodeSlice + idx] / (1.0 + omc2);
+        T beta = 0.5 * d_qom[is] * dt / c_val;
+        T omcx = beta * bx, omcy = beta * by, omcz = beta * bz;
+        T omc2 = omcx*omcx + omcy*omcy + omcz*omcz;
+        T prefactor = FourPI / 2.0 * delt * dt / c_val * d_qom[is];
+        T denom = prefactor * rhons[is * nodeSlice + idx] / (1.0 + omc2);
 
         mu00 += denom * (1.0 + omcx*omcx);
         mu01 += denom * (omcz + omcx*omcy);
@@ -1463,12 +1497,12 @@ __global__ void k_PrecomputeBlockJacobiInv(
         mu22 += denom * (1.0 + omcz*omcz);
     }
 
-    double D00 = diagScalar + wx*mu00, D01 = wx*mu01,              D02 = wx*mu02;
-    double D10 = wy*mu10,              D11 = diagScalar + wy*mu11, D12 = wy*mu12;
-    double D20 = wz*mu20,              D21 = wz*mu21,              D22 = diagScalar + wz*mu22;
+    T D00 = diagScalar + wx*mu00, D01 = wx*mu01,              D02 = wx*mu02;
+    T D10 = wy*mu10,              D11 = diagScalar + wy*mu11, D12 = wy*mu12;
+    T D20 = wz*mu20,              D21 = wz*mu21,              D22 = diagScalar + wz*mu22;
 
-    double det = D00*(D11*D22 - D12*D21) - D01*(D10*D22 - D12*D20) + D02*(D10*D21 - D11*D20);
-    double invDet = 1.0 / det;
+    T det = D00*(D11*D22 - D12*D21) - D01*(D10*D22 - D12*D20) + D02*(D10*D21 - D11*D20);
+    T invDet = 1.0 / det;
 
     Dinv[0 * nodeSlice + idx] = invDet * (D11*D22 - D12*D21);  // (0,0)
     Dinv[1 * nodeSlice + idx] = invDet * (D02*D21 - D01*D22);  // (0,1)
@@ -1482,12 +1516,12 @@ __global__ void k_PrecomputeBlockJacobiInv(
 }
 
 void gpuPrecomputeBlockJacobiInv(
-    double* Dinv,
-    const double* Bxn, const double* Byn, const double* Bzn,
-    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-    const double* rhons, const double* d_qom,
-    int ns, double dt, double c_val, double delt, double FourPI,
-    double diagScalar, double wx, double wy, double wz,
+    cudaSolverType* Dinv,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons, const cudaSolverType* d_qom,
+    int ns, cudaSolverType dt, cudaSolverType c_val, cudaSolverType delt, cudaSolverType FourPI,
+    cudaSolverType diagScalar, cudaSolverType wx, cudaSolverType wy, cudaSolverType wz,
     int nxn, int nyn, int nzn, cudaStream_t stream)
 {
     dim3 grid = interiorGrid3D(nxn, nyn, nzn);
@@ -1505,10 +1539,11 @@ void gpuPrecomputeBlockJacobiInv(
 //  Krylov layout: INTERLEAVED [Ex0,Ey0,Ez0, Ex1,Ey1,Ez1, ...]
 //  tid = (i-1)*ny2*nz2 + (j-1)*nz2 + (k-1), sol_idx = tid*3
 // =========================================================================
+template<typename T>
 __global__ void k_ApplyBlockJacobiInvKrylov(
-    double* __restrict__ zKrylov,
-    const double* __restrict__ rKrylov,
-    const double* __restrict__ Dinv,
+    T* __restrict__ zKrylov,
+    const T* __restrict__ rKrylov,
+    const T* __restrict__ Dinv,
     int nxn, int nyn, int nzn)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
@@ -1525,20 +1560,20 @@ __global__ void k_ApplyBlockJacobiInvKrylov(
     int sol_idx = tid * 3;
 
     // Read r from interleaved Krylov vector
-    double rx = rKrylov[sol_idx];
-    double ry = rKrylov[sol_idx + 1];
-    double rz = rKrylov[sol_idx + 2];
+    T rx = rKrylov[sol_idx];
+    T ry = rKrylov[sol_idx + 1];
+    T rz = rKrylov[sol_idx + 2];
 
     // Read D^{-1} entries
-    double A00 = Dinv[0 * nodeSlice + nodeIdx];
-    double A01 = Dinv[1 * nodeSlice + nodeIdx];
-    double A02 = Dinv[2 * nodeSlice + nodeIdx];
-    double A10 = Dinv[3 * nodeSlice + nodeIdx];
-    double A11 = Dinv[4 * nodeSlice + nodeIdx];
-    double A12 = Dinv[5 * nodeSlice + nodeIdx];
-    double A20 = Dinv[6 * nodeSlice + nodeIdx];
-    double A21 = Dinv[7 * nodeSlice + nodeIdx];
-    double A22 = Dinv[8 * nodeSlice + nodeIdx];
+    T A00 = Dinv[0 * nodeSlice + nodeIdx];
+    T A01 = Dinv[1 * nodeSlice + nodeIdx];
+    T A02 = Dinv[2 * nodeSlice + nodeIdx];
+    T A10 = Dinv[3 * nodeSlice + nodeIdx];
+    T A11 = Dinv[4 * nodeSlice + nodeIdx];
+    T A12 = Dinv[5 * nodeSlice + nodeIdx];
+    T A20 = Dinv[6 * nodeSlice + nodeIdx];
+    T A21 = Dinv[7 * nodeSlice + nodeIdx];
+    T A22 = Dinv[8 * nodeSlice + nodeIdx];
 
     // z = D^{-1} r
     zKrylov[sol_idx]     = A00*rx + A01*ry + A02*rz;
@@ -1547,7 +1582,7 @@ __global__ void k_ApplyBlockJacobiInvKrylov(
 }
 
 void gpuApplyBlockJacobiInvKrylov(
-    double* zKrylov, const double* rKrylov, const double* Dinv,
+    cudaSolverType* zKrylov, const cudaSolverType* rKrylov, const cudaSolverType* Dinv,
     int nxn, int nyn, int nzn, cudaStream_t stream)
 {
     dim3 grid = interiorGrid3D(nxn, nyn, nzn);

@@ -36,12 +36,12 @@
  * @param firstSpecies If true, writes output; if false, accumulates (+=).
  * @param stream      CUDA stream.
  */
-void gpuMUdotSpecies(double* MUdotX, double* MUdotY, double* MUdotZ,
-                     const double* vX, const double* vY, const double* vZ,
-                     const double* Bxn, const double* Byn, const double* Bzn,
-                     const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-                     const double* rhons_is,
-                     double beta, double prefactor,
+void gpuMUdotSpecies(cudaSolverType* MUdotX, cudaSolverType* MUdotY, cudaSolverType* MUdotZ,
+                     const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
+                     const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+                     const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+                     const cudaSolverType* rhons_is,
+                     cudaSolverType beta, cudaSolverType prefactor,
                      int nxn, int nyn, int nzn,
                      bool firstSpecies,
                      cudaStream_t stream = 0);
@@ -64,11 +64,11 @@ void gpuMUdotSpecies(double* MUdotX, double* MUdotY, double* MUdotZ,
  * @param nxn,nyn,nzn  Grid dimensions.
  * @param stream       CUDA stream.
  */
-void gpuPIdotSpecies(double* PIX, double* PIY, double* PIZ,
-                     const double* vX, const double* vY, const double* vZ,
-                     const double* Bxn, const double* Byn, const double* Bzn,
-                     const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-                     double beta,
+void gpuPIdotSpecies(cudaSolverType* PIX, cudaSolverType* PIY, cudaSolverType* PIZ,
+                     const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
+                     const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+                     const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+                     cudaSolverType beta,
                      int nxn, int nyn, int nzn,
                      cudaStream_t stream = 0);
 
@@ -100,30 +100,30 @@ void gpuPIdotSpecies(double* PIX, double* PIY, double* PIZ,
  * @param stream       CUDA stream.
  */
 void gpuPerfectConductorLeft(
-    double* imageX, double* imageY, double* imageZ,
-    const double* vectX, const double* vectY, const double* vectZ,
-    const double* Ex, const double* Ey, const double* Ez,
-    const double* Jxh, const double* Jyh, const double* Jzh,
-    const double* Bxn, const double* Byn, const double* Bzn,
-    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-    const double* rhons,
-    const double* d_qom, int ns,
-    double dt, double c, double th, double FourPI, double delt,
+    cudaSolverType* imageX, cudaSolverType* imageY, cudaSolverType* imageZ,
+    const cudaSolverType* vectX, const cudaSolverType* vectY, const cudaSolverType* vectZ,
+    const cudaSolverType* Ex, const cudaSolverType* Ey, const cudaSolverType* Ez,
+    const cudaSolverType* Jxh, const cudaSolverType* Jyh, const cudaSolverType* Jzh,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons,
+    const cudaSolverType* d_qom, int ns,
+    cudaSolverType dt, cudaSolverType c, cudaSolverType th, cudaSolverType FourPI, cudaSolverType delt,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream = 0);
 
 /** Same as gpuPerfectConductorLeft but for the RIGHT boundary. */
 void gpuPerfectConductorRight(
-    double* imageX, double* imageY, double* imageZ,
-    const double* vectX, const double* vectY, const double* vectZ,
-    const double* Ex, const double* Ey, const double* Ez,
-    const double* Jxh, const double* Jyh, const double* Jzh,
-    const double* Bxn, const double* Byn, const double* Bzn,
-    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-    const double* rhons,
-    const double* d_qom, int ns,
-    double dt, double c, double th, double FourPI, double delt,
+    cudaSolverType* imageX, cudaSolverType* imageY, cudaSolverType* imageZ,
+    const cudaSolverType* vectX, const cudaSolverType* vectY, const cudaSolverType* vectZ,
+    const cudaSolverType* Ex, const cudaSolverType* Ey, const cudaSolverType* Ez,
+    const cudaSolverType* Jxh, const cudaSolverType* Jyh, const cudaSolverType* Jzh,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons,
+    const cudaSolverType* d_qom, int ns,
+    cudaSolverType dt, cudaSolverType c, cudaSolverType th, cudaSolverType FourPI, cudaSolverType delt,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream = 0);
@@ -135,14 +135,14 @@ void gpuPerfectConductorRight(
  *   vectorX[bnd] = 0 (tangential components zeroed).
  */
 void gpuPerfectConductorLeftS(
-    double* vectorX, double* vectorY, double* vectorZ,
+    cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream = 0);
 
 /** Same as gpuPerfectConductorLeftS but for the RIGHT boundary. */
 void gpuPerfectConductorRightS(
-    double* vectorX, double* vectorY, double* vectorZ,
+    cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,
     int nxn, int nyn, int nzn,
     int dir,
     cudaStream_t stream = 0);
@@ -171,7 +171,7 @@ void gpuPerfectConductorRightS(
  */
 void gpuAdjustNonPeriodicDensities(
     int nptrs,
-    double* const* d_devPtrs,
+    cudaSolverType* const* d_devPtrs,
     int nxn, int nyn, int nzn,
     bool xLeftNull, bool xRightNull,
     bool yLeftNull, bool yRightNull,
@@ -183,30 +183,30 @@ void gpuAdjustNonPeriodicDensities(
 // =========================================================================
 
 /** Zero 3 arrays on a face plane interior [1..n-2]. */
-void gpuOpenBCZeroFace3(double* X, double* Y, double* Z,
+void gpuOpenBCZeroFace3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
     int dir, int faceIdx, int nx, int ny, int nz, cudaStream_t stream = 0);
 
 /** Set image = vect - injE on a face plane interior. */
-void gpuOpenBCImageDiffFace3(double* imX, double* imY, double* imZ,
-    const double* vX, const double* vY, const double* vZ,
-    double injE0, double injE1, double injE2,
+void gpuOpenBCImageDiffFace3(cudaSolverType* imX, cudaSolverType* imY, cudaSolverType* imZ,
+    const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
+    cudaSolverType injE0, cudaSolverType injE1, cudaSolverType injE2,
     int dir, int faceIdx, int nx, int ny, int nz, cudaStream_t stream = 0);
 
 /** SAL blend: v = v*sal + target*(1-sal) on boundary layers. */
-void gpuSALBlendLayers3(double* X, double* Y, double* Z,
-    double tgtX, double tgtY, double tgtZ,
+void gpuSALBlendLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
+    cudaSolverType tgtX, cudaSolverType tgtY, cudaSolverType tgtZ,
     int dir, int layerStart, int layerEnd,
-    double invNLayers, int ascending,
+    cudaSolverType invNLayers, int ascending,
     int nx, int ny, int nz, cudaStream_t stream = 0);
 
 /** Set 3 arrays to constant on boundary layers. */
-void gpuSetConstLayers3(double* X, double* Y, double* Z,
-    double cx, double cy, double cz,
+void gpuSetConstLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
+    cudaSolverType cx, cudaSolverType cy, cudaSolverType cz,
     int dir, int layerStart, int layerEnd,
     int nx, int ny, int nz, cudaStream_t stream = 0);
 
 /** Extrapolate: copy from reference plane to boundary layers. */
-void gpuExtrapolateLayers3(double* X, double* Y, double* Z,
+void gpuExtrapolateLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
     int dir, int layerStart, int layerEnd, int refLayer,
     int nx, int ny, int nz, cudaStream_t stream = 0);
 
@@ -215,21 +215,21 @@ void gpuExtrapolateLayers3(double* X, double* Y, double* Z,
 // =========================================================================
 
 /** Fix center B for GEM (tanh profile on Y-boundary layers). */
-void gpuFixBcGEMKernel(double* Bxc, double* Byc, double* Bzc,
-    double B0x, double B0y, double B0z,
-    double yStart, double dy, double LyH, double delta,
+void gpuFixBcGEMKernel(cudaSolverType* Bxc, cudaSolverType* Byc, cudaSolverType* Bzc,
+    cudaSolverType B0x, cudaSolverType B0y, cudaSolverType B0z,
+    cudaSolverType yStart, cudaSolverType dy, cudaSolverType LyH, cudaSolverType delta,
     int side, int nxc, int nyc, int nzc, cudaStream_t stream = 0);
 
 /** Fix node B for GEM (tanh profile using center Y coordinates). */
-void gpuFixBnGEMKernel(double* Bxn, double* Byn, double* Bzn,
-    double B0x, double B0y, double B0z,
-    double yStart, double dy, double LyH, double delta,
+void gpuFixBnGEMKernel(cudaSolverType* Bxn, cudaSolverType* Byn, cudaSolverType* Bzn,
+    cudaSolverType B0x, cudaSolverType B0y, cudaSolverType B0z,
+    cudaSolverType yStart, cudaSolverType dy, cudaSolverType LyH, cudaSolverType delta,
     int side, int nxn, int nyn, int nzn, int nyc, cudaStream_t stream = 0);
 
 /** Fix center B for ForceFree (tanh Bx, 1/cosh Bz on Y boundaries). */
-void gpuFixBforcefreeKernel(double* Bxc, double* Byc, double* Bzc,
-    double B0x, double B0y, double B0z,
-    double yStart, double dy, double LyH, double delta,
+void gpuFixBforcefreeKernel(cudaSolverType* Bxc, cudaSolverType* Byc, cudaSolverType* Bzc,
+    cudaSolverType B0x, cudaSolverType B0y, cudaSolverType B0z,
+    cudaSolverType yStart, cudaSolverType dy, cudaSolverType LyH, cudaSolverType delta,
     int side, int nxc, int nyc, int nzc, cudaStream_t stream = 0);
 
 // =========================================================================
@@ -237,16 +237,16 @@ void gpuFixBforcefreeKernel(double* Bxc, double* Byc, double* Bzc,
 // =========================================================================
 
 /** Set rhons = val inside sphere of radius R. */
-void gpuConstantChargePlanetKernel(double* rhons, double val,
-    double R, double xc, double yc, double zc,
-    double xStart, double yStart, double zStart,
-    double dx, double dy, double dz,
+void gpuConstantChargePlanetKernel(cudaSolverType* rhons, cudaSolverType val,
+    cudaSolverType R, cudaSolverType xc, cudaSolverType yc, cudaSolverType zc,
+    cudaSolverType xStart, cudaSolverType yStart, cudaSolverType zStart,
+    cudaSolverType dx, cudaSolverType dy, cudaSolverType dz,
     int nxn, int nyn, int nzn, cudaStream_t stream = 0);
 
 /** 2D version: set rhons inside circle in XZ plane. */
-void gpuConstantChargePlanet2DKernel(double* rhons, double val,
-    double R, double xc, double zc,
-    double xStart, double zStart, double dx, double dz,
+void gpuConstantChargePlanet2DKernel(cudaSolverType* rhons, cudaSolverType val,
+    cudaSolverType R, cudaSolverType xc, cudaSolverType zc,
+    cudaSolverType xStart, cudaSolverType zStart, cudaSolverType dx, cudaSolverType dz,
     int nxn, int nyn, int nzn, cudaStream_t stream = 0);
 
 // =========================================================================
@@ -254,8 +254,8 @@ void gpuConstantChargePlanet2DKernel(double* rhons, double val,
 // =========================================================================
 
 /** B -= gradPSI on boundary layers. */
-void gpuSubBoundaryLayers3(double* BxN, double* ByN, double* BzN,
-    const double* gX, const double* gY, const double* gZ,
+void gpuSubBoundaryLayers3(cudaSolverType* BxN, cudaSolverType* ByN, cudaSolverType* BzN,
+    const cudaSolverType* gX, const cudaSolverType* gY, const cudaSolverType* gZ,
     int dir, int layerStart, int layerEnd,
     int nxn, int nyn, int nzn, cudaStream_t stream = 0);
 
@@ -264,9 +264,9 @@ void gpuSubBoundaryLayers3(double* BxN, double* ByN, double* BzN,
 // =========================================================================
 
 /** 7-point center Laplacian. */
-void gpuLapC2CKernel(double* lapC, const double* fC,
+void gpuLapC2CKernel(cudaSolverType* lapC, const cudaSolverType* fC,
     int nxc, int nyc, int nzc,
-    double invdx2, double invdy2, double invdz2, cudaStream_t stream = 0);
+    cudaSolverType invdx2, cudaSolverType invdy2, cudaSolverType invdz2, cudaStream_t stream = 0);
 
 // =========================================================================
 //  Block-Jacobi preconditioner: solve D_i z_i = r_i per node
@@ -295,14 +295,14 @@ void gpuLapC2CKernel(double* lapC, const double* fC,
  * @param stream      CUDA stream.
  */
 void gpuBlockJacobiPrecondKernel(
-    double* zX, double* zY, double* zZ,
-    const double* rX, const double* rY, const double* rZ,
-    const double* Bxn, const double* Byn, const double* Bzn,
-    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-    const double* rhons, const double* d_qom,
+    cudaSolverType* zX, cudaSolverType* zY, cudaSolverType* zZ,
+    const cudaSolverType* rX, const cudaSolverType* rY, const cudaSolverType* rZ,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons, const cudaSolverType* d_qom,
     int ns,
-    double dt, double c_val, double delt, double FourPI,
-    double diagScalar, double wx, double wy, double wz,
+    cudaSolverType dt, cudaSolverType c_val, cudaSolverType delt, cudaSolverType FourPI,
+    cudaSolverType diagScalar, cudaSolverType wx, cudaSolverType wy, cudaSolverType wz,
     int nxn, int nyn, int nzn,
     cudaStream_t stream = 0);
 
@@ -311,12 +311,12 @@ void gpuBlockJacobiPrecondKernel(
  * Layout: Dinv[(row*3+col) * nodeSlice + nodeIdx]
  */
 void gpuPrecomputeBlockJacobiInv(
-    double* Dinv,
-    const double* Bxn, const double* Byn, const double* Bzn,
-    const double* Bx_ext, const double* By_ext, const double* Bz_ext,
-    const double* rhons, const double* d_qom,
-    int ns, double dt, double c_val, double delt, double FourPI,
-    double diagScalar, double wx, double wy, double wz,
+    cudaSolverType* Dinv,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn, const cudaSolverType* Bzn,
+    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons, const cudaSolverType* d_qom,
+    int ns, cudaSolverType dt, cudaSolverType c_val, cudaSolverType delt, cudaSolverType FourPI,
+    cudaSolverType diagScalar, cudaSolverType wx, cudaSolverType wy, cudaSolverType wz,
     int nxn, int nyn, int nzn, cudaStream_t stream = 0);
 
 /**
@@ -324,7 +324,7 @@ void gpuPrecomputeBlockJacobiInv(
  * zKrylov = D^{-1} * rKrylov  (no pack/unpack needed).
  */
 void gpuApplyBlockJacobiInvKrylov(
-    double* zKrylov, const double* rKrylov, const double* Dinv,
+    cudaSolverType* zKrylov, const cudaSolverType* rKrylov, const cudaSolverType* Dinv,
     int nxn, int nyn, int nzn, cudaStream_t stream = 0);
 
 #endif // GPU_SOLVER

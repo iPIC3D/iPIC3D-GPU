@@ -20,59 +20,67 @@ static inline size_t divCeil(size_t n, size_t d) { return (n + d - 1) / d; }
 //  Element-wise CUDA kernels
 // =========================================================================
 
-__global__ void k_scale(double* __restrict__ d, double alfa, size_t n)
+template<typename T>
+__global__ void k_scale(T* __restrict__ d, T alfa, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) d[i] *= alfa;
 }
 
-__global__ void k_scaleCopy(double* __restrict__ dst,
-                            const double* __restrict__ src,
-                            double alfa, size_t n)
+template<typename T>
+__global__ void k_scaleCopy(T* __restrict__ dst,
+                            const T* __restrict__ src,
+                            T alfa, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) dst[i] = src[i] * alfa;
 }
 
-__global__ void k_sum(double* __restrict__ dst,
-                      const double* __restrict__ src, size_t n)
+template<typename T>
+__global__ void k_sum(T* __restrict__ dst,
+                      const T* __restrict__ src, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) dst[i] += src[i];
 }
 
-__global__ void k_sub(double* __restrict__ dst,
-                      const double* __restrict__ src, size_t n)
+template<typename T>
+__global__ void k_sub(T* __restrict__ dst,
+                      const T* __restrict__ src, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) dst[i] -= src[i];
 }
 
-__global__ void k_subRes(double* __restrict__ res,
-                         const double* __restrict__ a,
-                         const double* __restrict__ b, size_t n)
+template<typename T>
+__global__ void k_subRes(T* __restrict__ res,
+                         const T* __restrict__ a,
+                         const T* __restrict__ b, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) res[i] = a[i] - b[i];
 }
 
-__global__ void k_addscale(double alfa,
-                           double* __restrict__ dst,
-                           const double* __restrict__ src, size_t n)
+template<typename T>
+__global__ void k_addscale(T alfa,
+                           T* __restrict__ dst,
+                           const T* __restrict__ src, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) dst[i] += alfa * src[i];
 }
 
-__global__ void k_addscale2(double alfa, double beta,
-                            double* __restrict__ dst,
-                            const double* __restrict__ src, size_t n)
+template<typename T>
+__global__ void k_addscale2(T alfa, T beta,
+                            T* __restrict__ dst,
+                            const T* __restrict__ src, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) dst[i] = beta * dst[i] + alfa * src[i];
 }
 
-__global__ void k_neg(double* __restrict__ d, size_t n)
+template<typename T>
+__global__ void k_neg(T* __restrict__ d, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) d[i] = -d[i];
@@ -82,46 +90,46 @@ __global__ void k_neg(double* __restrict__ d, size_t n)
 //  Element-wise host wrappers
 // =========================================================================
 
-void gpuEqValue(double* d, double val, size_t n, cudaStream_t stream)
+void gpuEqValue(cudaSolverType* d, cudaSolverType val, size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
-    if (val == 0.0) {
-        cudaErrChk(cudaMemsetAsync(d, 0, n * sizeof(double), stream));
+    if (val == cudaSolverType{}) {
+        cudaErrChk(cudaMemsetAsync(d, 0, n * sizeof(cudaSolverType), stream));
     } else {
         GPUFieldArray3::fillKernelLaunch(d, val, n, stream);
     }
 }
 
-void gpuScale(double* d, double alfa, size_t n, cudaStream_t stream)
+void gpuScale(cudaSolverType* d, cudaSolverType alfa, size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
     k_scale<<<divCeil(n, BLAS_BLOCK), BLAS_BLOCK, 0, stream>>>(d, alfa, n);
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuScaleCopy(double* dst, const double* src,
-                  double alfa, size_t n, cudaStream_t stream)
+void gpuScaleCopy(cudaSolverType* dst, const cudaSolverType* src,
+                  cudaSolverType alfa, size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
     k_scaleCopy<<<divCeil(n, BLAS_BLOCK), BLAS_BLOCK, 0, stream>>>(dst, src, alfa, n);
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSum(double* dst, const double* src, size_t n, cudaStream_t stream)
+void gpuSum(cudaSolverType* dst, const cudaSolverType* src, size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
     k_sum<<<divCeil(n, BLAS_BLOCK), BLAS_BLOCK, 0, stream>>>(dst, src, n);
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSub(double* dst, const double* src, size_t n, cudaStream_t stream)
+void gpuSub(cudaSolverType* dst, const cudaSolverType* src, size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
     k_sub<<<divCeil(n, BLAS_BLOCK), BLAS_BLOCK, 0, stream>>>(dst, src, n);
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSubRes(double* res, const double* a, const double* b,
+void gpuSubRes(cudaSolverType* res, const cudaSolverType* a, const cudaSolverType* b,
                size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
@@ -129,7 +137,7 @@ void gpuSubRes(double* res, const double* a, const double* b,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuAddscale(double alfa, double* dst, const double* src,
+void gpuAddscale(cudaSolverType alfa, cudaSolverType* dst, const cudaSolverType* src,
                  size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
@@ -137,7 +145,7 @@ void gpuAddscale(double alfa, double* dst, const double* src,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuAddscale2(double alfa, double beta, double* dst, const double* src,
+void gpuAddscale2(cudaSolverType alfa, cudaSolverType beta, cudaSolverType* dst, const cudaSolverType* src,
                   size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
@@ -145,17 +153,17 @@ void gpuAddscale2(double alfa, double beta, double* dst, const double* src,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuNeg(double* d, size_t n, cudaStream_t stream)
+void gpuNeg(cudaSolverType* d, size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
     k_neg<<<divCeil(n, BLAS_BLOCK), BLAS_BLOCK, 0, stream>>>(d, n);
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuEq(double* dst, const double* src, size_t n, cudaStream_t stream)
+void gpuEq(cudaSolverType* dst, const cudaSolverType* src, size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
-    cudaErrChk(cudaMemcpyAsync(dst, src, n * sizeof(double),
+    cudaErrChk(cudaMemcpyAsync(dst, src, n * sizeof(cudaSolverType),
                                 cudaMemcpyDeviceToDevice, stream));
 }
 
@@ -163,36 +171,40 @@ void gpuEq(double* dst, const double* src, size_t n, cudaStream_t stream)
 //  Fused triple kernels – 3 arrays in one launch
 // =========================================================================
 
-__global__ void k_neg3(double* __restrict__ dX,
-                       double* __restrict__ dY,
-                       double* __restrict__ dZ, size_t n)
+template<typename T>
+__global__ void k_neg3(T* __restrict__ dX,
+                       T* __restrict__ dY,
+                       T* __restrict__ dZ, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) { dX[i] = -dX[i]; dY[i] = -dY[i]; dZ[i] = -dZ[i]; }
 }
 
-__global__ void k_sub3(double* __restrict__ dstX, const double* __restrict__ srcX,
-                       double* __restrict__ dstY, const double* __restrict__ srcY,
-                       double* __restrict__ dstZ, const double* __restrict__ srcZ,
+template<typename T>
+__global__ void k_sub3(T* __restrict__ dstX, const T* __restrict__ srcX,
+                       T* __restrict__ dstY, const T* __restrict__ srcY,
+                       T* __restrict__ dstZ, const T* __restrict__ srcZ,
                        size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) { dstX[i] -= srcX[i]; dstY[i] -= srcY[i]; dstZ[i] -= srcZ[i]; }
 }
 
-__global__ void k_scale3(double* __restrict__ dX,
-                         double* __restrict__ dY,
-                         double* __restrict__ dZ,
-                         double alfa, size_t n)
+template<typename T>
+__global__ void k_scale3(T* __restrict__ dX,
+                         T* __restrict__ dY,
+                         T* __restrict__ dZ,
+                         T alfa, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) { dX[i] *= alfa; dY[i] *= alfa; dZ[i] *= alfa; }
 }
 
+template<typename T>
 __global__ void k_sumAddTwo3(
-    double* __restrict__ dstX, const double* __restrict__ srcAX, const double* __restrict__ srcBX,
-    double* __restrict__ dstY, const double* __restrict__ srcAY, const double* __restrict__ srcBY,
-    double* __restrict__ dstZ, const double* __restrict__ srcAZ, const double* __restrict__ srcBZ,
+    T* __restrict__ dstX, const T* __restrict__ srcAX, const T* __restrict__ srcBX,
+    T* __restrict__ dstY, const T* __restrict__ srcAY, const T* __restrict__ srcBY,
+    T* __restrict__ dstZ, const T* __restrict__ srcAZ, const T* __restrict__ srcBZ,
     size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
@@ -203,11 +215,12 @@ __global__ void k_sumAddTwo3(
     }
 }
 
+template<typename T>
 __global__ void k_scaleCopy3(
-    double* __restrict__ dstX, const double* __restrict__ srcX,
-    double* __restrict__ dstY, const double* __restrict__ srcY,
-    double* __restrict__ dstZ, const double* __restrict__ srcZ,
-    double alfa, size_t n)
+    T* __restrict__ dstX, const T* __restrict__ srcX,
+    T* __restrict__ dstY, const T* __restrict__ srcY,
+    T* __restrict__ dstZ, const T* __restrict__ srcZ,
+    T alfa, size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) {
@@ -217,21 +230,23 @@ __global__ void k_scaleCopy3(
     }
 }
 
+template<typename T>
 __global__ void k_sum3(
-    double* __restrict__ dstX, const double* __restrict__ srcX,
-    double* __restrict__ dstY, const double* __restrict__ srcY,
-    double* __restrict__ dstZ, const double* __restrict__ srcZ,
+    T* __restrict__ dstX, const T* __restrict__ srcX,
+    T* __restrict__ dstY, const T* __restrict__ srcY,
+    T* __restrict__ dstZ, const T* __restrict__ srcZ,
     size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i < n) { dstX[i] += srcX[i]; dstY[i] += srcY[i]; dstZ[i] += srcZ[i]; }
 }
 
+template<typename T>
 __global__ void k_addscale3(
-    double alfa,
-    double* __restrict__ dstX, const double* __restrict__ srcX,
-    double* __restrict__ dstY, const double* __restrict__ srcY,
-    double* __restrict__ dstZ, const double* __restrict__ srcZ,
+    T alfa,
+    T* __restrict__ dstX, const T* __restrict__ srcX,
+    T* __restrict__ dstY, const T* __restrict__ srcY,
+    T* __restrict__ dstZ, const T* __restrict__ srcZ,
     size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
@@ -242,11 +257,12 @@ __global__ void k_addscale3(
     }
 }
 
+template<typename T>
 __global__ void k_addscale2_3(
-    double alfa, double beta,
-    double* __restrict__ dstX, const double* __restrict__ srcX,
-    double* __restrict__ dstY, const double* __restrict__ srcY,
-    double* __restrict__ dstZ, const double* __restrict__ srcZ,
+    T alfa, T beta,
+    T* __restrict__ dstX, const T* __restrict__ srcX,
+    T* __restrict__ dstY, const T* __restrict__ srcY,
+    T* __restrict__ dstZ, const T* __restrict__ srcZ,
     size_t n)
 {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
@@ -259,16 +275,16 @@ __global__ void k_addscale2_3(
 
 // ---- Fused triple host wrappers ----
 
-void gpuNeg3(double* dX, double* dY, double* dZ, size_t n, cudaStream_t stream)
+void gpuNeg3(cudaSolverType* dX, cudaSolverType* dY, cudaSolverType* dZ, size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
     k_neg3<<<divCeil(n, BLAS_BLOCK), BLAS_BLOCK, 0, stream>>>(dX, dY, dZ, n);
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSub3(double* dstX, const double* srcX,
-             double* dstY, const double* srcY,
-             double* dstZ, const double* srcZ,
+void gpuSub3(cudaSolverType* dstX, const cudaSolverType* srcX,
+             cudaSolverType* dstY, const cudaSolverType* srcY,
+             cudaSolverType* dstZ, const cudaSolverType* srcZ,
              size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
@@ -276,16 +292,16 @@ void gpuSub3(double* dstX, const double* srcX,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuScale3(double* dX, double* dY, double* dZ, double alfa, size_t n, cudaStream_t stream)
+void gpuScale3(cudaSolverType* dX, cudaSolverType* dY, cudaSolverType* dZ, cudaSolverType alfa, size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
     k_scale3<<<divCeil(n, BLAS_BLOCK), BLAS_BLOCK, 0, stream>>>(dX, dY, dZ, alfa, n);
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSumAddTwo3(double* dstX, const double* srcAX, const double* srcBX,
-                   double* dstY, const double* srcAY, const double* srcBY,
-                   double* dstZ, const double* srcAZ, const double* srcBZ,
+void gpuSumAddTwo3(cudaSolverType* dstX, const cudaSolverType* srcAX, const cudaSolverType* srcBX,
+                   cudaSolverType* dstY, const cudaSolverType* srcAY, const cudaSolverType* srcBY,
+                   cudaSolverType* dstZ, const cudaSolverType* srcAZ, const cudaSolverType* srcBZ,
                    size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
@@ -294,16 +310,16 @@ void gpuSumAddTwo3(double* dstX, const double* srcAX, const double* srcBX,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSetAll0_N(double** d_ptrs, int nFields, size_t n, cudaStream_t stream)
+void gpuSetAll0_N(cudaSolverType** d_ptrs, int nFields, size_t n, cudaStream_t stream)
 {
     for (int f = 0; f < nFields; ++f)
-        cudaErrChk(cudaMemsetAsync(d_ptrs[f], 0, n * sizeof(double), stream));
+        cudaErrChk(cudaMemsetAsync(d_ptrs[f], 0, n * sizeof(cudaSolverType), stream));
 }
 
-void gpuScaleCopy3(double* dstX, const double* srcX,
-                   double* dstY, const double* srcY,
-                   double* dstZ, const double* srcZ,
-                   double alfa, size_t n, cudaStream_t stream)
+void gpuScaleCopy3(cudaSolverType* dstX, const cudaSolverType* srcX,
+                   cudaSolverType* dstY, const cudaSolverType* srcY,
+                   cudaSolverType* dstZ, const cudaSolverType* srcZ,
+                   cudaSolverType alfa, size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
     k_scaleCopy3<<<divCeil(n, BLAS_BLOCK), BLAS_BLOCK, 0, stream>>>(
@@ -311,9 +327,9 @@ void gpuScaleCopy3(double* dstX, const double* srcX,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSum3(double* dstX, const double* srcX,
-             double* dstY, const double* srcY,
-             double* dstZ, const double* srcZ,
+void gpuSum3(cudaSolverType* dstX, const cudaSolverType* srcX,
+             cudaSolverType* dstY, const cudaSolverType* srcY,
+             cudaSolverType* dstZ, const cudaSolverType* srcZ,
              size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
@@ -322,10 +338,10 @@ void gpuSum3(double* dstX, const double* srcX,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuAddscale3(double alfa,
-                  double* dstX, const double* srcX,
-                  double* dstY, const double* srcY,
-                  double* dstZ, const double* srcZ,
+void gpuAddscale3(cudaSolverType alfa,
+                  cudaSolverType* dstX, const cudaSolverType* srcX,
+                  cudaSolverType* dstY, const cudaSolverType* srcY,
+                  cudaSolverType* dstZ, const cudaSolverType* srcZ,
                   size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
@@ -334,10 +350,10 @@ void gpuAddscale3(double alfa,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuAddscale2_3(double alfa, double beta,
-                    double* dstX, const double* srcX,
-                    double* dstY, const double* srcY,
-                    double* dstZ, const double* srcZ,
+void gpuAddscale2_3(cudaSolverType alfa, cudaSolverType beta,
+                    cudaSolverType* dstX, const cudaSolverType* srcX,
+                    cudaSolverType* dstY, const cudaSolverType* srcY,
+                    cudaSolverType* dstZ, const cudaSolverType* srcZ,
                     size_t n, cudaStream_t stream)
 {
     if (n == 0) return;
@@ -356,12 +372,13 @@ void gpuAddscale2_3(double alfa, double beta,
  * The final per-block scalar is atomically added to *d_result.
  * d_result MUST be zeroed before launch.
  */
-__global__ void k_dotReduce(const double* __restrict__ a,
-                            const double* __restrict__ b,
+template<typename T>
+__global__ void k_dotReduce(const T* __restrict__ a,
+                            const T* __restrict__ b,
                             size_t n,
-                            double* __restrict__ d_result)
+                            T* __restrict__ d_result)
 {
-    double sum = 0.0;
+    T sum = 0.0;
     for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
          i < n;
          i += (size_t)blockDim.x * gridDim.x)
@@ -374,7 +391,7 @@ __global__ void k_dotReduce(const double* __restrict__ a,
         sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
 
     // First lane of each warp writes to shared memory
-    __shared__ double warpSums[MAX_WARPS];
+    __shared__ T warpSums[MAX_WARPS];
     int lane   = threadIdx.x % WARP_SIZE;
     int warpId = threadIdx.x / WARP_SIZE;
     if (lane == 0) warpSums[warpId] = sum;
@@ -390,23 +407,24 @@ __global__ void k_dotReduce(const double* __restrict__ a,
 }
 
 /** Same structure but computes norm2 (a[i]*a[i]). */
-__global__ void k_norm2Reduce(const double* __restrict__ a,
+template<typename T>
+__global__ void k_norm2Reduce(const T* __restrict__ a,
                               size_t n,
-                              double* __restrict__ d_result)
+                              T* __restrict__ d_result)
 {
-    double sum = 0.0;
+    T sum = 0.0;
     for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
          i < n;
          i += (size_t)blockDim.x * gridDim.x)
     {
-        double v = a[i];
+        T v = a[i];
         sum += v * v;
     }
 
     for (int offset = warpSize / 2; offset > 0; offset >>= 1)
         sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
 
-    __shared__ double warpSums[MAX_WARPS];
+    __shared__ T warpSums[MAX_WARPS];
     int lane   = threadIdx.x % WARP_SIZE;
     int warpId = threadIdx.x / WARP_SIZE;
     if (lane == 0) warpSums[warpId] = sum;
@@ -432,31 +450,31 @@ static inline int reduceGridSize(size_t n)
 //  Reduction host wrappers
 // =========================================================================
 
-double gpuDot(const double* a, const double* b, size_t n,
-              double* d_scratch, cudaStream_t stream)
+cudaSolverType gpuDot(const cudaSolverType* a, const cudaSolverType* b, size_t n,
+              cudaSolverType* d_scratch, cudaStream_t stream)
 {
-    cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(double), stream));
+    cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(cudaSolverType), stream));
     if (n > 0) {
         k_dotReduce<<<reduceGridSize(n), BLAS_BLOCK, 0, stream>>>(a, b, n, d_scratch);
         cudaErrChk(cudaGetLastError());
     }
-    double result;
-    cudaErrChk(cudaMemcpyAsync(&result, d_scratch, sizeof(double),
+    cudaSolverType result;
+    cudaErrChk(cudaMemcpyAsync(&result, d_scratch, sizeof(cudaSolverType),
                                 cudaMemcpyDeviceToHost, stream));
     cudaErrChk(cudaStreamSynchronize(stream));
     return result;
 }
 
-double gpuNorm2(const double* a, size_t n,
-                double* d_scratch, cudaStream_t stream)
+cudaSolverType gpuNorm2(const cudaSolverType* a, size_t n,
+                cudaSolverType* d_scratch, cudaStream_t stream)
 {
-    cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(double), stream));
+    cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(cudaSolverType), stream));
     if (n > 0) {
         k_norm2Reduce<<<reduceGridSize(n), BLAS_BLOCK, 0, stream>>>(a, n, d_scratch);
         cudaErrChk(cudaGetLastError());
     }
-    double result;
-    cudaErrChk(cudaMemcpyAsync(&result, d_scratch, sizeof(double),
+    cudaSolverType result;
+    cudaErrChk(cudaMemcpyAsync(&result, d_scratch, sizeof(cudaSolverType),
                                 cudaMemcpyDeviceToHost, stream));
     cudaErrChk(cudaStreamSynchronize(stream));
     return result;
@@ -464,29 +482,29 @@ double gpuNorm2(const double* a, size_t n,
 
 // ---- Async variants (no stream sync — caller must sync before reading) ----
 
-void gpuNorm2_async(const double* a, size_t n,
-                    double* d_scratch, double* h_result,
+void gpuNorm2_async(const cudaSolverType* a, size_t n,
+                    cudaSolverType* d_scratch, cudaSolverType* h_result,
                     cudaStream_t stream)
 {
-    cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(double), stream));
+    cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(cudaSolverType), stream));
     if (n > 0) {
         k_norm2Reduce<<<reduceGridSize(n), BLAS_BLOCK, 0, stream>>>(a, n, d_scratch);
         cudaErrChk(cudaGetLastError());
     }
-    cudaErrChk(cudaMemcpyAsync(h_result, d_scratch, sizeof(double),
+    cudaErrChk(cudaMemcpyAsync(h_result, d_scratch, sizeof(cudaSolverType),
                                 cudaMemcpyDeviceToHost, stream));
 }
 
-void gpuDot_async(const double* a, const double* b, size_t n,
-                  double* d_scratch, double* h_result,
+void gpuDot_async(const cudaSolverType* a, const cudaSolverType* b, size_t n,
+                  cudaSolverType* d_scratch, cudaSolverType* h_result,
                   cudaStream_t stream)
 {
-    cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(double), stream));
+    cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(cudaSolverType), stream));
     if (n > 0) {
         k_dotReduce<<<reduceGridSize(n), BLAS_BLOCK, 0, stream>>>(a, b, n, d_scratch);
         cudaErrChk(cudaGetLastError());
     }
-    cudaErrChk(cudaMemcpyAsync(h_result, d_scratch, sizeof(double),
+    cudaErrChk(cudaMemcpyAsync(h_result, d_scratch, sizeof(cudaSolverType),
                                 cudaMemcpyDeviceToHost, stream));
 }
 
@@ -504,10 +522,11 @@ void gpuDot_async(const double* a, const double* b, size_t n,
  * Template-free: runtime loop over j values.  k is small (~20) so the
  * overhead of the inner loop is negligible.
  */
-__global__ void k_batchedDotNorm(const double* __restrict__ w,
-                                 const double* __restrict__ V_base,
+template<typename T>
+__global__ void k_batchedDotNorm(const T* __restrict__ w,
+                                 const T* __restrict__ V_base,
                                  size_t stride, int kp1, size_t n,
-                                 double* __restrict__ d_out)
+                                 T* __restrict__ d_out)
 {
     // kp1 = k+1 (number of dot products). d_out has kp1+1 entries.
     // d_out[0..kp1-1] = dot(w, V[j]), d_out[kp1] = norm2(w).
@@ -515,7 +534,7 @@ __global__ void k_batchedDotNorm(const double* __restrict__ w,
     // Each thread accumulates kp1+1 partial sums.
     // Use stack-allocated array up to a compile-time max.
     constexpr int MAX_BATCH = 32;
-    double sums[MAX_BATCH + 1]; // +1 for norm2
+    T sums[MAX_BATCH + 1]; // +1 for norm2
     int total = kp1 + 1;
     if (total > MAX_BATCH + 1) total = MAX_BATCH + 1; // safety clamp
     for (int j = 0; j < total; j++) sums[j] = 0.0;
@@ -524,7 +543,7 @@ __global__ void k_batchedDotNorm(const double* __restrict__ w,
          i < n;
          i += (size_t)blockDim.x * gridDim.x)
     {
-        double wi = w[i];
+        T wi = w[i];
         for (int j = 0; j < kp1; j++)
             sums[j] += wi * V_base[j * stride + i];
         sums[kp1] += wi * wi;
@@ -537,7 +556,7 @@ __global__ void k_batchedDotNorm(const double* __restrict__ w,
     }
 
     // Per-warp partial sums to shared memory
-    extern __shared__ double smem[]; // MAX_WARPS * total
+    extern __shared__ T smem[]; // MAX_WARPS * total
     int lane   = threadIdx.x % WARP_SIZE;
     int warpId = threadIdx.x / WARP_SIZE;
 
@@ -550,7 +569,7 @@ __global__ void k_batchedDotNorm(const double* __restrict__ w,
     // First warp reduces across warps
     if (warpId == 0) {
         for (int j = 0; j < total; j++) {
-            double val = (lane < MAX_WARPS) ? smem[lane * total + j] : 0.0;
+            T val = (lane < MAX_WARPS) ? smem[lane * total + j] : 0.0;
             for (int offset = warpSize / 2; offset > 0; offset >>= 1)
                 val += __shfl_down_sync(0xFFFFFFFF, val, offset);
             if (lane == 0) atomicAdd(&d_out[j], val);
@@ -558,21 +577,21 @@ __global__ void k_batchedDotNorm(const double* __restrict__ w,
     }
 }
 
-void gpuBatchedDotNorm(const double* w, const double* V_base,
+void gpuBatchedDotNorm(const cudaSolverType* w, const cudaSolverType* V_base,
                        size_t stride, int k, size_t n,
-                       double* d_out, cudaStream_t stream)
+                       cudaSolverType* d_out, cudaStream_t stream)
 {
     int kp1 = k + 1; // number of dot products
     int total = kp1 + 1; // +1 for norm2
 
     // Zero the output array
-    cudaErrChk(cudaMemsetAsync(d_out, 0, total * sizeof(double), stream));
+    cudaErrChk(cudaMemsetAsync(d_out, 0, total * sizeof(cudaSolverType), stream));
 
     if (n == 0) return;
 
     int grid = reduceGridSize(n);
     // Shared memory: MAX_WARPS * total doubles
-    size_t smemBytes = MAX_WARPS * total * sizeof(double);
+    size_t smemBytes = MAX_WARPS * total * sizeof(cudaSolverType);
 
     k_batchedDotNorm<<<grid, BLAS_BLOCK, smemBytes, stream>>>(
         w, V_base, stride, kp1, n, d_out);
@@ -587,10 +606,11 @@ void gpuBatchedDotNorm(const double* w, const double* V_base,
  * Pack 3 node-based fields into interleaved Krylov vector.
  * Thread per interior point: tid ∈ [0, (nx-2)*(ny-2)*(nz-2)).
  */
-__global__ void k_phys2solver3(double* __restrict__ d_solver,
-                               const double* __restrict__ d_physX,
-                               const double* __restrict__ d_physY,
-                               const double* __restrict__ d_physZ,
+template<typename T>
+__global__ void k_phys2solver3(T* __restrict__ d_solver,
+                               const T* __restrict__ d_physX,
+                               const T* __restrict__ d_physY,
+                               const T* __restrict__ d_physZ,
                                int nx, int ny, int nz)
 {
     int numInterior = (nx - 2) * (ny - 2) * (nz - 2);
@@ -613,8 +633,9 @@ __global__ void k_phys2solver3(double* __restrict__ d_solver,
 }
 
 /** Pack single scalar field into Krylov vector (Poisson). */
-__global__ void k_phys2solver1(double* __restrict__ d_solver,
-                               const double* __restrict__ d_phys,
+template<typename T>
+__global__ void k_phys2solver1(T* __restrict__ d_solver,
+                               const T* __restrict__ d_phys,
                                int nx, int ny, int nz)
 {
     int numInterior = (nx - 2) * (ny - 2) * (nz - 2);
@@ -634,10 +655,11 @@ __global__ void k_phys2solver1(double* __restrict__ d_solver,
 }
 
 /** Unpack interleaved Krylov vector into 3 node-based fields. */
-__global__ void k_solver2phys3(double* __restrict__ d_physX,
-                               double* __restrict__ d_physY,
-                               double* __restrict__ d_physZ,
-                               const double* __restrict__ d_solver,
+template<typename T>
+__global__ void k_solver2phys3(T* __restrict__ d_physX,
+                               T* __restrict__ d_physY,
+                               T* __restrict__ d_physZ,
+                               const T* __restrict__ d_solver,
                                int nx, int ny, int nz)
 {
     int numInterior = (nx - 2) * (ny - 2) * (nz - 2);
@@ -660,8 +682,9 @@ __global__ void k_solver2phys3(double* __restrict__ d_physX,
 }
 
 /** Unpack Krylov vector into single scalar field (Poisson). */
-__global__ void k_solver2phys1(double* __restrict__ d_phys,
-                               const double* __restrict__ d_solver,
+template<typename T>
+__global__ void k_solver2phys1(T* __restrict__ d_phys,
+                               const T* __restrict__ d_solver,
                                int nx, int ny, int nz)
 {
     int numInterior = (nx - 2) * (ny - 2) * (nz - 2);
@@ -684,10 +707,10 @@ __global__ void k_solver2phys1(double* __restrict__ d_phys,
 //  Phys2Solver / Solver2Phys host wrappers
 // =========================================================================
 
-void gpuPhys2Solver3(double* d_solver,
-                     const double* d_physX,
-                     const double* d_physY,
-                     const double* d_physZ,
+void gpuPhys2Solver3(cudaSolverType* d_solver,
+                     const cudaSolverType* d_physX,
+                     const cudaSolverType* d_physY,
+                     const cudaSolverType* d_physZ,
                      int nx, int ny, int nz,
                      cudaStream_t stream)
 {
@@ -699,8 +722,8 @@ void gpuPhys2Solver3(double* d_solver,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuPhys2Solver1(double* d_solver,
-                     const double* d_phys,
+void gpuPhys2Solver1(cudaSolverType* d_solver,
+                     const cudaSolverType* d_phys,
                      int nx, int ny, int nz,
                      cudaStream_t stream)
 {
@@ -711,10 +734,10 @@ void gpuPhys2Solver1(double* d_solver,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSolver2Phys3(double* d_physX,
-                     double* d_physY,
-                     double* d_physZ,
-                     const double* d_solver,
+void gpuSolver2Phys3(cudaSolverType* d_physX,
+                     cudaSolverType* d_physY,
+                     cudaSolverType* d_physZ,
+                     const cudaSolverType* d_solver,
                      int nx, int ny, int nz,
                      cudaStream_t stream)
 {
@@ -726,8 +749,8 @@ void gpuSolver2Phys3(double* d_physX,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSolver2Phys1(double* d_phys,
-                     const double* d_solver,
+void gpuSolver2Phys1(cudaSolverType* d_phys,
+                     const cudaSolverType* d_solver,
                      int nx, int ny, int nz,
                      cudaStream_t stream)
 {
@@ -742,12 +765,12 @@ void gpuSolver2Phys1(double* d_phys,
 //  Scratch buffer helpers
 // =========================================================================
 
-void gpuBlasAllocScratch(double** d_scratch)
+void gpuBlasAllocScratch(cudaSolverType** d_scratch)
 {
-    cudaErrChk(cudaMalloc(d_scratch, sizeof(double)));
+    cudaErrChk(cudaMalloc(d_scratch, sizeof(cudaSolverType)));
 }
 
-void gpuBlasFreeScratch(double* d_scratch)
+void gpuBlasFreeScratch(cudaSolverType* d_scratch)
 {
     if (d_scratch) cudaFree(d_scratch);
 }

@@ -13,9 +13,9 @@
 // =========================================================================
 __global__ void gpuPackFieldForPclsToCenter(
     cudaFieldType* __restrict__ out,
-    const double*  __restrict__ Ex,      const double* __restrict__ Ey,      const double* __restrict__ Ez,
-    const double*  __restrict__ Bxn,     const double* __restrict__ Byn,     const double* __restrict__ Bzn,
-    const double*  __restrict__ Bx_ext,  const double* __restrict__ By_ext,  const double* __restrict__ Bz_ext,
+    const cudaSolverType*  __restrict__ Ex,      const cudaSolverType* __restrict__ Ey,      const cudaSolverType* __restrict__ Ez,
+    const cudaSolverType*  __restrict__ Bxn,     const cudaSolverType* __restrict__ Byn,     const cudaSolverType* __restrict__ Bzn,
+    const cudaSolverType*  __restrict__ Bx_ext,  const cudaSolverType* __restrict__ By_ext,  const cudaSolverType* __restrict__ Bz_ext,
     int nxn, int nyn, int nzn)
 {
     const int ncells = (nxn - 1) * (nyn - 1) * nzn;

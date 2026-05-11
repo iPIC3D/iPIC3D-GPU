@@ -24,15 +24,15 @@
 // =========================================================================
 
 /** Copy ghost faces for periodic X self-neighbour. */
-__global__ void gpuSelfCopyFaceX(double* __restrict__ arr,
+__global__ void gpuSelfCopyFaceX(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz);
 
 /** Copy ghost faces for periodic Y self-neighbour. */
-__global__ void gpuSelfCopyFaceY(double* __restrict__ arr,
+__global__ void gpuSelfCopyFaceY(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz);
 
 /** Copy ghost faces for periodic Z self-neighbour. */
-__global__ void gpuSelfCopyFaceZ(double* __restrict__ arr,
+__global__ void gpuSelfCopyFaceZ(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz);
 
 // =========================================================================
@@ -40,19 +40,19 @@ __global__ void gpuSelfCopyFaceZ(double* __restrict__ arr,
 // =========================================================================
 
 /** Copy ghost edges along X when X is periodic self-neighbour (Z and Y exist). */
-__global__ void gpuSelfCopyEdgeX(double* __restrict__ arr,
+__global__ void gpuSelfCopyEdgeX(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz,
                                   bool hasZright, bool hasZleft,
                                   bool hasYright, bool hasYleft);
 
 /** Copy ghost edges along Y when Y is periodic self-neighbour. */
-__global__ void gpuSelfCopyEdgeY(double* __restrict__ arr,
+__global__ void gpuSelfCopyEdgeY(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz,
                                   bool hasXright, bool hasXleft,
                                   bool hasZright, bool hasZleft);
 
 /** Copy ghost edges along Z when Z is periodic self-neighbour. */
-__global__ void gpuSelfCopyEdgeZ(double* __restrict__ arr,
+__global__ void gpuSelfCopyEdgeZ(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz,
                                   bool hasYright, bool hasYleft,
                                   bool hasXright, bool hasXleft);
@@ -61,17 +61,17 @@ __global__ void gpuSelfCopyEdgeZ(double* __restrict__ arr,
 //  CUDA kernels for local corner self-copy (periodic)
 // =========================================================================
 
-__global__ void gpuSelfCopyCornerX(double* __restrict__ arr,
+__global__ void gpuSelfCopyCornerX(cudaSolverType* __restrict__ arr,
                                     int nx, int ny, int nz,
                                     bool hasYleft, bool hasYright,
                                     bool hasZleft, bool hasZright);
 
-__global__ void gpuSelfCopyCornerY(double* __restrict__ arr,
+__global__ void gpuSelfCopyCornerY(cudaSolverType* __restrict__ arr,
                                     int nx, int ny, int nz,
                                     bool hasXleft, bool hasXright,
                                     bool hasZleft, bool hasZright);
 
-__global__ void gpuSelfCopyCornerZ(double* __restrict__ arr,
+__global__ void gpuSelfCopyCornerZ(cudaSolverType* __restrict__ arr,
                                     int nx, int ny, int nz,
                                     bool hasYleft, bool hasYright,
                                     bool hasXleft, bool hasXright);
@@ -81,24 +81,24 @@ __global__ void gpuSelfCopyCornerZ(double* __restrict__ arr,
 // =========================================================================
 
 /** Batched face self-copy: blockIdx.z selects the field. */
-__global__ void gpuBatchSelfCopyFaceX(double* const* __restrict__ fields, int nx, int ny, int nz);
-__global__ void gpuBatchSelfCopyFaceY(double* const* __restrict__ fields, int nx, int ny, int nz);
-__global__ void gpuBatchSelfCopyFaceZ(double* const* __restrict__ fields, int nx, int ny, int nz);
+__global__ void gpuBatchSelfCopyFaceX(cudaSolverType* const* __restrict__ fields, int nx, int ny, int nz);
+__global__ void gpuBatchSelfCopyFaceY(cudaSolverType* const* __restrict__ fields, int nx, int ny, int nz);
+__global__ void gpuBatchSelfCopyFaceZ(cudaSolverType* const* __restrict__ fields, int nx, int ny, int nz);
 
 /** Batched edge self-copy: blockIdx.y selects the field. */
-__global__ void gpuBatchSelfCopyEdgeX(double* const* __restrict__ fields, int nx, int ny, int nz,
+__global__ void gpuBatchSelfCopyEdgeX(cudaSolverType* const* __restrict__ fields, int nx, int ny, int nz,
                                        bool hasZright, bool hasZleft, bool hasYright, bool hasYleft);
-__global__ void gpuBatchSelfCopyEdgeY(double* const* __restrict__ fields, int nx, int ny, int nz,
+__global__ void gpuBatchSelfCopyEdgeY(cudaSolverType* const* __restrict__ fields, int nx, int ny, int nz,
                                        bool hasXright, bool hasXleft, bool hasZright, bool hasZleft);
-__global__ void gpuBatchSelfCopyEdgeZ(double* const* __restrict__ fields, int nx, int ny, int nz,
+__global__ void gpuBatchSelfCopyEdgeZ(cudaSolverType* const* __restrict__ fields, int nx, int ny, int nz,
                                        bool hasYright, bool hasYleft, bool hasXright, bool hasXleft);
 
 /** Batched corner self-copy: blockIdx.x selects the field. */
-__global__ void gpuBatchSelfCopyCornerX(double* const* __restrict__ fields, int nx, int ny, int nz,
+__global__ void gpuBatchSelfCopyCornerX(cudaSolverType* const* __restrict__ fields, int nx, int ny, int nz,
                                          bool hasYleft, bool hasYright, bool hasZleft, bool hasZright);
-__global__ void gpuBatchSelfCopyCornerY(double* const* __restrict__ fields, int nx, int ny, int nz,
+__global__ void gpuBatchSelfCopyCornerY(cudaSolverType* const* __restrict__ fields, int nx, int ny, int nz,
                                          bool hasXleft, bool hasXright, bool hasZleft, bool hasZright);
-__global__ void gpuBatchSelfCopyCornerZ(double* const* __restrict__ fields, int nx, int ny, int nz,
+__global__ void gpuBatchSelfCopyCornerZ(cudaSolverType* const* __restrict__ fields, int nx, int ny, int nz,
                                          bool hasYleft, bool hasYright, bool hasXleft, bool hasXright);
 
 // =========================================================================
@@ -106,27 +106,27 @@ __global__ void gpuBatchSelfCopyCornerZ(double* const* __restrict__ fields, int 
 // =========================================================================
 
 /** Apply BC on the Xleft face (ghost layer i=0). */
-__global__ void gpuBCfaceXleft(double* __restrict__ arr,
+__global__ void gpuBCfaceXleft(cudaSolverType* __restrict__ arr,
                                 int nx, int ny, int nz, int bcType);
 
 /** Apply BC on the Xright face (ghost layer i=nx-1). */
-__global__ void gpuBCfaceXright(double* __restrict__ arr,
+__global__ void gpuBCfaceXright(cudaSolverType* __restrict__ arr,
                                  int nx, int ny, int nz, int bcType);
 
 /** Apply BC on the Yleft face (ghost layer j=0). */
-__global__ void gpuBCfaceYleft(double* __restrict__ arr,
+__global__ void gpuBCfaceYleft(cudaSolverType* __restrict__ arr,
                                 int nx, int ny, int nz, int bcType);
 
 /** Apply BC on the Yright face (ghost layer j=ny-1). */
-__global__ void gpuBCfaceYright(double* __restrict__ arr,
+__global__ void gpuBCfaceYright(cudaSolverType* __restrict__ arr,
                                  int nx, int ny, int nz, int bcType);
 
 /** Apply BC on the Zleft face (ghost layer k=0). */
-__global__ void gpuBCfaceZleft(double* __restrict__ arr,
+__global__ void gpuBCfaceZleft(cudaSolverType* __restrict__ arr,
                                 int nx, int ny, int nz, int bcType);
 
 /** Apply BC on the Zright face (ghost layer k=nz-1). */
-__global__ void gpuBCfaceZright(double* __restrict__ arr,
+__global__ void gpuBCfaceZright(cudaSolverType* __restrict__ arr,
                                  int nx, int ny, int nz, int bcType);
 
 // =========================================================================
@@ -139,24 +139,24 @@ __global__ void gpuBCfaceZright(double* __restrict__ arr,
 //  CUDA kernels for additive interpolation (communicateInterp)
 // =========================================================================
 
-__global__ void gpuAddFaceX(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddFaceX(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasXright, bool hasXleft);
-__global__ void gpuAddFaceY(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddFaceY(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasYright, bool hasYleft);
-__global__ void gpuAddFaceZ(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddFaceZ(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasZright, bool hasZleft);
 
-__global__ void gpuAddEdgeZ(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddEdgeZ(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasXright, bool hasXleft,
                              bool hasYright, bool hasYleft);
-__global__ void gpuAddEdgeY(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddEdgeY(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasXright, bool hasXleft,
                              bool hasZright, bool hasZleft);
-__global__ void gpuAddEdgeX(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddEdgeX(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasYright, bool hasYleft,
                              bool hasZright, bool hasZleft);
 
-__global__ void gpuAddCorner(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddCorner(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                               bool hasXright, bool hasXleft,
                               bool hasYright, bool hasYleft,
                               bool hasZright, bool hasZleft);

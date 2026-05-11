@@ -13,6 +13,7 @@
 #ifdef GPU_SOLVER
 
 #include "GPUHaloComm.cuh"   // single-array self-copy kernels, BC kernels
+#include "GPUSolverMPITypes.h"
 #include "EMfields3D.h"
 #include "VCtopology3D.h"
 #include <cassert>
@@ -36,8 +37,8 @@ int bidx3(int i, int j, int k, int ny, int nz)
 // =========================================================================
 
 __global__ void k_batchPack2D(
-    double* __restrict__ buf,
-    double* const* __restrict__ fields,
+    cudaSolverType* __restrict__ buf,
+    cudaSolverType* const* __restrict__ fields,
     int nFields,
     int base,
     int outerStride,
@@ -59,8 +60,8 @@ __global__ void k_batchPack2D(
 }
 
 __global__ void k_batchUnpack2D(
-    const double* __restrict__ buf,
-    double* const* __restrict__ fields,
+    const cudaSolverType* __restrict__ buf,
+    cudaSolverType* const* __restrict__ fields,
     int nFields,
     int base,
     int outerStride,
@@ -86,8 +87,8 @@ __global__ void k_batchUnpack2D(
 // =========================================================================
 
 __global__ void k_batchPackCorners4(
-    double* __restrict__ buf,
-    double* const* __restrict__ fields,
+    cudaSolverType* __restrict__ buf,
+    cudaSolverType* const* __restrict__ fields,
     int nFields,
     int base,       // ix * ny * nz
     int ny, int nz)
@@ -104,8 +105,8 @@ __global__ void k_batchPackCorners4(
 }
 
 __global__ void k_batchUnpackCorners4(
-    const double* __restrict__ buf,
-    double* const* __restrict__ fields,
+    const cudaSolverType* __restrict__ buf,
+    cudaSolverType* const* __restrict__ fields,
     int nFields,
     int base,
     int ny, int nz)
@@ -128,7 +129,7 @@ __global__ void k_batchUnpackCorners4(
 // =========================================================================
 
 __global__ void k_batchAddFaceX(
-    double* const* __restrict__ fields,
+    cudaSolverType* const* __restrict__ fields,
     int nFields, int nx, int ny, int nz,
     bool hasRight, bool hasLeft)
 {
@@ -149,7 +150,7 @@ __global__ void k_batchAddFaceX(
 }
 
 __global__ void k_batchAddFaceY(
-    double* const* __restrict__ fields,
+    cudaSolverType* const* __restrict__ fields,
     int nFields, int nx, int ny, int nz,
     bool hasRight, bool hasLeft)
 {
@@ -170,7 +171,7 @@ __global__ void k_batchAddFaceY(
 }
 
 __global__ void k_batchAddFaceZ(
-    double* const* __restrict__ fields,
+    cudaSolverType* const* __restrict__ fields,
     int nFields, int nx, int ny, int nz,
     bool hasRight, bool hasLeft)
 {
@@ -191,7 +192,7 @@ __global__ void k_batchAddFaceZ(
 }
 
 __global__ void k_batchAddEdgeZ(
-    double* const* __restrict__ fields,
+    cudaSolverType* const* __restrict__ fields,
     int nFields, int nx, int ny, int nz,
     bool hasXR, bool hasXL, bool hasYR, bool hasYL)
 {
@@ -214,7 +215,7 @@ __global__ void k_batchAddEdgeZ(
 }
 
 __global__ void k_batchAddEdgeY(
-    double* const* __restrict__ fields,
+    cudaSolverType* const* __restrict__ fields,
     int nFields, int nx, int ny, int nz,
     bool hasXR, bool hasXL, bool hasZR, bool hasZL)
 {
@@ -237,7 +238,7 @@ __global__ void k_batchAddEdgeY(
 }
 
 __global__ void k_batchAddEdgeX(
-    double* const* __restrict__ fields,
+    cudaSolverType* const* __restrict__ fields,
     int nFields, int nx, int ny, int nz,
     bool hasYR, bool hasYL, bool hasZR, bool hasZL)
 {
@@ -260,7 +261,7 @@ __global__ void k_batchAddEdgeX(
 }
 
 __global__ void k_batchAddCorner(
-    double* const* __restrict__ fields,
+    cudaSolverType* const* __restrict__ fields,
     int nFields, int nx, int ny, int nz,
     bool hasXR, bool hasXL, bool hasYR, bool hasYL,
     bool hasZR, bool hasZL)
@@ -298,7 +299,7 @@ static constexpr int BATCH_BLK = 256;
 
 // Helper: launch k_batchPack2D with auto grid sizing
 static inline void launchPack2D(
-    double* buf, double* const* fields, int nFields,
+    cudaSolverType* buf, cudaSolverType* const* fields, int nFields,
     int base, int outerStride, int innerStride,
     int outerCount, int innerCount, cudaStream_t s)
 {
@@ -309,7 +310,7 @@ static inline void launchPack2D(
 }
 
 static inline void launchUnpack2D(
-    const double* buf, double* const* fields, int nFields,
+    const cudaSolverType* buf, cudaSolverType* const* fields, int nFields,
     int base, int outerStride, int innerStride,
     int outerCount, int innerCount, cudaStream_t s)
 {
@@ -320,7 +321,7 @@ static inline void launchUnpack2D(
 }
 
 void EMfields3D::gpuBatchedHaloExchange(
-    double** h_fieldPtrs,
+    cudaSolverType** h_fieldPtrs,
     int nFields,
     int nx, int ny, int nz,
     bool isCenterFlag,
@@ -344,8 +345,8 @@ void EMfields3D::gpuBatchedHaloExchange(
     const MPI_Comm comm = isParticle ? vct->getParticleComm() : vct->getFieldComm();
 
     // ---- Copy field pointers via pinned staging → device ----
-    memcpy(h_ptrArray_, h_fieldPtrs, nFields * sizeof(double*));
-    cudaMemcpyAsync(d_ptrArray_, h_ptrArray_, nFields * sizeof(double*),
+    memcpy(h_ptrArray_, h_fieldPtrs, nFields * sizeof(cudaSolverType*));
+    cudaMemcpyAsync(d_ptrArray_, h_ptrArray_, nFields * sizeof(cudaSolverType*),
                     cudaMemcpyHostToDevice, stream);
 
     // ---- Active-direction flags (not NULL and not self) ----
@@ -367,7 +368,7 @@ void EMfields3D::gpuBatchedHaloExchange(
     MPI_Status  mpiStat[12];
     MPI_Request mpiReq[12];
 
-    double* const* d_ptrs = (double* const*) d_ptrArray_;
+    cudaSolverType* const* d_ptrs = (cudaSolverType* const*) d_ptrArray_;
 
     // ---- Stencil sizes ----
     const int nyzF = (ny - 2) * (nz - 2);   // YZ face element count per field
@@ -415,20 +416,20 @@ void EMfields3D::gpuBatchedHaloExchange(
 
     // ---- Post face Irecv / Isend ----
     int rcnt = 0, scnt;
-    if (cc[0]) MPI_Irecv(d_haloBuf_recv_[0], nyzF*nFields, MPI_DOUBLE, xlN, tag_XR, comm, &mpiReq[rcnt++]);
-    if (cc[1]) MPI_Irecv(d_haloBuf_recv_[1], nyzF*nFields, MPI_DOUBLE, xrN, tag_XL, comm, &mpiReq[rcnt++]);
-    if (cc[2]) MPI_Irecv(d_haloBuf_recv_[2], nxzF*nFields, MPI_DOUBLE, ylN, tag_YR, comm, &mpiReq[rcnt++]);
-    if (cc[3]) MPI_Irecv(d_haloBuf_recv_[3], nxzF*nFields, MPI_DOUBLE, yrN, tag_YL, comm, &mpiReq[rcnt++]);
-    if (cc[4]) MPI_Irecv(d_haloBuf_recv_[4], nxyF*nFields, MPI_DOUBLE, zlN, tag_ZR, comm, &mpiReq[rcnt++]);
-    if (cc[5]) MPI_Irecv(d_haloBuf_recv_[5], nxyF*nFields, MPI_DOUBLE, zrN, tag_ZL, comm, &mpiReq[rcnt++]);
+    if (cc[0]) MPI_Irecv(d_haloBuf_recv_[0], nyzF*nFields, mpiTypeOf<cudaSolverType>(), xlN, tag_XR, comm, &mpiReq[rcnt++]);
+    if (cc[1]) MPI_Irecv(d_haloBuf_recv_[1], nyzF*nFields, mpiTypeOf<cudaSolverType>(), xrN, tag_XL, comm, &mpiReq[rcnt++]);
+    if (cc[2]) MPI_Irecv(d_haloBuf_recv_[2], nxzF*nFields, mpiTypeOf<cudaSolverType>(), ylN, tag_YR, comm, &mpiReq[rcnt++]);
+    if (cc[3]) MPI_Irecv(d_haloBuf_recv_[3], nxzF*nFields, mpiTypeOf<cudaSolverType>(), yrN, tag_YL, comm, &mpiReq[rcnt++]);
+    if (cc[4]) MPI_Irecv(d_haloBuf_recv_[4], nxyF*nFields, mpiTypeOf<cudaSolverType>(), zlN, tag_ZR, comm, &mpiReq[rcnt++]);
+    if (cc[5]) MPI_Irecv(d_haloBuf_recv_[5], nxyF*nFields, mpiTypeOf<cudaSolverType>(), zrN, tag_ZL, comm, &mpiReq[rcnt++]);
 
     scnt = rcnt;
-    if (cc[0]) MPI_Isend(d_haloBuf_send_[0], nyzF*nFields, MPI_DOUBLE, xlN, tag_XL, comm, &mpiReq[scnt++]);
-    if (cc[1]) MPI_Isend(d_haloBuf_send_[1], nyzF*nFields, MPI_DOUBLE, xrN, tag_XR, comm, &mpiReq[scnt++]);
-    if (cc[2]) MPI_Isend(d_haloBuf_send_[2], nxzF*nFields, MPI_DOUBLE, ylN, tag_YL, comm, &mpiReq[scnt++]);
-    if (cc[3]) MPI_Isend(d_haloBuf_send_[3], nxzF*nFields, MPI_DOUBLE, yrN, tag_YR, comm, &mpiReq[scnt++]);
-    if (cc[4]) MPI_Isend(d_haloBuf_send_[4], nxyF*nFields, MPI_DOUBLE, zlN, tag_ZL, comm, &mpiReq[scnt++]);
-    if (cc[5]) MPI_Isend(d_haloBuf_send_[5], nxyF*nFields, MPI_DOUBLE, zrN, tag_ZR, comm, &mpiReq[scnt++]);
+    if (cc[0]) MPI_Isend(d_haloBuf_send_[0], nyzF*nFields, mpiTypeOf<cudaSolverType>(), xlN, tag_XL, comm, &mpiReq[scnt++]);
+    if (cc[1]) MPI_Isend(d_haloBuf_send_[1], nyzF*nFields, mpiTypeOf<cudaSolverType>(), xrN, tag_XR, comm, &mpiReq[scnt++]);
+    if (cc[2]) MPI_Isend(d_haloBuf_send_[2], nxzF*nFields, mpiTypeOf<cudaSolverType>(), ylN, tag_YL, comm, &mpiReq[scnt++]);
+    if (cc[3]) MPI_Isend(d_haloBuf_send_[3], nxzF*nFields, mpiTypeOf<cudaSolverType>(), yrN, tag_YR, comm, &mpiReq[scnt++]);
+    if (cc[4]) MPI_Isend(d_haloBuf_send_[4], nxyF*nFields, mpiTypeOf<cudaSolverType>(), zlN, tag_ZL, comm, &mpiReq[scnt++]);
+    if (cc[5]) MPI_Isend(d_haloBuf_send_[5], nxyF*nFields, mpiTypeOf<cudaSolverType>(), zrN, tag_ZR, comm, &mpiReq[scnt++]);
 
     // ---- Self-copy faces (periodic self-neighbour, batched) ----
     {
@@ -490,7 +491,7 @@ void EMfields3D::gpuBatchedHaloExchange(
         for (int dir = 0; dir < 2; ++dir) {   // dir 0=XL, 1=XR
             if (!cc[dir]) continue;
             int ix_send = (dir == 0) ? 1 : (nx - 2);
-            double* buf = d_haloBuf_send_[dir];
+            cudaSolverType* buf = d_haloBuf_send_[dir];
             int off = 0;
             if (cc[4]) {  // ZL edge at jz=0
                 launchPack2D(buf + off, d_ptrs, nFields,
@@ -508,7 +509,7 @@ void EMfields3D::gpuBatchedHaloExchange(
         for (int dir = 2; dir < 4; ++dir) {   // dir 2=YL, 3=YR
             if (!cc[dir]) continue;
             int iy_send = (dir == 2) ? 1 : (ny - 2);
-            double* buf = d_haloBuf_send_[dir];
+            cudaSolverType* buf = d_haloBuf_send_[dir];
             int off = 0;
             if (cc[0]) {  // XL edge at ix=0
                 launchPack2D(buf + off, d_ptrs, nFields,
@@ -526,7 +527,7 @@ void EMfields3D::gpuBatchedHaloExchange(
         for (int dir = 4; dir < 6; ++dir) {   // dir 4=ZL, 5=ZR
             if (!cc[dir]) continue;
             int iz_send = (dir == 4) ? 1 : (nz - 2);
-            double* buf = d_haloBuf_send_[dir];
+            cudaSolverType* buf = d_haloBuf_send_[dir];
             int off = 0;
             if (cc[2]) {  // YL edge at iy=0
                 launchPack2D(buf + off, d_ptrs, nFields,
@@ -552,7 +553,7 @@ void EMfields3D::gpuBatchedHaloExchange(
             if (nEdges == 0) continue;
             int neighbor = (dir == 0) ? xlN : xrN;
             int tag      = (dir == 0) ? tag_XR : tag_XL;
-            MPI_Irecv(d_haloBuf_recv_[dir], nEdges*edgeYlen*nFields, MPI_DOUBLE,
+            MPI_Irecv(d_haloBuf_recv_[dir], nEdges*edgeYlen*nFields, mpiTypeOf<cudaSolverType>(),
                       neighbor, tag, comm, &mpiReq[rcnt++]);
         }
         // Recv Z-edges from Y neighbours
@@ -562,7 +563,7 @@ void EMfields3D::gpuBatchedHaloExchange(
             if (nEdges == 0) continue;
             int neighbor = (dir == 2) ? ylN : yrN;
             int tag      = (dir == 2) ? tag_YR : tag_YL;
-            MPI_Irecv(d_haloBuf_recv_[dir], nEdges*edgeZlen*nFields, MPI_DOUBLE,
+            MPI_Irecv(d_haloBuf_recv_[dir], nEdges*edgeZlen*nFields, mpiTypeOf<cudaSolverType>(),
                       neighbor, tag, comm, &mpiReq[rcnt++]);
         }
         // Recv X-edges from Z neighbours
@@ -572,7 +573,7 @@ void EMfields3D::gpuBatchedHaloExchange(
             if (nEdges == 0) continue;
             int neighbor = (dir == 4) ? zlN : zrN;
             int tag      = (dir == 4) ? tag_ZR : tag_ZL;
-            MPI_Irecv(d_haloBuf_recv_[dir], nEdges*edgeXlen*nFields, MPI_DOUBLE,
+            MPI_Irecv(d_haloBuf_recv_[dir], nEdges*edgeXlen*nFields, mpiTypeOf<cudaSolverType>(),
                       neighbor, tag, comm, &mpiReq[rcnt++]);
         }
 
@@ -585,7 +586,7 @@ void EMfields3D::gpuBatchedHaloExchange(
             if (nEdges == 0) continue;
             int neighbor = (dir == 0) ? xlN : xrN;
             int tag      = (dir == 0) ? tag_XL : tag_XR;
-            MPI_Isend(d_haloBuf_send_[dir], nEdges*edgeYlen*nFields, MPI_DOUBLE,
+            MPI_Isend(d_haloBuf_send_[dir], nEdges*edgeYlen*nFields, mpiTypeOf<cudaSolverType>(),
                       neighbor, tag, comm, &mpiReq[scnt++]);
         }
         // Send Z-edges to Y neighbours
@@ -595,7 +596,7 @@ void EMfields3D::gpuBatchedHaloExchange(
             if (nEdges == 0) continue;
             int neighbor = (dir == 2) ? ylN : yrN;
             int tag      = (dir == 2) ? tag_YL : tag_YR;
-            MPI_Isend(d_haloBuf_send_[dir], nEdges*edgeZlen*nFields, MPI_DOUBLE,
+            MPI_Isend(d_haloBuf_send_[dir], nEdges*edgeZlen*nFields, mpiTypeOf<cudaSolverType>(),
                       neighbor, tag, comm, &mpiReq[scnt++]);
         }
         // Send X-edges to Z neighbours
@@ -605,7 +606,7 @@ void EMfields3D::gpuBatchedHaloExchange(
             if (nEdges == 0) continue;
             int neighbor = (dir == 4) ? zlN : zrN;
             int tag      = (dir == 4) ? tag_ZL : tag_ZR;
-            MPI_Isend(d_haloBuf_send_[dir], nEdges*edgeXlen*nFields, MPI_DOUBLE,
+            MPI_Isend(d_haloBuf_send_[dir], nEdges*edgeXlen*nFields, mpiTypeOf<cudaSolverType>(),
                       neighbor, tag, comm, &mpiReq[scnt++]);
         }
 
@@ -641,7 +642,7 @@ void EMfields3D::gpuBatchedHaloExchange(
         for (int dir = 0; dir < 2; ++dir) {
             if (!cc[dir]) continue;
             int ix_recv = (dir == 0) ? 0 : (nx - 1);
-            const double* buf = d_haloBuf_recv_[dir];
+            const cudaSolverType* buf = d_haloBuf_recv_[dir];
             int off = 0;
             if (cc[4]) {
                 launchUnpack2D(buf + off, d_ptrs, nFields,
@@ -658,7 +659,7 @@ void EMfields3D::gpuBatchedHaloExchange(
         for (int dir = 2; dir < 4; ++dir) {
             if (!cc[dir]) continue;
             int iy_recv = (dir == 2) ? 0 : (ny - 1);
-            const double* buf = d_haloBuf_recv_[dir];
+            const cudaSolverType* buf = d_haloBuf_recv_[dir];
             int off = 0;
             if (cc[0]) {
                 launchUnpack2D(buf + off, d_ptrs, nFields,
@@ -675,7 +676,7 @@ void EMfields3D::gpuBatchedHaloExchange(
         for (int dir = 4; dir < 6; ++dir) {
             if (!cc[dir]) continue;
             int iz_recv = (dir == 4) ? 0 : (nz - 1);
-            const double* buf = d_haloBuf_recv_[dir];
+            const cudaSolverType* buf = d_haloBuf_recv_[dir];
             int off = 0;
             if (cc[2]) {
                 launchUnpack2D(buf + off, d_ptrs, nFields,
@@ -715,11 +716,11 @@ void EMfields3D::gpuBatchedHaloExchange(
 
             // Post corner Irecv / Isend
             rcnt = 0;
-            if (cc[0]) MPI_Irecv(d_haloBuf_recv_[0], 4*nFields, MPI_DOUBLE, xlN, tag_XR, comm, &mpiReq[rcnt++]);
-            if (cc[1]) MPI_Irecv(d_haloBuf_recv_[1], 4*nFields, MPI_DOUBLE, xrN, tag_XL, comm, &mpiReq[rcnt++]);
+            if (cc[0]) MPI_Irecv(d_haloBuf_recv_[0], 4*nFields, mpiTypeOf<cudaSolverType>(), xlN, tag_XR, comm, &mpiReq[rcnt++]);
+            if (cc[1]) MPI_Irecv(d_haloBuf_recv_[1], 4*nFields, mpiTypeOf<cudaSolverType>(), xrN, tag_XL, comm, &mpiReq[rcnt++]);
             scnt = rcnt;
-            if (cc[0]) MPI_Isend(d_haloBuf_send_[0], 4*nFields, MPI_DOUBLE, xlN, tag_XL, comm, &mpiReq[scnt++]);
-            if (cc[1]) MPI_Isend(d_haloBuf_send_[1], 4*nFields, MPI_DOUBLE, xrN, tag_XR, comm, &mpiReq[scnt++]);
+            if (cc[0]) MPI_Isend(d_haloBuf_send_[0], 4*nFields, mpiTypeOf<cudaSolverType>(), xlN, tag_XL, comm, &mpiReq[scnt++]);
+            if (cc[1]) MPI_Isend(d_haloBuf_send_[1], 4*nFields, mpiTypeOf<cudaSolverType>(), xrN, tag_XR, comm, &mpiReq[scnt++]);
 
             // Corner self-copy (batched)
             {
@@ -830,7 +831,7 @@ void EMfields3D::gpuBatchedHaloExchange(
 #ifdef HALO_OVERLAP
 
 int EMfields3D::gpuBatchedHaloBeginExchange(
-    double** h_fieldPtrs, int nFields,
+    cudaSolverType** h_fieldPtrs, int nFields,
     int nx, int ny, int nz,
     bool isCenterFlag, bool isFaceOnlyFlag,
     bool needInterp, bool isParticle,
@@ -847,8 +848,8 @@ int EMfields3D::gpuBatchedHaloBeginExchange(
     const int zrN = isParticle ? vct->getZright_neighbor_P() : vct->getZright_neighbor();
     const MPI_Comm comm = isParticle ? vct->getParticleComm() : vct->getFieldComm();
 
-    memcpy(h_ptrArray_, h_fieldPtrs, nFields * sizeof(double*));
-    cudaMemcpyAsync(d_ptrArray_, h_ptrArray_, nFields * sizeof(double*),
+    memcpy(h_ptrArray_, h_fieldPtrs, nFields * sizeof(cudaSolverType*));
+    cudaMemcpyAsync(d_ptrArray_, h_ptrArray_, nFields * sizeof(cudaSolverType*),
                     cudaMemcpyHostToDevice, stream);
 
     int cc[6];
@@ -864,7 +865,7 @@ int EMfields3D::gpuBatchedHaloBeginExchange(
     const int tag_YL = 2, tag_YR = 5;
     const int tag_ZL = 3, tag_ZR = 6;
 
-    double* const* d_ptrs = (double* const*) d_ptrArray_;
+    cudaSolverType* const* d_ptrs = (cudaSolverType* const*) d_ptrArray_;
     const int nyzF = (ny - 2) * (nz - 2);
     const int nxzF = (nx - 2) * (nz - 2);
     const int nxyF = (nx - 2) * (ny - 2);
@@ -881,19 +882,19 @@ int EMfields3D::gpuBatchedHaloBeginExchange(
 
     // ---- Post face Irecv / Isend ----
     int rcnt = 0;
-    if (cc[0]) MPI_Irecv(d_haloBuf_recv_[0], nyzF*nFields, MPI_DOUBLE, xlN, tag_XR, comm, &haloFaceRequests_[rcnt++]);
-    if (cc[1]) MPI_Irecv(d_haloBuf_recv_[1], nyzF*nFields, MPI_DOUBLE, xrN, tag_XL, comm, &haloFaceRequests_[rcnt++]);
-    if (cc[2]) MPI_Irecv(d_haloBuf_recv_[2], nxzF*nFields, MPI_DOUBLE, ylN, tag_YR, comm, &haloFaceRequests_[rcnt++]);
-    if (cc[3]) MPI_Irecv(d_haloBuf_recv_[3], nxzF*nFields, MPI_DOUBLE, yrN, tag_YL, comm, &haloFaceRequests_[rcnt++]);
-    if (cc[4]) MPI_Irecv(d_haloBuf_recv_[4], nxyF*nFields, MPI_DOUBLE, zlN, tag_ZR, comm, &haloFaceRequests_[rcnt++]);
-    if (cc[5]) MPI_Irecv(d_haloBuf_recv_[5], nxyF*nFields, MPI_DOUBLE, zrN, tag_ZL, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[0]) MPI_Irecv(d_haloBuf_recv_[0], nyzF*nFields, mpiTypeOf<cudaSolverType>(), xlN, tag_XR, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[1]) MPI_Irecv(d_haloBuf_recv_[1], nyzF*nFields, mpiTypeOf<cudaSolverType>(), xrN, tag_XL, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[2]) MPI_Irecv(d_haloBuf_recv_[2], nxzF*nFields, mpiTypeOf<cudaSolverType>(), ylN, tag_YR, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[3]) MPI_Irecv(d_haloBuf_recv_[3], nxzF*nFields, mpiTypeOf<cudaSolverType>(), yrN, tag_YL, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[4]) MPI_Irecv(d_haloBuf_recv_[4], nxyF*nFields, mpiTypeOf<cudaSolverType>(), zlN, tag_ZR, comm, &haloFaceRequests_[rcnt++]);
+    if (cc[5]) MPI_Irecv(d_haloBuf_recv_[5], nxyF*nFields, mpiTypeOf<cudaSolverType>(), zrN, tag_ZL, comm, &haloFaceRequests_[rcnt++]);
     int scnt = rcnt;
-    if (cc[0]) MPI_Isend(d_haloBuf_send_[0], nyzF*nFields, MPI_DOUBLE, xlN, tag_XL, comm, &haloFaceRequests_[scnt++]);
-    if (cc[1]) MPI_Isend(d_haloBuf_send_[1], nyzF*nFields, MPI_DOUBLE, xrN, tag_XR, comm, &haloFaceRequests_[scnt++]);
-    if (cc[2]) MPI_Isend(d_haloBuf_send_[2], nxzF*nFields, MPI_DOUBLE, ylN, tag_YL, comm, &haloFaceRequests_[scnt++]);
-    if (cc[3]) MPI_Isend(d_haloBuf_send_[3], nxzF*nFields, MPI_DOUBLE, yrN, tag_YR, comm, &haloFaceRequests_[scnt++]);
-    if (cc[4]) MPI_Isend(d_haloBuf_send_[4], nxyF*nFields, MPI_DOUBLE, zlN, tag_ZL, comm, &haloFaceRequests_[scnt++]);
-    if (cc[5]) MPI_Isend(d_haloBuf_send_[5], nxyF*nFields, MPI_DOUBLE, zrN, tag_ZR, comm, &haloFaceRequests_[scnt++]);
+    if (cc[0]) MPI_Isend(d_haloBuf_send_[0], nyzF*nFields, mpiTypeOf<cudaSolverType>(), xlN, tag_XL, comm, &haloFaceRequests_[scnt++]);
+    if (cc[1]) MPI_Isend(d_haloBuf_send_[1], nyzF*nFields, mpiTypeOf<cudaSolverType>(), xrN, tag_XR, comm, &haloFaceRequests_[scnt++]);
+    if (cc[2]) MPI_Isend(d_haloBuf_send_[2], nxzF*nFields, mpiTypeOf<cudaSolverType>(), ylN, tag_YL, comm, &haloFaceRequests_[scnt++]);
+    if (cc[3]) MPI_Isend(d_haloBuf_send_[3], nxzF*nFields, mpiTypeOf<cudaSolverType>(), yrN, tag_YR, comm, &haloFaceRequests_[scnt++]);
+    if (cc[4]) MPI_Isend(d_haloBuf_send_[4], nxyF*nFields, mpiTypeOf<cudaSolverType>(), zlN, tag_ZL, comm, &haloFaceRequests_[scnt++]);
+    if (cc[5]) MPI_Isend(d_haloBuf_send_[5], nxyF*nFields, mpiTypeOf<cudaSolverType>(), zrN, tag_ZR, comm, &haloFaceRequests_[scnt++]);
 
     // ---- Self-copy periodic faces ----
     {
@@ -918,7 +919,7 @@ int EMfields3D::gpuBatchedHaloBeginExchange(
 }
 
 void EMfields3D::gpuBatchedHaloEndExchange(
-    double** h_fieldPtrs, int nFields,
+    cudaSolverType** h_fieldPtrs, int nFields,
     int nx, int ny, int nz,
     bool isCenterFlag, bool isFaceOnlyFlag,
     bool needInterp, bool isParticle,
@@ -954,7 +955,7 @@ void EMfields3D::gpuBatchedHaloEndExchange(
     const int tag_ZL = 3, tag_ZR = 6;
 
     // d_ptrArray_ was already populated by begin
-    double* const* d_ptrs = (double* const*) d_ptrArray_;
+    cudaSolverType* const* d_ptrs = (cudaSolverType* const*) d_ptrArray_;
 
     MPI_Status  mpiStat[12];
     MPI_Request mpiReq[12];
@@ -976,21 +977,21 @@ void EMfields3D::gpuBatchedHaloEndExchange(
         for (int dir = 0; dir < 2; ++dir) {
             if (!cc[dir]) continue;
             int ix_send = (dir == 0) ? 1 : (nx - 2);
-            double* buf = d_haloBuf_send_[dir]; int off = 0;
+            cudaSolverType* buf = d_haloBuf_send_[dir]; int off = 0;
             if (cc[4]) { launchPack2D(buf+off, d_ptrs, nFields, ix_send*ny*nz+1*nz+0, nz, 1, edgeYlen, 1, stream); off += edgeYlen*nFields; }
             if (cc[5]) { launchPack2D(buf+off, d_ptrs, nFields, ix_send*ny*nz+1*nz+(nz-1), nz, 1, edgeYlen, 1, stream); off += edgeYlen*nFields; }
         }
         for (int dir = 2; dir < 4; ++dir) {
             if (!cc[dir]) continue;
             int iy_send = (dir == 2) ? 1 : (ny - 2);
-            double* buf = d_haloBuf_send_[dir]; int off = 0;
+            cudaSolverType* buf = d_haloBuf_send_[dir]; int off = 0;
             if (cc[0]) { launchPack2D(buf+off, d_ptrs, nFields, 0*ny*nz+iy_send*nz+1, 1, 1, edgeZlen, 1, stream); off += edgeZlen*nFields; }
             if (cc[1]) { launchPack2D(buf+off, d_ptrs, nFields, (nx-1)*ny*nz+iy_send*nz+1, 1, 1, edgeZlen, 1, stream); off += edgeZlen*nFields; }
         }
         for (int dir = 4; dir < 6; ++dir) {
             if (!cc[dir]) continue;
             int iz_send = (dir == 4) ? 1 : (nz - 2);
-            double* buf = d_haloBuf_send_[dir]; int off = 0;
+            cudaSolverType* buf = d_haloBuf_send_[dir]; int off = 0;
             if (cc[2]) { launchPack2D(buf+off, d_ptrs, nFields, 1*ny*nz+0*nz+iz_send, ny*nz, 1, edgeXlen, 1, stream); off += edgeXlen*nFields; }
             if (cc[3]) { launchPack2D(buf+off, d_ptrs, nFields, 1*ny*nz+(ny-1)*nz+iz_send, ny*nz, 1, edgeXlen, 1, stream); off += edgeXlen*nFields; }
         }
@@ -999,13 +1000,13 @@ void EMfields3D::gpuBatchedHaloEndExchange(
 
         // Post edge Irecv / Isend
         rcnt = 0;
-        for (int dir = 0; dir < 2; ++dir) { if (!cc[dir]) continue; int nE=(cc[4]?1:0)+(cc[5]?1:0); if(!nE) continue; int nb=(dir==0)?xlN:xrN; int tag=(dir==0)?tag_XR:tag_XL; MPI_Irecv(d_haloBuf_recv_[dir], nE*edgeYlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[rcnt++]); }
-        for (int dir = 2; dir < 4; ++dir) { if (!cc[dir]) continue; int nE=(cc[0]?1:0)+(cc[1]?1:0); if(!nE) continue; int nb=(dir==2)?ylN:yrN; int tag=(dir==2)?tag_YR:tag_YL; MPI_Irecv(d_haloBuf_recv_[dir], nE*edgeZlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[rcnt++]); }
-        for (int dir = 4; dir < 6; ++dir) { if (!cc[dir]) continue; int nE=(cc[2]?1:0)+(cc[3]?1:0); if(!nE) continue; int nb=(dir==4)?zlN:zrN; int tag=(dir==4)?tag_ZR:tag_ZL; MPI_Irecv(d_haloBuf_recv_[dir], nE*edgeXlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[rcnt++]); }
+        for (int dir = 0; dir < 2; ++dir) { if (!cc[dir]) continue; int nE=(cc[4]?1:0)+(cc[5]?1:0); if(!nE) continue; int nb=(dir==0)?xlN:xrN; int tag=(dir==0)?tag_XR:tag_XL; MPI_Irecv(d_haloBuf_recv_[dir], nE*edgeYlen*nFields, mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[rcnt++]); }
+        for (int dir = 2; dir < 4; ++dir) { if (!cc[dir]) continue; int nE=(cc[0]?1:0)+(cc[1]?1:0); if(!nE) continue; int nb=(dir==2)?ylN:yrN; int tag=(dir==2)?tag_YR:tag_YL; MPI_Irecv(d_haloBuf_recv_[dir], nE*edgeZlen*nFields, mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[rcnt++]); }
+        for (int dir = 4; dir < 6; ++dir) { if (!cc[dir]) continue; int nE=(cc[2]?1:0)+(cc[3]?1:0); if(!nE) continue; int nb=(dir==4)?zlN:zrN; int tag=(dir==4)?tag_ZR:tag_ZL; MPI_Irecv(d_haloBuf_recv_[dir], nE*edgeXlen*nFields, mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[rcnt++]); }
         scnt = rcnt;
-        for (int dir = 0; dir < 2; ++dir) { if (!cc[dir]) continue; int nE=(cc[4]?1:0)+(cc[5]?1:0); if(!nE) continue; int nb=(dir==0)?xlN:xrN; int tag=(dir==0)?tag_XL:tag_XR; MPI_Isend(d_haloBuf_send_[dir], nE*edgeYlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[scnt++]); }
-        for (int dir = 2; dir < 4; ++dir) { if (!cc[dir]) continue; int nE=(cc[0]?1:0)+(cc[1]?1:0); if(!nE) continue; int nb=(dir==2)?ylN:yrN; int tag=(dir==2)?tag_YL:tag_YR; MPI_Isend(d_haloBuf_send_[dir], nE*edgeZlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[scnt++]); }
-        for (int dir = 4; dir < 6; ++dir) { if (!cc[dir]) continue; int nE=(cc[2]?1:0)+(cc[3]?1:0); if(!nE) continue; int nb=(dir==4)?zlN:zrN; int tag=(dir==4)?tag_ZL:tag_ZR; MPI_Isend(d_haloBuf_send_[dir], nE*edgeXlen*nFields, MPI_DOUBLE, nb, tag, comm, &mpiReq[scnt++]); }
+        for (int dir = 0; dir < 2; ++dir) { if (!cc[dir]) continue; int nE=(cc[4]?1:0)+(cc[5]?1:0); if(!nE) continue; int nb=(dir==0)?xlN:xrN; int tag=(dir==0)?tag_XL:tag_XR; MPI_Isend(d_haloBuf_send_[dir], nE*edgeYlen*nFields, mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[scnt++]); }
+        for (int dir = 2; dir < 4; ++dir) { if (!cc[dir]) continue; int nE=(cc[0]?1:0)+(cc[1]?1:0); if(!nE) continue; int nb=(dir==2)?ylN:yrN; int tag=(dir==2)?tag_YL:tag_YR; MPI_Isend(d_haloBuf_send_[dir], nE*edgeZlen*nFields, mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[scnt++]); }
+        for (int dir = 4; dir < 6; ++dir) { if (!cc[dir]) continue; int nE=(cc[2]?1:0)+(cc[3]?1:0); if(!nE) continue; int nb=(dir==4)?zlN:zrN; int tag=(dir==4)?tag_ZL:tag_ZR; MPI_Isend(d_haloBuf_send_[dir], nE*edgeXlen*nFields, mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[scnt++]); }
 
         // Edge self-copy
         {
@@ -1022,21 +1023,21 @@ void EMfields3D::gpuBatchedHaloEndExchange(
         for (int dir = 0; dir < 2; ++dir) {
             if (!cc[dir]) continue;
             int ix_recv = (dir == 0) ? 0 : (nx - 1);
-            const double* buf = d_haloBuf_recv_[dir]; int off = 0;
+            const cudaSolverType* buf = d_haloBuf_recv_[dir]; int off = 0;
             if (cc[4]) { launchUnpack2D(buf+off, d_ptrs, nFields, ix_recv*ny*nz+1*nz+0, nz, 1, edgeYlen, 1, stream); off += edgeYlen*nFields; }
             if (cc[5]) { launchUnpack2D(buf+off, d_ptrs, nFields, ix_recv*ny*nz+1*nz+(nz-1), nz, 1, edgeYlen, 1, stream); off += edgeYlen*nFields; }
         }
         for (int dir = 2; dir < 4; ++dir) {
             if (!cc[dir]) continue;
             int iy_recv = (dir == 2) ? 0 : (ny - 1);
-            const double* buf = d_haloBuf_recv_[dir]; int off = 0;
+            const cudaSolverType* buf = d_haloBuf_recv_[dir]; int off = 0;
             if (cc[0]) { launchUnpack2D(buf+off, d_ptrs, nFields, 0*ny*nz+iy_recv*nz+1, 1, 1, edgeZlen, 1, stream); off += edgeZlen*nFields; }
             if (cc[1]) { launchUnpack2D(buf+off, d_ptrs, nFields, (nx-1)*ny*nz+iy_recv*nz+1, 1, 1, edgeZlen, 1, stream); off += edgeZlen*nFields; }
         }
         for (int dir = 4; dir < 6; ++dir) {
             if (!cc[dir]) continue;
             int iz_recv = (dir == 4) ? 0 : (nz - 1);
-            const double* buf = d_haloBuf_recv_[dir]; int off = 0;
+            const cudaSolverType* buf = d_haloBuf_recv_[dir]; int off = 0;
             if (cc[2]) { launchUnpack2D(buf+off, d_ptrs, nFields, 1*ny*nz+0*nz+iz_recv, ny*nz, 1, edgeXlen, 1, stream); off += edgeXlen*nFields; }
             if (cc[3]) { launchUnpack2D(buf+off, d_ptrs, nFields, 1*ny*nz+(ny-1)*nz+iz_recv, ny*nz, 1, edgeXlen, 1, stream); off += edgeXlen*nFields; }
         }
@@ -1048,11 +1049,11 @@ void EMfields3D::gpuBatchedHaloEndExchange(
             cudaStreamSynchronize(stream);
 
             rcnt = 0;
-            if (cc[0]) MPI_Irecv(d_haloBuf_recv_[0], 4*nFields, MPI_DOUBLE, xlN, tag_XR, comm, &mpiReq[rcnt++]);
-            if (cc[1]) MPI_Irecv(d_haloBuf_recv_[1], 4*nFields, MPI_DOUBLE, xrN, tag_XL, comm, &mpiReq[rcnt++]);
+            if (cc[0]) MPI_Irecv(d_haloBuf_recv_[0], 4*nFields, mpiTypeOf<cudaSolverType>(), xlN, tag_XR, comm, &mpiReq[rcnt++]);
+            if (cc[1]) MPI_Irecv(d_haloBuf_recv_[1], 4*nFields, mpiTypeOf<cudaSolverType>(), xrN, tag_XL, comm, &mpiReq[rcnt++]);
             scnt = rcnt;
-            if (cc[0]) MPI_Isend(d_haloBuf_send_[0], 4*nFields, MPI_DOUBLE, xlN, tag_XL, comm, &mpiReq[scnt++]);
-            if (cc[1]) MPI_Isend(d_haloBuf_send_[1], 4*nFields, MPI_DOUBLE, xrN, tag_XR, comm, &mpiReq[scnt++]);
+            if (cc[0]) MPI_Isend(d_haloBuf_send_[0], 4*nFields, mpiTypeOf<cudaSolverType>(), xlN, tag_XL, comm, &mpiReq[scnt++]);
+            if (cc[1]) MPI_Isend(d_haloBuf_send_[1], 4*nFields, mpiTypeOf<cudaSolverType>(), xrN, tag_XR, comm, &mpiReq[scnt++]);
 
             // Corner self-copy
             {

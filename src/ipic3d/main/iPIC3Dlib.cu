@@ -1037,7 +1037,22 @@ void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronizeCopy)
   // ---- GPU path: pack fields entirely on the GPU ----
   // gpuCalculateE / gpuCalculateB produce results directly in d_Ex etc.
   // No H2D sync needed — launch the GPU packing kernel immediately.
-  // Wait for solverStream_ to finish before packing on streams[0].
+  //
+  // Re-record solverDoneEvent here to capture the *current* tail of
+  // solverStream_, not just the E-solver tail from the last CalculateField().
+  // This is necessary because:
+  //   - The mover path calls this after CalculateField(), so only E work is
+  //     outstanding — the re-record is a cheap no-op in that case.
+  //   - The analysis path (sortAllSpecies → refreshFieldForPclsDeviceBuffer)
+  //     calls this BEFORE CalculateField(), meaning the previous cycle's
+  //     CalculateB() and MomentsAwait() solver-stream work may still be
+  //     queued. Without a fresh record here the wait below only gates on the
+  //     previous E-solve record, letting gpuPackFieldForPclsToCenter race
+  //     with writes to Bxn/Byn/Bzn from CalculateB(prev cycle).
+  //   - On cycle 0 the event has never been recorded; re-recording it against
+  //     the current (empty or H2D-initialized) stream makes the wait formally
+  //     safe instead of a no-op.
+  cudaErrChk(cudaEventRecord(solverDoneEvent, EMf->gpuSolverStream()));
   cudaErrChk(cudaStreamWaitEvent(streams[0], solverDoneEvent, 0));
   {
     const int ncells = (grid->getNXN() - 1) * (grid->getNYN() - 1) * grid->getNZN();
@@ -1985,6 +2000,8 @@ void c_Solver::MomentsAwait() {
         col->getx_center_planet(), col->getz_center_planet());
   }
   EMf->gpuSumOverSpecies();
+  if (col->getOutputConfig().needsJTotComputation())
+    EMf->gpuSumOverSpeciesJ();
   EMf->gpuInterpDensitiesN2C();
 
   // Phase 3: hat functions (Jhat, rhohat) — already GPU-implemented

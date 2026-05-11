@@ -19,6 +19,7 @@ using warp_mask_t = uint64_t;
 
 #include <iostream>
 #include <sstream>
+#include <type_traits>
 
 // ── Portable warp intrinsic helpers (defined once, used everywhere) ──
 // Only available in device compilation units (.cu files compiled by nvcc/hipcc)
@@ -43,6 +44,21 @@ using cudaCommonType = cudaTypeDouble;
 using cudaParticleType = cudaTypeDouble;
 using cudaFieldType = cudaTypeDouble; // type for the field array from host to device
 using cudaMomentType = cudaTypeDouble; // MUST be DOUBLE now, type for the moment array from device to host
+
+// ── Semantic alias for the EM field solver (arrays, Krylov vectors, scalars).
+// Changing this to float requires migrating GPUFieldArray, all GPU solver kernel
+// APIs (GPUBlas, GPUStencils, GPUPhysicsKernels, GPUMaxwellLocal, GPUHaloComm),
+// MPI halo/reduction paths, and host↔device sync conversion kernels.
+using cudaSolverType = cudaCommonType;
+
+// ── Compile-time guards: prevent silent type corruption when changing the
+//    common or moment type before all paths are fully migrated.
+static_assert(std::is_same<cudaCommonType, double>::value,
+    "GPU field solver (stencils, MPI halos, host sync) still assumes "
+    "cudaCommonType == double. Migrate all GPU solver APIs before relaxing.");
+static_assert(std::is_same<cudaMomentType, double>::value,
+    "gpuScatterMomentsD2D still assumes cudaMomentType == double. "
+    "Add a type-conversion kernel before changing cudaMomentType.");
 
 // ── Per-field particle types (all default to double; change individually for mixed precision) ──
 using cudaPclType_U = cudaTypeDouble;  // velocity x

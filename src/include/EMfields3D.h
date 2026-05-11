@@ -562,13 +562,13 @@ class EMfields3D                // :public Field
     /** GPU version of calculateHatFunctions. */
     void gpuCalculateHatFunctions();
     /** GPU MaxwellImage: A*x callback for GMRES (operates on device Krylov vectors). */
-    void gpuMaxwellImage(double* d_im, double* d_vector);
+    void gpuMaxwellImage(cudaSolverType* d_im, cudaSolverType* d_vector);
     /** GPU MaxwellImage (local): communication-free A*x for use as preconditioner.
      *  Ghost cells are treated as zero and physical boundary image corrections
      *  are enforced locally so the operator better matches the full Maxwell image. */
-    void gpuMaxwellImageLocal(double* d_im, double* d_vector);
+    void gpuMaxwellImageLocal(cudaSolverType* d_im, cudaSolverType* d_vector);
     /** GPU MaxwellSource: build RHS of Maxwell system (result in device Krylov vector). */
-    void gpuMaxwellSource(double* d_bkrylov);
+    void gpuMaxwellSource(cudaSolverType* d_bkrylov);
 
     // ---- GPU Chebyshev Semi-Iterative Solver ----
     /** Full Chebyshev solver (with MPI communication).
@@ -582,9 +582,9 @@ class EMfields3D                // :public Field
      *  @param eigMax    upper bound on eigenvalues of A  (>eigMin)
      *  @param fieldcomm MPI communicator for residual norms
      */
-    void gpuChebyshevSolve(double* d_x, int n, double* d_b,
-                           void (EMfields3D::*GpuImage)(double*, double*),
-                           int maxIter, double eigMin, double eigMax,
+    void gpuChebyshevSolve(cudaSolverType* d_x, int n, cudaSolverType* d_b,
+                           void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*),
+                           int maxIter, cudaSolverType eigMin, cudaSolverType eigMax,
                            MPI_Comm fieldcomm);
 
     /** GPU point-block Jacobi preconditioner (communication-free).
@@ -593,15 +593,15 @@ class EMfields3D                // :public Field
      *  @param d_x  [out] approximate solution (Krylov vector, device)
      *  @param d_b  [in]  right-hand side       (Krylov vector, device)
      */
-    void gpuBlockJacobiPrecond(double* d_x, double* d_b);
+    void gpuBlockJacobiPrecond(cudaSolverType* d_x, cudaSolverType* d_b);
 
     /** GPU FGMRES(m) with communication-free block-Jacobi preconditioner.
      *  Right-preconditioned flexible GMRES: Z[k] = M⁻¹ V[k], w = A Z[k].
      *  Uses gpuBlockJacobiPrecond as the preconditioner.
      */
     void gpuFGMRES_BlockJacobiPrecond(
-        double* d_x, int n, double* d_b,
-        int m, int max_iter, double tol,
+        cudaSolverType* d_x, int n, cudaSolverType* d_b,
+        int m, int max_iter, cudaSolverType tol,
         MPI_Comm fieldcomm);
 
     /** Power iteration to estimate the largest eigenvalue of A.
@@ -611,7 +611,7 @@ class EMfields3D                // :public Field
      *  @param fieldcomm MPI communicator for reductions
      *  @return          estimate of lambda_max
      */
-    double gpuEstimateMaxEigenvalue(void (EMfields3D::*GpuImage)(double*, double*),
+    cudaSolverType gpuEstimateMaxEigenvalue(void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*),
                                    int n, int nIter, MPI_Comm fieldcomm);
     /** GPU MUdot: compute μ·E for all species. */
     void gpuMUdot(GPUFieldArray3& MUdotX, GPUFieldArray3& MUdotY, GPUFieldArray3& MUdotZ,
@@ -641,7 +641,7 @@ class EMfields3D                // :public Field
      *  (momentsSrc, layout [10][gridSize]) into the per-species slices of
      *  d_rhons, d_Jxs, d_Jys, d_Jzs, d_pXXsn, d_pXYsn, d_pXZsn,
      *  d_pYYsn, d_pYZsn, d_pZZsn.  Pure device-to-device, no host touch. */
-    void gpuScatterMomentsD2D(double* momentsSrc, int species, cudaStream_t stream = 0);
+    void gpuScatterMomentsD2D(cudaMomentType* momentsSrc, int species, cudaStream_t stream = 0);
 
     /** Batched ghost exchange: all species at once (reduces MPI barriers). */
     void gpuCommunicateGhostP2G_AllSpecies();
@@ -657,7 +657,7 @@ class EMfields3D                // :public Field
      *  @param needInterp   true = additive accumulation after exchange.
      *  @param isParticle   true = use particle communicator.
      *  @param stream       CUDA stream for kernels. */
-    void gpuBatchedHaloExchange(double** h_fieldPtrs, int nFields,
+    void gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs, int nFields,
                                 int nx, int ny, int nz,
                                 bool isCenterFlag, bool isFaceOnlyFlag,
                                 bool needInterp, bool isParticle,
@@ -667,14 +667,14 @@ class EMfields3D                // :public Field
     /** Phase 1 of split halo exchange: pack boundary faces, post
      *  non-blocking MPI sends/receives, self-copy periodic faces.
      *  Returns the number of MPI requests stored in haloFaceRequests_. */
-    int gpuBatchedHaloBeginExchange(double** h_fieldPtrs, int nFields,
+    int gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs, int nFields,
                                     int nx, int ny, int nz,
                                     bool isCenterFlag, bool isFaceOnlyFlag,
                                     bool needInterp, bool isParticle,
                                     cudaStream_t stream);
     /** Phase 2 of split halo exchange: MPI_Waitall on face requests,
      *  unpack face buffers, then run edge + corner phases as usual. */
-    void gpuBatchedHaloEndExchange(double** h_fieldPtrs, int nFields,
+    void gpuBatchedHaloEndExchange(cudaSolverType** h_fieldPtrs, int nFields,
                                    int nx, int ny, int nz,
                                    bool isCenterFlag, bool isFaceOnlyFlag,
                                    bool needInterp, bool isParticle,
@@ -692,20 +692,23 @@ class EMfields3D                // :public Field
     /** GPU sumOverSpecies: rhon += sum_s(rhons_s) on device. */
     void gpuSumOverSpecies();
 
+    /** GPU sumOverSpeciesJ: Jx/Jy/Jz = sum_s(Jxs/Jys/Jzs)_s on device. */
+    void gpuSumOverSpeciesJ();
+
     /** GPU interpDensitiesN2C: rhoc = interpN2C(rhon) on device. */
     void gpuInterpDensitiesN2C();
 
     // ---- GPU Solver: open boundary conditions ----
     /** GPU open BC: zero source term on inflow faces. */
-    void gpuOpenBoundaryInflowESource(double* dX, double* dY, double* dZ, int nx, int ny, int nz);
+    void gpuOpenBoundaryInflowESource(cudaSolverType* dX, cudaSolverType* dY, cudaSolverType* dZ, int nx, int ny, int nz);
     /** GPU open BC: set image = vect - E_inj on inflow faces. */
-    void gpuOpenBoundaryInflowEImage(double* imX, double* imY, double* imZ,
-                                     const double* vX, const double* vY, const double* vZ,
+    void gpuOpenBoundaryInflowEImage(cudaSolverType* imX, cudaSolverType* imY, cudaSolverType* imZ,
+                                     const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
                                      int nx, int ny, int nz);
     /** GPU open BC: SAL blend / Dirichlet on E inflow faces (post-solve). */
-    void gpuOpenBoundaryInflowE(double* dX, double* dY, double* dZ, int nx, int ny, int nz);
+    void gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY, cudaSolverType* dZ, int nx, int ny, int nz);
     /** GPU open BC: SAL blend / extrapolation on center B inflow faces. */
-    void gpuOpenBoundaryInflowB(double* dX, double* dY, double* dZ, int nx, int ny, int nz);
+    void gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY, cudaSolverType* dZ, int nx, int ny, int nz);
 
     // ---- GPU Solver: case-specific B fixes ----
     /** GPU fix center B for GEM case. */
@@ -723,17 +726,17 @@ class EMfields3D                // :public Field
 
     // ---- GPU Solver: Poisson/divB correction ----
     /** GPU Poisson image operator (laplacian on centers, with communication). */
-    void gpuPoissonImage(double* d_im, double* d_vec);
+    void gpuPoissonImage(cudaSolverType* d_im, cudaSolverType* d_vec);
     /** GPU Poisson image operator, communication-free (computes -∇², positive eigenvalues). */
-    void gpuPoissonImageLocal(double* d_im, double* d_vec);
+    void gpuPoissonImageLocal(cudaSolverType* d_im, cudaSolverType* d_vec);
     /** Compute analytic eigenvalue bounds of the local -∇² operator (once per simulation). */
     void computePoissonChebyshevEigenvalues();
     /** Chebyshev preconditioner for Poisson (communication-free, analytic eigenvalues). */
-    void gpuChebyshevPrecondPoisson(double* d_x, double* d_b);
+    void gpuChebyshevPrecondPoisson(cudaSolverType* d_x, cudaSolverType* d_b);
     /** GPU FGMRES(m) with Chebyshev preconditioner for Poisson (divergence cleaning). */
     void gpuFGMRES_PoissonChebyshev(
-        double* d_x, int n, double* d_b,
-        int m, int max_iter, double tol,
+        cudaSolverType* d_x, int n, cudaSolverType* d_b,
+        int m, int max_iter, cudaSolverType tol,
         MPI_Comm fieldcomm);
     /** GPU Poisson correction for div(E) cleaning. */
     void gpuPoissonCorrection(int cycle);
@@ -1157,25 +1160,25 @@ class EMfields3D                // :public Field
     GPUFieldArray3 d_smoothTemp;
 
     // Device copy of species q/m for perfectConductor kernels
-    double* d_qom = nullptr;
+    cudaSolverType* d_qom = nullptr;
 
     // Reduction scratch buffer for GPU BLAS dot/norm operations
-    double* d_blasScratch = nullptr;
+    cudaSolverType* d_blasScratch = nullptr;
 
     // GPU GMRES workspace (allocated on first use in gpuCalculateE)
-    double* d_gmresV    = nullptr;  // [m+1][xkrylovlen]
-    double* d_gmresW    = nullptr;  // [xkrylovlen]
+    cudaSolverType* d_gmresV    = nullptr;  // [m+1][xkrylovlen]
+    cudaSolverType* d_gmresW    = nullptr;  // [xkrylovlen]
     int     gmresVAlloc = 0;
 
     // GPU FGMRES workspace (Z basis = preconditioned vectors)
-    double* d_fgmresZ   = nullptr;  // [m][xkrylovlen]
+    cudaSolverType* d_fgmresZ   = nullptr;  // [m][xkrylovlen]
     int     fgmresZAlloc = 0;
 
     // ---- GPU Chebyshev workspace (4 Krylov-sized vectors) ----
-    double* d_chebY   = nullptr;   // current iterate
-    double* d_chebW   = nullptr;   // new iterate
-    double* d_chebZ   = nullptr;   // previous iterate
-    double* d_chebTmp = nullptr;   // operator output scratch
+    cudaSolverType* d_chebY   = nullptr;   // current iterate
+    cudaSolverType* d_chebW   = nullptr;   // new iterate
+    cudaSolverType* d_chebZ   = nullptr;   // previous iterate
+    cudaSolverType* d_chebTmp = nullptr;   // operator output scratch
     int     chebAlloc = 0;         // allocated length (0 = not yet)
     // Chebyshev parameters (configurable, estimated if <= 0)
     int     chebMaxIter  = 20;     // default polynomial degree
@@ -1195,7 +1198,7 @@ class EMfields3D                // :public Field
     double  blockJacobiOmega  = 1.0;  // damping factor (1.0 = no damping, 2/3 typical for 3D)
 
     // Precomputed D^{-1} (9 entries per node, allocated lazily)
-    double* d_blockJacobiDinv = nullptr;
+    cudaSolverType* d_blockJacobiDinv = nullptr;
     int     blockJacobiDinvAlloc = 0;  // allocated nodeSlice (0 = not yet)
     bool    blockJacobiDinvStale = true;
 

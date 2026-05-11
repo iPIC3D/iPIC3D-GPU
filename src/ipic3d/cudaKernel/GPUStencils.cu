@@ -44,13 +44,14 @@ static inline dim3 stencilGrid(int nx, int ny, int nz)
  * Interior output on node grid: i=1..nxn-2 → reads center[i-1..i].
  * nxc = nxn-1, nyc = nyn-1, nzc = nzn-1.
  */
-__global__ void k_gradC2N(double* __restrict__ gradXN,
-                          double* __restrict__ gradYN,
-                          double* __restrict__ gradZN,
-                          const double* __restrict__ C,
+template<typename T>
+__global__ void k_gradC2N(T* __restrict__ gradXN,
+                          T* __restrict__ gradYN,
+                          T* __restrict__ gradZN,
+                          const T* __restrict__ C,
                           int nxn, int nyn, int nzn,
                           int nyc, int nzc,
-                          double invdx, double invdy, double invdz)
+                          T invdx, T invdy, T invdz)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
     int j = blockIdx.y * BY + threadIdx.y + 1;
@@ -59,14 +60,14 @@ __global__ void k_gradC2N(double* __restrict__ gradXN,
 
     // Center indices (i-1, i) × (j-1, j) × (k-1, k)
     #define C_(ii, jj, kk) C[IDX(ii, jj, kk, nyc, nzc)]
-    double c000 = C_(i-1, j-1, k-1);
-    double c001 = C_(i-1, j-1, k  );
-    double c010 = C_(i-1, j  , k-1);
-    double c011 = C_(i-1, j  , k  );
-    double c100 = C_(i  , j-1, k-1);
-    double c101 = C_(i  , j-1, k  );
-    double c110 = C_(i  , j  , k-1);
-    double c111 = C_(i  , j  , k  );
+    T c000 = C_(i-1, j-1, k-1);
+    T c001 = C_(i-1, j-1, k  );
+    T c010 = C_(i-1, j  , k-1);
+    T c011 = C_(i-1, j  , k  );
+    T c100 = C_(i  , j-1, k-1);
+    T c101 = C_(i  , j-1, k  );
+    T c110 = C_(i  , j  , k-1);
+    T c111 = C_(i  , j  , k  );
 
     int nidx = IDX(i, j, k, nyn, nzn);
     gradXN[nidx] = 0.25 * invdx * ((c111 - c011) + (c110 - c010) + (c101 - c001) + (c100 - c000));
@@ -79,13 +80,14 @@ __global__ void k_gradC2N(double* __restrict__ gradXN,
  * gradN2C: gradient node→center.
  * Interior output on center grid: i=1..nxc-2 → reads node[i..i+1].
  */
-__global__ void k_gradN2C(double* __restrict__ gradXC,
-                          double* __restrict__ gradYC,
-                          double* __restrict__ gradZC,
-                          const double* __restrict__ N,
+template<typename T>
+__global__ void k_gradN2C(T* __restrict__ gradXC,
+                          T* __restrict__ gradYC,
+                          T* __restrict__ gradZC,
+                          const T* __restrict__ N,
                           int nxc, int nyc, int nzc,
                           int nyn, int nzn,
-                          double invdx, double invdy, double invdz)
+                          T invdx, T invdy, T invdz)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
     int j = blockIdx.y * BY + threadIdx.y + 1;
@@ -94,14 +96,14 @@ __global__ void k_gradN2C(double* __restrict__ gradXC,
 
     // Node indices (i, i+1) × (j, j+1) × (k, k+1)
     #define N_(ii, jj, kk) N[IDX(ii, jj, kk, nyn, nzn)]
-    double n000 = N_(i  , j  , k  );
-    double n001 = N_(i  , j  , k+1);
-    double n010 = N_(i  , j+1, k  );
-    double n011 = N_(i  , j+1, k+1);
-    double n100 = N_(i+1, j  , k  );
-    double n101 = N_(i+1, j  , k+1);
-    double n110 = N_(i+1, j+1, k  );
-    double n111 = N_(i+1, j+1, k+1);
+    T n000 = N_(i  , j  , k  );
+    T n001 = N_(i  , j  , k+1);
+    T n010 = N_(i  , j+1, k  );
+    T n011 = N_(i  , j+1, k+1);
+    T n100 = N_(i+1, j  , k  );
+    T n101 = N_(i+1, j  , k+1);
+    T n110 = N_(i+1, j+1, k  );
+    T n111 = N_(i+1, j+1, k+1);
 
     int cidx = IDX(i, j, k, nyc, nzc);
     gradXC[cidx] = 0.25 * invdx * ((n100 - n000) + (n101 - n001) + (n110 - n010) + (n111 - n011));
@@ -115,13 +117,14 @@ __global__ void k_gradN2C(double* __restrict__ gradXC,
 // =========================================================================
 
 /** divN2C: divergence node→center.  Same stencil as gradN2C but applied to 3 components. */
-__global__ void k_divN2C(double* __restrict__ divC,
-                         const double* __restrict__ vecXN,
-                         const double* __restrict__ vecYN,
-                         const double* __restrict__ vecZN,
+template<typename T>
+__global__ void k_divN2C(T* __restrict__ divC,
+                         const T* __restrict__ vecXN,
+                         const T* __restrict__ vecYN,
+                         const T* __restrict__ vecZN,
                          int nxc, int nyc, int nzc,
                          int nyn, int nzn,
-                         double invdx, double invdy, double invdz)
+                         T invdx, T invdy, T invdz)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
     int j = blockIdx.y * BY + threadIdx.y + 1;
@@ -130,19 +133,19 @@ __global__ void k_divN2C(double* __restrict__ divC,
 
     #define N_(arr, ii, jj, kk) arr[IDX(ii, jj, kk, nyn, nzn)]
     // X-component derivative (d/dx)
-    double compX = 0.25 * invdx * (
+    T compX = 0.25 * invdx * (
         (N_(vecXN,i+1,j  ,k  ) - N_(vecXN,i,j  ,k  )) +
         (N_(vecXN,i+1,j  ,k+1) - N_(vecXN,i,j  ,k+1)) +
         (N_(vecXN,i+1,j+1,k  ) - N_(vecXN,i,j+1,k  )) +
         (N_(vecXN,i+1,j+1,k+1) - N_(vecXN,i,j+1,k+1)));
     // Y-component derivative (d/dy)
-    double compY = 0.25 * invdy * (
+    T compY = 0.25 * invdy * (
         (N_(vecYN,i  ,j+1,k  ) - N_(vecYN,i  ,j,k  )) +
         (N_(vecYN,i  ,j+1,k+1) - N_(vecYN,i  ,j,k+1)) +
         (N_(vecYN,i+1,j+1,k  ) - N_(vecYN,i+1,j,k  )) +
         (N_(vecYN,i+1,j+1,k+1) - N_(vecYN,i+1,j,k+1)));
     // Z-component derivative (d/dz)
-    double compZ = 0.25 * invdz * (
+    T compZ = 0.25 * invdz * (
         (N_(vecZN,i  ,j  ,k+1) - N_(vecZN,i  ,j  ,k)) +
         (N_(vecZN,i+1,j  ,k+1) - N_(vecZN,i+1,j  ,k)) +
         (N_(vecZN,i  ,j+1,k+1) - N_(vecZN,i  ,j+1,k)) +
@@ -153,13 +156,14 @@ __global__ void k_divN2C(double* __restrict__ divC,
 }
 
 /** divC2N: divergence center→node.  Reads center[i-1..i] for node output. */
-__global__ void k_divC2N(double* __restrict__ divN,
-                         const double* __restrict__ vecXC,
-                         const double* __restrict__ vecYC,
-                         const double* __restrict__ vecZC,
+template<typename T>
+__global__ void k_divC2N(T* __restrict__ divN,
+                         const T* __restrict__ vecXC,
+                         const T* __restrict__ vecYC,
+                         const T* __restrict__ vecZC,
                          int nxn, int nyn, int nzn,
                          int nyc, int nzc,
-                         double invdx, double invdy, double invdz)
+                         T invdx, T invdy, T invdz)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
     int j = blockIdx.y * BY + threadIdx.y + 1;
@@ -167,17 +171,17 @@ __global__ void k_divC2N(double* __restrict__ divN,
     if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2) return;
 
     #define C_(arr, ii, jj, kk) arr[IDX(ii, jj, kk, nyc, nzc)]
-    double compX = 0.25 * invdx * (
+    T compX = 0.25 * invdx * (
         (C_(vecXC,i  ,j  ,k  ) - C_(vecXC,i-1,j  ,k  )) +
         (C_(vecXC,i  ,j  ,k-1) - C_(vecXC,i-1,j  ,k-1)) +
         (C_(vecXC,i  ,j-1,k  ) - C_(vecXC,i-1,j-1,k  )) +
         (C_(vecXC,i  ,j-1,k-1) - C_(vecXC,i-1,j-1,k-1)));
-    double compY = 0.25 * invdy * (
+    T compY = 0.25 * invdy * (
         (C_(vecYC,i  ,j  ,k  ) - C_(vecYC,i  ,j-1,k  )) +
         (C_(vecYC,i  ,j  ,k-1) - C_(vecYC,i  ,j-1,k-1)) +
         (C_(vecYC,i-1,j  ,k  ) - C_(vecYC,i-1,j-1,k  )) +
         (C_(vecYC,i-1,j  ,k-1) - C_(vecYC,i-1,j-1,k-1)));
-    double compZ = 0.25 * invdz * (
+    T compZ = 0.25 * invdz * (
         (C_(vecZC,i  ,j  ,k  ) - C_(vecZC,i  ,j  ,k-1)) +
         (C_(vecZC,i-1,j  ,k  ) - C_(vecZC,i-1,j  ,k-1)) +
         (C_(vecZC,i  ,j-1,k  ) - C_(vecZC,i  ,j-1,k-1)) +
@@ -191,15 +195,16 @@ __global__ void k_divC2N(double* __restrict__ divN,
 //  Curl kernels
 // =========================================================================
 
-__global__ void k_curlC2N(double* __restrict__ curlXN,
-                          double* __restrict__ curlYN,
-                          double* __restrict__ curlZN,
-                          const double* __restrict__ vecXC,
-                          const double* __restrict__ vecYC,
-                          const double* __restrict__ vecZC,
+template<typename T>
+__global__ void k_curlC2N(T* __restrict__ curlXN,
+                          T* __restrict__ curlYN,
+                          T* __restrict__ curlZN,
+                          const T* __restrict__ vecXC,
+                          const T* __restrict__ vecYC,
+                          const T* __restrict__ vecZC,
                           int nxn, int nyn, int nzn,
                           int nyc, int nzc,
-                          double invdx, double invdy, double invdz)
+                          T invdx, T invdy, T invdz)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
     int j = blockIdx.y * BY + threadIdx.y + 1;
@@ -208,36 +213,36 @@ __global__ void k_curlC2N(double* __restrict__ curlXN,
 
     #define C_(arr, ii, jj, kk) arr[IDX(ii, jj, kk, nyc, nzc)]
     // curl_X = dZdy - dYdz
-    double compZDY = 0.25 * invdy * (
+    T compZDY = 0.25 * invdy * (
         (C_(vecZC,i  ,j  ,k  ) - C_(vecZC,i  ,j-1,k  )) +
         (C_(vecZC,i  ,j  ,k-1) - C_(vecZC,i  ,j-1,k-1)) +
         (C_(vecZC,i-1,j  ,k  ) - C_(vecZC,i-1,j-1,k  )) +
         (C_(vecZC,i-1,j  ,k-1) - C_(vecZC,i-1,j-1,k-1)));
-    double compYDZ = 0.25 * invdz * (
+    T compYDZ = 0.25 * invdz * (
         (C_(vecYC,i  ,j  ,k  ) - C_(vecYC,i  ,j  ,k-1)) +
         (C_(vecYC,i-1,j  ,k  ) - C_(vecYC,i-1,j  ,k-1)) +
         (C_(vecYC,i  ,j-1,k  ) - C_(vecYC,i  ,j-1,k-1)) +
         (C_(vecYC,i-1,j-1,k  ) - C_(vecYC,i-1,j-1,k-1)));
 
     // curl_Y = dXdz - dZdx
-    double compXDZ = 0.25 * invdz * (
+    T compXDZ = 0.25 * invdz * (
         (C_(vecXC,i  ,j  ,k  ) - C_(vecXC,i  ,j  ,k-1)) +
         (C_(vecXC,i-1,j  ,k  ) - C_(vecXC,i-1,j  ,k-1)) +
         (C_(vecXC,i  ,j-1,k  ) - C_(vecXC,i  ,j-1,k-1)) +
         (C_(vecXC,i-1,j-1,k  ) - C_(vecXC,i-1,j-1,k-1)));
-    double compZDX = 0.25 * invdx * (
+    T compZDX = 0.25 * invdx * (
         (C_(vecZC,i  ,j  ,k  ) - C_(vecZC,i-1,j  ,k  )) +
         (C_(vecZC,i  ,j  ,k-1) - C_(vecZC,i-1,j  ,k-1)) +
         (C_(vecZC,i  ,j-1,k  ) - C_(vecZC,i-1,j-1,k  )) +
         (C_(vecZC,i  ,j-1,k-1) - C_(vecZC,i-1,j-1,k-1)));
 
     // curl_Z = dYdx - dXdy
-    double compYDX = 0.25 * invdx * (
+    T compYDX = 0.25 * invdx * (
         (C_(vecYC,i  ,j  ,k  ) - C_(vecYC,i-1,j  ,k  )) +
         (C_(vecYC,i  ,j  ,k-1) - C_(vecYC,i-1,j  ,k-1)) +
         (C_(vecYC,i  ,j-1,k  ) - C_(vecYC,i-1,j-1,k  )) +
         (C_(vecYC,i  ,j-1,k-1) - C_(vecYC,i-1,j-1,k-1)));
-    double compXDY = 0.25 * invdy * (
+    T compXDY = 0.25 * invdy * (
         (C_(vecXC,i  ,j  ,k  ) - C_(vecXC,i  ,j-1,k  )) +
         (C_(vecXC,i  ,j  ,k-1) - C_(vecXC,i  ,j-1,k-1)) +
         (C_(vecXC,i-1,j  ,k  ) - C_(vecXC,i-1,j-1,k  )) +
@@ -250,15 +255,16 @@ __global__ void k_curlC2N(double* __restrict__ curlXN,
     #undef C_
 }
 
-__global__ void k_curlN2C(double* __restrict__ curlXC,
-                          double* __restrict__ curlYC,
-                          double* __restrict__ curlZC,
-                          const double* __restrict__ vecXN,
-                          const double* __restrict__ vecYN,
-                          const double* __restrict__ vecZN,
+template<typename T>
+__global__ void k_curlN2C(T* __restrict__ curlXC,
+                          T* __restrict__ curlYC,
+                          T* __restrict__ curlZC,
+                          const T* __restrict__ vecXN,
+                          const T* __restrict__ vecYN,
+                          const T* __restrict__ vecZN,
                           int nxc, int nyc, int nzc,
                           int nyn, int nzn,
-                          double invdx, double invdy, double invdz)
+                          T invdx, T invdy, T invdz)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
     int j = blockIdx.y * BY + threadIdx.y + 1;
@@ -267,36 +273,36 @@ __global__ void k_curlN2C(double* __restrict__ curlXC,
 
     #define N_(arr, ii, jj, kk) arr[IDX(ii, jj, kk, nyn, nzn)]
     // curl_X = dZdy - dYdz
-    double compZDY = 0.25 * invdy * (
+    T compZDY = 0.25 * invdy * (
         (N_(vecZN,i  ,j+1,k  ) - N_(vecZN,i  ,j,k  )) +
         (N_(vecZN,i  ,j+1,k+1) - N_(vecZN,i  ,j,k+1)) +
         (N_(vecZN,i+1,j+1,k  ) - N_(vecZN,i+1,j,k  )) +
         (N_(vecZN,i+1,j+1,k+1) - N_(vecZN,i+1,j,k+1)));
-    double compYDZ = 0.25 * invdz * (
+    T compYDZ = 0.25 * invdz * (
         (N_(vecYN,i  ,j  ,k+1) - N_(vecYN,i  ,j  ,k)) +
         (N_(vecYN,i+1,j  ,k+1) - N_(vecYN,i+1,j  ,k)) +
         (N_(vecYN,i  ,j+1,k+1) - N_(vecYN,i  ,j+1,k)) +
         (N_(vecYN,i+1,j+1,k+1) - N_(vecYN,i+1,j+1,k)));
 
     // curl_Y = dXdz - dZdx
-    double compXDZ = 0.25 * invdz * (
+    T compXDZ = 0.25 * invdz * (
         (N_(vecXN,i  ,j  ,k+1) - N_(vecXN,i  ,j  ,k)) +
         (N_(vecXN,i+1,j  ,k+1) - N_(vecXN,i+1,j  ,k)) +
         (N_(vecXN,i  ,j+1,k+1) - N_(vecXN,i  ,j+1,k)) +
         (N_(vecXN,i+1,j+1,k+1) - N_(vecXN,i+1,j+1,k)));
-    double compZDX = 0.25 * invdx * (
+    T compZDX = 0.25 * invdx * (
         (N_(vecZN,i+1,j  ,k  ) - N_(vecZN,i,j  ,k  )) +
         (N_(vecZN,i+1,j  ,k+1) - N_(vecZN,i,j  ,k+1)) +
         (N_(vecZN,i+1,j+1,k  ) - N_(vecZN,i,j+1,k  )) +
         (N_(vecZN,i+1,j+1,k+1) - N_(vecZN,i,j+1,k+1)));
 
     // curl_Z = dYdx - dXdy
-    double compYDX = 0.25 * invdx * (
+    T compYDX = 0.25 * invdx * (
         (N_(vecYN,i+1,j  ,k  ) - N_(vecYN,i,j  ,k  )) +
         (N_(vecYN,i+1,j  ,k+1) - N_(vecYN,i,j  ,k+1)) +
         (N_(vecYN,i+1,j+1,k  ) - N_(vecYN,i,j+1,k  )) +
         (N_(vecYN,i+1,j+1,k+1) - N_(vecYN,i,j+1,k+1)));
-    double compXDY = 0.25 * invdy * (
+    T compXDY = 0.25 * invdy * (
         (N_(vecXN,i  ,j+1,k  ) - N_(vecXN,i  ,j,k  )) +
         (N_(vecXN,i  ,j+1,k+1) - N_(vecXN,i  ,j,k+1)) +
         (N_(vecXN,i+1,j+1,k  ) - N_(vecXN,i+1,j,k  )) +
@@ -313,8 +319,9 @@ __global__ void k_curlN2C(double* __restrict__ curlXC,
 //  Interpolation kernels
 // =========================================================================
 
-__global__ void k_interpC2N(double* __restrict__ fieldN,
-                            const double* __restrict__ fieldC,
+template<typename T>
+__global__ void k_interpC2N(T* __restrict__ fieldN,
+                            const T* __restrict__ fieldC,
                             int nxn, int nyn, int nzn,
                             int nyc, int nzc)
 {
@@ -330,8 +337,9 @@ __global__ void k_interpC2N(double* __restrict__ fieldN,
     #undef C_
 }
 
-__global__ void k_interpN2C(double* __restrict__ fieldC,
-                            const double* __restrict__ fieldN,
+template<typename T>
+__global__ void k_interpN2C(T* __restrict__ fieldC,
+                            const T* __restrict__ fieldN,
                             int nxc, int nyc, int nzc,
                             int nyn, int nzn)
 {
@@ -361,16 +369,17 @@ __global__ void k_interpN2C(double* __restrict__ fieldC,
  * Output on center grid [nxc][nyc][nzc].
  * Uses gradN2C stencil: reads node [i..i+1]×[j..j+1]×[k..k+1].
  */
+template<typename T>
 __global__ void k_divSymmTensorN2C(
-    double* __restrict__ divCX,
-    double* __restrict__ divCY,
-    double* __restrict__ divCZ,
-    const double* __restrict__ pXX, const double* __restrict__ pXY,
-    const double* __restrict__ pXZ, const double* __restrict__ pYY,
-    const double* __restrict__ pYZ, const double* __restrict__ pZZ,
+    T* __restrict__ divCX,
+    T* __restrict__ divCY,
+    T* __restrict__ divCZ,
+    const T* __restrict__ pXX, const T* __restrict__ pXY,
+    const T* __restrict__ pXZ, const T* __restrict__ pYY,
+    const T* __restrict__ pYZ, const T* __restrict__ pZZ,
     int nxc, int nyc, int nzc,
     int nyn, int nzn,
-    double invdx, double invdy, double invdz)
+    T invdx, T invdy, T invdz)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
     int j = blockIdx.y * BY + threadIdx.y + 1;
@@ -404,10 +413,11 @@ __global__ void k_divSymmTensorN2C(
 //  Smooth (box stencil) kernel
 // =========================================================================
 
-__global__ void k_smoothStep(double* __restrict__ out,
-                             const double* __restrict__ in,
+template<typename T>
+__global__ void k_smoothStep(T* __restrict__ out,
+                             const T* __restrict__ in,
                              int nx, int ny, int nz,
-                             double alpha, double beta3D)
+                             T alpha, T beta3D)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
     int j = blockIdx.y * BY + threadIdx.y + 1;
@@ -426,10 +436,10 @@ __global__ void k_smoothStep(double* __restrict__ out,
 //  Host wrappers
 // =========================================================================
 
-void gpuGradC2N(double* gradXN, double* gradYN, double* gradZN,
-                const double* scFieldC,
+void gpuGradC2N(cudaSolverType* gradXN, cudaSolverType* gradYN, cudaSolverType* gradZN,
+                const cudaSolverType* scFieldC,
                 int nxn, int nyn, int nzn,
-                double invdx, double invdy, double invdz,
+                cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                 cudaStream_t stream)
 {
     int nyc = nyn - 1, nzc = nzn - 1;
@@ -441,10 +451,10 @@ void gpuGradC2N(double* gradXN, double* gradYN, double* gradZN,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuGradN2C(double* gradXC, double* gradYC, double* gradZC,
-                const double* scFieldN,
+void gpuGradN2C(cudaSolverType* gradXC, cudaSolverType* gradYC, cudaSolverType* gradZC,
+                const cudaSolverType* scFieldN,
                 int nxc, int nyc, int nzc,
-                double invdx, double invdy, double invdz,
+                cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                 cudaStream_t stream)
 {
     int nyn = nyc + 1, nzn = nzc + 1;
@@ -456,10 +466,10 @@ void gpuGradN2C(double* gradXC, double* gradYC, double* gradZC,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuDivN2C(double* divC,
-               const double* vecXN, const double* vecYN, const double* vecZN,
+void gpuDivN2C(cudaSolverType* divC,
+               const cudaSolverType* vecXN, const cudaSolverType* vecYN, const cudaSolverType* vecZN,
                int nxc, int nyc, int nzc,
-               double invdx, double invdy, double invdz,
+               cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                cudaStream_t stream)
 {
     int nyn = nyc + 1, nzn = nzc + 1;
@@ -471,10 +481,10 @@ void gpuDivN2C(double* divC,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuDivC2N(double* divN,
-               const double* vecXC, const double* vecYC, const double* vecZC,
+void gpuDivC2N(cudaSolverType* divN,
+               const cudaSolverType* vecXC, const cudaSolverType* vecYC, const cudaSolverType* vecZC,
                int nxn, int nyn, int nzn,
-               double invdx, double invdy, double invdz,
+               cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                cudaStream_t stream)
 {
     int nyc = nyn - 1, nzc = nzn - 1;
@@ -486,10 +496,10 @@ void gpuDivC2N(double* divN,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuCurlC2N(double* curlXN, double* curlYN, double* curlZN,
-                const double* vecXC, const double* vecYC, const double* vecZC,
+void gpuCurlC2N(cudaSolverType* curlXN, cudaSolverType* curlYN, cudaSolverType* curlZN,
+                const cudaSolverType* vecXC, const cudaSolverType* vecYC, const cudaSolverType* vecZC,
                 int nxn, int nyn, int nzn,
-                double invdx, double invdy, double invdz,
+                cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                 cudaStream_t stream)
 {
     int nyc = nyn - 1, nzc = nzn - 1;
@@ -501,10 +511,10 @@ void gpuCurlC2N(double* curlXN, double* curlYN, double* curlZN,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuCurlN2C(double* curlXC, double* curlYC, double* curlZC,
-                const double* vecXN, const double* vecYN, const double* vecZN,
+void gpuCurlN2C(cudaSolverType* curlXC, cudaSolverType* curlYC, cudaSolverType* curlZC,
+                const cudaSolverType* vecXN, const cudaSolverType* vecYN, const cudaSolverType* vecZN,
                 int nxc, int nyc, int nzc,
-                double invdx, double invdy, double invdz,
+                cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                 cudaStream_t stream)
 {
     int nyn = nyc + 1, nzn = nzc + 1;
@@ -516,7 +526,7 @@ void gpuCurlN2C(double* curlXC, double* curlYC, double* curlZC,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuInterpC2N(double* fieldN, const double* fieldC,
+void gpuInterpC2N(cudaSolverType* fieldN, const cudaSolverType* fieldC,
                   int nxn, int nyn, int nzn,
                   cudaStream_t stream)
 {
@@ -528,7 +538,7 @@ void gpuInterpC2N(double* fieldN, const double* fieldC,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuInterpN2C(double* fieldC, const double* fieldN,
+void gpuInterpN2C(cudaSolverType* fieldC, const cudaSolverType* fieldN,
                   int nxc, int nyc, int nzc,
                   cudaStream_t stream)
 {
@@ -540,11 +550,11 @@ void gpuInterpN2C(double* fieldC, const double* fieldN,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuDivSymmTensorN2C(double* divCX, double* divCY, double* divCZ,
-                         const double* pXX, const double* pXY, const double* pXZ,
-                         const double* pYY, const double* pYZ, const double* pZZ,
+void gpuDivSymmTensorN2C(cudaSolverType* divCX, cudaSolverType* divCY, cudaSolverType* divCZ,
+                         const cudaSolverType* pXX, const cudaSolverType* pXY, const cudaSolverType* pXZ,
+                         const cudaSolverType* pYY, const cudaSolverType* pYZ, const cudaSolverType* pZZ,
                          int nxc, int nyc, int nzc,
-                         double invdx, double invdy, double invdz,
+                         cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                          cudaStream_t stream)
 {
     int nyn = nyc + 1, nzn = nzc + 1;
@@ -556,9 +566,9 @@ void gpuDivSymmTensorN2C(double* divCX, double* divCY, double* divCZ,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSmoothStep(double* out, const double* in,
+void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in,
                    int nx, int ny, int nz,
-                   double alpha, double beta3D,
+                   cudaSolverType alpha, cudaSolverType beta3D,
                    cudaStream_t stream)
 {
     dim3 grid = stencilGrid(nx, ny, nz);
@@ -593,27 +603,28 @@ static inline dim3 rangedGrid(int iLo, int iHi, int jLo, int jHi, int kLo, int k
 // -----------------------------------------------------------------
 //  divC2N  (centre → node divergence)
 // -----------------------------------------------------------------
+template<typename T>
 __device__ __forceinline__
-void d_divC2N(double* __restrict__ divN,
-              const double* __restrict__ vXC,
-              const double* __restrict__ vYC,
-              const double* __restrict__ vZC,
+void d_divC2N(T* __restrict__ divN,
+              const T* __restrict__ vXC,
+              const T* __restrict__ vYC,
+              const T* __restrict__ vZC,
               int i, int j, int k,
               int nyn, int nzn, int nyc, int nzc,
-              double invdx, double invdy, double invdz)
+              T invdx, T invdy, T invdz)
 {
     #define C_D(arr, ii, jj, kk) arr[IDX(ii, jj, kk, nyc, nzc)]
-    double cX = 0.25 * invdx * (
+    T cX = 0.25 * invdx * (
         (C_D(vXC,i  ,j  ,k  ) - C_D(vXC,i-1,j  ,k  )) +
         (C_D(vXC,i  ,j  ,k-1) - C_D(vXC,i-1,j  ,k-1)) +
         (C_D(vXC,i  ,j-1,k  ) - C_D(vXC,i-1,j-1,k  )) +
         (C_D(vXC,i  ,j-1,k-1) - C_D(vXC,i-1,j-1,k-1)));
-    double cY = 0.25 * invdy * (
+    T cY = 0.25 * invdy * (
         (C_D(vYC,i  ,j  ,k  ) - C_D(vYC,i  ,j-1,k  )) +
         (C_D(vYC,i  ,j  ,k-1) - C_D(vYC,i  ,j-1,k-1)) +
         (C_D(vYC,i-1,j  ,k  ) - C_D(vYC,i-1,j-1,k  )) +
         (C_D(vYC,i-1,j  ,k-1) - C_D(vYC,i-1,j-1,k-1)));
-    double cZ = 0.25 * invdz * (
+    T cZ = 0.25 * invdz * (
         (C_D(vZC,i  ,j  ,k  ) - C_D(vZC,i  ,j  ,k-1)) +
         (C_D(vZC,i-1,j  ,k  ) - C_D(vZC,i-1,j  ,k-1)) +
         (C_D(vZC,i  ,j-1,k  ) - C_D(vZC,i  ,j-1,k-1)) +
@@ -622,11 +633,12 @@ void d_divC2N(double* __restrict__ divN,
     #undef C_D
 }
 
+template<typename T>
 __global__ void k_divC2N_interior(
-    double* __restrict__ divN,
-    const double* __restrict__ vXC, const double* __restrict__ vYC, const double* __restrict__ vZC,
+    T* __restrict__ divN,
+    const T* __restrict__ vXC, const T* __restrict__ vYC, const T* __restrict__ vZC,
     int nxn, int nyn, int nzn, int nyc, int nzc,
-    double invdx, double invdy, double invdz,
+    T invdx, T invdy, T invdz,
     int iLo, int iHi, int jLo, int jHi, int kLo, int kHi)
 {
     int i = blockIdx.x * BX + threadIdx.x + iLo;
@@ -636,11 +648,12 @@ __global__ void k_divC2N_interior(
     d_divC2N(divN, vXC, vYC, vZC, i, j, k, nyn, nzn, nyc, nzc, invdx, invdy, invdz);
 }
 
+template<typename T>
 __global__ void k_divC2N_boundary(
-    double* __restrict__ divN,
-    const double* __restrict__ vXC, const double* __restrict__ vYC, const double* __restrict__ vZC,
+    T* __restrict__ divN,
+    const T* __restrict__ vXC, const T* __restrict__ vYC, const T* __restrict__ vZC,
     int nxn, int nyn, int nzn, int nyc, int nzc,
-    double invdx, double invdy, double invdz,
+    T invdx, T invdy, T invdz,
     int sILo, int sIHi, int sJLo, int sJHi, int sKLo, int sKHi)
 {
     int i = blockIdx.x * BX + threadIdx.x + 1;
@@ -651,10 +664,10 @@ __global__ void k_divC2N_boundary(
     d_divC2N(divN, vXC, vYC, vZC, i, j, k, nyn, nzn, nyc, nzc, invdx, invdy, invdz);
 }
 
-void gpuDivC2N_interior(double* divN,
-                        const double* vXC, const double* vYC, const double* vZC,
+void gpuDivC2N_interior(cudaSolverType* divN,
+                        const cudaSolverType* vXC, const cudaSolverType* vYC, const cudaSolverType* vZC,
                         int nxn, int nyn, int nzn,
-                        double invdx, double invdy, double invdz,
+                        cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                         cudaStream_t stream)
 {
     int iLo=2, iHi=nxn-3, jLo=2, jHi=nyn-3, kLo=2, kHi=nzn-3;
@@ -666,10 +679,10 @@ void gpuDivC2N_interior(double* divN,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuDivC2N_boundary(double* divN,
-                        const double* vXC, const double* vYC, const double* vZC,
+void gpuDivC2N_boundary(cudaSolverType* divN,
+                        const cudaSolverType* vXC, const cudaSolverType* vYC, const cudaSolverType* vZC,
                         int nxn, int nyn, int nzn,
-                        double invdx, double invdy, double invdz,
+                        cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                         cudaStream_t stream)
 {
     int nyc=nyn-1, nzc=nzn-1;
@@ -682,16 +695,17 @@ void gpuDivC2N_boundary(double* divN,
 // -----------------------------------------------------------------
 //  gradC2N  (centre → node gradient)
 // -----------------------------------------------------------------
+template<typename T>
 __device__ __forceinline__
-void d_gradC2N(double* __restrict__ gXN, double* __restrict__ gYN, double* __restrict__ gZN,
-               const double* __restrict__ C,
+void d_gradC2N(T* __restrict__ gXN, T* __restrict__ gYN, T* __restrict__ gZN,
+               const T* __restrict__ C,
                int i, int j, int k,
                int nyn, int nzn, int nyc, int nzc,
-               double invdx, double invdy, double invdz)
+               T invdx, T invdy, T invdz)
 {
     #define CG(ii,jj,kk) C[IDX(ii,jj,kk,nyc,nzc)]
-    double c000=CG(i-1,j-1,k-1), c001=CG(i-1,j-1,k), c010=CG(i-1,j,k-1), c011=CG(i-1,j,k);
-    double c100=CG(i,  j-1,k-1), c101=CG(i,  j-1,k), c110=CG(i,  j,k-1), c111=CG(i,  j,k);
+    T c000=CG(i-1,j-1,k-1), c001=CG(i-1,j-1,k), c010=CG(i-1,j,k-1), c011=CG(i-1,j,k);
+    T c100=CG(i,  j-1,k-1), c101=CG(i,  j-1,k), c110=CG(i,  j,k-1), c111=CG(i,  j,k);
     int nidx = IDX(i,j,k,nyn,nzn);
     gXN[nidx] = 0.25*invdx*((c111-c011)+(c110-c010)+(c101-c001)+(c100-c000));
     gYN[nidx] = 0.25*invdy*((c111-c101)+(c110-c100)+(c011-c001)+(c010-c000));
@@ -699,11 +713,12 @@ void d_gradC2N(double* __restrict__ gXN, double* __restrict__ gYN, double* __res
     #undef CG
 }
 
+template<typename T>
 __global__ void k_gradC2N_interior(
-    double* __restrict__ gXN, double* __restrict__ gYN, double* __restrict__ gZN,
-    const double* __restrict__ C,
+    T* __restrict__ gXN, T* __restrict__ gYN, T* __restrict__ gZN,
+    const T* __restrict__ C,
     int nxn, int nyn, int nzn, int nyc, int nzc,
-    double invdx, double invdy, double invdz,
+    T invdx, T invdy, T invdz,
     int iLo, int iHi, int jLo, int jHi, int kLo, int kHi)
 {
     int i=blockIdx.x*BX+threadIdx.x+iLo, j=blockIdx.y*BY+threadIdx.y+jLo, k=blockIdx.z*BZ+threadIdx.z+kLo;
@@ -711,11 +726,12 @@ __global__ void k_gradC2N_interior(
     d_gradC2N(gXN,gYN,gZN,C,i,j,k,nyn,nzn,nyc,nzc,invdx,invdy,invdz);
 }
 
+template<typename T>
 __global__ void k_gradC2N_boundary(
-    double* __restrict__ gXN, double* __restrict__ gYN, double* __restrict__ gZN,
-    const double* __restrict__ C,
+    T* __restrict__ gXN, T* __restrict__ gYN, T* __restrict__ gZN,
+    const T* __restrict__ C,
     int nxn, int nyn, int nzn, int nyc, int nzc,
-    double invdx, double invdy, double invdz,
+    T invdx, T invdy, T invdz,
     int sILo, int sIHi, int sJLo, int sJHi, int sKLo, int sKHi)
 {
     int i=blockIdx.x*BX+threadIdx.x+1, j=blockIdx.y*BY+threadIdx.y+1, k=blockIdx.z*BZ+threadIdx.z+1;
@@ -724,10 +740,10 @@ __global__ void k_gradC2N_boundary(
     d_gradC2N(gXN,gYN,gZN,C,i,j,k,nyn,nzn,nyc,nzc,invdx,invdy,invdz);
 }
 
-void gpuGradC2N_interior(double* gXN, double* gYN, double* gZN,
-                         const double* C,
+void gpuGradC2N_interior(cudaSolverType* gXN, cudaSolverType* gYN, cudaSolverType* gZN,
+                         const cudaSolverType* C,
                          int nxn, int nyn, int nzn,
-                         double invdx, double invdy, double invdz,
+                         cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                          cudaStream_t stream)
 {
     int iLo=2,iHi=nxn-3,jLo=2,jHi=nyn-3,kLo=2,kHi=nzn-3;
@@ -738,10 +754,10 @@ void gpuGradC2N_interior(double* gXN, double* gYN, double* gZN,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuGradC2N_boundary(double* gXN, double* gYN, double* gZN,
-                         const double* C,
+void gpuGradC2N_boundary(cudaSolverType* gXN, cudaSolverType* gYN, cudaSolverType* gZN,
+                         const cudaSolverType* C,
                          int nxn, int nyn, int nzn,
-                         double invdx, double invdy, double invdz,
+                         cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                          cudaStream_t stream)
 {
     int nyc=nyn-1,nzc=nzn-1;
@@ -753,8 +769,9 @@ void gpuGradC2N_boundary(double* gXN, double* gYN, double* gZN,
 // -----------------------------------------------------------------
 //  interpC2N  (centre → node interpolation)
 // -----------------------------------------------------------------
+template<typename T>
 __device__ __forceinline__
-void d_interpC2N(double* __restrict__ fN, const double* __restrict__ fC,
+void d_interpC2N(T* __restrict__ fN, const T* __restrict__ fC,
                  int i, int j, int k, int nyn, int nzn, int nyc, int nzc)
 {
     #define CI(ii,jj,kk) fC[IDX(ii,jj,kk,nyc,nzc)]
@@ -763,8 +780,9 @@ void d_interpC2N(double* __restrict__ fN, const double* __restrict__ fC,
     #undef CI
 }
 
+template<typename T>
 __global__ void k_interpC2N_interior(
-    double* __restrict__ fN, const double* __restrict__ fC,
+    T* __restrict__ fN, const T* __restrict__ fC,
     int nxn, int nyn, int nzn, int nyc, int nzc,
     int iLo, int iHi, int jLo, int jHi, int kLo, int kHi)
 {
@@ -773,8 +791,9 @@ __global__ void k_interpC2N_interior(
     d_interpC2N(fN,fC,i,j,k,nyn,nzn,nyc,nzc);
 }
 
+template<typename T>
 __global__ void k_interpC2N_boundary(
-    double* __restrict__ fN, const double* __restrict__ fC,
+    T* __restrict__ fN, const T* __restrict__ fC,
     int nxn, int nyn, int nzn, int nyc, int nzc,
     int sILo, int sIHi, int sJLo, int sJHi, int sKLo, int sKHi)
 {
@@ -784,7 +803,7 @@ __global__ void k_interpC2N_boundary(
     d_interpC2N(fN,fC,i,j,k,nyn,nzn,nyc,nzc);
 }
 
-void gpuInterpC2N_interior(double* fN, const double* fC,
+void gpuInterpC2N_interior(cudaSolverType* fN, const cudaSolverType* fC,
                            int nxn, int nyn, int nzn,
                            cudaStream_t stream)
 {
@@ -796,7 +815,7 @@ void gpuInterpC2N_interior(double* fN, const double* fC,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuInterpC2N_boundary(double* fN, const double* fC,
+void gpuInterpC2N_boundary(cudaSolverType* fN, const cudaSolverType* fC,
                            int nxn, int nyn, int nzn,
                            cudaStream_t stream)
 {
@@ -809,10 +828,11 @@ void gpuInterpC2N_boundary(double* fN, const double* fC,
 // -----------------------------------------------------------------
 //  smoothStep  (6-point box smooth)
 // -----------------------------------------------------------------
+template<typename T>
 __device__ __forceinline__
-void d_smoothStep(double* __restrict__ out, const double* __restrict__ in,
+void d_smoothStep(T* __restrict__ out, const T* __restrict__ in,
                   int i, int j, int k, int ny, int nz,
-                  double alpha, double beta3D)
+                  T alpha, T beta3D)
 {
     #define INS(ii,jj,kk) in[IDX(ii,jj,kk,ny,nz)]
     out[IDX(i,j,k,ny,nz)] = alpha*INS(i,j,k) + beta3D*(
@@ -820,9 +840,10 @@ void d_smoothStep(double* __restrict__ out, const double* __restrict__ in,
     #undef INS
 }
 
+template<typename T>
 __global__ void k_smoothStep_interior(
-    double* __restrict__ out, const double* __restrict__ in,
-    int nx, int ny, int nz, double alpha, double beta3D,
+    T* __restrict__ out, const T* __restrict__ in,
+    int nx, int ny, int nz, T alpha, T beta3D,
     int iLo, int iHi, int jLo, int jHi, int kLo, int kHi)
 {
     int i=blockIdx.x*BX+threadIdx.x+iLo, j=blockIdx.y*BY+threadIdx.y+jLo, k=blockIdx.z*BZ+threadIdx.z+kLo;
@@ -830,9 +851,10 @@ __global__ void k_smoothStep_interior(
     d_smoothStep(out,in,i,j,k,ny,nz,alpha,beta3D);
 }
 
+template<typename T>
 __global__ void k_smoothStep_boundary(
-    double* __restrict__ out, const double* __restrict__ in,
-    int nx, int ny, int nz, double alpha, double beta3D,
+    T* __restrict__ out, const T* __restrict__ in,
+    int nx, int ny, int nz, T alpha, T beta3D,
     int sILo, int sIHi, int sJLo, int sJHi, int sKLo, int sKHi)
 {
     int i=blockIdx.x*BX+threadIdx.x+1, j=blockIdx.y*BY+threadIdx.y+1, k=blockIdx.z*BZ+threadIdx.z+1;
@@ -841,9 +863,9 @@ __global__ void k_smoothStep_boundary(
     d_smoothStep(out,in,i,j,k,ny,nz,alpha,beta3D);
 }
 
-void gpuSmoothStep_interior(double* out, const double* in,
+void gpuSmoothStep_interior(cudaSolverType* out, const cudaSolverType* in,
                             int nx, int ny, int nz,
-                            double alpha, double beta3D,
+                            cudaSolverType alpha, cudaSolverType beta3D,
                             cudaStream_t stream)
 {
     int iLo=2,iHi=nx-3,jLo=2,jHi=ny-3,kLo=2,kHi=nz-3;
@@ -853,9 +875,9 @@ void gpuSmoothStep_interior(double* out, const double* in,
     cudaErrChk(cudaGetLastError());
 }
 
-void gpuSmoothStep_boundary(double* out, const double* in,
+void gpuSmoothStep_boundary(cudaSolverType* out, const cudaSolverType* in,
                             int nx, int ny, int nz,
-                            double alpha, double beta3D,
+                            cudaSolverType alpha, cudaSolverType beta3D,
                             cudaStream_t stream)
 {
     dim3 grid=stencilGrid(nx,ny,nz); dim3 block(BX,BY,BZ);

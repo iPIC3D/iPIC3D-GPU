@@ -34,7 +34,7 @@ int idx3(int i, int j, int k, int ny, int nz)
 //          2 = Neumann   0 first-order   ghost = interior
 // =========================================================================
 
-__global__ void gpuBCfaceXleft(double* __restrict__ arr,
+__global__ void gpuBCfaceXleft(cudaSolverType* __restrict__ arr,
                                 int nx, int ny, int nz, int bcType)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
@@ -49,7 +49,7 @@ __global__ void gpuBCfaceXleft(double* __restrict__ arr,
     }
 }
 
-__global__ void gpuBCfaceXright(double* __restrict__ arr,
+__global__ void gpuBCfaceXright(cudaSolverType* __restrict__ arr,
                                  int nx, int ny, int nz, int bcType)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
@@ -64,7 +64,7 @@ __global__ void gpuBCfaceXright(double* __restrict__ arr,
     }
 }
 
-__global__ void gpuBCfaceYleft(double* __restrict__ arr,
+__global__ void gpuBCfaceYleft(cudaSolverType* __restrict__ arr,
                                 int nx, int ny, int nz, int bcType)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -79,7 +79,7 @@ __global__ void gpuBCfaceYleft(double* __restrict__ arr,
     }
 }
 
-__global__ void gpuBCfaceYright(double* __restrict__ arr,
+__global__ void gpuBCfaceYright(cudaSolverType* __restrict__ arr,
                                  int nx, int ny, int nz, int bcType)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -94,7 +94,7 @@ __global__ void gpuBCfaceYright(double* __restrict__ arr,
     }
 }
 
-__global__ void gpuBCfaceZleft(double* __restrict__ arr,
+__global__ void gpuBCfaceZleft(cudaSolverType* __restrict__ arr,
                                 int nx, int ny, int nz, int bcType)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -109,7 +109,7 @@ __global__ void gpuBCfaceZleft(double* __restrict__ arr,
     }
 }
 
-__global__ void gpuBCfaceZright(double* __restrict__ arr,
+__global__ void gpuBCfaceZright(cudaSolverType* __restrict__ arr,
                                  int nx, int ny, int nz, int bcType)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -128,7 +128,7 @@ __global__ void gpuBCfaceZright(double* __restrict__ arr,
 //  Self-copy kernels – periodic face swap when rank == neighbour
 // =========================================================================
 
-__global__ void gpuSelfCopyFaceX(double* __restrict__ arr,
+__global__ void gpuSelfCopyFaceX(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -139,7 +139,7 @@ __global__ void gpuSelfCopyFaceX(double* __restrict__ arr,
     arr[idx3(nx - 1, j, k, ny, nz)] = arr[idx3(1,      j, k, ny, nz)];
 }
 
-__global__ void gpuSelfCopyFaceY(double* __restrict__ arr,
+__global__ void gpuSelfCopyFaceY(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -149,7 +149,7 @@ __global__ void gpuSelfCopyFaceY(double* __restrict__ arr,
     arr[idx3(i, ny - 1, k, ny, nz)] = arr[idx3(i, 1,      k, ny, nz)];
 }
 
-__global__ void gpuSelfCopyFaceZ(double* __restrict__ arr,
+__global__ void gpuSelfCopyFaceZ(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -163,7 +163,7 @@ __global__ void gpuSelfCopyFaceZ(double* __restrict__ arr,
 //  Self-copy kernels – periodic edge swap when rank == neighbour
 // =========================================================================
 
-__global__ void gpuSelfCopyEdgeX(double* __restrict__ arr,
+__global__ void gpuSelfCopyEdgeX(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz,
                                   bool hasZright, bool hasZleft,
                                   bool hasYright, bool hasYleft)
@@ -200,7 +200,7 @@ __global__ void gpuSelfCopyEdgeX(double* __restrict__ arr,
     }
 }
 
-__global__ void gpuSelfCopyEdgeY(double* __restrict__ arr,
+__global__ void gpuSelfCopyEdgeY(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz,
                                   bool hasXright, bool hasXleft,
                                   bool hasZright, bool hasZleft)
@@ -236,7 +236,7 @@ __global__ void gpuSelfCopyEdgeY(double* __restrict__ arr,
     }
 }
 
-__global__ void gpuSelfCopyEdgeZ(double* __restrict__ arr,
+__global__ void gpuSelfCopyEdgeZ(cudaSolverType* __restrict__ arr,
                                   int nx, int ny, int nz,
                                   bool hasYright, bool hasYleft,
                                   bool hasXright, bool hasXleft)
@@ -276,7 +276,7 @@ __global__ void gpuSelfCopyEdgeZ(double* __restrict__ arr,
 //  Self-copy kernels – periodic corner swap
 // =========================================================================
 
-__global__ void gpuSelfCopyCornerX(double* __restrict__ arr,
+__global__ void gpuSelfCopyCornerX(cudaSolverType* __restrict__ arr,
                                     int nx, int ny, int nz,
                                     bool hasYleft, bool hasYright,
                                     bool hasZleft, bool hasZright)
@@ -301,7 +301,7 @@ __global__ void gpuSelfCopyCornerX(double* __restrict__ arr,
     }
 }
 
-__global__ void gpuSelfCopyCornerY(double* __restrict__ arr,
+__global__ void gpuSelfCopyCornerY(cudaSolverType* __restrict__ arr,
                                     int nx, int ny, int nz,
                                     bool hasXleft, bool hasXright,
                                     bool hasZleft, bool hasZright)
@@ -325,7 +325,7 @@ __global__ void gpuSelfCopyCornerY(double* __restrict__ arr,
     }
 }
 
-__global__ void gpuSelfCopyCornerZ(double* __restrict__ arr,
+__global__ void gpuSelfCopyCornerZ(cudaSolverType* __restrict__ arr,
                                     int nx, int ny, int nz,
                                     bool hasYleft, bool hasYright,
                                     bool hasXleft, bool hasXright)
@@ -353,35 +353,35 @@ __global__ void gpuSelfCopyCornerZ(double* __restrict__ arr,
 //  Batched self-copy kernels – face (uses blockIdx.z for field index)
 // =========================================================================
 
-__global__ void gpuBatchSelfCopyFaceX(double* const* __restrict__ fields,
+__global__ void gpuBatchSelfCopyFaceX(cudaSolverType* const* __restrict__ fields,
                                        int nx, int ny, int nz)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (j >= ny - 1 || k >= nz - 1) return;
-    double* arr = fields[blockIdx.z];
+    cudaSolverType* arr = fields[blockIdx.z];
     arr[idx3(0,      j, k, ny, nz)] = arr[idx3(nx - 2, j, k, ny, nz)];
     arr[idx3(nx - 1, j, k, ny, nz)] = arr[idx3(1,      j, k, ny, nz)];
 }
 
-__global__ void gpuBatchSelfCopyFaceY(double* const* __restrict__ fields,
+__global__ void gpuBatchSelfCopyFaceY(cudaSolverType* const* __restrict__ fields,
                                        int nx, int ny, int nz)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i >= nx - 1 || k >= nz - 1) return;
-    double* arr = fields[blockIdx.z];
+    cudaSolverType* arr = fields[blockIdx.z];
     arr[idx3(i, 0,      k, ny, nz)] = arr[idx3(i, ny - 2, k, ny, nz)];
     arr[idx3(i, ny - 1, k, ny, nz)] = arr[idx3(i, 1,      k, ny, nz)];
 }
 
-__global__ void gpuBatchSelfCopyFaceZ(double* const* __restrict__ fields,
+__global__ void gpuBatchSelfCopyFaceZ(cudaSolverType* const* __restrict__ fields,
                                        int nx, int ny, int nz)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i >= nx - 1 || j >= ny - 1) return;
-    double* arr = fields[blockIdx.z];
+    cudaSolverType* arr = fields[blockIdx.z];
     arr[idx3(i, j, 0,      ny, nz)] = arr[idx3(i, j, nz - 2, ny, nz)];
     arr[idx3(i, j, nz - 1, ny, nz)] = arr[idx3(i, j, 1,      ny, nz)];
 }
@@ -390,13 +390,13 @@ __global__ void gpuBatchSelfCopyFaceZ(double* const* __restrict__ fields,
 //  Batched self-copy kernels – edge (uses blockIdx.y for field index)
 // =========================================================================
 
-__global__ void gpuBatchSelfCopyEdgeX(double* const* __restrict__ fields,
+__global__ void gpuBatchSelfCopyEdgeX(cudaSolverType* const* __restrict__ fields,
                                        int nx, int ny, int nz,
                                        bool hasZright, bool hasZleft,
                                        bool hasYright, bool hasYleft)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    double* arr = fields[blockIdx.y];
+    cudaSolverType* arr = fields[blockIdx.y];
     if (hasZright) {
         int iy = tid + 1;
         if (iy < ny - 1) {
@@ -427,13 +427,13 @@ __global__ void gpuBatchSelfCopyEdgeX(double* const* __restrict__ fields,
     }
 }
 
-__global__ void gpuBatchSelfCopyEdgeY(double* const* __restrict__ fields,
+__global__ void gpuBatchSelfCopyEdgeY(cudaSolverType* const* __restrict__ fields,
                                        int nx, int ny, int nz,
                                        bool hasXright, bool hasXleft,
                                        bool hasZright, bool hasZleft)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    double* arr = fields[blockIdx.y];
+    cudaSolverType* arr = fields[blockIdx.y];
     if (hasXright) {
         int iz = tid + 1;
         if (iz < nz - 1) {
@@ -464,13 +464,13 @@ __global__ void gpuBatchSelfCopyEdgeY(double* const* __restrict__ fields,
     }
 }
 
-__global__ void gpuBatchSelfCopyEdgeZ(double* const* __restrict__ fields,
+__global__ void gpuBatchSelfCopyEdgeZ(cudaSolverType* const* __restrict__ fields,
                                        int nx, int ny, int nz,
                                        bool hasYright, bool hasYleft,
                                        bool hasXright, bool hasXleft)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    double* arr = fields[blockIdx.y];
+    cudaSolverType* arr = fields[blockIdx.y];
     if (hasYright) {
         int ix = tid + 1;
         if (ix < nx - 1) {
@@ -505,12 +505,12 @@ __global__ void gpuBatchSelfCopyEdgeZ(double* const* __restrict__ fields,
 //  Batched self-copy kernels – corner (uses blockIdx.x for field index)
 // =========================================================================
 
-__global__ void gpuBatchSelfCopyCornerX(double* const* __restrict__ fields,
+__global__ void gpuBatchSelfCopyCornerX(cudaSolverType* const* __restrict__ fields,
                                          int nx, int ny, int nz,
                                          bool hasYleft, bool hasYright,
                                          bool hasZleft, bool hasZright)
 {
-    double* arr = fields[blockIdx.x];
+    cudaSolverType* arr = fields[blockIdx.x];
     if (threadIdx.x != 0) return;
     if (hasYleft && hasZleft) {
         arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(nx - 2, 0, 0, ny, nz)];
@@ -530,12 +530,12 @@ __global__ void gpuBatchSelfCopyCornerX(double* const* __restrict__ fields,
     }
 }
 
-__global__ void gpuBatchSelfCopyCornerY(double* const* __restrict__ fields,
+__global__ void gpuBatchSelfCopyCornerY(cudaSolverType* const* __restrict__ fields,
                                          int nx, int ny, int nz,
                                          bool hasXleft, bool hasXright,
                                          bool hasZleft, bool hasZright)
 {
-    double* arr = fields[blockIdx.x];
+    cudaSolverType* arr = fields[blockIdx.x];
     if (threadIdx.x != 0) return;
     if (hasXleft && hasZleft) {
         arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(0, ny - 2, 0, ny, nz)];
@@ -555,12 +555,12 @@ __global__ void gpuBatchSelfCopyCornerY(double* const* __restrict__ fields,
     }
 }
 
-__global__ void gpuBatchSelfCopyCornerZ(double* const* __restrict__ fields,
+__global__ void gpuBatchSelfCopyCornerZ(cudaSolverType* const* __restrict__ fields,
                                          int nx, int ny, int nz,
                                          bool hasYleft, bool hasYright,
                                          bool hasXleft, bool hasXright)
 {
-    double* arr = fields[blockIdx.x];
+    cudaSolverType* arr = fields[blockIdx.x];
     if (threadIdx.x != 0) return;
     if (hasYleft && hasXleft) {
         arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(0, 0, nz - 2, ny, nz)];
@@ -584,7 +584,7 @@ __global__ void gpuBatchSelfCopyCornerZ(double* const* __restrict__ fields,
 //  Additive interpolation kernels (for communicateInterp)
 // =========================================================================
 
-__global__ void gpuAddFaceX(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddFaceX(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasXright, bool hasXleft)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -596,7 +596,7 @@ __global__ void gpuAddFaceX(double* __restrict__ arr, int nx, int ny, int nz,
         arr[idx3(1, j, k, ny, nz)] += arr[idx3(0, j, k, ny, nz)];
 }
 
-__global__ void gpuAddFaceY(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddFaceY(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasYright, bool hasYleft)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -608,7 +608,7 @@ __global__ void gpuAddFaceY(double* __restrict__ arr, int nx, int ny, int nz,
         arr[idx3(i, 1, k, ny, nz)] += arr[idx3(i, 0, k, ny, nz)];
 }
 
-__global__ void gpuAddFaceZ(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddFaceZ(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasZright, bool hasZleft)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -620,7 +620,7 @@ __global__ void gpuAddFaceZ(double* __restrict__ arr, int nx, int ny, int nz,
         arr[idx3(i, j, 1, ny, nz)] += arr[idx3(i, j, 0, ny, nz)];
 }
 
-__global__ void gpuAddEdgeZ(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddEdgeZ(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasXright, bool hasXleft,
                              bool hasYright, bool hasYleft)
 {
@@ -636,7 +636,7 @@ __global__ void gpuAddEdgeZ(double* __restrict__ arr, int nx, int ny, int nz,
         arr[idx3(1, ny - 2, k, ny, nz)] += arr[idx3(0, ny - 1, k, ny, nz)];
 }
 
-__global__ void gpuAddEdgeY(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddEdgeY(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasXright, bool hasXleft,
                              bool hasZright, bool hasZleft)
 {
@@ -652,7 +652,7 @@ __global__ void gpuAddEdgeY(double* __restrict__ arr, int nx, int ny, int nz,
         arr[idx3(nx - 2, j, 1, ny, nz)] += arr[idx3(nx - 1, j, 0, ny, nz)];
 }
 
-__global__ void gpuAddEdgeX(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddEdgeX(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                              bool hasYright, bool hasYleft,
                              bool hasZright, bool hasZleft)
 {
@@ -668,7 +668,7 @@ __global__ void gpuAddEdgeX(double* __restrict__ arr, int nx, int ny, int nz,
         arr[idx3(i, ny - 2, 1, ny, nz)] += arr[idx3(i, ny - 1, 0, ny, nz)];
 }
 
-__global__ void gpuAddCorner(double* __restrict__ arr, int nx, int ny, int nz,
+__global__ void gpuAddCorner(cudaSolverType* __restrict__ arr, int nx, int ny, int nz,
                               bool hasXright, bool hasXleft,
                               bool hasYright, bool hasYleft,
                               bool hasZright, bool hasZleft)
@@ -706,7 +706,7 @@ void gpuBCface(int nx, int ny, int nz,
                const VirtualTopology3D* vct,
                cudaStream_t stream)
 {
-    double* d = gpuArr.devPtr();
+    cudaSolverType* d = gpuArr.devPtr();
 
     // X boundaries
     if (vct->getXleft_neighbor() == MPI_PROC_NULL) {
@@ -756,7 +756,7 @@ void gpuBCface_P(int nx, int ny, int nz,
     // BCface_P uses particle-topology neighbours but same BC logic.
     // For field solver, particle topology is not used; delegate to gpuBCface
     // with the field topology neighbour checks already handled.
-    double* d = gpuArr.devPtr();
+    cudaSolverType* d = gpuArr.devPtr();
 
     if (vct->getXleft_neighbor_P() == MPI_PROC_NULL) {
         dim3 block(BC_BLOCK, BC_BLOCK);
@@ -802,7 +802,7 @@ void EMfields3D::gpuCommunicateCenterBC(int nx, int ny, int nz, GPUFieldArray3& 
                                          int bcFaceYright, int bcFaceYleft,
                                          int bcFaceZright, int bcFaceZleft)
 {
-    double* ptr = gpuArr.devPtr();
+    cudaSolverType* ptr = gpuArr.devPtr();
     gpuBatchedHaloExchange(&ptr, 1, nx, ny, nz, true, false, false, false, solverStream_);
     gpuBCface(nx, ny, nz, gpuArr, bcFaceXright, bcFaceXleft, bcFaceYright, bcFaceYleft, bcFaceZright, bcFaceZleft, &_vct, solverStream_);
 }
@@ -812,7 +812,7 @@ void EMfields3D::gpuCommunicateCenterBC_P(int nx, int ny, int nz, GPUFieldArray3
                                            int bcFaceYright, int bcFaceYleft,
                                            int bcFaceZright, int bcFaceZleft)
 {
-    double* ptr = gpuArr.devPtr();
+    cudaSolverType* ptr = gpuArr.devPtr();
     gpuBatchedHaloExchange(&ptr, 1, nx, ny, nz, true, false, false, true, solverStream_);
     gpuBCface_P(nx, ny, nz, gpuArr, bcFaceXright, bcFaceXleft, bcFaceYright, bcFaceYleft, bcFaceZright, bcFaceZleft, &_vct, solverStream_);
 }
@@ -822,7 +822,7 @@ void EMfields3D::gpuCommunicateNodeBoxStencilBC_P(int nx, int ny, int nz, GPUFie
                                                    int bcFaceYright, int bcFaceYleft,
                                                    int bcFaceZright, int bcFaceZleft)
 {
-    double* ptr = gpuArr.devPtr();
+    cudaSolverType* ptr = gpuArr.devPtr();
     gpuBatchedHaloExchange(&ptr, 1, nx, ny, nz, false, true, false, true, solverStream_);
     gpuBCface_P(nx, ny, nz, gpuArr, bcFaceXright, bcFaceXleft, bcFaceYright, bcFaceYleft, bcFaceZright, bcFaceZleft, &_vct, solverStream_);
 }
@@ -831,7 +831,7 @@ void EMfields3D::gpuCommunicateNodeBoxStencilBC_P_3(int nx, int ny, int nz,
                                                     GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
                                                     int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL)
 {
-    double* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
+    cudaSolverType* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
     gpuBatchedHaloExchange(ptrs, 3, nx, ny, nz, false, true, false, true, solverStream_);
     gpuBCface_P(nx, ny, nz, a1, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
     gpuBCface_P(nx, ny, nz, a2, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
@@ -843,7 +843,7 @@ void EMfields3D::gpuCommunicateCenterBoxStencilBC_P(int nx, int ny, int nz, GPUF
                                                      int bcFaceYright, int bcFaceYleft,
                                                      int bcFaceZright, int bcFaceZleft)
 {
-    double* ptr = gpuArr.devPtr();
+    cudaSolverType* ptr = gpuArr.devPtr();
     gpuBatchedHaloExchange(&ptr, 1, nx, ny, nz, true, true, false, true, solverStream_);
     gpuBCface_P(nx, ny, nz, gpuArr, bcFaceXright, bcFaceXleft, bcFaceYright, bcFaceYleft, bcFaceZright, bcFaceZleft, &_vct, solverStream_);
 }
@@ -852,7 +852,7 @@ void EMfields3D::gpuCommunicateCenterBoxStencilBC_P_3(int nx, int ny, int nz,
                                                       GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
                                                       int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL)
 {
-    double* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
+    cudaSolverType* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
     gpuBatchedHaloExchange(ptrs, 3, nx, ny, nz, true, true, false, true, solverStream_);
     gpuBCface_P(nx, ny, nz, a1, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
     gpuBCface_P(nx, ny, nz, a2, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
@@ -864,7 +864,7 @@ void EMfields3D::gpuCommunicateCenterBoxStencilBC(int nx, int ny, int nz, GPUFie
                                                    int bcFaceYright, int bcFaceYleft,
                                                    int bcFaceZright, int bcFaceZleft)
 {
-    double* ptr = gpuArr.devPtr();
+    cudaSolverType* ptr = gpuArr.devPtr();
     gpuBatchedHaloExchange(&ptr, 1, nx, ny, nz, true, true, false, false, solverStream_);
     gpuBCface(nx, ny, nz, gpuArr, bcFaceXright, bcFaceXleft, bcFaceYright, bcFaceYleft, bcFaceZright, bcFaceZleft, &_vct, solverStream_);
 }
@@ -881,7 +881,7 @@ void EMfields3D::gpuCommunicateCenterBC_3(int nx, int ny, int nz,
                                            GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
                                            int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL)
 {
-    double* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
+    cudaSolverType* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
     gpuBatchedHaloExchange(ptrs, 3, nx, ny, nz, true, false, false, false, solverStream_);
     gpuBCface(nx, ny, nz, a1, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
     gpuBCface(nx, ny, nz, a2, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
@@ -892,7 +892,7 @@ void EMfields3D::gpuCommunicateCenterBC_P_3(int nx, int ny, int nz,
                                              GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
                                              int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL)
 {
-    double* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
+    cudaSolverType* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
     gpuBatchedHaloExchange(ptrs, 3, nx, ny, nz, true, false, false, true, solverStream_);
     gpuBCface_P(nx, ny, nz, a1, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
     gpuBCface_P(nx, ny, nz, a2, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct, solverStream_);
@@ -904,7 +904,7 @@ void EMfields3D::gpuCommunicateCenterBC_3mixed(int nx, int ny, int nz,
     GPUFieldArray3& a2, const int* bc2,
     GPUFieldArray3& a3, const int* bc3)
 {
-    double* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
+    cudaSolverType* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
     gpuBatchedHaloExchange(ptrs, 3, nx, ny, nz, true, false, false, false, solverStream_);
     gpuBCface(nx, ny, nz, a1, bc1[0], bc1[1], bc1[2], bc1[3], bc1[4], bc1[5], &_vct, solverStream_);
     gpuBCface(nx, ny, nz, a2, bc2[0], bc2[1], bc2[2], bc2[3], bc2[4], bc2[5], &_vct, solverStream_);
@@ -916,7 +916,7 @@ void EMfields3D::gpuCommunicateNodeBC_3mixed(int nx, int ny, int nz,
     GPUFieldArray3& a2, const int* bc2,
     GPUFieldArray3& a3, const int* bc3)
 {
-    double* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
+    cudaSolverType* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
     gpuBatchedHaloExchange(ptrs, 3, nx, ny, nz, false, false, false, false, solverStream_);
     gpuBCface(nx, ny, nz, a1, bc1[0], bc1[1], bc1[2], bc1[3], bc1[4], bc1[5], &_vct, solverStream_);
     gpuBCface(nx, ny, nz, a2, bc2[0], bc2[1], bc2[2], bc2[3], bc2[4], bc2[5], &_vct, solverStream_);
@@ -928,7 +928,7 @@ void EMfields3D::gpuCommunicateNodeBoxStencilBC_3mixed(int nx, int ny, int nz,
     GPUFieldArray3& a2, const int* bc2,
     GPUFieldArray3& a3, const int* bc3)
 {
-    double* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
+    cudaSolverType* ptrs[3] = { a1.devPtr(), a2.devPtr(), a3.devPtr() };
     gpuBatchedHaloExchange(ptrs, 3, nx, ny, nz, false, true, false, false, solverStream_);
     gpuBCface(nx, ny, nz, a1, bc1[0], bc1[1], bc1[2], bc1[3], bc1[4], bc1[5], &_vct, solverStream_);
     gpuBCface(nx, ny, nz, a2, bc2[0], bc2[1], bc2[2], bc2[3], bc2[4], bc2[5], &_vct, solverStream_);
@@ -941,7 +941,7 @@ void EMfields3D::gpuCommunicateCenterBC_9(int nx, int ny, int nz,
                                            GPUFieldArray3& a7, GPUFieldArray3& a8, GPUFieldArray3& a9,
                                            int bcXR, int bcXL, int bcYR, int bcYL, int bcZR, int bcZL)
 {
-    double* ptrs[9] = { a1.devPtr(), a2.devPtr(), a3.devPtr(),
+    cudaSolverType* ptrs[9] = { a1.devPtr(), a2.devPtr(), a3.devPtr(),
                         a4.devPtr(), a5.devPtr(), a6.devPtr(),
                         a7.devPtr(), a8.devPtr(), a9.devPtr() };
     gpuBatchedHaloExchange(ptrs, 9, nx, ny, nz, true, false, false, false, solverStream_);

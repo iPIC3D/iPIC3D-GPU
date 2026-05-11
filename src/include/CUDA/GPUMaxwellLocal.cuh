@@ -56,14 +56,14 @@
  * @param stream      CUDA stream.
  */
 void gpuMaxwellLocalCenterOps(
-    double* gExX, double* gExY, double* gExZ,
-    double* gEyX, double* gEyY, double* gEyZ,
-    double* gEzX, double* gEzY, double* gEzZ,
-    double* divD,
-    const double* vX, const double* vY, const double* vZ,
-    const double* dX, const double* dY, const double* dZ,
+    cudaSolverType* gExX, cudaSolverType* gExY, cudaSolverType* gExZ,
+    cudaSolverType* gEyX, cudaSolverType* gEyY, cudaSolverType* gEyZ,
+    cudaSolverType* gEzX, cudaSolverType* gEzY, cudaSolverType* gEzZ,
+    cudaSolverType* divD,
+    const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
+    const cudaSolverType* dX, const cudaSolverType* dY, const cudaSolverType* dZ,
     int nxc, int nyc, int nzc,
-    double invdx, double invdy, double invdz,
+    cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
     cudaStream_t stream = 0);
 
 // =========================================================================
@@ -93,16 +93,16 @@ void gpuMaxwellLocalCenterOps(
  * @param stream      CUDA stream.
  */
 void gpuMaxwellLocalNodeFused(
-    double* d_im,
-    const double* gExX, const double* gExY, const double* gExZ,
-    const double* gEyX, const double* gEyY, const double* gEyZ,
-    const double* gEzX, const double* gEzY, const double* gEzZ,
-    const double* divD,
-    const double* vX, const double* vY, const double* vZ,
-    const double* dX, const double* dY, const double* dZ,
+    cudaSolverType* d_im,
+    const cudaSolverType* gExX, const cudaSolverType* gExY, const cudaSolverType* gExZ,
+    const cudaSolverType* gEyX, const cudaSolverType* gEyY, const cudaSolverType* gEyZ,
+    const cudaSolverType* gEzX, const cudaSolverType* gEzY, const cudaSolverType* gEzZ,
+    const cudaSolverType* divD,
+    const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
+    const cudaSolverType* dX, const cudaSolverType* dY, const cudaSolverType* dZ,
     int nxn, int nyn, int nzn,
-    double invdx, double invdy, double invdz,
-    double dt2,
+    cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
+    cudaSolverType dt2,
     cudaStream_t stream = 0);
 
 #endif // GPU_SOLVER

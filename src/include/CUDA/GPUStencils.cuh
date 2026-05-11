@@ -29,10 +29,10 @@
  * Input on center grid [nxc][nyc][nzc] (nxc=nxn-1, etc.).
  * Stencil: 8-point finite difference.
  */
-void gpuGradC2N(double* gradXN, double* gradYN, double* gradZN,
-                const double* scFieldC,
+void gpuGradC2N(cudaSolverType* gradXN, cudaSolverType* gradYN, cudaSolverType* gradZN,
+                const cudaSolverType* scFieldC,
                 int nxn, int nyn, int nzn,
-                double invdx, double invdy, double invdz,
+                cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                 cudaStream_t stream = 0);
 
 /**
@@ -40,10 +40,10 @@ void gpuGradC2N(double* gradXN, double* gradYN, double* gradZN,
  * Output on center grid [nxc][nyc][nzc], interior i=1..nxc-2.
  * Input on node grid [nxn][nyn][nzn] (nxn=nxc+1, etc.).
  */
-void gpuGradN2C(double* gradXC, double* gradYC, double* gradZC,
-                const double* scFieldN,
+void gpuGradN2C(cudaSolverType* gradXC, cudaSolverType* gradYC, cudaSolverType* gradZC,
+                const cudaSolverType* scFieldN,
                 int nxc, int nyc, int nzc,
-                double invdx, double invdy, double invdz,
+                cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                 cudaStream_t stream = 0);
 
 // =========================================================================
@@ -55,10 +55,10 @@ void gpuGradN2C(double* gradXC, double* gradYC, double* gradZC,
  * Output on center grid [nxc][nyc][nzc], interior i=1..nxc-2.
  * Input on node grid [nxn][nyn][nzn].
  */
-void gpuDivN2C(double* divC,
-               const double* vecXN, const double* vecYN, const double* vecZN,
+void gpuDivN2C(cudaSolverType* divC,
+               const cudaSolverType* vecXN, const cudaSolverType* vecYN, const cudaSolverType* vecZN,
                int nxc, int nyc, int nzc,
-               double invdx, double invdy, double invdz,
+               cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                cudaStream_t stream = 0);
 
 /**
@@ -66,10 +66,10 @@ void gpuDivN2C(double* divC,
  * Output on node grid [nxn][nyn][nzn], interior i=1..nxn-2.
  * Input on center grid [nxc][nyc][nzc].
  */
-void gpuDivC2N(double* divN,
-               const double* vecXC, const double* vecYC, const double* vecZC,
+void gpuDivC2N(cudaSolverType* divN,
+               const cudaSolverType* vecXC, const cudaSolverType* vecYC, const cudaSolverType* vecZC,
                int nxn, int nyn, int nzn,
-               double invdx, double invdy, double invdz,
+               cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                cudaStream_t stream = 0);
 
 // =========================================================================
@@ -81,10 +81,10 @@ void gpuDivC2N(double* divN,
  * Output on node grid [nxn][nyn][nzn], interior i=1..nxn-2.
  * Input on center grid [nxc][nyc][nzc].
  */
-void gpuCurlC2N(double* curlXN, double* curlYN, double* curlZN,
-                const double* vecXC, const double* vecYC, const double* vecZC,
+void gpuCurlC2N(cudaSolverType* curlXN, cudaSolverType* curlYN, cudaSolverType* curlZN,
+                const cudaSolverType* vecXC, const cudaSolverType* vecYC, const cudaSolverType* vecZC,
                 int nxn, int nyn, int nzn,
-                double invdx, double invdy, double invdz,
+                cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                 cudaStream_t stream = 0);
 
 /**
@@ -92,10 +92,10 @@ void gpuCurlC2N(double* curlXN, double* curlYN, double* curlZN,
  * Output on center grid [nxc][nyc][nzc], interior i=1..nxc-2.
  * Input on node grid [nxn][nyn][nzn].
  */
-void gpuCurlN2C(double* curlXC, double* curlYC, double* curlZC,
-                const double* vecXN, const double* vecYN, const double* vecZN,
+void gpuCurlN2C(cudaSolverType* curlXC, cudaSolverType* curlYC, cudaSolverType* curlZC,
+                const cudaSolverType* vecXN, const cudaSolverType* vecYN, const cudaSolverType* vecZN,
                 int nxc, int nyc, int nzc,
-                double invdx, double invdy, double invdz,
+                cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                 cudaStream_t stream = 0);
 
 // =========================================================================
@@ -107,7 +107,7 @@ void gpuCurlN2C(double* curlXC, double* curlYC, double* curlZC,
  * 8-point average from surrounding center cells.
  * Output on node grid, interior i=1..nxn-2.
  */
-void gpuInterpC2N(double* fieldN, const double* fieldC,
+void gpuInterpC2N(cudaSolverType* fieldN, const cudaSolverType* fieldC,
                   int nxn, int nyn, int nzn,
                   cudaStream_t stream = 0);
 
@@ -116,7 +116,7 @@ void gpuInterpC2N(double* fieldN, const double* fieldC,
  * 8-point average from surrounding nodes.
  * Output on center grid, interior i=1..nxc-2.
  */
-void gpuInterpN2C(double* fieldC, const double* fieldN,
+void gpuInterpN2C(cudaSolverType* fieldC, const cudaSolverType* fieldN,
                   int nxc, int nyc, int nzc,
                   cudaStream_t stream = 0);
 
@@ -134,11 +134,11 @@ void gpuInterpN2C(double* fieldC, const double* fieldN,
  * Output on center grid, interior i=1..nxc-2.
  * is = species offset into the 4D arrays (pXX = pXX_4D + is*nxn*nyn*nzn).
  */
-void gpuDivSymmTensorN2C(double* divCX, double* divCY, double* divCZ,
-                         const double* pXX, const double* pXY, const double* pXZ,
-                         const double* pYY, const double* pYZ, const double* pZZ,
+void gpuDivSymmTensorN2C(cudaSolverType* divCX, cudaSolverType* divCY, cudaSolverType* divCZ,
+                         const cudaSolverType* pXX, const cudaSolverType* pXY, const cudaSolverType* pXZ,
+                         const cudaSolverType* pYY, const cudaSolverType* pYZ, const cudaSolverType* pZZ,
                          int nxc, int nyc, int nzc,
-                         double invdx, double invdy, double invdz,
+                         cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                          cudaStream_t stream = 0);
 
 // =========================================================================
@@ -153,9 +153,9 @@ void gpuDivSymmTensorN2C(double* divCX, double* divCY, double* divCZ,
  * Interior: i=1..nx-2, j=1..ny-2, k=1..nz-2.
  * Ghost cells must be valid (from prior halo exchange).
  */
-void gpuSmoothStep(double* out, const double* in,
+void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in,
                    int nx, int ny, int nz,
-                   double alpha, double beta3D,
+                   cudaSolverType alpha, cudaSolverType beta3D,
                    cudaStream_t stream = 0);
 
 // =========================================================================
@@ -165,42 +165,42 @@ void gpuSmoothStep(double* out, const double* in,
 // =========================================================================
 #ifdef HALO_OVERLAP
 
-void gpuDivC2N_interior(double* divN,
-                        const double* vecXC, const double* vecYC, const double* vecZC,
+void gpuDivC2N_interior(cudaSolverType* divN,
+                        const cudaSolverType* vecXC, const cudaSolverType* vecYC, const cudaSolverType* vecZC,
                         int nxn, int nyn, int nzn,
-                        double invdx, double invdy, double invdz,
+                        cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                         cudaStream_t stream = 0);
-void gpuDivC2N_boundary(double* divN,
-                        const double* vecXC, const double* vecYC, const double* vecZC,
+void gpuDivC2N_boundary(cudaSolverType* divN,
+                        const cudaSolverType* vecXC, const cudaSolverType* vecYC, const cudaSolverType* vecZC,
                         int nxn, int nyn, int nzn,
-                        double invdx, double invdy, double invdz,
+                        cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                         cudaStream_t stream = 0);
 
-void gpuGradC2N_interior(double* gradXN, double* gradYN, double* gradZN,
-                         const double* scFieldC,
+void gpuGradC2N_interior(cudaSolverType* gradXN, cudaSolverType* gradYN, cudaSolverType* gradZN,
+                         const cudaSolverType* scFieldC,
                          int nxn, int nyn, int nzn,
-                         double invdx, double invdy, double invdz,
+                         cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                          cudaStream_t stream = 0);
-void gpuGradC2N_boundary(double* gradXN, double* gradYN, double* gradZN,
-                         const double* scFieldC,
+void gpuGradC2N_boundary(cudaSolverType* gradXN, cudaSolverType* gradYN, cudaSolverType* gradZN,
+                         const cudaSolverType* scFieldC,
                          int nxn, int nyn, int nzn,
-                         double invdx, double invdy, double invdz,
+                         cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
                          cudaStream_t stream = 0);
 
-void gpuInterpC2N_interior(double* fieldN, const double* fieldC,
+void gpuInterpC2N_interior(cudaSolverType* fieldN, const cudaSolverType* fieldC,
                            int nxn, int nyn, int nzn,
                            cudaStream_t stream = 0);
-void gpuInterpC2N_boundary(double* fieldN, const double* fieldC,
+void gpuInterpC2N_boundary(cudaSolverType* fieldN, const cudaSolverType* fieldC,
                            int nxn, int nyn, int nzn,
                            cudaStream_t stream = 0);
 
-void gpuSmoothStep_interior(double* out, const double* in,
+void gpuSmoothStep_interior(cudaSolverType* out, const cudaSolverType* in,
                             int nx, int ny, int nz,
-                            double alpha, double beta3D,
+                            cudaSolverType alpha, cudaSolverType beta3D,
                             cudaStream_t stream = 0);
-void gpuSmoothStep_boundary(double* out, const double* in,
+void gpuSmoothStep_boundary(cudaSolverType* out, const cudaSolverType* in,
                             int nx, int ny, int nz,
-                            double alpha, double beta3D,
+                            cudaSolverType alpha, cudaSolverType beta3D,
                             cudaStream_t stream = 0);
 
 #endif // HALO_OVERLAP

@@ -619,7 +619,8 @@ int c_Solver::initCUDA(){
     }
   }
 
-  dataAnalysis::dataAnalysisPipeline::createOutputDirectory(myrank, ns, vct);
+  dataAnalysis::dataAnalysisPipeline::createOutputDirectory(
+      myrank, ns, vct, restart_status != 0);
 
   // ======= Allocate planet quasi-neutral boundary-condition buffers =======
   {
@@ -933,6 +934,32 @@ void c_Solver::CalculateField(int cycle) {
   // calculate the E field
   EMf->calculateE(cycle);
 }
+
+/**
+ * @brief Pack the current mover/interpolation field buffer and copy it to the GPU.
+ *
+ * Macrocell spectra consumes this same packed B layout during data analysis,
+ * before the mover path refreshes it for the current-cycle E solve. The caller
+ * can request a host-side wait when the buffer must be ready immediately.
+ */
+void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronizeCopy)
+{
+  EMf->set_fieldForPclsToCenter(fieldForPclHostPtr);
+
+  const size_t fieldValues =
+      static_cast<size_t>(grid->getNZN()) *
+      static_cast<size_t>(grid->getNYN() - 1) *
+      static_cast<size_t>(grid->getNXN() - 1) * 24u;
+
+  cudaErrChk(cudaMemcpyAsync(fieldForPclCUDAPtr, fieldForPclHostPtr,
+                             fieldValues * sizeof(cudaFieldType),
+                             cudaMemcpyDefault, fieldH2DStream));
+  cudaErrChk(cudaEventRecord(event0, fieldH2DStream));
+  if (synchronizeCopy) {
+    cudaErrChk(cudaStreamSynchronize(fieldH2DStream));
+  }
+}
+
 /**
  * @brief Launch the asynchronous GPU mover pipeline for one species.
  *
@@ -1190,16 +1217,9 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle)
   if (MPIdata::get_rank() == 0)
     printf("  [Cycle %d] Particle sorting: %s\n", cycle, sortThisCycle_ ? "ON" : "OFF");
 
-  // Build the particle-field interpolation buffer on cell centers.
-  EMf->set_fieldForPclsToCenter(fieldForPclHostPtr);
-
-  // Copy the shared field-interpolation buffer to the device once on the
-  // dedicated fieldH2DStream. Isolating this H->D copy from streams[0]
-  // removes a subtle implicit ordering with whatever else happens to live
-  // on streams[0]; per-species mover kernels still consume the buffer via
-  // the explicit cudaStreamWaitEvent(streams[species], event0) below.
-  cudaErrChk(cudaMemcpyAsync(fieldForPclCUDAPtr, fieldForPclHostPtr, (grid->getNZN() * (grid->getNYN() - 1) * (grid->getNXN() - 1)) * 24 * sizeof(cudaFieldType), cudaMemcpyDefault, fieldH2DStream));
-  cudaErrChk(cudaEventRecord(event0, fieldH2DStream));
+  // Refresh the shared field-interpolation buffer for the mover. The per-
+  // species mover streams consume it through cudaStreamWaitEvent(event0).
+  refreshFieldForPclsDeviceBuffer(false);
 
   for(int i=0; i<ns; i++){
     if (i != mergeIdx){
@@ -2160,6 +2180,23 @@ void c_Solver::sortAllSpecies() {
   // Wait until every species has completed its full sort pipeline.
   for (int i = 0; i < ns; i++) {
     cudaErrChk(cudaStreamSynchronize(streams[i]));
+  }
+
+  if constexpr (DAConfig::MACROCELL_SPECTRA_ENABLE) {
+    bool anyMacrocellSpecies = false;
+    for (int s = 0; s < ns && !anyMacrocellSpecies; ++s) {
+      anyMacrocellSpecies = col->getVelocitySpectraSpecies(s);
+    }
+
+    if (col->getMacrocellNx() > 0 &&
+        col->getMacrocellNy() > 0 &&
+        col->getMacrocellNz() > 0 &&
+        anyMacrocellSpecies) {
+      // Data analysis starts immediately after sortAllSpecies(). Refresh and
+      // drain the packed field buffer here so macrocell spectra sees the current
+      // B field, including on cycle 0 before the mover path has packed it once.
+      refreshFieldForPclsDeviceBuffer(true);
+    }
   }
 }
 

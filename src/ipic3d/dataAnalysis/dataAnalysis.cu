@@ -69,7 +69,7 @@ private:
     bool macrocellEnabled = false;
     std::vector<char> macrocellSpeciesMask; // size ns, 1=on, 0=off
     // Borrowed from c_Solver for the macrocell module:
-    cudaCommonType*    macrocellFieldForPcls = nullptr; // shared by all species
+    cudaFieldType*     macrocellFieldForPcls = nullptr; // shared by all species
     const grid3DCUDA*  macrocellGridDevicePtr = nullptr;
     CellSorter*        macrocellCellSorters   = nullptr; // per-species sorter array
     const VCtopology3D*      macrocellVct      = nullptr;
@@ -139,9 +139,18 @@ public:
                     macrocellVct           = KCode.vct;
                     macrocellEnabled       = true;
                     if constexpr (MACROCELL_SPECTRA_OUTPUT) {
-                        macrocellHist->writePartitionMetadata(macrocellSubdomainDir,
-                                                              macrocellMyRank,
-                                                              macrocellVct);
+                        // Register one output file context per enabled species.
+                        // On a restart the existing records are read back from
+                        // the JSON and the binary size is validated.
+                        const bool isRestart = (KCode.restart_status != 0);
+                        for (int s = 0; s < ns; ++s) {
+                            if (macrocellSpeciesMask[s]) {
+                                macrocellHist->initSpeciesFile(
+                                    macrocellSubdomainDir, s,
+                                    macrocellMyRank, isRestart,
+                                    macrocellVct);
+                            }
+                        }
                     }
                 }
             }
@@ -455,9 +464,7 @@ int dataAnalysisPipelineImpl::analysisEntre(int cycle){
                                       macrocellCellSorters[i].getCellCounts(),
                                       i, streams[i]);
                 if constexpr (MACROCELL_SPECTRA_OUTPUT) {
-                    macrocellHist->writeToFile(macrocellSubdomainDir,
-                                               macrocellMyRank, macrocellVct,
-                                               i, cycle, streams[i]);
+                    macrocellHist->writeToFile(i, cycle, streams[i]);
                 } else {
                     // Single shared dHist_ is reused across species: drain
                     // streams[i] so the next species' reset/launch on
@@ -532,9 +539,7 @@ int dataAnalysisPipelineImpl::waitForAnalysis(){
         return 0;
     }
 
-    analysisFuture.wait();
-
-    return 0;
+    return analysisFuture.get();
 }
 
 
@@ -545,10 +550,30 @@ int dataAnalysisPipelineImpl::waitForAnalysis(){
  * @param ns Number of species included in the analysis output.
  * @param vct MPI topology used for subdomain-coordinate metadata.
  */
-void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns, VirtualTopology3D* vct){ // output path for data analysis
+void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns,
+                                                 VirtualTopology3D* vct,
+                                                 bool isRestart)
+{
     if constexpr (DATA_ANALYSIS_ENABLED == false){
         return;
     }
+
+    auto prepareOutputFolder = [&](const std::string& path,
+                                   const std::string& message) {
+        if (!isRestart) {
+            if (0 != checkOutputFolder(path)) {
+                throw std::runtime_error(message);
+            }
+            return;
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories(path, ec);
+        const bool isDirectory = !ec && std::filesystem::is_directory(path, ec);
+        if (ec || !isDirectory) {
+            throw std::runtime_error(message + " (" + ec.message() + ")");
+        }
+    };
 
     // VCT mapping for this subdomain
     auto writeVctMapping = [&](const std::string& filePath) {
@@ -575,15 +600,16 @@ void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns, VirtualTopo
 
         vctMapping.close();
         } else {
-        throw std::runtime_error("[!]Error: Can not create VCT mapping for velocity GMM species");
+        throw std::runtime_error("[!]Error: Can not create VCT mapping file");
         }
     };
 
     if constexpr (VELOCITY_HISTOGRAM_ENABLE && HISTOGRAM_OUTPUT) {
         const auto histogramSubDomainOutputPath = HISTOGRAM_OUTPUT_DIR;
 
-        if(myrank == 0 && 0 != checkOutputFolder(histogramSubDomainOutputPath)){
-            throw std::runtime_error("[!]Error: Can not create output folder for velocity histogram");
+        if(myrank == 0){
+            prepareOutputFolder(histogramSubDomainOutputPath,
+                                "[!]Error: Can not create output folder for velocity histogram");
         }
 
         MPI_Barrier(MPIdata::get_PicGlobalComm());
@@ -594,8 +620,9 @@ void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns, VirtualTopo
     if constexpr (GMM_ENABLE && GMM_OUTPUT) {
         const auto GMMSubDomainOutputPath = GMM_OUTPUT_DIR;
 
-        if(myrank == 0 && 0 != checkOutputFolder(GMMSubDomainOutputPath)){
-            throw std::runtime_error("[!]Error: Can not create output folder for velocity GMM");
+        if(myrank == 0){
+            prepareOutputFolder(GMMSubDomainOutputPath,
+                                "[!]Error: Can not create output folder for velocity GMM");
         }
 
         MPI_Barrier(MPIdata::get_PicGlobalComm());
@@ -606,17 +633,17 @@ void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns, VirtualTopo
     if constexpr (MACROCELL_SPECTRA_ENABLE && MACROCELL_SPECTRA_OUTPUT) {
         const auto macrocellRoot = MACROCELL_SPECTRA_OUTPUT_DIR;
 
-        if (myrank == 0 && 0 != checkOutputFolder(macrocellRoot)) {
-            throw std::runtime_error("[!]Error: Can not create output folder for macrocell spectra");
+        if (myrank == 0) {
+            prepareOutputFolder(macrocellRoot,
+                                "[!]Error: Can not create output folder for macrocell spectra");
         }
 
         MPI_Barrier(MPIdata::get_PicGlobalComm());
 
         // Per-subdomain folder.
         const auto subDir = macrocellRoot + "subDomain_" + std::to_string(myrank) + "/";
-        if (0 != checkOutputFolder(subDir)) {
-            throw std::runtime_error("[!]Error: Can not create subdomain folder for macrocell spectra");
-        }
+        prepareOutputFolder(subDir,
+                            "[!]Error: Can not create subdomain folder for macrocell spectra");
         writeVctMapping(subDir + "vctMapping.txt");
     }
 
@@ -660,9 +687,6 @@ dataAnalysisPipeline::~dataAnalysisPipeline() {
 }
     
 } // namespace dataAnalysis
-
-
-
 
 
 

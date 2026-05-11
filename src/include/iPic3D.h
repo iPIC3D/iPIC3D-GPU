@@ -218,6 +218,12 @@ namespace iPic3D {
     void pad_particle_capacities();
     void sortParticles();
     /**
+     * @brief Pack the current field interpolation buffer and copy it to the GPU.
+     *
+     * @param synchronizeCopy Wait for the H2D copy before returning.
+     */
+    void refreshFieldForPclsDeviceBuffer(bool synchronizeCopy);
+    /**
      * @brief Copy one species' moment buffer from device to host.
      *
      * @param species Species index.

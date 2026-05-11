@@ -8,11 +8,11 @@
 
 #include <iostream>
 #include <fstream>
-#include <sstream>
 #include <iomanip>
 #include <stdexcept>
-#include <cassert>
 #include <filesystem>
+#include <cstdlib>   // std::strtol
+#include <algorithm>
 
 namespace macrocellSpectra {
 
@@ -61,16 +61,8 @@ cudaCommonType macrocellSpectra2D::vmaxForSpecies(int species) {
 
 namespace {
 
-// Helper: copy a host vector<MacrocellRange> to a device int array of size 2*N
-// laid out as [start0, size0, start1, size1, ...].
-int* uploadRanges(const std::vector<MacrocellRange>& ranges) {
-    std::vector<int> flat;
-    flat.reserve(ranges.size() * 2);
-    for (const auto& r : ranges) {
-        flat.push_back(r.start);
-        flat.push_back(r.size);
-    }
-    return copyArrayToDevice(flat.data(), static_cast<int>(flat.size()));
+bool isRecordSeparator(char c) {
+    return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == ',';
 }
 
 } // namespace
@@ -83,10 +75,6 @@ macrocellSpectra2D::macrocellSpectra2D(const MacrocellPartition& part)
         throw std::runtime_error("macrocellSpectra2D: empty partition");
     }
 
-    dRangeX_ = uploadRanges(part_.rangeX);
-    dRangeY_ = uploadRanges(part_.rangeY);
-    dRangeZ_ = uploadRanges(part_.rangeZ);
-
     numFloats_ = static_cast<size_t>(part_.M) * static_cast<size_t>(Nb);
     cudaErrChk(cudaMalloc(&dHist_, numFloats_ * sizeof(macrocellHistType)));
     hHist_ = static_cast<macrocellHistType*>(
@@ -95,11 +83,17 @@ macrocellSpectra2D::macrocellSpectra2D(const MacrocellPartition& part)
 
 
 macrocellSpectra2D::~macrocellSpectra2D() {
-    if (dRangeX_) cudaFree(dRangeX_);
-    if (dRangeY_) cudaFree(dRangeY_);
-    if (dRangeZ_) cudaFree(dRangeZ_);
     if (dHist_)   cudaFree(dHist_);
     if (hHist_)   cudaFreeHost(hHist_);
+}
+
+size_t macrocellSpectra2D::recordSizeBytes_() const {
+    return numFloats_ * sizeof(macrocellHistType);
+}
+
+
+size_t macrocellSpectra2D::bytesPerMacrocell_() const {
+    return static_cast<size_t>(Nb) * sizeof(macrocellHistType);
 }
 
 
@@ -109,7 +103,7 @@ void macrocellSpectra2D::reset(cudaStream_t stream) {
 
 
 void macrocellSpectra2D::launch(particleArrayCUDA* pclsHostPtr,
-                                cudaCommonType*    fieldForPclsCUDA,
+                                cudaFieldType*     fieldForPclsCUDA,
                                 const grid3DCUDA*  gridDevicePtr,
                                 const int*         cellStartOffsetsCUDA,
                                 const int*         cellCountsCUDA,
@@ -122,9 +116,9 @@ void macrocellSpectra2D::launch(particleArrayCUDA* pclsHostPtr,
 
     dim3 grid(part_.Mx, part_.My, part_.Mz);
     constexpr int BLOCK_SIZE = 128;
-    // Shared memory: mini-histogram (Nb x macrocellHistType) + 8 corners x 3 B components.
-    const size_t shmemBytes = Nb * sizeof(macrocellHistType)
-                            + 24 * sizeof(cudaCommonType);
+    // Dynamic shared memory is only the per-block mini-histogram; B corners use
+    // a small statically aligned shared array in the kernel.
+    const size_t shmemBytes = Nb * sizeof(macrocellHistType);
 
     macrocellSpectraKernel<<<grid, BLOCK_SIZE, shmemBytes, stream>>>(
         pclsHostPtr->getX(),
@@ -136,28 +130,74 @@ void macrocellSpectra2D::launch(particleArrayCUDA* pclsHostPtr,
         pclsHostPtr->getQ(),
         cellStartOffsetsCUDA,
         cellCountsCUDA,
-        dRangeX_, dRangeY_, dRangeZ_,
+        part_.Nx_int, part_.Ny_int, part_.Nz_int,
+        part_.Cx, part_.Cy, part_.Cz,
         part_.Mx, part_.My, part_.Mz,
         fieldForPclsCUDA,
         gridDevicePtr,
         dHist_,
-        MACROCELL_BINS_VPAR, MACROCELL_BINS_VPERP,
         vmax,
         MACROCELL_BMIN);
+    cudaErrChk(cudaGetLastError());
 }
 
 
 // ======= Output =======
 
-void macrocellSpectra2D::writePartitionMetadata(const std::string&       subdomainDir,
-                                                int                      subdomainRank,
-                                                const VCtopology3D* vct) const
+// -----------------------------------------------------------------------
+// parseRecordsFromJson_
+// -----------------------------------------------------------------------
+std::vector<int>
+macrocellSpectra2D::parseRecordsFromJson_(const std::string& jsonPath)
 {
-    const std::string path = subdomainDir + "partition.json";
-    std::ofstream f(path);
-    if (!f.is_open())
-        throw std::runtime_error("macrocellSpectra: cannot write " + path);
+    std::vector<int> result;
 
+    std::ifstream f(jsonPath);
+    if (!f.is_open()) return result;
+
+    // Read the whole file into a string (JSON files are small, < 10 KB).
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+
+    // Locate the "records" key and the following array.
+    const std::string key = "\"records\"";
+    auto pos = content.find(key);
+    if (pos == std::string::npos) return result;
+    pos += key.size();
+
+    pos = content.find(':', pos);
+    if (pos == std::string::npos) return result;
+    pos = content.find('[', pos);
+    if (pos == std::string::npos) return result;
+    ++pos;
+
+    // Parse comma-separated integers until ']'.
+    while (pos < content.size()) {
+        // Skip whitespace and commas.
+        while (pos < content.size() && isRecordSeparator(content[pos])) ++pos;
+        if (pos >= content.size() || content[pos] == ']') break;
+
+        char* endPtr = nullptr;
+        long val = std::strtol(content.c_str() + pos, &endPtr, 10);
+        if (endPtr == content.c_str() + pos) break; // no digits found
+        result.push_back(static_cast<int>(val));
+        pos = static_cast<size_t>(endPtr - content.c_str());
+    }
+
+    return result;
+}
+
+// -----------------------------------------------------------------------
+// writeJson_  — full rewrite via temp-file + atomic rename
+// -----------------------------------------------------------------------
+void macrocellSpectra2D::writeJson_(const SpeciesFileContext& ctx) const
+{
+    const std::string tmpPath = ctx.jsonPath + ".tmp";
+    std::ofstream f(tmpPath);
+    if (!f.is_open())
+        throw std::runtime_error("macrocellSpectra: cannot write " + tmpPath);
+
+    // Helper: write one axis tiling as  "name": [[s0,n0],[s1,n1],...]
     auto writeAxisTiling = [&](const char* name,
                                const std::vector<MacrocellRange>& r) {
         f << "    \"" << name << "\": [";
@@ -168,128 +208,232 @@ void macrocellSpectra2D::writePartitionMetadata(const std::string&       subdoma
         f << "]";
     };
 
+    f << std::setprecision(17); // full double precision for velocity ranges
+
     f << "{\n"
-      << "  \"subdomain_rank\": " << subdomainRank << ",\n"
+      << "  \"subdomain_rank\": "     << ctx.rank          << ",\n"
+      << "  \"cartesian_rank\": "     << ctx.cartesianRank << ",\n"
       << "  \"cartesian_coords\": ["
-      << vct->getCoordinates(0) << "," << vct->getCoordinates(1) << ","
-      << vct->getCoordinates(2) << "],\n"
+         << ctx.coords[0]   << ","
+         << ctx.coords[1]   << ","
+         << ctx.coords[2]   << "],\n"
       << "  \"topology\": ["
-      << vct->getXLEN() << "," << vct->getYLEN() << "," << vct->getZLEN() << "],\n"
+         << ctx.topology[0] << ","
+         << ctx.topology[1] << ","
+         << ctx.topology[2] << "],\n"
+      << "  \"species\": "            << ctx.species        << ",\n"
+      << "  \"vmax\": "               << ctx.vmax           << ",\n"
       << "  \"subdomain_interior_cells\": ["
-      << part_.Nx_int << "," << part_.Ny_int << "," << part_.Nz_int << "],\n"
+         << part_.Nx_int << "," << part_.Ny_int << "," << part_.Nz_int << "],\n"
       << "  \"subdomain_global_offset_cells\": ["
-      << part_.globalOffsetX << "," << part_.globalOffsetY << ","
-      << part_.globalOffsetZ << "],\n"
+         << part_.globalOffsetX << ","
+         << part_.globalOffsetY << ","
+         << part_.globalOffsetZ << "],\n"
       << "  \"macrocell_size_request\": ["
-      << part_.Cx << "," << part_.Cy << "," << part_.Cz << "],\n"
+         << part_.Cx << "," << part_.Cy << "," << part_.Cz << "],\n"
       << "  \"macrocells_per_axis\": ["
-      << part_.Mx << "," << part_.My << "," << part_.Mz << "],\n"
+         << part_.Mx << "," << part_.My << "," << part_.Mz << "],\n"
+      << "  \"total_macrocells\": "   << part_.M            << ",\n"
       << "  \"axis_tiling\": {\n";
     writeAxisTiling("x", part_.rangeX); f << ",\n";
     writeAxisTiling("y", part_.rangeY); f << ",\n";
     writeAxisTiling("z", part_.rangeZ); f << "\n  },\n"
-      << "  \"bins\": {\"vpar\": " << MACROCELL_BINS_VPAR
-      << ", \"vperp\": " << MACROCELL_BINS_VPERP << "},\n"
+      << "  \"bins\": {\"vpar\": "    << MACROCELL_BINS_VPAR
+         << ", \"vperp\": "           << MACROCELL_BINS_VPERP << "},\n"
       << "  \"ranges\": {\n"
-      << "    \"e\": {\"vpar\": [" << MIN_VELOCITY_HIST_E << ","
-                                   << MAX_VELOCITY_HIST_E << "], \"vperp\": [0,"
-                                   << MAX_VELOCITY_HIST_E << "]},\n"
-      << "    \"i\": {\"vpar\": [" << MIN_VELOCITY_HIST_I << ","
-                                   << MAX_VELOCITY_HIST_I << "], \"vperp\": [0,"
-                                   << MAX_VELOCITY_HIST_I << "]}\n"
+      << "    \"vpar\":  [" << -ctx.vmax << "," <<  ctx.vmax << "],\n"
+      << "    \"vperp\": [0,"          <<  ctx.vmax << "]\n"
       << "  },\n"
-      << "  \"binary_layout\": \"row-major, vperp outer, vpar inner, float32\",\n"
-      << "  \"endian\": \"little\"\n"
-      << "}\n";
+      << "  \"dtype\": \"float32\",\n"
+      << "  \"endian\": \"little\",\n"
+      << "  \"bytes_per_macrocell\": " << bytesPerMacrocell_() << ",\n"
+      << "  \"record_size_bytes\": "   << recordSizeBytes_()   << ",\n"
+      << "  \"binary_layout\": \"per record: M macrocells contiguous; "
+             "within macrocell: row-major [vperp][vpar] (vperp outer, vpar inner); "
+             "macrocell linear id m = (mz*My + my)*Mx + mx\",\n"
+      << "  \"byte_offset_formula\": "
+             "\"record_index * record_size_bytes + m * bytes_per_macrocell\",\n"
+      << "  \"records\": [";
+    for (size_t i = 0; i < ctx.records.size(); ++i) {
+        f << ctx.records[i];
+        if (i + 1 < ctx.records.size()) f << ",";
+    }
+    f << "]\n}\n";
+
     f.close();
+    if (!f) // badbit can be set after close if the flush failed
+        throw std::runtime_error("macrocellSpectra: write failed for " + tmpPath);
+
+    // Atomic rename: on POSIX, rename() over an existing file is atomic.
+    std::error_code ec;
+    std::filesystem::rename(tmpPath, ctx.jsonPath, ec);
+    if (ec)
+        throw std::runtime_error("macrocellSpectra: rename failed "
+                                 + tmpPath + " -> " + ctx.jsonPath
+                                 + " (" + ec.message() + ")");
 }
 
 
-void macrocellSpectra2D::writeToFile(const std::string&        subdomainDir,
-                                     int                       subdomainRank,
-                                     const VCtopology3D*       vct,
-                                     int                       species,
-                                     int                       cycle,
-                                     cudaStream_t              stream)
+macrocellSpectra2D::SpeciesFileContext
+macrocellSpectra2D::makeSpeciesContext_(const std::string&  subdomainDir,
+                                        int                 species,
+                                        int                 rank,
+                                        const VCtopology3D* vct) const
 {
-    // D->H copy of the full per-species histogram block.
+    SpeciesFileContext ctx;
+    ctx.species  = species;
+    ctx.rank     = rank;
+    ctx.vmax     = vmaxForSpecies(species);
+    ctx.binPath  = subdomainDir + "species_" + std::to_string(species) + ".bin";
+    ctx.jsonPath = subdomainDir + "species_" + std::to_string(species) + ".json";
+
+    if (vct) {
+        ctx.cartesianRank = vct->getCartesian_rank();
+        ctx.coords[0]     = vct->getCoordinates(0);
+        ctx.coords[1]     = vct->getCoordinates(1);
+        ctx.coords[2]     = vct->getCoordinates(2);
+        ctx.topology[0]   = vct->getXLEN();
+        ctx.topology[1]   = vct->getYLEN();
+        ctx.topology[2]   = vct->getZLEN();
+    }
+
+    return ctx;
+}
+
+
+void macrocellSpectra2D::createEmptyBinary_(const std::string& path) const
+{
+    std::ofstream bin(path, std::ios::binary | std::ios::trunc);
+    if (!bin.is_open()) {
+        throw std::runtime_error("macrocellSpectra: cannot create " + path);
+    }
+}
+
+
+void macrocellSpectra2D::reconcileRestart_(SpeciesFileContext& ctx) const
+{
+    if (std::filesystem::exists(ctx.jsonPath)) {
+        ctx.records = parseRecordsFromJson_(ctx.jsonPath);
+    } else {
+        std::cerr << "[macrocellSpectra] rank=" << ctx.rank
+                  << " species=" << ctx.species
+                  << ": JSON not found on restart; starting fresh.\n";
+    }
+
+    if (!std::filesystem::exists(ctx.binPath)) {
+        std::cerr << "[macrocellSpectra] rank=" << ctx.rank
+                  << " species=" << ctx.species
+                  << ": binary not found on restart; creating new file.\n";
+        ctx.records.clear();
+        createEmptyBinary_(ctx.binPath);
+        return;
+    }
+
+    const size_t actualBytes   = std::filesystem::file_size(ctx.binPath);
+    const size_t expectedBytes = ctx.records.size() * recordSizeBytes_();
+    if (actualBytes == expectedBytes) return;
+
+    // JSON is authoritative. Keep only complete binary records also listed
+    // there; this drops orphaned appends and incomplete trailing writes.
+    const size_t completeInBin = actualBytes / recordSizeBytes_();
+    const size_t consistentRecords =
+        std::min(completeInBin, ctx.records.size());
+    const size_t consistentBytes = consistentRecords * recordSizeBytes_();
+
+    std::cerr << "[macrocellSpectra] rank=" << ctx.rank
+              << " species=" << ctx.species
+              << ": size mismatch (binary=" << actualBytes
+              << " expected=" << expectedBytes
+              << "). Truncating to " << consistentRecords
+              << " records (" << consistentBytes << " bytes).\n";
+
+    std::error_code ec;
+    std::filesystem::resize_file(ctx.binPath, consistentBytes, ec);
+    if (ec) {
+        throw std::runtime_error("macrocellSpectra: cannot resize "
+                                 + ctx.binPath + " (" + ec.message() + ")");
+    }
+
+    ctx.records.resize(consistentRecords);
+}
+
+
+void macrocellSpectra2D::appendBinaryRecord_(const SpeciesFileContext& ctx) const
+{
+    // std::ios::app positions the write pointer at the end before every write,
+    // which is correct for sequential appends.
+    std::ofstream bin(ctx.binPath, std::ios::binary | std::ios::app);
+    if (!bin.is_open()) {
+        throw std::runtime_error("macrocellSpectra: cannot open " + ctx.binPath);
+    }
+
+    bin.write(reinterpret_cast<const char*>(hHist_),
+              static_cast<std::streamsize>(recordSizeBytes_()));
+    bin.close();
+
+    if (!bin) {
+        throw std::runtime_error("macrocellSpectra: write failed for "
+                                 + ctx.binPath);
+    }
+}
+
+// -----------------------------------------------------------------------
+// initSpeciesFile
+// -----------------------------------------------------------------------
+void macrocellSpectra2D::initSpeciesFile(const std::string&  subdomainDir,
+                                          int                 species,
+                                          int                 rank,
+                                          bool                isRestart,
+                                          const VCtopology3D* vct)
+{
+    if (species < 0) {
+        throw std::runtime_error("macrocellSpectra: invalid species "
+                                 + std::to_string(species));
+    }
+
+    SpeciesFileContext ctx =
+        makeSpeciesContext_(subdomainDir, species, rank, vct);
+    if (isRestart) {
+        reconcileRestart_(ctx);
+    } else {
+        createEmptyBinary_(ctx.binPath);
+    }
+
+    if (species >= static_cast<int>(speciesCtx_.size())) {
+        speciesCtx_.resize(static_cast<size_t>(species) + 1);
+    }
+    ctx.initialized = true;
+    speciesCtx_[static_cast<size_t>(species)] = std::move(ctx);
+    writeJson_(speciesCtx_[static_cast<size_t>(species)]);
+}
+
+// -----------------------------------------------------------------------
+// writeToFile  — D->H copy + binary append + JSON rewrite
+// -----------------------------------------------------------------------
+void macrocellSpectra2D::writeToFile(int species, int cycle, cudaStream_t stream)
+{
+    if (species < 0 ||
+        species >= static_cast<int>(speciesCtx_.size()) ||
+        !speciesCtx_[static_cast<size_t>(species)].initialized) {
+        throw std::runtime_error(
+            "macrocellSpectra: initSpeciesFile not called for species "
+            + std::to_string(species));
+    }
+    SpeciesFileContext& ctx = speciesCtx_[static_cast<size_t>(species)];
+
+    // ---- D->H copy of the full per-species histogram block ----
     cudaErrChk(cudaMemcpyAsync(hHist_, dHist_,
-                               numFloats_ * sizeof(macrocellHistType),
+                               recordSizeBytes_(),
                                cudaMemcpyDeviceToHost, stream));
     cudaErrChk(cudaStreamSynchronize(stream));
 
-    std::ostringstream cycDir;
-    cycDir << subdomainDir << "species_" << species << "/cycle_"
-           << std::setw(6) << std::setfill('0') << cycle << "/";
-    const std::string cycDirStr = cycDir.str();
+    appendBinaryRecord_(ctx);
 
-    // Create directories (idempotent).
-    std::error_code ec;
-    std::filesystem::create_directories(cycDirStr, ec);
-    if (ec)
-        throw std::runtime_error("macrocellSpectra: cannot create dir "
-                                 + cycDirStr + " (" + ec.message() + ")");
-
-    const cudaCommonType vmax = vmaxForSpecies(species);
-
-    for (int mz = 0; mz < part_.Mz; ++mz)
-    for (int my = 0; my < part_.My; ++my)
-    for (int mx = 0; mx < part_.Mx; ++mx)
-    {
-        const int  m  = part_.linearId(mx, my, mz);
-        const auto rx = part_.rangeX[mx];
-        const auto ry = part_.rangeY[my];
-        const auto rz = part_.rangeZ[mz];
-
-        std::ostringstream base;
-        base << cycDirStr << "mc_" << mx << "_" << my << "_" << mz;
-        const std::string binPath  = base.str() + ".bin";
-        const std::string jsonPath = base.str() + ".json";
-
-        // Binary
-        std::ofstream bin(binPath, std::ios::binary);
-        if (!bin.is_open())
-            throw std::runtime_error("macrocellSpectra: cannot open " + binPath);
-        bin.write(reinterpret_cast<const char*>(hHist_ + size_t(m) * Nb),
-                  Nb * sizeof(macrocellHistType));
-        bin.close();
-
-        // JSON sidecar
-        std::ofstream js(jsonPath);
-        if (!js.is_open())
-            throw std::runtime_error("macrocellSpectra: cannot open " + jsonPath);
-        js << "{\n"
-           << "  \"cycle\": " << cycle << ",\n"
-           << "  \"species\": " << species << ",\n"
-           << "  \"mpi_rank\": " << subdomainRank << ",\n"
-           << "  \"mpi_cartesian_rank\": " << (vct ? vct->getCartesian_rank() : -1) << ",\n"
-           << "  \"mpi_coords\": ["
-              << (vct ? vct->getCoordinates(0) : -1) << ","
-              << (vct ? vct->getCoordinates(1) : -1) << ","
-              << (vct ? vct->getCoordinates(2) : -1) << "],\n"
-           << "  \"mpi_topology\": ["
-              << (vct ? vct->getXLEN() : -1) << ","
-              << (vct ? vct->getYLEN() : -1) << ","
-              << (vct ? vct->getZLEN() : -1) << "],\n"
-           << "  \"macrocell_index_in_subdomain\": ["
-              << mx << "," << my << "," << mz << "],\n"
-           << "  \"macrocell_size_cells\": ["
-              << rx.size << "," << ry.size << "," << rz.size << "],\n"
-           << "  \"macrocell_offset_in_subdomain_cells\": ["
-              << rx.start << "," << ry.start << "," << rz.start << "],\n"
-           << "  \"macrocell_offset_in_global_cells\": ["
-              << (part_.globalOffsetX + rx.start) << ","
-              << (part_.globalOffsetY + ry.start) << ","
-              << (part_.globalOffsetZ + rz.start) << "],\n"
-           << "  \"bins\": [" << MACROCELL_BINS_VPERP << ","
-                              << MACROCELL_BINS_VPAR  << "],\n"
-           << "  \"ranges\": {\"vpar\": [" << -vmax << "," << vmax
-              << "], \"vperp\": [0," << vmax << "]},\n"
-           << "  \"binary_file\": \"mc_" << mx << "_" << my << "_" << mz << ".bin\",\n"
-           << "  \"endian\": \"little\"\n"
-           << "}\n";
-        js.close();
-    }
+    // ---- Update in-memory records and rewrite JSON atomically ----
+    // JSON is updated only after the binary write has completed, so
+    // records.size() * record_size_bytes == actual binary file size.
+    ctx.records.push_back(cycle);
+    writeJson_(ctx);
 }
 
 } // namespace macrocellSpectra

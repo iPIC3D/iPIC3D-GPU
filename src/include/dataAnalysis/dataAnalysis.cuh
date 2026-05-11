@@ -31,7 +31,8 @@ public:
     }
 
     // create the output directory
-    static void createOutputDirectory(int myrank, int ns, VirtualTopology3D* vct);
+    static void createOutputDirectory(int myrank, int ns, VirtualTopology3D* vct,
+                                      bool isRestart);
 
     // called in the main loop
     void startAnalysis(int cycle);
@@ -56,7 +57,6 @@ public:
 
 
 #endif
-
 
 
 

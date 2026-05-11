@@ -45,8 +45,8 @@ struct MacrocellRange {
  *
  * Halo cells are never included.
  *
- * The class is purely host-side: device-resident copies of the per-axis
- * tilings are owned by `macrocellSpectra2D`.
+ * The class is host-side. The JSON writer uses the full per-axis tiling, while
+ * the CUDA kernel receives the scalar extents and requested macrocell sizes.
  */
 struct MacrocellPartition {
     int Cx = 0, Cy = 0, Cz = 0;             ///< requested macrocell size
@@ -98,13 +98,27 @@ struct MacrocellPartition {
  *   - vperp in [0,       +vmax_s]
  * with vmax_s = MAX_VELOCITY_HIST_E for species 0/2 and
  *      vmax_s = MAX_VELOCITY_HIST_I otherwise.
+ *
+ * Output files (one per enabled species per MPI rank):
+ *   <subdomainDir>/species_<S>.bin   — flat binary, one record per analysis
+ *                                      cycle appended in order.
+ *   <subdomainDir>/species_<S>.json  — fully self-contained metadata; the
+ *                                      "records" array lists every cycle that
+ *                                      has been successfully written.
+ *
+ * Binary record layout (record K covers cycle records[K]):
+ *   [ M*Nb float32 ]
+ *   macrocell m = (mz*My + my)*Mx + mx  at offset  m * Nb * 4  within the record.
+ *   Within each macrocell slice: row-major [vperp][vpar] (vperp outer, vpar inner).
+ *   Byte offset of macrocell m at record K:
+ *     K * record_size_bytes + m * bytes_per_macrocell
  */
 class macrocellSpectra2D {
 public:
     /// Number of bins per macrocell.
     static constexpr int Nb = MACROCELL_BINS_VPAR * MACROCELL_BINS_VPERP;
 
-    macrocellSpectra2D(const MacrocellPartition& part);
+    explicit macrocellSpectra2D(const MacrocellPartition& part);
 
     /// Async memset of the device histogram buffer to zero.
     void reset(cudaStream_t stream);
@@ -120,7 +134,7 @@ public:
      *      `CellSorter`. Particles must already be cell-sorted.
      */
     void launch(particleArrayCUDA* pclsHostPtr,
-                cudaCommonType*    fieldForPclsCUDA,   // cudaFieldType*
+                cudaFieldType*     fieldForPclsCUDA,
                 const grid3DCUDA*  gridDevicePtr,
                 const int*         cellStartOffsetsCUDA,
                 const int*         cellCountsCUDA,
@@ -128,24 +142,49 @@ public:
                 cudaStream_t       stream);
 
     /**
-     * @brief Copy histograms to host and write per-macrocell binary + JSON.
+     * @brief Register a species' output file context.
      *
-     * Files are written under
-     *   <subdomainDir>/species_<species>/cycle_<NNNNNN>/
-     *       mc_<mx>_<my>_<mz>.bin
-     *       mc_<mx>_<my>_<mz>.json
+     * Must be called once per enabled species before the first writeToFile().
+     *
+     * Fresh start (isRestart == false):
+     *   - The binary file is created/truncated.
+     *   - The JSON is written with an empty "records" array.
+     *
+     * Restart (isRestart == true):
+     *   - The existing JSON is read to restore the "records" list.
+     *   - The binary file size is validated against records.size().
+     *   - Any size mismatch (orphaned or missing records) is resolved by
+     *     truncating the binary to records.size() * record_size_bytes, so
+     *     the JSON always remains the authoritative source of truth.
+     *
+     * @param subdomainDir  Path to the per-rank subdomain directory (trailing /).
+     * @param species       Species index (used as the file name suffix).
+     * @param rank          MPI rank stored in the JSON metadata.
+     * @param isRestart     true when continuing a previous simulation.
+     * @param vct           VCT topology pointer; its coordinates are snapshotted
+     *                      into the JSON and are not accessed after this call.
      */
-    void writeToFile(const std::string&        subdomainDir,
-                     int                       subdomainRank,
-                     const VCtopology3D*  vct,
-                     int                       species,
-                     int                       cycle,
-                     cudaStream_t              stream);
+    void initSpeciesFile(const std::string&  subdomainDir,
+                         int                 species,
+                         int                 rank,
+                         bool                isRestart,
+                         const VCtopology3D* vct);
 
-    /// Write the constant per-subdomain partition.json once at startup.
-    void writePartitionMetadata(const std::string&       subdomainDir,
-                                int                      subdomainRank,
-                                const VCtopology3D* vct) const;
+    /**
+     * @brief D->H copy + append one record to the species binary file.
+     *
+     * The binary is opened in append mode. After a successful write the
+     * in-memory records list is updated and the JSON is rewritten atomically
+     * via a temp-file + rename to guarantee a consistent on-disk state even
+     * across unexpected process termination.
+     *
+     * initSpeciesFile() must have been called for this species beforehand.
+     *
+     * @param species Species index (must match a prior initSpeciesFile call).
+     * @param cycle   Simulation cycle being saved.
+     * @param stream  CUDA stream used for the D->H copy.
+     */
+    void writeToFile(int species, int cycle, cudaStream_t stream);
 
     const MacrocellPartition& partition() const { return part_; }
 
@@ -157,18 +196,65 @@ public:
 private:
     MacrocellPartition part_;
 
-    // Device-resident axis tilings: 2 ints per macrocell (start, size).
-    int* dRangeX_ = nullptr;
-    int* dRangeY_ = nullptr;
-    int* dRangeZ_ = nullptr;
-
     // Flat histogram buffer (device + pinned host mirror).
-    macrocellHistType* dHist_ = nullptr;
-    macrocellHistType* hHist_ = nullptr;
-    size_t numFloats_ = 0;   ///< == part_.M * Nb
+    // Sized M * Nb elements; shared and reused across species sequentially.
+    macrocellHistType* dHist_     = nullptr;
+    macrocellHistType* hHist_     = nullptr;
+    size_t             numFloats_ = 0;   ///< == part_.M * Nb
 
-    // Returns vmax for the given species using the fixed-range convention.
+    // ======= Per-species output context =======
+
+    /**
+     * @brief Runtime state for one enabled species' output files.
+     *
+     * Populated by initSpeciesFile() and updated by writeToFile().
+     */
+    struct SpeciesFileContext {
+        std::string      binPath;           ///< absolute path to the .bin file
+        std::string      jsonPath;          ///< absolute path to the .json file
+        std::vector<int> records;           ///< simulation cycles written so far
+        cudaCommonType   vmax     = 0;      ///< velocity range bound for this species
+        int              species  = -1;     ///< species index
+        int              rank     = 0;      ///< MPI rank
+        bool             initialized = false;
+        // Snapshot of VCT topology taken at initSpeciesFile() time.
+        int              cartesianRank  = -1;
+        int              coords[3]      = {0, 0, 0};
+        int              topology[3]    = {0, 0, 0};
+    };
+
+    /// Indexed by species id; disabled species keep initialized=false.
+    std::vector<SpeciesFileContext> speciesCtx_;
+
+    /// Returns vmax for the given species using the fixed-range convention.
     static cudaCommonType vmaxForSpecies(int species);
+
+    /**
+     * @brief Atomically rewrite the JSON for ctx (temp-file + rename).
+     *
+     * Called after every successful binary append so the JSON "records" array
+     * always reflects the true content of the binary file.
+     */
+    void writeJson_(const SpeciesFileContext& ctx) const;
+
+    size_t recordSizeBytes_() const;
+    size_t bytesPerMacrocell_() const;
+
+    SpeciesFileContext makeSpeciesContext_(const std::string&  subdomainDir,
+                                            int                 species,
+                                            int                 rank,
+                                            const VCtopology3D* vct) const;
+
+    void createEmptyBinary_(const std::string& path) const;
+    void reconcileRestart_(SpeciesFileContext& ctx) const;
+    void appendBinaryRecord_(const SpeciesFileContext& ctx) const;
+
+    /**
+     * @brief Parse the "records" array from an existing JSON written by writeJson_.
+     *
+     * Returns an empty vector if the file is absent, unreadable, or malformed.
+     */
+    static std::vector<int> parseRecordsFromJson_(const std::string& jsonPath);
 };
 
 } // namespace macrocellSpectra
@@ -188,17 +274,15 @@ __global__ void macrocellSpectraKernel(
     // Cell sort
     const int* __restrict__ cellStartOffsets,
     const int* __restrict__ cellCounts,
-    // Macrocell axis tilings (2 ints per element: start, size)
-    const int* __restrict__ rangeX,
-    const int* __restrict__ rangeY,
-    const int* __restrict__ rangeZ,
+    // Interior cell extents and requested macrocell sizes
+    int Nx_int, int Ny_int, int Nz_int,
+    int Cx, int Cy, int Cz,
     int Mx, int My, int Mz,
     // Field & grid
-    const cudaCommonType* __restrict__ fieldForPcls,  // packed cudaFieldType
+    const cudaFieldType* __restrict__ fieldForPcls,
     const grid3DCUDA*     __restrict__ grid,
     // Histogram parameters
     macrocellSpectra::macrocellHistType* __restrict__ histOut, // [M * Nb]
-    int   binsVpar, int binsVperp,
     cudaCommonType vmax,
     cudaCommonType bMin);
 

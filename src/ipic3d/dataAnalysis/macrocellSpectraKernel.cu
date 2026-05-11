@@ -26,6 +26,15 @@ int binIndex(cudaCommonType v, cudaCommonType vmin, cudaCommonType vmax,
     return b;
 }
 
+__device__ __forceinline__
+void macrocellAxisRange(int macrocell, int requestedSize, int interiorCells,
+                        int& start, int& length)
+{
+    start  = macrocell * requestedSize;
+    const int remaining = interiorCells - start;
+    length = (requestedSize < remaining) ? requestedSize : remaining;
+}
+
 } // namespace
 
 
@@ -39,14 +48,12 @@ __global__ void macrocellSpectraKernel(
     const cudaCommonType* __restrict__ q,
     const int* __restrict__ cellStartOffsets,
     const int* __restrict__ cellCounts,
-    const int* __restrict__ rangeX,
-    const int* __restrict__ rangeY,
-    const int* __restrict__ rangeZ,
+    int Nx_int, int Ny_int, int Nz_int,
+    int Cx, int Cy, int Cz,
     int Mx, int My, int Mz,
-    const cudaCommonType* __restrict__ fieldForPcls,
+    const cudaFieldType* __restrict__ fieldForPcls,
     const grid3DCUDA*     __restrict__ grid,
     macrocellHistType* __restrict__ histOut,
-    int   binsVpar, int binsVperp,
     cudaCommonType vmax,
     cudaCommonType bMin)
 {
@@ -57,19 +64,17 @@ __global__ void macrocellSpectraKernel(
     if (mx >= Mx || my >= My || mz >= Mz) return;
     const int m = (mz * My + my) * Mx + mx;
 
-    const int sx = rangeX[2 * mx];   const int lx = rangeX[2 * mx + 1];
-    const int sy = rangeY[2 * my];   const int ly = rangeY[2 * my + 1];
-    const int sz = rangeZ[2 * mz];   const int lz = rangeZ[2 * mz + 1];
+    int sx, lx, sy, ly, sz, lz;
+    macrocellAxisRange(mx, Cx, Nx_int, sx, lx);
+    macrocellAxisRange(my, Cy, Ny_int, sy, ly);
+    macrocellAxisRange(mz, Cz, Nz_int, sz, lz);
 
+    constexpr int binsVpar  = DAConfig::MACROCELL_BINS_VPAR;
+    constexpr int binsVperp = DAConfig::MACROCELL_BINS_VPERP;
     const int Nb = binsVpar * binsVperp;
 
-    // Shared memory layout:
-    //   [0 .. Nb)                              : macrocellHistType mini-histogram
-    //   [Nb*sizeof(macrocellHistType) .. + 24*8) : 8 corners x 3 B components in cudaCommonType
-    extern __shared__ unsigned char smemRaw[];
-    macrocellHistType* shHist = reinterpret_cast<macrocellHistType*>(smemRaw);
-    cudaCommonType*    shB    = reinterpret_cast<cudaCommonType*>(
-                                    smemRaw + Nb * sizeof(macrocellHistType));
+    extern __shared__ macrocellHistType shHist[];
+    __shared__ cudaCommonType shB[24]; // 8 corners x 3 B components.
 
     // Bin geometry (vpar in [-vmax,+vmax], vperp in [0,vmax]).
     const cudaCommonType vparMin   = -vmax;
@@ -114,8 +119,9 @@ __global__ void macrocellSpectraKernel(
         if (threadIdx.x < 24) {
             const int corner = threadIdx.x / 3;
             const int comp   = threadIdx.x % 3;
-            shB[corner * 3 + comp] =
-                fieldForPcls[previousIndex * 24 + corner * 6 + comp];
+            shB[corner * 3 + comp] = static_cast<cudaCommonType>(
+                fieldForPcls[previousIndex * 24 + corner * 6 + comp]
+            );
         }
         __syncthreads();
 

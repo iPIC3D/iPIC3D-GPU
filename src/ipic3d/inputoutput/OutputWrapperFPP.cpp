@@ -46,7 +46,6 @@ void OutputWrapperFPP::init_output_files(
     RestartDirName = col->getRestartDirName();
     int restart_status = col->getRestart_status();
     output_file = SaveDirName + "/proc"   + num_proc_str + ".hdf";
-    restart_file= RestartDirName + "/restart"+ num_proc_str + ".hdf";
 
     // Initialize the output (simulation results and restart file)
     hdf5_agent.set_simulation_pointers(EMf, grid, vct, col);
@@ -85,11 +84,6 @@ void OutputWrapperFPP::init_output_files(
   		  hdf5_agent.close();
         }
 
-    	if (restart_status == 0) {
-    		hdf5_agent.open(restart_file);
-    		hdf5_agent.close();
-    	}
-
     }
 
 
@@ -114,10 +108,14 @@ void OutputWrapperFPP::append_field_moment_output(const OutputTagConfig& cfg, in
 #endif
 }
 
-void OutputWrapperFPP::append_restart(int cycle)
+void OutputWrapperFPP::append_restart(int cycle, const string& restartDir)
 {
 #ifndef NO_HDF5
-		hdf5_agent.open_append(restart_file);
+		stringstream num_proc_ss;
+		num_proc_ss << cartesian_rank;
+		restart_file = restartDir + "/restart" + num_proc_ss.str() + ".hdf";
+
+		hdf5_agent.open(restart_file);
 		output_mgr.output("proc_topology ", cycle);
 		output_mgr.output("Eall + Ball + rhos + Js + pressure", cycle);
 		output_mgr.output("position + velocity + q + ID", cycle, 0);

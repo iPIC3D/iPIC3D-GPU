@@ -16,6 +16,7 @@
 
 #include "arraysfwd.h"        // arr3_double, array4_double
 #include "aligned_vector.h"   // vector_double
+#include "RestartSlotManager.h"
 #include <string>
 
 // Forward declarations
@@ -31,15 +32,29 @@ public:
     // ---------------------------------------------------------------
 
     /**
-     * @brief Read the last checkpoint cycle number from the restart directory.
+     * @brief Read the checkpoint cycle label from the restart directory.
      *
-     * Opens restart_0.bp (ADIOS2) or restart0.hdf (HDF5) and retrieves
-     * the cycle counter stored in the most recent step.
+     * Resolves A/B restart metadata when present, otherwise falls back to the
+     * legacy flat layout. Returns the checkpoint cycle label.
      *
      * @param restartDir  Path to the directory containing restart files.
-     * @return            The cycle number of the last checkpoint.
+     * @return            The loop cycle to execute first after restart.
      */
     static int readLastCycle(const std::string& restartDir);
+
+    /**
+     * @brief Resolve the checkpoint directory and cycle label to read.
+     *
+     * New restart layouts use RestartDirName/restart_A or restart_B plus
+     * latest_restart.json metadata.  If that metadata is absent, this falls
+     * back to the legacy flat layout directly under RestartDirName.
+     *
+     * @param restartDir  User-provided restart root directory.
+     * @return            Checkpoint metadata, including the directory that
+     *                    contains rank-local restart files.
+     */
+    static RestartCheckpoint resolveLatestCheckpoint(
+        const std::string& restartDir);
 
     // ---------------------------------------------------------------
     // Field restart
@@ -60,7 +75,7 @@ public:
      * @param rhons       Species density array (output).
      * @param ns          Number of species.
      * @param restartDir  Path to restart directory.
-     * @param last_cycle  Expected cycle number (validated against file).
+     * @param last_cycle  Expected restart cycle label (validated against file).
      */
     static void readFields(
         const VCtopology3D* vct,
@@ -93,7 +108,7 @@ public:
      * @param x,y,z           Position components (output).
      * @param t               Particle ID (output, stored as double).
      * @param restartDir      Path to restart directory.
-     * @param last_cycle      Expected cycle number.
+     * @param last_cycle      Expected restart cycle label.
      */
     static void readParticles(
         const VCtopology3D* vct,

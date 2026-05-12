@@ -207,7 +207,10 @@ int c_Solver::Init(int argc, char **argv) {
   RestartDirName = col->getRestartDirName();
   restart_status = col->getRestart_status();
   ns = col->getNs();            // get the number of particle species involved in simulation
-  first_cycle = col->getLast_cycle() + 1; // get the last cycle from the restart
+  // Restart labels identify the loop cycle to resume. Periodic checkpoints are
+  // written before that cycle completes, so a checkpoint labeled N must restart
+  // by executing cycle N again. Fresh runs keep the historical start at cycle 0.
+  first_cycle = (restart_status != 0) ? col->getLast_cycle() : 0;
   // initialize the virtual cartesian topology
   vct = new VCtopology3D(*col);
   // Check if we can map the processes into a matrix ordering defined in Collective.cpp
@@ -690,7 +693,7 @@ int c_Solver::initCUDA(){
   }
 
   dataAnalysis::dataAnalysisPipeline::createOutputDirectory(
-      myrank, ns, vct, restart_status != 0);
+      myrank, ns, vct, restart_status != 0, col->getVelocitySpectra());
 
   // ======= Allocate planet quasi-neutral boundary-condition buffers =======
   {
@@ -2096,26 +2099,16 @@ void c_Solver::WriteOutput(int cycle) {
 
   WriteConserved(cycle);
 
-  // Pipeline note on output cycle labeling:
-  //   outputCopyAsync(i) is called at the end of iteration i, AFTER the mover
-  //   has advanced particles from t_i to t_{i+1}. So the host SoA mirror that
-  //   the next iteration's WriteOutput(i+1) consumes already represents
-  //   particles at physical time t_{i+1}. The cycle label `cycle` therefore
-  //   correctly identifies the particle state, and matches the convention used
-  //   by the field arrays in EMf at the same iteration.
-  //
-  //   Special case: on the very first iteration (cycle == first_cycle), no
-  //   outputCopyAsync() has run yet and the host mirror holds the initial
-  //   (or restart-loaded) state, which by convention represents
-  //   t = first_cycle. The label `cycle` still matches.
-
   // ======= Restart checkpoint =======
   if (restart_cycle > 0 && cycle % restart_cycle == 0) {
+    // Periodic restarts are written before the current iteration is completed.
+    // The checkpoint label remains the triggering loop cycle, so a checkpoint
+    // labeled N restarts by executing cycle N again.
     // eventOutputCopy is pre-recorded once at init on outputStream and re-
     // recorded by every outputCopyAsync() that actually issues copies. The
     // synchronize below is therefore always well-defined: on cycle 0 it
     // resolves immediately and the host SoA mirror still holds the initial /
-    // restart-loaded state (which by convention represents t = first_cycle).
+    // restart-loaded state.
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     // SoA data is already in host vectors after outputCopyAsync — no conversion needed
     ioManager->writeRestart(cycle);
@@ -2327,7 +2320,9 @@ void c_Solver::Finalize() {
 
     outputCopyAsync(-1);
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
-    ioManager->writeRestart((col->getNcycles() + first_cycle) - 1);
+    // Final restart data is written after the last loop iteration has
+    // completed, so the resume label is the next loop cycle.
+    ioManager->writeRestart(col->getNcycles() + first_cycle);
   }
 
   ioManager->finalize();
@@ -2394,6 +2389,7 @@ void c_Solver::sortAllSpecies() {
   }
 
   if constexpr (DAConfig::MACROCELL_SPECTRA_ENABLE) {
+    if (col->getVelocitySpectra()) {
     bool anyMacrocellSpecies = false;
     for (int s = 0; s < ns && !anyMacrocellSpecies; ++s) {
       anyMacrocellSpecies = col->getVelocitySpectraSpecies(s);
@@ -2408,6 +2404,7 @@ void c_Solver::sortAllSpecies() {
       // B field, including on cycle 0 before the mover path has packed it once.
       refreshFieldForPclsDeviceBuffer(true);
     }
+    } // getVelocitySpectra()
   }
 }
 

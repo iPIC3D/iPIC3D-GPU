@@ -158,7 +158,7 @@ The solver on CPU will be benefited from OpenMP now, and this option is ON by de
 
 ## Restart
 
-iPIC3D-GPU supports restarting a simulation from checkpoint files. Restart files store the full electromagnetic field state (E, B, rho) and all particle data so that a simulation can be resumed from the exact point where it stopped.
+iPIC3D-GPU supports restarting a simulation from checkpoint files. Restart files store electromagnetic field arrays, moment arrays, and particle data. A restart checkpoint label is the loop cycle that will be executed first after restart.
 
 ### Launching a restart
 
@@ -174,10 +174,23 @@ Without `restart`, the simulation always starts fresh from the initial condition
 
 ### Restart files
 
-Restart checkpoints are written as one file per MPI rank into `RestartDirName`. The file format depends on the compile-time backend:
+`RestartDirName` is the restart root directory. New checkpoints are written into two reusable slots under that root:
 
-- **ADIOS2** (`USE_ADIOS2=ON`, default): BP5 directories `restart_0.bp` ... `restart_N.bp`, each containing multiple steps (one per checkpoint). On restart the last step is read.
-- **Serial HDF5** (`USE_ADIOS2=OFF`, `USE_HDF5=ON`): HDF5 files `restart0.hdf` ... `restartN.hdf`.
+```text
+RestartDirName/
+  latest_restart.json
+  restart_A/
+  restart_B/
+```
+
+Each checkpoint rewrites the slot that is not currently marked latest. After every rank closes its rank file, the code enters an MPI barrier; then rank 0 writes `restart_A/manifest.json` or `restart_B/manifest.json` and atomically replaces `latest_restart.json`.
+
+The rank-file format depends on the compile-time backend:
+
+- **ADIOS2** (`USE_ADIOS2=ON`, default): `restart_A/restart_<rank>.bp` or `restart_B/restart_<rank>.bp`.
+- **Serial HDF5** (`USE_ADIOS2=OFF`, `USE_HDF5=ON`): `restart_A/restart<rank>.hdf` or `restart_B/restart<rank>.hdf`.
+
+On restart, the reader uses `latest_restart.json` to select the newest valid slot. If that slot is incomplete, it tries the previous slot recorded in the metadata. If no A/B metadata exists, it falls back to the legacy flat layout directly inside `RestartDirName`.
 
 **Important:** you must restart with the **same number of MPI processes** as the original run, since each rank reads its own file.
 
@@ -185,24 +198,40 @@ Restart checkpoints are written as one file per MPI rank into `RestartDirName`. 
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `RestartDirName` | `data` | Directory containing the `restart_*.bp` files |
+| `RestartDirName` | `data` | Restart root containing `latest_restart.json` and `restart_A` / `restart_B` |
 | `RestartOutputCycle` | `5000` | Write a restart checkpoint every N cycles. Set to `0` to disable periodic checkpoints. |
 | `CallFinalize` | `1` | If `1`, write a final restart checkpoint when the simulation ends. Requires `RestartOutputCycle > 0` — if `RestartOutputCycle` is `0`, no final restart is written even with `CallFinalize = 1`. |
 | `ncycles` | — | Number of **new** cycles to run from the restart point (not an absolute cycle number). |
 
 ### How the cycle counter works
 
-The cycle variable `i` in the main loop is a **global/absolute counter** that continues from where the previous run stopped:
+The cycle variable `i` in the main loop is a **global/absolute counter**. On restart, the checkpoint cycle label is used as the first loop cycle:
 
 ```
-first_cycle = last_cycle_in_restart_file + 1
+first_cycle = restart_cycle_label
 LastCycle    = first_cycle + ncycles
 loop:  i = first_cycle  ...  LastCycle - 1
 ```
 
-**Example:** original run completes 1000 cycles (0–999) and writes a restart at cycle 999. A restart run with `ncycles = 500` will execute cycles 1000–1499. Output file names, restart checkpoint labels, and all diagnostics use this absolute counter, so there is no ambiguity across runs.
+The checkpoint label is the cycle to resume:
 
-For a fresh start (no `restart` keyword), `last_cycle = -1`, so `first_cycle = 0`.
+- A periodic checkpoint triggered at loop cycle `N` is written before cycle `N` has completed. It is labeled `N`, so a restart begins at `first_cycle = N` and executes the `N -> N+1` update.
+- The final checkpoint written during `Finalize()` is written after the loop has completed. If the last executed loop cycle was `L`, it is labeled `L + 1`, so a restart begins at `first_cycle = L + 1`.
+
+**Example:** with `RestartOutputCycle = 100`, the checkpoint triggered while loop cycle `100` is running is labeled `100`. A restart from it begins at cycle `100`. If that restarted run uses `ncycles = 500`, it executes cycles `100-599`.
+
+For a fresh start (no `restart` keyword), `first_cycle = 0`.
+
+### What a restart checkpoint contains
+
+For a periodic checkpoint triggered at loop cycle `N`, the payload is the state needed to execute cycle `N` again:
+
+- **Particles** are the host SoA mirror staged by `outputCopyAsync(N - 1)`, after the previous mover/exchange completed. They represent the particle state at the cycle-`N` boundary.
+- **B** is saved before `CalculateB(N)`, so it represents `B^N`.
+- **E** is saved after `CalculateField(N)`, so it represents `E^{N+1}`.
+- **rho, J, and pressure moments** are the moment arrays available at the cycle-`N` boundary, before the cycle-`N` particle mover/exchange has completed.
+
+For a final checkpoint, the payload is written after the last cycle has completed and after a fresh particle copy. If the last executed loop cycle is `L`, the checkpoint contains particles, B, E, and moments at the boundary for cycle `L + 1`, and it is labeled `L + 1`.
 
 ### What happens during restart initialisation
 
@@ -357,7 +386,7 @@ Additional ADIOS2-only tokens used for restart data: `proc_topology`, `E`, `B`, 
 |-----------|---------|-------------|
 | `WriteMethod` | — | Field output backend (see [I/O Backends](#io-backends) below) |
 | `SaveDirName` | `data` | Output directory. **Warning:** existing contents are deleted on fresh start. |
-| `RestartDirName` | `data` | Directory for restart checkpoint files |
+| `RestartDirName` | `data` | Restart root containing `latest_restart.json` and `restart_A` / `restart_B` |
 | `CallFinalize` | `1` | Write a final restart checkpoint when the simulation ends (requires `RestartOutputCycle > 0`) |
 | `ParaviewScriptPath` | `""` | Path to ParaView Catalyst Python script (requires `USE_CATALYST`) |
 
@@ -451,6 +480,3 @@ You can find the corresponding data at [./share/benchmark/GH200_release_baseline
 ## Contact
 
 Feel free to contact Professor Stefano Markidis at KTH for using iPIC3D. 
-
-
-

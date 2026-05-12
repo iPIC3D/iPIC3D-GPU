@@ -61,6 +61,7 @@ private:
 
     // restart
     string restartTag;
+    int restartWriteCount = 0;
 
 
     // pointer registration
@@ -141,10 +142,12 @@ void appendFieldOutput(int cycle);
 void appendParticleOutput(int cycle);
 
 /**
- * @brief Append one restart/checkpoint step to the ADIOS2 stream.
- * @param cycle Simulation cycle being written.
+ * @brief Write one restart/checkpoint into the selected slot directory.
+ * @param cycle Restart label stored in the checkpoint; the loop cycle to
+ *              execute first after restart.
+ * @param restartDir Directory containing this checkpoint slot's rank files.
  */
-void appendRestartOutput(int cycle);
+void writeRestartOutput(int cycle, const string& restartDir);
 
 private:
 
@@ -251,9 +254,12 @@ void _B(adios2::IO &io, adios2::Engine &engine){
     auto by = _variableHelper<cudaCommonType>(io, "By", shape, {0, 0, 0}, shape);
     auto bz = _variableHelper<cudaCommonType>(io, "Bz", shape, {0, 0, 0}, shape);
 
-    engine.Put<cudaCommonType>(bx, EMf->getBxTot().get_arr(), adios2::Mode::Deferred);
-    engine.Put<cudaCommonType>(by, EMf->getByTot().get_arr(), adios2::Mode::Deferred);
-    engine.Put<cudaCommonType>(bz, EMf->getBzTot().get_arr(), adios2::Mode::Deferred);
+    // Store only the evolved B (Bxn/Byn/Bzn), not B_tot = Bxn + Bx_ext.
+    // Bx_ext is recomputed from the analytic expression at init, so storing
+    // B_tot would cause Bx_ext to be double-counted on restart.
+    engine.Put<cudaCommonType>(bx, EMf->getBx().get_arr(), adios2::Mode::Deferred);
+    engine.Put<cudaCommonType>(by, EMf->getBy().get_arr(), adios2::Mode::Deferred);
+    engine.Put<cudaCommonType>(bz, EMf->getBz().get_arr(), adios2::Mode::Deferred);
 }
 
 void _rhos(adios2::IO &io, adios2::Engine &engine){

@@ -99,6 +99,7 @@ public:
         }
 
         if constexpr (MACROCELL_SPECTRA_ENABLE) {
+            if (KCode.col->getVelocitySpectra()) {
             const int Cx = KCode.col->getMacrocellNx();
             const int Cy = KCode.col->getMacrocellNy();
             const int Cz = KCode.col->getMacrocellNz();
@@ -154,6 +155,7 @@ public:
                     }
                 }
             }
+            } // getVelocitySpectra()
         }
     }
 
@@ -549,10 +551,12 @@ int dataAnalysisPipelineImpl::waitForAnalysis(){
  * @param myrank MPI rank used to create rank-local paths.
  * @param ns Number of species included in the analysis output.
  * @param vct MPI topology used for subdomain-coordinate metadata.
+ * @param velocitySpectraEnabled runtime flag from VelocitySpectra input parameter.
  */
 void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns,
                                                  VirtualTopology3D* vct,
-                                                 bool isRestart)
+                                                 bool isRestart,
+                                                 bool velocitySpectraEnabled)
 {
     if constexpr (DATA_ANALYSIS_ENABLED == false){
         return;
@@ -631,6 +635,7 @@ void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns,
     }
 
     if constexpr (MACROCELL_SPECTRA_ENABLE && MACROCELL_SPECTRA_OUTPUT) {
+        if (velocitySpectraEnabled) {
         const auto macrocellRoot = MACROCELL_SPECTRA_OUTPUT_DIR;
 
         if (myrank == 0) {
@@ -645,6 +650,7 @@ void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns,
         prepareOutputFolder(subDir,
                             "[!]Error: Can not create subdomain folder for macrocell spectra");
         writeVctMapping(subDir + "vctMapping.txt");
+        } // velocitySpectraEnabled
     }
 
 }

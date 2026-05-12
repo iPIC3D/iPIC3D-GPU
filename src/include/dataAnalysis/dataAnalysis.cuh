@@ -32,7 +32,7 @@ public:
 
     // create the output directory
     static void createOutputDirectory(int myrank, int ns, VirtualTopology3D* vct,
-                                      bool isRestart);
+                                      bool isRestart, bool velocitySpectraEnabled = false);
 
     // called in the main loop
     void startAnalysis(int cycle);

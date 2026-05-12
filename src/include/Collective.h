@@ -121,6 +121,9 @@ class Collective
     int getMacrocellNx()const{ return (MacrocellNx); }
     int getMacrocellNy()const{ return (MacrocellNy); }
     int getMacrocellNz()const{ return (MacrocellNz); }
+    /*! Top-level runtime on/off switch for the (v_par,v_perp) spectra pipeline.
+     *  Read from VelocitySpectra in the input file; default 0 = disabled. */
+    bool getVelocitySpectra()const{ return (velocitySpectra != 0); }
     /*! Per-species enable mask for the (v_par,v_perp) macrocell spectra.
      *  Returns false (off) if the input file did not list the species. */
     bool getVelocitySpectraSpecies(int s)const{
@@ -278,6 +281,8 @@ class Collective
     int MacrocellNx;
     int MacrocellNy;
     int MacrocellNz;
+    /*! Top-level on/off switch for the spectra pipeline (VelocitySpectra in input). */
+    int velocitySpectra;
     /*! Per-species on/off mask for the (v_par,v_perp) macrocell spectra.
      *  Empty / unset means off for all species. */
     std::vector<int> VelocitySpectraSpecies;

@@ -623,7 +623,7 @@ int c_Solver::initCUDA(){
   }
 
   dataAnalysis::dataAnalysisPipeline::createOutputDirectory(
-      myrank, ns, vct, restart_status != 0);
+      myrank, ns, vct, restart_status != 0, col->getVelocitySpectra());
 
   // ======= Allocate planet quasi-neutral boundary-condition buffers =======
   {
@@ -2177,6 +2177,7 @@ void c_Solver::sortAllSpecies() {
   }
 
   if constexpr (DAConfig::MACROCELL_SPECTRA_ENABLE) {
+    if (col->getVelocitySpectra()) {
     bool anyMacrocellSpecies = false;
     for (int s = 0; s < ns && !anyMacrocellSpecies; ++s) {
       anyMacrocellSpecies = col->getVelocitySpectraSpecies(s);
@@ -2191,6 +2192,7 @@ void c_Solver::sortAllSpecies() {
       // B field, including on cycle 0 before the mover path has packed it once.
       refreshFieldForPclsDeviceBuffer(true);
     }
+    } // getVelocitySpectra()
   }
 }
 

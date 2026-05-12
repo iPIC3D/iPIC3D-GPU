@@ -132,6 +132,7 @@ SortingCycle=1
 #   Ny_int = nyc/YLEN = 80/2 = 40
 #   Nz_int = nzc/ZLEN = 80/2 = 40
 # With (Cx,Cy,Cz)=(10,10,10) -> 8 x 4 x 4 = 128 macrocells per subdomain.
+VelocitySpectra = 1             # 1=run the (v_par,v_perp) spectra pipeline, 0=disable (default)
 MacrocellNx = 10
 MacrocellNy = 10
 MacrocellNz = 10

@@ -104,6 +104,9 @@ void Collective::ReadInput(string inputfile) {
     MacrocellNx = config.read < int >("MacrocellNx", 0);
     MacrocellNy = config.read < int >("MacrocellNy", 0);
     MacrocellNz = config.read < int >("MacrocellNz", 0);
+    // Top-level on/off switch for the (v_par,v_perp) spectra pipeline.
+    // Default 0 = disabled; set to 1 in the input file to enable.
+    velocitySpectra = config.read < int >("VelocitySpectra", 0);
 
     Smooth = config.read < double >("Smooth",1.0);
     SmoothNiter = config.read < int >("SmoothNiter",6);

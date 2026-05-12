@@ -60,6 +60,7 @@ class OutputWrapperFPP
     int 		  nstestpart);
   void append_output(const char* tag, int cycle, int sample);
   void append_field_moment_output(const OutputTagConfig& cfg, int cycle);
+  // `cycle` is the restart label: the loop cycle to execute first after restart.
   void append_restart(int cycle);
 };
 

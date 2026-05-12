@@ -31,13 +31,13 @@ public:
     // ---------------------------------------------------------------
 
     /**
-     * @brief Read the last checkpoint cycle number from the restart directory.
+     * @brief Read the checkpoint cycle label from the restart directory.
      *
      * Opens restart_0.bp (ADIOS2) or restart0.hdf (HDF5) and retrieves
-     * the cycle counter stored in the most recent step.
+     * the cycle label stored in the most recent step.
      *
      * @param restartDir  Path to the directory containing restart files.
-     * @return            The cycle number of the last checkpoint.
+     * @return            The loop cycle to execute first after restart.
      */
     static int readLastCycle(const std::string& restartDir);
 
@@ -60,7 +60,7 @@ public:
      * @param rhons       Species density array (output).
      * @param ns          Number of species.
      * @param restartDir  Path to restart directory.
-     * @param last_cycle  Expected cycle number (validated against file).
+     * @param last_cycle  Expected restart cycle label (validated against file).
      */
     static void readFields(
         const VCtopology3D* vct,
@@ -93,7 +93,7 @@ public:
      * @param x,y,z           Position components (output).
      * @param t               Particle ID (output, stored as double).
      * @param restartDir      Path to restart directory.
-     * @param last_cycle      Expected cycle number.
+     * @param last_cycle      Expected restart cycle label.
      */
     static void readParticles(
         const VCtopology3D* vct,

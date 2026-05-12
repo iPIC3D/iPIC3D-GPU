@@ -28,7 +28,7 @@ using std::string;
 using std::stringstream;
 
 // ===========================================================================
-// readLastCycle  —  retrieve the cycle counter from the newest checkpoint
+// readLastCycle  —  retrieve the restart cycle label from the newest checkpoint
 // ===========================================================================
 
 int RestartReader::readLastCycle(const std::string& restartDir)
@@ -57,7 +57,7 @@ int RestartReader::readLastCycle(const std::string& restartDir)
         engine.EndStep();
 
         if (MPIdata::get_rank() == 0)
-            std::cout << "[*] Restarting last cycle = "
+            std::cout << "[*] Restart cycle label = "
                       << last_cycle << std::endl;
         break;
     }
@@ -91,7 +91,7 @@ int RestartReader::readLastCycle(const std::string& restartDir)
     H5Fclose(file_id);
 
     if (MPIdata::get_rank() == 0)
-        std::cout << "[*] Restarting (HDF5) last cycle = "
+        std::cout << "[*] Restart cycle label (HDF5) = "
                   << last_cycle << std::endl;
 
 #else
@@ -150,10 +150,10 @@ void RestartReader::readFields(
             engineField.Close();
             printf("last_cycle = %d\n", lastCycle);
             printf("last_cycle = %d\n", last_cycle);
-            eprintf("last_cycle in restart file does not match the one in settings file");
+            eprintf("restart cycle label in file does not match the selected checkpoint label");
         } else {
             if (MPIdata::get_rank() == 0)
-                std::cout << "[*] Fields Restarting from cycle: "
+                std::cout << "[*] Fields Restarting from cycle label: "
                           << lastCycle << std::endl;
         }
 
@@ -216,7 +216,7 @@ void RestartReader::readFields(
     string cycle_str = "cycle_" + std::to_string(last_cycle);
 
     if (MPIdata::get_rank() == 0)
-        std::cout << "[*] Fields Restarting (HDF5) from cycle: "
+        std::cout << "[*] Fields Restarting (HDF5) from cycle label: "
                   << last_cycle << std::endl;
 
     // Lambda: read interior-only 3D field, place at [i+1][j+1][k+1]
@@ -320,10 +320,10 @@ void RestartReader::readParticles(
         if (lastCycle != last_cycle) {
             printf("last_cycle = %d\n", lastCycle);
             printf("last_cycle = %d\n", last_cycle);
-            eprintf("last_cycle in restart file does not match the one in settings file");
+            eprintf("restart cycle label in file does not match the selected checkpoint label");
         } else {
             if (MPIdata::get_rank() == 0)
-                std::cout << "[*] Particle Restarting from cycle: "
+                std::cout << "[*] Particle Restarting from cycle label: "
                           << lastCycle << std::endl;
         }
 
@@ -398,7 +398,7 @@ void RestartReader::readParticles(
     string species_str = std::to_string(species_number);
 
     if (MPIdata::get_rank() == 0 && species_number == 0){
-        std::cout << "[*] Particle Restarting (HDF5) from cycle: "
+        std::cout << "[*] Particle Restarting (HDF5) from cycle label: "
                   << last_cycle << std::endl;
         printf("\n");
     }

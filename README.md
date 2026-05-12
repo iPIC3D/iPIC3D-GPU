@@ -158,7 +158,7 @@ The solver on CPU will be benefited from OpenMP now, and this option is ON by de
 
 ## Restart
 
-iPIC3D-GPU supports restarting a simulation from checkpoint files. Restart files store the full electromagnetic field state (E, B, rho) and all particle data so that a simulation can be resumed from the exact point where it stopped.
+iPIC3D-GPU supports restarting a simulation from checkpoint files. Restart files store electromagnetic field arrays, moment arrays, and particle data. A restart checkpoint label is the loop cycle that will be executed first after restart.
 
 ### Launching a restart
 
@@ -192,17 +192,33 @@ Restart checkpoints are written as one file per MPI rank into `RestartDirName`. 
 
 ### How the cycle counter works
 
-The cycle variable `i` in the main loop is a **global/absolute counter** that continues from where the previous run stopped:
+The cycle variable `i` in the main loop is a **global/absolute counter**. On restart, the checkpoint cycle label is used as the first loop cycle:
 
 ```
-first_cycle = last_cycle_in_restart_file + 1
+first_cycle = restart_cycle_label
 LastCycle    = first_cycle + ncycles
 loop:  i = first_cycle  ...  LastCycle - 1
 ```
 
-**Example:** original run completes 1000 cycles (0–999) and writes a restart at cycle 999. A restart run with `ncycles = 500` will execute cycles 1000–1499. Output file names, restart checkpoint labels, and all diagnostics use this absolute counter, so there is no ambiguity across runs.
+The checkpoint label is the cycle to resume:
 
-For a fresh start (no `restart` keyword), `last_cycle = -1`, so `first_cycle = 0`.
+- A periodic checkpoint triggered at loop cycle `N` is written before cycle `N` has completed. It is labeled `N`, so a restart begins at `first_cycle = N` and executes the `N -> N+1` update.
+- The final checkpoint written during `Finalize()` is written after the loop has completed. If the last executed loop cycle was `L`, it is labeled `L + 1`, so a restart begins at `first_cycle = L + 1`.
+
+**Example:** with `RestartOutputCycle = 100`, the checkpoint triggered while loop cycle `100` is running is labeled `100`. A restart from it begins at cycle `100`. If that restarted run uses `ncycles = 500`, it executes cycles `100-599`.
+
+For a fresh start (no `restart` keyword), `first_cycle = 0`.
+
+### What a restart checkpoint contains
+
+For a periodic checkpoint triggered at loop cycle `N`, the payload is the state needed to execute cycle `N` again:
+
+- **Particles** are the host SoA mirror staged by `outputCopyAsync(N - 1)`, after the previous mover/exchange completed. They represent the particle state at the cycle-`N` boundary.
+- **B** is saved before `CalculateB(N)`, so it represents `B^N`.
+- **E** is saved after `CalculateField(N)`, so it represents `E^{N+1}`.
+- **rho, J, and pressure moments** are the moment arrays available at the cycle-`N` boundary, before the cycle-`N` particle mover/exchange has completed.
+
+For a final checkpoint, the payload is written after the last cycle has completed and after a fresh particle copy. If the last executed loop cycle is `L`, the checkpoint contains particles, B, E, and moments at the boundary for cycle `L + 1`, and it is labeled `L + 1`.
 
 ### What happens during restart initialisation
 
@@ -451,6 +467,3 @@ You can find the corresponding data at [./share/benchmark/GH200_release_baseline
 ## Contact
 
 Feel free to contact Professor Stefano Markidis at KTH for using iPIC3D. 
-
-
-

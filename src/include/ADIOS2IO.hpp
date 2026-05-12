@@ -142,7 +142,8 @@ void appendParticleOutput(int cycle);
 
 /**
  * @brief Append one restart/checkpoint step to the ADIOS2 stream.
- * @param cycle Simulation cycle being written.
+ * @param cycle Restart label stored in the checkpoint; the loop cycle to
+ *              execute first after restart.
  */
 void appendRestartOutput(int cycle);
 

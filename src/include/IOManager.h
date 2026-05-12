@@ -88,7 +88,8 @@ public:
     /**
      * @brief Write a restart checkpoint containing fields and particles.
      *
-     * @param cycle Simulation cycle being checkpointed.
+     * @param cycle Restart label stored in the checkpoint. This is the loop
+     *              cycle that a restart will execute first.
      */
     void writeRestart(int cycle);
 

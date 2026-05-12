@@ -472,11 +472,15 @@ public:
       delete[]coord;
     }
 
-    // Bfield is written without ghost cells and defined in nodes
+    // Bfield is written without ghost cells and defined in nodes.
+    // Only the evolved component (Bxn/Byn/Bzn) is stored in the restart, NOT
+    // B_tot = Bxn + Bx_ext.  The external field (Bx_ext) is recomputed from
+    // the analytic expression at initialisation, so storing B_tot would cause
+    // Bx_ext to be double-counted when the simulation restarts.
     if (tag.find("Ball", 0) != string::npos) {
-      this->output_adaptor.write("/fields/Bx/cycle_" + cc.str(), PSK::Dimens(_grid->getNXN() - 2, _grid->getNYN() - 2, _grid->getNZN() - 2), _field->getBxTot());//_field->getBx()
-      this->output_adaptor.write("/fields/By/cycle_" + cc.str(), PSK::Dimens(_grid->getNXN() - 2, _grid->getNYN() - 2, _grid->getNZN() - 2), _field->getByTot());//_field->getBy()
-      this->output_adaptor.write("/fields/Bz/cycle_" + cc.str(), PSK::Dimens(_grid->getNXN() - 2, _grid->getNYN() - 2, _grid->getNZN() - 2), _field->getBzTot());//_field->getBz()
+      this->output_adaptor.write("/fields/Bx/cycle_" + cc.str(), PSK::Dimens(_grid->getNXN() - 2, _grid->getNYN() - 2, _grid->getNZN() - 2), _field->getBx());
+      this->output_adaptor.write("/fields/By/cycle_" + cc.str(), PSK::Dimens(_grid->getNXN() - 2, _grid->getNYN() - 2, _grid->getNZN() - 2), _field->getBy());
+      this->output_adaptor.write("/fields/Bz/cycle_" + cc.str(), PSK::Dimens(_grid->getNXN() - 2, _grid->getNYN() - 2, _grid->getNZN() - 2), _field->getBz());
     }
     else if (tag.find("Bx", 0) != string::npos) {
       this->output_adaptor.write("/fields/Bx/cycle_" + cc.str(), PSK::Dimens(_grid->getNXN() - 2, _grid->getNYN() - 2, _grid->getNZN() - 2), _field->getBxTot());//_field->getBx()
@@ -572,12 +576,14 @@ public:
     }
 
     // rhos (number density for species s) is written without ghost cells and defined in nodes
+    // No scale factor is applied here: this path is used by the restart writer,
+    // and the reader (RestartReader.cpp) loads the raw value directly into rhons.
     if (tag.find("rhos", 0) != string::npos) {
 
       for (int i = 0; i < ns; ++i) {
         stringstream ii;
         ii << i;
-        this->output_adaptor.write("/moments/species_" + ii.str() + "/rho/cycle_" + cc.str(), PSK::Dimens(_grid->getNXN() - 2, _grid->getNYN() - 2, _grid->getNZN() - 2), i, _field->getRHOns(), 4*3.1415926535897);
+        this->output_adaptor.write("/moments/species_" + ii.str() + "/rho/cycle_" + cc.str(), PSK::Dimens(_grid->getNXN() - 2, _grid->getNYN() - 2, _grid->getNZN() - 2), i, _field->getRHOns());
       }
     }
 

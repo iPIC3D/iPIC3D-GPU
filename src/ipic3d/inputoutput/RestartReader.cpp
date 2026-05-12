@@ -68,7 +68,7 @@ int RestartReader::readLastCycle(const std::string& restartDir)
     if (MPIdata::get_rank() == 0) {
         printf("\n");
         printf("=========================================================================\n");
-        printf("  WARNING: HDF5 restart reading has NOT been tested. Use with caution!\n");
+        printf("  WARNING: HDF5 restart is a Beta feature. Use with caution!\n");
         printf("=========================================================================\n");
         printf("\n");
     }
@@ -189,7 +189,7 @@ void RestartReader::readFields(
     if (vct->getCartesian_rank() == 0) {
         printf("\n");
         printf("=========================================================================\n");
-        printf("  WARNING: HDF5 restart reading has NOT been tested. Use with caution!\n");
+        printf("  WARNING: HDF5 restart is a Beta feature. Use with caution!\n");
         printf("=========================================================================\n");
         printf("\n");
         printf("LOADING EM FIELD FROM HDF5 RESTART FILE in %s/restart<rank>.hdf\n",
@@ -289,9 +289,11 @@ void RestartReader::readParticles(
 {
 #ifdef USE_ADIOS2
     // ---- ADIOS2 particle restart read ----
-    if (vct->getCartesian_rank() == 0)
+    if (vct->getCartesian_rank() == 0){
         printf("LOADING PARTICLE FROM RESTART FILE in %s/restart.bp\n",
                restartDir.c_str());
+        printf("\n");
+    }
 
     stringstream ss;
     ss << vct->getCartesian_rank();
@@ -373,13 +375,13 @@ void RestartReader::readParticles(
 
 #elif !defined(NO_HDF5)
     // ---- HDF5 particle restart read ----
-    if (vct->getCartesian_rank() == 0) {
+    if (vct->getCartesian_rank() == 0 && species_number == 0) {
         printf("\n");
         printf("=========================================================================\n");
-        printf("  WARNING: HDF5 restart reading has NOT been tested. Use with caution!\n");
+        printf("  WARNING: HDF5 restart is a Beta feature. Use with caution!\n");
         printf("=========================================================================\n");
         printf("\n");
-        printf("LOADING PARTICLE FROM HDF5 RESTART FILE in %s/restart<rank>.hdf\n",
+        printf("LOADING PARTICLES FROM HDF5 RESTART FILE in %s/restart<rank>.hdf\n",
                restartDir.c_str());
     }
 
@@ -395,9 +397,12 @@ void RestartReader::readParticles(
     string cycle_str   = "cycle_" + std::to_string(last_cycle);
     string species_str = std::to_string(species_number);
 
-    if (MPIdata::get_rank() == 0)
+    if (MPIdata::get_rank() == 0 && species_number == 0){
         std::cout << "[*] Particle Restarting (HDF5) from cycle: "
                   << last_cycle << std::endl;
+        printf("\n");
+    }
+    
 
     // Determine particle count from the x dataset dimensions
     string xPath = "/particles/species_" + species_str + "/x/" + cycle_str;

@@ -251,9 +251,12 @@ void _B(adios2::IO &io, adios2::Engine &engine){
     auto by = _variableHelper<cudaCommonType>(io, "By", shape, {0, 0, 0}, shape);
     auto bz = _variableHelper<cudaCommonType>(io, "Bz", shape, {0, 0, 0}, shape);
 
-    engine.Put<cudaCommonType>(bx, EMf->getBxTot().get_arr(), adios2::Mode::Deferred);
-    engine.Put<cudaCommonType>(by, EMf->getByTot().get_arr(), adios2::Mode::Deferred);
-    engine.Put<cudaCommonType>(bz, EMf->getBzTot().get_arr(), adios2::Mode::Deferred);
+    // Store only the evolved B (Bxn/Byn/Bzn), not B_tot = Bxn + Bx_ext.
+    // Bx_ext is recomputed from the analytic expression at init, so storing
+    // B_tot would cause Bx_ext to be double-counted on restart.
+    engine.Put<cudaCommonType>(bx, EMf->getBx().get_arr(), adios2::Mode::Deferred);
+    engine.Put<cudaCommonType>(by, EMf->getBy().get_arr(), adios2::Mode::Deferred);
+    engine.Put<cudaCommonType>(bz, EMf->getBz().get_arr(), adios2::Mode::Deferred);
 }
 
 void _rhos(adios2::IO &io, adios2::Engine &engine){

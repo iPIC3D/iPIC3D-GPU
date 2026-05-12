@@ -127,10 +127,14 @@ static CaseType parseCaseType(const std::string& s) {
  */
 c_Solver::~c_Solver()
 {
-  delete col; // configuration parameters ("collectiveIO")
-  delete vct; // process topology
+  // EMf must be deleted first: ~EMfields3D() calls freeDataType() which
+  // dereferences _col, _grid, and _vct (stored as const refs bound to
+  // *col, *grid, *vct). Deleting col/vct/grid first would leave those
+  // refs dangling.
+  delete EMf;  // field (destructor uses _col/_grid/_vct refs → must be first)
+  delete col;  // configuration parameters ("collectiveIO")
+  delete vct;  // process topology
   delete grid; // grid
-  delete EMf; // field
   delete ioManager; // I/O backends (HDF5, ADIOS2, VTK buffers)
 
   // delete particles

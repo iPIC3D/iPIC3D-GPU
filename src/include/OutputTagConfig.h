@@ -6,6 +6,7 @@
 #include <sstream>
 #include <regex>
 #include <cstdio>
+#include "HeatFluxComponents.h"
 
 /**
  * @brief Parsed output tag configuration.
@@ -15,9 +16,9 @@
  * Field tags: B, E  (grid-level quantities only)
  *
  * Moments tags use numeric species indexing:
- *   bare name (rho, J, PXX, ..., P)  → all species
- *   name + digit (rho0, J2, PXX3)    → single species
- *   name_tot (rho_tot, J_tot, PXX_tot, P_tot) → sum over species
+ *   bare name (rho, J, PXX, ..., P, Q)  → all species
+ *   name + digit (rho0, J2, PXX3, Qxyz1) → single species
+ *   name_tot (rho_tot, J_tot, PXX_tot, P_tot, Qxyz_tot) → sum over species
  */
 struct OutputTagConfig {
 
@@ -34,6 +35,7 @@ struct OutputTagConfig {
     std::set<int> PYYSpecies;
     std::set<int> PYZSpecies;
     std::set<int> PZZSpecies;
+    std::array<std::set<int>, HeatFlux::ComponentCount> heatFluxSpecies;
 
     // --- Total flags ---
     bool writeRhoTot = false;
@@ -44,6 +46,7 @@ struct OutputTagConfig {
     bool writePYYTot = false;
     bool writePYZTot = false;
     bool writePZZTot = false;
+    std::array<bool, HeatFlux::ComponentCount> writeHeatFluxTot = {};
 
     // --- Convenience queries ---
 
@@ -58,7 +61,8 @@ struct OutputTagConfig {
             || !PYZSpecies.empty() || !PZZSpecies.empty()
             || writeRhoTot || writeJTot
             || writePXXTot || writePXYTot || writePXZTot
-            || writePYYTot || writePYZTot || writePZZTot;
+            || writePYYTot || writePYZTot || writePZZTot
+            || needsAnyHeatFlux();
     }
 
     bool needsJTotComputation() const {
@@ -68,6 +72,19 @@ struct OutputTagConfig {
     bool needsAnyPTot() const {
         return writePXXTot || writePXYTot || writePXZTot
             || writePYYTot || writePYZTot || writePZZTot;
+    }
+
+    bool needsAnyHeatFlux() const {
+        for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+            if (!heatFluxSpecies[c].empty() || writeHeatFluxTot[c]) return true;
+        }
+        return false;
+    }
+
+    bool needsAnyHeatFluxTot() const {
+        for (bool doWrite : writeHeatFluxTot)
+            if (doWrite) return true;
+        return false;
     }
 
     /** Number of scalar moment writes (rho + pressure; excludes J which is vector). */
@@ -87,6 +104,10 @@ struct OutputTagConfig {
         if (writePYYTot) n++;
         if (writePYZTot) n++;
         if (writePZZTot) n++;
+        for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+            n += (int)heatFluxSpecies[c].size();
+            if (writeHeatFluxTot[c]) n++;
+        }
         return n;
     }
 
@@ -136,6 +157,27 @@ inline void setAllPressureTot(OutputTagConfig& cfg) {
     cfg.writePZZTot = true;
 }
 
+inline void addAllHeatFluxSpecies(OutputTagConfig& cfg, int ns) {
+    for (auto& species : cfg.heatFluxSpecies)
+        addAllSpecies(species, ns);
+}
+
+inline void addHeatFluxForSpecies(OutputTagConfig& cfg, int si) {
+    for (auto& species : cfg.heatFluxSpecies)
+        species.insert(si);
+}
+
+inline void setAllHeatFluxTot(OutputTagConfig& cfg) {
+    for (auto& doWrite : cfg.writeHeatFluxTot)
+        doWrite = true;
+}
+
+inline int heatFluxComponentFromToken(const std::string& token) {
+    for (int c = 0; c < HeatFlux::ComponentCount; ++c)
+        if (token == HeatFlux::ComponentNames[c]) return c;
+    return -1;
+}
+
 /**
  * @brief Parse one moments-tag token.
  *
@@ -154,6 +196,13 @@ inline bool parseMomentToken(const std::string& tok, int ns,
     if (tok == "PYY_tot") { cfg.writePYYTot = true;   return true; }
     if (tok == "PYZ_tot") { cfg.writePYZTot = true;   return true; }
     if (tok == "PZZ_tot") { cfg.writePZZTot = true;   return true; }
+    if (tok == "Q_tot")   { setAllHeatFluxTot(cfg);   return true; }
+    for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+        if (tok == std::string(HeatFlux::ComponentNames[c]) + "_tot") {
+            cfg.writeHeatFluxTot[c] = true;
+            return true;
+        }
+    }
 
     // --- Bare names (all species) ---
     if (tok == "rho") { addAllSpecies(cfg.rhoSpecies, ns);  return true; }
@@ -165,9 +214,17 @@ inline bool parseMomentToken(const std::string& tok, int ns,
     if (tok == "PYY") { addAllSpecies(cfg.PYYSpecies, ns);  return true; }
     if (tok == "PYZ") { addAllSpecies(cfg.PYZSpecies, ns);  return true; }
     if (tok == "PZZ") { addAllSpecies(cfg.PZZSpecies, ns);  return true; }
+    if (tok == "Q")   { addAllHeatFluxSpecies(cfg, ns);     return true; }
+    {
+        const int component = heatFluxComponentFromToken(tok);
+        if (component >= 0) {
+            addAllSpecies(cfg.heatFluxSpecies[component], ns);
+            return true;
+        }
+    }
 
     // --- Species-indexed: name followed by one or more digits ---
-    static const std::regex re("^(rho|J|PXX|PXY|PXZ|PYY|PYZ|PZZ|P)(\\d+)$");
+    static const std::regex re("^(rho|J|PXX|PXY|PXZ|PYY|PYZ|PZZ|P|Qxxx|Qxxy|Qxxz|Qxyy|Qxyz|Qxzz|Qyyy|Qyyz|Qyzz|Qzzz|Q)(\\d+)$");
     std::smatch m;
     if (std::regex_match(tok, m, re)) {
         int si = std::stoi(m[2].str());
@@ -186,6 +243,12 @@ inline bool parseMomentToken(const std::string& tok, int ns,
         else if (base == "PYY") cfg.PYYSpecies.insert(si);
         else if (base == "PYZ") cfg.PYZSpecies.insert(si);
         else if (base == "PZZ") cfg.PZZSpecies.insert(si);
+        else if (base == "Q")   addHeatFluxForSpecies(cfg, si);
+        else {
+            const int component = heatFluxComponentFromToken(base);
+            if (component >= 0)
+                cfg.heatFluxSpecies[component].insert(si);
+        }
         return true;
     }
 

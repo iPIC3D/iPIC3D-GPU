@@ -139,6 +139,7 @@ EMfields3D::EMfields3D(Collective *col, Grid *grid, VirtualTopology3D *vct) :
   pYYsn(ns, nxn, nyn, nzn),
   pYZsn(ns, nxn, nyn, nzn),
   pZZsn(ns, nxn, nyn, nzn),
+  heatFlux(ns * HeatFlux::ComponentCount, nxn, nyn, nzn),
 
   // array allocation: central points
   //
@@ -1302,6 +1303,46 @@ void EMfields3D::adjustNonPeriodicDensities(int is)
   }
 }
 
+void EMfields3D::adjustNonPeriodicHeatFlux(int is)
+{
+  const VirtualTopology3D *vct = &get_vct();
+
+  auto scaleNode = [&](int i, int j, int k) {
+    for (int c = 0; c < HeatFlux::ComponentCount; ++c)
+      heatFlux[HeatFlux::componentIndex(is, c)][i][j][k] *= 2;
+  };
+
+  if (vct->getXleft_neighbor_P() == MPI_PROC_NULL)
+    for (int j = 1; j < nyn - 1; j++)
+      for (int k = 1; k < nzn - 1; k++)
+        scaleNode(1, j, k);
+
+  if (vct->getYleft_neighbor_P() == MPI_PROC_NULL)
+    for (int i = 1; i < nxn - 1; i++)
+      for (int k = 1; k < nzn - 1; k++)
+        scaleNode(i, 1, k);
+
+  if (vct->getZleft_neighbor_P() == MPI_PROC_NULL)
+    for (int i = 1; i < nxn - 1; i++)
+      for (int j = 1; j < nyn - 1; j++)
+        scaleNode(i, j, 1);
+
+  if (vct->getXright_neighbor_P() == MPI_PROC_NULL)
+    for (int j = 1; j < nyn - 1; j++)
+      for (int k = 1; k < nzn - 1; k++)
+        scaleNode(nxn - 2, j, k);
+
+  if (vct->getYright_neighbor_P() == MPI_PROC_NULL)
+    for (int i = 1; i < nxn - 1; i++)
+      for (int k = 1; k < nzn - 1; k++)
+        scaleNode(i, nyn - 2, k);
+
+  if (vct->getZright_neighbor_P() == MPI_PROC_NULL)
+    for (int i = 1; i < nxn - 1; i++)
+      for (int j = 1; j < nyn - 1; j++)
+        scaleNode(i, j, nzn - 2);
+}
+
 void EMfields3D::ConstantChargeOpenBCv2()
 {
   const VirtualTopology3D *vct = &get_vct();
@@ -1992,6 +2033,27 @@ void EMfields3D::communicateGhostP2G(int ns)
   communicateNode_P(nxn, nyn, nzn, moment7, vct, this);
   communicateNode_P(nxn, nyn, nzn, moment8, vct, this);
   communicateNode_P(nxn, nyn, nzn, moment9, vct, this);
+}
+
+void EMfields3D::communicateGhostHeatFlux(int is)
+{
+  timeTasks_set_communicating();
+
+  const VirtualTopology3D *vct = &get_vct();
+
+  for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+    double ***component =
+        convert_to_arr3(heatFlux[HeatFlux::componentIndex(is, c)]);
+    communicateInterp(nxn, nyn, nzn, component, vct, this);
+  }
+
+  adjustNonPeriodicHeatFlux(is);
+
+  for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+    double ***component =
+        convert_to_arr3(heatFlux[HeatFlux::componentIndex(is, c)]);
+    communicateNode_P(nxn, nyn, nzn, component, vct, this);
+  }
 }
 
 /*! communicate ghost for grid -> Particles interpolation */

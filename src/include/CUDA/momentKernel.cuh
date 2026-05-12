@@ -85,5 +85,28 @@ __global__ void cellAwareMomentKernel(
     grid3DCUDA*                   grid,
     cudaTypeArray1<cudaMomentType> moments);
 
+/**
+ * @brief Deposit the third central velocity moment for an unsorted species.
+ *
+ * The bulk buffer is packed as [rho, Jx, Jy, Jz] on the nodal grid using
+ * already-communicated lower moments. The output buffer stores the symmetric
+ * heat-flux components in the order:
+ * Qxxx,Qxxy,Qxxz,Qxyy,Qxyz,Qxzz,Qyyy,Qyyz,Qyzz,Qzzz.
+ *
+ * @param momentParam Device-side moment parameter bundle for one species.
+ * @param grid Device-side grid descriptor.
+ * @param bulkMoments Packed lower moments [4][nxn][nyn][nzn].
+ * @param heatFlux Packed heat-flux output [10][nxn][nyn][nzn].
+ * @param qom Species charge-to-mass ratio.
+ * @param rhoFloor Absolute charge-density floor for bulk-velocity division.
+ */
+__global__ void heatFluxKernelUnsorted(
+    momentParameter* momentParam,
+    grid3DCUDA* grid,
+    const cudaTypeArray1<cudaMomentType> bulkMoments,
+    cudaTypeArray1<cudaMomentType> heatFlux,
+    cudaMomentType qom,
+    cudaMomentType rhoFloor);
+
 
 #endif

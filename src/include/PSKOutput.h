@@ -744,6 +744,33 @@ public:
     writePressureTot("pYY", cfg.writePYYTot, [&](int x,int y,int z,int s){ return _field->getpYYsn(x,y,z,s); });
     writePressureTot("pYZ", cfg.writePYZTot, [&](int x,int y,int z,int s){ return _field->getpYZsn(x,y,z,s); });
     writePressureTot("pZZ", cfg.writePZZTot, [&](int x,int y,int z,int s){ return _field->getpZZsn(x,y,z,s); });
+
+    // --- Per-species heat-flux tensor ---
+    for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+      const std::string name = HeatFlux::ComponentNames[c];
+      for (int si : cfg.heatFluxSpecies[c]) {
+        this->output_adaptor.write("/moments/species_" + std::to_string(si) + "/" + name + "/cycle_" + cc.str(),
+          dims, HeatFlux::componentIndex(si, c), _field->getHeatFlux());
+      }
+    }
+
+    // --- Total heat-flux tensor ---
+    auto writeHeatFluxTot = [&](int component) {
+      if (!cfg.writeHeatFluxTot[component]) return;
+      std::vector<double> tmp(nx * ny * nz);
+      for (int iz = 0; iz < nz; iz++)
+        for (int iy = 0; iy < ny; iy++)
+          for (int ix = 0; ix < nx; ix++) {
+            double sum = 0.0;
+            for (int s = 0; s < ns; s++)
+              sum += _field->getHeatFlux(ix+1, iy+1, iz+1, s, component);
+            tmp[(size_t)iz * ny * nx + (size_t)iy * nx + ix] = sum;
+          }
+      this->output_adaptor.write("/moments/" + std::string(HeatFlux::ComponentNames[component]) + "_tot/cycle_" + cc.str(),
+        dims, tmp.data());
+    };
+    for (int c = 0; c < HeatFlux::ComponentCount; ++c)
+      writeHeatFluxTot(c);
   }
 
   void output(const string & tag, int cycle, int sample) {

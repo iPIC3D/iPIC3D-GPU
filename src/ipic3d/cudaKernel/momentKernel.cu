@@ -259,6 +259,113 @@ __global__ void momentKernelNew(momentParameter* momentParam,
 
 }
 
+__global__ void heatFluxKernelUnsorted(
+    momentParameter* momentParam,
+    grid3DCUDA* grid,
+    const cudaTypeArray1<cudaMomentType> bulkMoments,
+    cudaTypeArray1<cudaMomentType> heatFlux,
+    cudaMomentType qom,
+    cudaMomentType rhoFloor)
+{
+    if (qom == 0.0) return;
+
+    const uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
+    auto pclsArray = momentParam->pclsArray;
+    if (pidx >= pclsArray->getNOP()) return;
+
+    const commonType inv_dx = 1.0 / grid->dx;
+    const commonType inv_dy = 1.0 / grid->dy;
+    const commonType inv_dz = 1.0 / grid->dz;
+    const int nxn = grid->nxn;
+    const int nyn = grid->nyn;
+    const int nzn = grid->nzn;
+    const commonType xstart = grid->xStart;
+    const commonType ystart = grid->yStart;
+    const commonType zstart = grid->zStart;
+    const uint32_t oneDensity = nxn * nyn * nzn;
+
+    const commonType ui = pclsArray->getU()[pidx];
+    const commonType vi = pclsArray->getV()[pidx];
+    const commonType wi = pclsArray->getW()[pidx];
+    const commonType xpcl = pclsArray->getX()[pidx];
+    const commonType ypcl = pclsArray->getY()[pidx];
+    const commonType zpcl = pclsArray->getZ()[pidx];
+    const commonType qi = pclsArray->getQ()[pidx];
+
+    int ix = 2 + int(floor((xpcl - xstart) * inv_dx));
+    int iy = 2 + int(floor((ypcl - ystart) * inv_dy));
+    int iz = 2 + int(floor((zpcl - zstart) * inv_dz));
+    if (ix < 1) ix = 1; if (ix > nxn - 1) ix = nxn - 1;
+    if (iy < 1) iy = 1; if (iy > nyn - 1) iy = nyn - 1;
+    if (iz < 1) iz = 1; if (iz > nzn - 1) iz = nzn - 1;
+
+    const commonType xi0 = xpcl - grid->getXN(ix - 1);
+    const commonType eta0 = ypcl - grid->getYN(iy - 1);
+    const commonType zeta0 = zpcl - grid->getZN(iz - 1);
+    const commonType xi1 = grid->getXN(ix) - xpcl;
+    const commonType eta1 = grid->getYN(iy) - ypcl;
+    const commonType zeta1 = grid->getZN(iz) - zpcl;
+    const commonType invVOLqi = grid->invVOL * qi;
+    const commonType weight0 = invVOLqi * xi0;
+    const commonType weight1 = invVOLqi * xi1;
+    const commonType weight00 = weight0 * eta0;
+    const commonType weight01 = weight0 * eta1;
+    const commonType weight10 = weight1 * eta0;
+    const commonType weight11 = weight1 * eta1;
+
+    commonType weights[8];
+    weights[0] = weight00 * zeta0 * grid->invVOL;
+    weights[1] = weight00 * zeta1 * grid->invVOL;
+    weights[2] = weight01 * zeta0 * grid->invVOL;
+    weights[3] = weight01 * zeta1 * grid->invVOL;
+    weights[4] = weight10 * zeta0 * grid->invVOL;
+    weights[5] = weight10 * zeta1 * grid->invVOL;
+    weights[6] = weight11 * zeta0 * grid->invVOL;
+    weights[7] = weight11 * zeta1 * grid->invVOL;
+
+    uint32_t posIndex[8];
+    posIndex[0] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz);
+    posIndex[1] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz - 1);
+    posIndex[2] = toOneDimIndex(nxn, nyn, nzn, ix, iy - 1, iz);
+    posIndex[3] = toOneDimIndex(nxn, nyn, nzn, ix, iy - 1, iz - 1);
+    posIndex[4] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy, iz);
+    posIndex[5] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy, iz - 1);
+    posIndex[6] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy - 1, iz);
+    posIndex[7] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy - 1, iz - 1);
+
+    for (int c = 0; c < 8; ++c) {
+        const uint32_t node = posIndex[c];
+        const commonType rho = bulkMoments[node];
+        if (fabs(rho) <= rhoFloor) continue;
+
+        const commonType ux = bulkMoments[oneDensity + node] / rho;
+        const commonType uy = bulkMoments[2 * oneDensity + node] / rho;
+        const commonType uz = bulkMoments[3 * oneDensity + node] / rho;
+        const commonType cx = ui - ux;
+        const commonType cy = vi - uy;
+        const commonType cz = wi - uz;
+        const commonType cx2 = cx * cx;
+        const commonType cy2 = cy * cy;
+        const commonType cz2 = cz * cz;
+        const commonType massWeight = weights[c] / qom;
+
+        commonType q[10];
+        q[0] = cx2 * cx;
+        q[1] = cx2 * cy;
+        q[2] = cx2 * cz;
+        q[3] = cx * cy2;
+        q[4] = cx * cy * cz;
+        q[5] = cx * cz2;
+        q[6] = cy2 * cy;
+        q[7] = cy2 * cz;
+        q[8] = cy * cz2;
+        q[9] = cz2 * cz;
+
+        for (int m = 0; m < 10; ++m)
+            atomicAdd(&heatFlux[oneDensity * m + node], q[m] * massWeight);
+    }
+}
+
 
 // ======= Cell-aware sorted moment deposition =======
 

@@ -33,6 +33,7 @@
 #include "mpi.h"
 
 #include "cudaTypeDef.cuh"
+#include "HeatFluxComponents.h"
 
 #ifdef GPU_SOLVER
 #include "GPUFieldArray.cuh"
@@ -308,11 +309,23 @@ class EMfields3D                // :public Field
     void communicateGhostP2G(int ns);
 
     /**
+     * @brief Communicate per-species heat-flux tensor components for output.
+     *
+     * Uses the same shared-node summation, non-periodic boundary scaling, and
+     * ghost-node population pattern as communicateGhostP2G().
+     *
+     * @param is Species index.
+     */
+    void communicateGhostHeatFlux(int is);
+
+    /**
      * @brief Adjust densities on non-periodic boundaries.
      *
      * @param is Species index.
      */
     void adjustNonPeriodicDensities(int is);
+    /** @brief Apply the current moment boundary scaling to heat flux. */
+    void adjustNonPeriodicHeatFlux(int is);
 
 
     /*! Perfect conductor boundary conditions LEFT wall */
@@ -418,6 +431,19 @@ class EMfields3D                // :public Field
 
     arr4_double getpZZsn() { return pZZsn; }
     double getpZZsn(int X,int Y,int Z,int is)const{return pZZsn.get(is,X,Y,Z);}
+
+    arr4_double getHeatFlux() { return heatFlux; }
+    arr3_double getHeatFluxComponent(int is, int component) {
+      return arr3_double(heatFlux.fetch_arr4()[HeatFlux::componentIndex(is, component)], nxn, nyn, nzn);
+    }
+    double getHeatFlux(int X, int Y, int Z, int is, int component) const {
+      return heatFlux.get(HeatFlux::componentIndex(is, component), X, Y, Z);
+    }
+    double* getHeatFluxRaw() { return heatFlux.fetch_arr(); }
+    double* getHeatFluxSpeciesPtr(int is) {
+      return heatFlux.fetch_arr()
+           + HeatFlux::componentIndex(is, 0) * nxn * nyn * nzn;
+    }
 
     // per-species 3D slice accessors (node grid) for parallel HDF5 / H5hut output
     arr3_double getpXXsn(int is){return arr3_double(pXXsn.fetch_arr4()[is], nxn, nyn, nzn);}
@@ -974,6 +1000,7 @@ class EMfields3D                // :public Field
     array4_double pYYsn;
     array4_double pYZsn;
     array4_double pZZsn;
+    array4_double heatFlux;
 
     /*! Field Boundary Condition
       0 = Dirichlet Boundary Condition: specifies the

@@ -348,6 +348,8 @@ A `+`-separated string selecting which per-species or total moments to write. Ex
 | `J` | Current density |
 | `P` | Full pressure tensor (all 6 components) |
 | `PXX`, `PXY`, `PXZ`, `PYY`, `PYZ`, `PZZ` | Individual pressure tensor components |
+| `Q` | Full heat-flux tensor (all 10 symmetric components) |
+| `Qxxx`, `Qxxy`, `Qxxz`, `Qxyy`, `Qxyz`, `Qxzz`, `Qyyy`, `Qyyz`, `Qyzz`, `Qzzz` | Individual heat-flux tensor components |
 
 **Species-indexed** (single species `s`):
 
@@ -357,6 +359,8 @@ A `+`-separated string selecting which per-species or total moments to write. Ex
 | `J<s>` | `J1` | Current of species 1 |
 | `P<s>` | `P0` | Full pressure tensor of species 0 |
 | `PXX<s>` ... `PZZ<s>` | `PXX2` | Single component for species 2 |
+| `Q<s>` | `Q0` | Full heat-flux tensor of species 0 |
+| `Qxxx<s>` ... `Qzzz<s>` | `Qxyz2` | Single heat-flux component for species 2 |
 
 **Summed totals** (sum over all species):
 
@@ -366,6 +370,8 @@ A `+`-separated string selecting which per-species or total moments to write. Ex
 | `J_tot` | Total current density |
 | `P_tot` | Total pressure tensor |
 | `PXX_tot` ... `PZZ_tot` | Individual total pressure components |
+| `Q_tot` | Total heat-flux tensor |
+| `Qxxx_tot` ... `Qzzz_tot` | Individual total heat-flux components |
 
 ### Particle output tags (`ParticlesOutputTag`)
 

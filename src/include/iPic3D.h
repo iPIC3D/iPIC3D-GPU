@@ -48,6 +48,7 @@ using std::string;
 #include "ExosphereIonization.h"
 #include "ParticleSoAHost.h"
 #include "ParticleCommInjection.h"
+#include "HeatFluxComponents.h"
 
 #include <fstream>
 
@@ -105,6 +106,13 @@ namespace iPic3D {
       testpart(nullptr),
       exosphereIonization(nullptr),
       ioManager(0),
+      heatFluxEnabled_(false),
+      heatFluxScheduledCycle_(-1),
+      heatFluxStream(nullptr),
+      heatFluxReadDoneEvt(nullptr),
+      heatFluxHostDoneEvt(nullptr),
+      heatFluxCUDAPtr(nullptr),
+      heatFluxBulkCUDAPtr(nullptr),
       Ke(0),
       BulkEnergy(0),
       momentum(0),
@@ -150,7 +158,7 @@ namespace iPic3D {
      * @param doMomentsInLauncher True when moments are deposited in the same async path.
      * @return Status code from the launch path.
      */
-    int cudaLauncherAsync(int species, bool doMomentsInLauncher);
+    int cudaLauncherAsync(int species, bool doMomentsInLauncher, bool waitForHeatFlux);
     /**
      * @brief Launch mover and moment work for all species asynchronously.
      *
@@ -197,6 +205,16 @@ namespace iPic3D {
     void WriteVelocityDistribution(int cycle);
     void WriteVirtualSatelliteTraces();
     /**
+     * @brief Schedule heat-flux tensor computation for an output cycle.
+     *
+     * No-ops unless the current output configuration requests heat flux for
+     * this cycle. The mover waits only until the heat-flux kernel has finished
+     * reading particle data; host copy and MPI halo summation remain overlapped.
+     *
+     * @param cycle Current simulation cycle.
+     */
+    void ScheduleHeatFlux(int cycle);
+    /**
      * @brief Schedule or execute GPU-to-host copies needed for output.
      *
      * @param cycle Current simulation cycle, or -1 for the final flush path.
@@ -230,6 +248,16 @@ namespace iPic3D {
      * @param stream CUDA stream used for the asynchronous copy.
      */
     void copyMomentsD2H(int species, cudaStream_t stream);
+    /** @brief Copy one species' communicated rho/J bulk moments to the GPU (host→device, GPU_SOLVER=OFF). */
+    void copyHeatFluxBulkH2D(int species, cudaStream_t stream);
+    /** @brief Copy one species' rho/J bulk moments device→device from GPU solver arrays (GPU_SOLVER=ON). */
+    void copyHeatFluxBulkD2D(int species, cudaStream_t stream);
+    /** @brief Copy one species' heat-flux tensor from device to host storage. */
+    void copyHeatFluxD2H(int species, cudaStream_t stream);
+    /** @brief Complete heat-flux D2H, halo communication, and make data writable. */
+    void finishHeatFluxForOutput(int cycle);
+    /** @brief Return true when this cycle's configured field output needs heat flux. */
+    bool needsHeatFluxOutput(int cycle) const;
     /**
      * @brief Register one species' host moment arrays as pinned memory.
      *
@@ -242,6 +270,10 @@ namespace iPic3D {
      * @param species Species index.
      */
     void unregisterMomentsPinnedMemory(int species);
+    /** @brief Register the persistent heat-flux host tensor as pinned memory. */
+    void registerHeatFluxPinnedMemory();
+    /** @brief Unregister the persistent heat-flux host tensor. */
+    void unregisterHeatFluxPinnedMemory();
 
   private:
     //static MPIdata * mpi;
@@ -311,6 +343,10 @@ namespace iPic3D {
     // ======= Shared device buffers =======
     // [10][nxn][nyn][nzn] packed moment storage per species.
     cudaTypeArray1<cudaMomentType>* momentsCUDAPtr; // for every species
+    // [10][nxn][nyn][nzn] packed heat-flux storage per species.
+    cudaTypeArray1<cudaMomentType>* heatFluxCUDAPtr; // for every species
+    // [rho,Jx,Jy,Jz][nxn][nyn][nzn] communicated lower moments per species.
+    cudaTypeArray1<cudaMomentType>* heatFluxBulkCUDAPtr; // for every species
     // Packed field-interpolation buffer copied from host for mover kernels.
     cudaTypeArray1<cudaFieldType> fieldForPclCUDAPtr; // for all species
 
@@ -319,7 +355,10 @@ namespace iPic3D {
     ThreadPool *threadPoolPtr;
 
     cudaEvent_t event0, eventOutputCopy;
-    cudaEvent_t solverDoneEvent; ///< recorded on solverStream_ after field solve; GPU_SOLVER only
+    cudaEvent_t solverDoneEvent;          ///< recorded on solverStream_ after field solve; GPU_SOLVER only
+    cudaEvent_t momentsPipelineDoneEvt;   ///< recorded on solverStream_ at end of MomentsAwait() GPU pipeline
+                                          ///< (after gpuCalculateHatFunctions); guards heatFluxStream D2D
+                                          ///< reads of d_rhons/d_Jxs/d_Jys/d_Jzs. GPU_SOLVER + heatFlux only.
     // Per-species end-of-cycle event, recorded on streams[i] right after
     // copyMomentsD2H(i, streams[i]) at the end of MoverAwaitAndPclExchange.
     // Captures both: (a) all in-place SoA writes for cycle i are complete,
@@ -340,6 +379,11 @@ namespace iPic3D {
     // reset counter or a torn nop_ value, dropping or double-counting OpenBC-
     // appended particles in the moment deposition.
     cudaEvent_t* stayedMomentsDoneEvt;   // [ns]
+    cudaEvent_t* heatFluxReadDoneEvt;    // [ns] : heat kernel has finished reading particles
+    cudaEvent_t* heatFluxHostDoneEvt;    // [ns] : heat D2H copy into EMfields is complete
+    cudaStream_t heatFluxStream;         // dedicated stream for heat-flux output work
+    bool heatFluxEnabled_;
+    int heatFluxScheduledCycle_;
 
     //bool verbose;
     string SaveDirName;

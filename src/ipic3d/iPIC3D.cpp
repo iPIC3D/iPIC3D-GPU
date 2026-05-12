@@ -58,6 +58,8 @@ int main(int argc, char **argv) {
     }
     auto t_sort = std::chrono::high_resolution_clock::now();
 
+    KCode.ScheduleHeatFlux(i);
+
     // DA analysis runs async on GPU while CalculateField runs on CPU.
     // t_field is sampled *before* DA.waitForAnalysis() so that field= reflects
     // only the field solver and not particle-count-dependent analysis wait time.

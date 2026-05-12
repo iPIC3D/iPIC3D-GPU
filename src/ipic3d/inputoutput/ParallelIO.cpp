@@ -191,6 +191,38 @@ void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCt
     writePTot("pZZ", cfg.writePZZTot, &EMfields3D::getpZZsn);
   }
 
+  // --- Per-species heat-flux tensor ---
+  for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+    for (int si : cfg.heatFluxSpecies[c]) {
+      outputfile.WritePHDF5dataset("Fields",
+        string(HeatFlux::ComponentNames[c]) + "_" + std::to_string(si),
+        EMf->getHeatFluxComponent(si, c), 1,1,1, gdim, ldim, foff);
+    }
+  }
+
+  // --- Total heat-flux tensor ---
+  if (cfg.needsAnyHeatFluxTot()) {
+    const int nxn = grid->getNXN();
+    const int nyn = grid->getNYN();
+    const int nzn = grid->getNZN();
+    arr3_double tmp(nxn, nyn, nzn);
+
+    for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+      if (!cfg.writeHeatFluxTot[c]) continue;
+      for (int i = 0; i < (int)ldim[0]; i++)
+        for (int j = 0; j < (int)ldim[1]; j++)
+          for (int k = 0; k < (int)ldim[2]; k++) {
+            double sum = 0.0;
+            for (int s = 0; s < ns; s++)
+              sum += EMf->getHeatFlux(i+1, j+1, k+1, s, c);
+            tmp[i+1][j+1][k+1] = sum;
+          }
+      outputfile.WritePHDF5dataset("Fields",
+        string(HeatFlux::ComponentNames[c]) + "_tot",
+        tmp, 1,1,1, gdim, ldim, foff);
+    }
+  }
+
   outputfile.ClosePHDF5file();
 
 #else  
@@ -305,6 +337,33 @@ void WriteFieldsH5hut(int nspec, Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *
     writePTot("pYY", cfg.writePYYTot, &EMfields3D::getpYYsn);
     writePTot("pYZ", cfg.writePYZTot, &EMfields3D::getpYZsn);
     writePTot("pZZ", cfg.writePZZTot, &EMfields3D::getpZZsn);
+  }
+
+  // --- Per-species heat-flux tensor ---
+  for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+    for (int si : cfg.heatFluxSpecies[c]) {
+      file.WriteFields(EMf->getHeatFluxComponent(si, c),
+        string(HeatFlux::ComponentNames[c]) + "_" + std::to_string(si),
+        nxn, nyn, nzn);
+    }
+  }
+
+  // --- Total heat-flux tensor ---
+  if (cfg.needsAnyHeatFluxTot()) {
+    arr3_double tmp(nxn, nyn, nzn);
+    for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+      if (!cfg.writeHeatFluxTot[c]) continue;
+      for (int i = 0; i < nxn; i++)
+        for (int j = 0; j < nyn; j++)
+          for (int k = 0; k < nzn; k++) {
+            double sum = 0.0;
+            for (int s = 0; s < ns; s++)
+              sum += EMf->getHeatFlux(i, j, k, s, c);
+            tmp[i][j][k] = sum;
+          }
+      file.WriteFields(tmp, string(HeatFlux::ComponentNames[c]) + "_tot",
+                       nxn, nyn, nzn);
+    }
   }
 
   file.CloseFieldsFile();
@@ -799,6 +858,41 @@ void WriteMomentsVTK(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopol
 									sum += pd.getter(ix+1, iy+1, iz+1, s);
 								buf[iz][iy][ix] = (float)sum;
 							}
+			});
+		}
+	}
+
+	// --- Per-species and total heat-flux tensor components ---
+	for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+		const std::string name = HeatFlux::ComponentNames[c];
+		for (int si : cfg.heatFluxSpecies[c]) {
+			std::string tag = name + std::to_string(si);
+			writeScalarVTK(grid, EMf, col, vct,
+				vtkPath(col, tag, cycle), tag,
+				"Species " + std::to_string(si) + " heat flux " + name,
+				momentswritebuffer, g,
+				[&](float*** buf, int lx, int ly, int lz) {
+					for (int iz = 0; iz < lz; iz++)
+						for (int iy = 0; iy < ly; iy++)
+							for (int ix = 0; ix < lx; ix++)
+								buf[iz][iy][ix] = (float)EMf->getHeatFlux(ix+1, iy+1, iz+1, si, c);
+				});
+		}
+		if (cfg.writeHeatFluxTot[c]) {
+			std::string tag = name + "_tot";
+			writeScalarVTK(grid, EMf, col, vct,
+				vtkPath(col, tag, cycle), tag,
+				"Total heat flux " + name,
+				momentswritebuffer, g,
+				[&](float*** buf, int lx, int ly, int lz) {
+					for (int iz = 0; iz < lz; iz++)
+						for (int iy = 0; iy < ly; iy++)
+							for (int ix = 0; ix < lx; ix++) {
+								double sum = 0.0;
+								for (int s = 0; s < ns; s++)
+									sum += EMf->getHeatFlux(ix+1, iy+1, iz+1, s, c);
+								buf[iz][iy][ix] = (float)sum;
+							}
 				});
 		}
 	}
@@ -1136,6 +1230,39 @@ int WriteMomentsVTKNonblk(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VC
 								double sum = 0.0;
 								for (int s = 0; s < ns; s++)
 									sum += pd.getter(ix+1, iy+1, iz+1, s);
+								buf[iz][iy][ix] = (float)sum;
+							}
+				}, fhArr);
+			counter++;
+		}
+	}
+
+	// Per-species and total heat-flux tensor components
+	for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+		const std::string name = HeatFlux::ComponentNames[c];
+		for (int si : cfg.heatFluxSpecies[c]) {
+			std::string tag = name + std::to_string(si);
+			nbcScalarWrite(EMf, col, vct, momentswritebuffer, counter, g,
+				tag, "Species " + std::to_string(si) + " heat flux " + name,
+				[&](float*** buf, int lx, int ly, int lz) {
+					for (int iz = 0; iz < lz; iz++)
+						for (int iy = 0; iy < ly; iy++)
+							for (int ix = 0; ix < lx; ix++)
+								buf[iz][iy][ix] = (float)EMf->getHeatFlux(ix+1, iy+1, iz+1, si, c);
+				}, fhArr);
+			counter++;
+		}
+		if (cfg.writeHeatFluxTot[c]) {
+			std::string tag = name + "_tot";
+			nbcScalarWrite(EMf, col, vct, momentswritebuffer, counter, g,
+				tag, "Total heat flux " + name,
+				[&](float*** buf, int lx, int ly, int lz) {
+					for (int iz = 0; iz < lz; iz++)
+						for (int iy = 0; iy < ly; iy++)
+							for (int ix = 0; ix < lx; ix++) {
+								double sum = 0.0;
+								for (int s = 0; s < ns; s++)
+									sum += EMf->getHeatFlux(ix+1, iy+1, iz+1, s, c);
 								buf[iz][iy][ix] = (float)sum;
 							}
 				}, fhArr);

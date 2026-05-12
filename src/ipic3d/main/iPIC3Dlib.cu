@@ -411,6 +411,9 @@ int c_Solver::Init(int argc, char **argv) {
  * pinned host registrations, sorting buffers, and planet-boundary workspaces.
  */
 int c_Solver::initCUDA(){
+  heatFluxEnabled_ = Parameters::get_doWriteOutput()
+                  && col->getOutputConfig().needsAnyHeatFlux();
+  heatFluxScheduledCycle_ = -1;
 
   // ======= Select the GPU assigned to this MPI rank =======
   {
@@ -488,6 +491,8 @@ int c_Solver::initCUDA(){
   // re-established explicitly via cycleEndEvent/eventOutputCopy below.
   cudaErrChk(cudaStreamCreate(&outputStream));
   cudaErrChk(cudaStreamCreate(&fieldH2DStream));
+  if (heatFluxEnabled_)
+    cudaErrChk(cudaStreamCreate(&heatFluxStream));
   {
     // ======= Allocate device-resident particle containers and staging buffers =======
     pclsArrayHostPtr = new particleArrayCUDA*[ns];
@@ -605,6 +610,19 @@ int c_Solver::initCUDA(){
   //for(int i=0; i<ns; i++)cudaMallocAsync(&(momentsCUDAPtr[i]), gridSize*10*sizeof(cudaMomentType), streams[i]);
   for(int i=0; i<ns; i++) cudaErrChk(cudaMalloc(&(momentsCUDAPtr[i]), gridSize*10*sizeof(cudaMomentType)));
 
+  heatFluxCUDAPtr = nullptr;
+  heatFluxBulkCUDAPtr = nullptr;
+  if (heatFluxEnabled_) {
+    heatFluxCUDAPtr = new cudaTypeArray1<cudaMomentType>[ns];
+    heatFluxBulkCUDAPtr = new cudaTypeArray1<cudaMomentType>[ns];
+    for (int i = 0; i < ns; i++) {
+      cudaErrChk(cudaMalloc(&(heatFluxCUDAPtr[i]),
+                            gridSize * HeatFlux::ComponentCount * sizeof(cudaMomentType)));
+      cudaErrChk(cudaMalloc(&(heatFluxBulkCUDAPtr[i]),
+                            gridSize * 4 * sizeof(cudaMomentType)));
+    }
+  }
+
 #ifndef GPU_SOLVER
   { // Register the 10 host-side moment arrays per species as pinned memory.
     // NOTE: when GPU_SOLVER is ON, pinning is deferred to after
@@ -636,12 +654,27 @@ int c_Solver::initCUDA(){
   EMf->gpuSolverSyncH2D(EMf->gpuSolverStream());
   cudaErrChk(cudaEventCreateWithFlags(&solverDoneEvent, cudaEventDisableTiming));
 
+  // momentsPipelineDoneEvt is recorded at the end of every MomentsAwait() GPU
+  // pipeline (after gpuCalculateHatFunctions). heatFluxStream waits on it
+  // before the D2D copy of d_rhons/d_Jxs into heatFluxBulkCUDAPtr, ensuring
+  // current-cycle values with ghost cells filled are used.
+  // Pre-record here (on the now-synchronized solverStream_) so that
+  // ScheduleHeatFlux on cycle 0 — which runs after the pre-loop MomentsAwait()
+  // has already re-recorded the event — never observes an uninitialised handle.
+  if (heatFluxEnabled_) {
+    cudaErrChk(cudaEventCreateWithFlags(&momentsPipelineDoneEvt, cudaEventDisableTiming));
+    cudaErrChk(cudaEventRecord(momentsPipelineDoneEvt, EMf->gpuSolverStream()));
+  }
+
   // Now safe to pin moment memory (after the initial H2D sync is done)
   for(int i=0; i<ns; i++)
     registerMomentsPinnedMemory(i);
 #else
   cudaErrChk(cudaHostAlloc((void**)&fieldForPclHostPtr, fieldSize * 24 * sizeof(cudaFieldType), 0));
 #endif
+
+  if (heatFluxEnabled_)
+    registerHeatFluxPinnedMemory();
 
   threadPoolPtr = new ThreadPool(ns);
   cudaErrChk(cudaEventCreateWithFlags(&event0, cudaEventDisableTiming));
@@ -654,11 +687,19 @@ int c_Solver::initCUDA(){
   moverHashedReadyEvt  = new cudaEvent_t[ns];
   auxHashedReadyEvt    = new cudaEvent_t[ns];
   stayedMomentsDoneEvt = new cudaEvent_t[ns];
+  heatFluxReadDoneEvt  = heatFluxEnabled_ ? new cudaEvent_t[ns] : nullptr;
+  heatFluxHostDoneEvt  = heatFluxEnabled_ ? new cudaEvent_t[ns] : nullptr;
   for (int i = 0; i < ns; i++) {
     cudaErrChk(cudaEventCreateWithFlags(&cycleEndEvent[i],        cudaEventDisableTiming|cudaEventBlockingSync));
     cudaErrChk(cudaEventCreateWithFlags(&moverHashedReadyEvt[i],  cudaEventDisableTiming));
     cudaErrChk(cudaEventCreateWithFlags(&auxHashedReadyEvt[i],    cudaEventDisableTiming));
     cudaErrChk(cudaEventCreateWithFlags(&stayedMomentsDoneEvt[i], cudaEventDisableTiming));
+    if (heatFluxEnabled_) {
+      cudaErrChk(cudaEventCreateWithFlags(&heatFluxReadDoneEvt[i], cudaEventDisableTiming));
+      cudaErrChk(cudaEventCreateWithFlags(&heatFluxHostDoneEvt[i], cudaEventDisableTiming|cudaEventBlockingSync));
+      cudaErrChk(cudaEventRecord(heatFluxReadDoneEvt[i], heatFluxStream));
+      cudaErrChk(cudaEventRecord(heatFluxHostDoneEvt[i], heatFluxStream));
+    }
     // Pre-record cycleEndEvent[i] on streams[i] so MomentsAwait() / output-
     // CopyAsync() are well-defined even if invoked before any moment pipeline
     // has run. Both real producers (CalculateMoments and MoverAwaitAndPcl-
@@ -792,6 +833,10 @@ int c_Solver::deInitCUDA(){
     cudaEventDestroy(moverHashedReadyEvt[i]);
     cudaEventDestroy(auxHashedReadyEvt[i]);
     cudaEventDestroy(stayedMomentsDoneEvt[i]);
+    if (heatFluxEnabled_) {
+      cudaEventDestroy(heatFluxReadDoneEvt[i]);
+      cudaEventDestroy(heatFluxHostDoneEvt[i]);
+    }
   }
   delete[] cycleEndEvent;
   delete[] moverHashedReadyEvt;
@@ -799,7 +844,11 @@ int c_Solver::deInitCUDA(){
   delete[] stayedMomentsDoneEvt;
 #ifdef GPU_SOLVER
   cudaEventDestroy(solverDoneEvent);
+  if (heatFluxEnabled_)
+    cudaEventDestroy(momentsPipelineDoneEvt);
 #endif
+  delete[] heatFluxReadDoneEvt;
+  delete[] heatFluxHostDoneEvt;
 
   delete threadPoolPtr;
 
@@ -843,6 +892,10 @@ int c_Solver::deInitCUDA(){
     cudaFree(injectionParamCUDAPtr[i]);
 
     cudaFree(momentsCUDAPtr[i]);
+    if (heatFluxEnabled_) {
+      cudaFree(heatFluxCUDAPtr[i]);
+      cudaFree(heatFluxBulkCUDAPtr[i]);
+    }
     
   }
 
@@ -867,6 +920,8 @@ int c_Solver::deInitCUDA(){
   delete[] injectionParamHostPtr;
   delete[] injectionParamCUDAPtr;
   delete[] momentsCUDAPtr;
+  delete[] heatFluxCUDAPtr;
+  delete[] heatFluxBulkCUDAPtr;
   delete[] toBeMerged;
 
   // ======= Release planet quasi-neutral boundary-condition buffers =======
@@ -899,6 +954,8 @@ int c_Solver::deInitCUDA(){
   cudaStreamDestroy(planetStream);
   cudaStreamDestroy(outputStream);
   cudaStreamDestroy(fieldH2DStream);
+  if (heatFluxEnabled_)
+    cudaStreamDestroy(heatFluxStream);
   delete[] streams;
   delete[] stayedParticle;
   delete[] exitingResults;
@@ -907,6 +964,8 @@ int c_Solver::deInitCUDA(){
     for (int i = 0; i < ns; i++)
       unregisterMomentsPinnedMemory(i);
   }
+  if (heatFluxEnabled_)
+    unregisterHeatFluxPinnedMemory();
 
   return 0;
 }
@@ -932,6 +991,80 @@ void c_Solver::copyMomentsD2H(int species, cudaStream_t stream) {
   cudaErrChk(cudaMemcpyAsync((void*)&(EMf->getpYYsn().get(species,0,0,0)),  momentsCUDAPtr[species]+7*gridSize, gridSize*sizeof(cudaMomentType), cudaMemcpyDefault, stream));
   cudaErrChk(cudaMemcpyAsync((void*)&(EMf->getpYZsn().get(species,0,0,0)),  momentsCUDAPtr[species]+8*gridSize, gridSize*sizeof(cudaMomentType), cudaMemcpyDefault, stream));
   cudaErrChk(cudaMemcpyAsync((void*)&(EMf->getpZZsn().get(species,0,0,0)),  momentsCUDAPtr[species]+9*gridSize, gridSize*sizeof(cudaMomentType), cudaMemcpyDefault, stream));
+}
+
+void c_Solver::copyHeatFluxBulkH2D(int species, cudaStream_t stream) {
+  const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
+  cudaErrChk(cudaMemcpyAsync(heatFluxBulkCUDAPtr[species] + 0 * gridSize,
+                             (void*)&(EMf->getRHOns().get(species,0,0,0)),
+                             gridSize * sizeof(cudaMomentType),
+                             cudaMemcpyDefault, stream));
+  cudaErrChk(cudaMemcpyAsync(heatFluxBulkCUDAPtr[species] + 1 * gridSize,
+                             (void*)&(EMf->getJxs().get(species,0,0,0)),
+                             gridSize * sizeof(cudaMomentType),
+                             cudaMemcpyDefault, stream));
+  cudaErrChk(cudaMemcpyAsync(heatFluxBulkCUDAPtr[species] + 2 * gridSize,
+                             (void*)&(EMf->getJys().get(species,0,0,0)),
+                             gridSize * sizeof(cudaMomentType),
+                             cudaMemcpyDefault, stream));
+  cudaErrChk(cudaMemcpyAsync(heatFluxBulkCUDAPtr[species] + 3 * gridSize,
+                             (void*)&(EMf->getJzs().get(species,0,0,0)),
+                             gridSize * sizeof(cudaMomentType),
+                             cudaMemcpyDefault, stream));
+}
+
+/**
+ * @brief Fill heatFluxBulkCUDAPtr[species] from live GPU solver moment arrays (D2D).
+ *
+ * GPU_SOLVER=ON path: replaces the stale-host copyHeatFluxBulkH2D by reading
+ * d_rhons/d_Jxs/d_Jys/d_Jzs directly on the device. The caller MUST ensure
+ * heatFluxStream has already waited on momentsPipelineDoneEvt so that the
+ * ghost-exchange and hat-function pipeline on solverStream_ has completed.
+ *
+ * Layout of heatFluxBulkCUDAPtr[s]:
+ *   [0*gridSize .. 1*gridSize)  →  rhons[s]   (nxn*nyn*nzn doubles)
+ *   [1*gridSize .. 2*gridSize)  →  Jxs[s]
+ *   [2*gridSize .. 3*gridSize)  →  Jys[s]
+ *   [3*gridSize .. 4*gridSize)  →  Jzs[s]
+ *
+ * d_rhons.speciesPtr(s) = d_ptr_ + s*nxn*nyn*nzn  (same flat layout).
+ * cudaSolverType == cudaMomentType == double, so no conversion is needed.
+ *
+ * @param species  Species index.
+ * @param stream   CUDA stream carrying the asynchronous copies (heatFluxStream).
+ */
+void c_Solver::copyHeatFluxBulkD2D(int species, cudaStream_t stream) {
+#ifdef GPU_SOLVER
+  const size_t gridSize = (size_t)grid->getNXN() * grid->getNYN() * grid->getNZN();
+  cudaErrChk(cudaMemcpyAsync(heatFluxBulkCUDAPtr[species] + 0 * gridSize,
+                             EMf->gpuRhons().speciesPtr(species),
+                             gridSize * sizeof(cudaMomentType),
+                             cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(heatFluxBulkCUDAPtr[species] + 1 * gridSize,
+                             EMf->gpuJxs().speciesPtr(species),
+                             gridSize * sizeof(cudaMomentType),
+                             cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(heatFluxBulkCUDAPtr[species] + 2 * gridSize,
+                             EMf->gpuJys().speciesPtr(species),
+                             gridSize * sizeof(cudaMomentType),
+                             cudaMemcpyDeviceToDevice, stream));
+  cudaErrChk(cudaMemcpyAsync(heatFluxBulkCUDAPtr[species] + 3 * gridSize,
+                             EMf->gpuJzs().speciesPtr(species),
+                             gridSize * sizeof(cudaMomentType),
+                             cudaMemcpyDeviceToDevice, stream));
+#else
+  // Should never be called when GPU_SOLVER is off; guard against accidental use.
+  (void)species; (void)stream;
+  eprintf("copyHeatFluxBulkD2D called but GPU_SOLVER is not compiled in");
+#endif
+}
+
+void c_Solver::copyHeatFluxD2H(int species, cudaStream_t stream) {
+  const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
+  cudaErrChk(cudaMemcpyAsync(EMf->getHeatFluxSpeciesPtr(species),
+                             heatFluxCUDAPtr[species],
+                             gridSize * HeatFlux::ComponentCount * sizeof(cudaMomentType),
+                             cudaMemcpyDefault, stream));
 }
 
 /**
@@ -970,6 +1103,20 @@ void c_Solver::unregisterMomentsPinnedMemory(int species) {
   cudaErrChk(cudaHostUnregister((void*)&(EMf->getpYYsn().get(species,0,0,0))));
   cudaErrChk(cudaHostUnregister((void*)&(EMf->getpYZsn().get(species,0,0,0))));
   cudaErrChk(cudaHostUnregister((void*)&(EMf->getpZZsn().get(species,0,0,0))));
+}
+
+void c_Solver::registerHeatFluxPinnedMemory() {
+  const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
+  const size_t bytes = static_cast<size_t>(ns) *
+                       static_cast<size_t>(HeatFlux::ComponentCount) *
+                       static_cast<size_t>(gridSize) *
+                       sizeof(cudaCommonType);
+  cudaErrChk(cudaHostRegister((void*)EMf->getHeatFluxRaw(), bytes,
+                              cudaHostRegisterDefault));
+}
+
+void c_Solver::unregisterHeatFluxPinnedMemory() {
+  cudaErrChk(cudaHostUnregister((void*)EMf->getHeatFluxRaw()));
 }
 
 
@@ -1025,6 +1172,75 @@ void c_Solver::CalculateField(int cycle) {
   // Legacy CPU field solver
   EMf->calculateE(cycle);
 #endif
+}
+
+bool c_Solver::needsHeatFluxOutput(int cycle) const {
+  if (!heatFluxEnabled_) return false;
+  if (!Parameters::get_doWriteOutput()) return false;
+  if (col->field_output_is_off()) return false;
+  return (cycle % col->getFieldOutputCycle() == 0 || cycle == first_cycle);
+}
+
+void c_Solver::ScheduleHeatFlux(int cycle) {
+  if (!needsHeatFluxOutput(cycle)) {
+    heatFluxScheduledCycle_ = -1;
+    return;
+  }
+
+  heatFluxScheduledCycle_ = cycle;
+  const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
+  constexpr cudaMomentType rhoFloor = 1.0e-30;
+
+#ifdef GPU_SOLVER
+  // Gate: heatFluxStream must not start reading d_rhons/d_Jxs/d_Jys/d_Jzs
+  // until the full MomentsAwait() GPU pipeline on solverStream_ has completed
+  // (gpuCommunicateGhostP2G_AllSpecies + gpuCalculateHatFunctions).
+  // momentsPipelineDoneEvt is recorded at the tail of that pipeline, so this
+  // single stream-wait covers all ns species simultaneously.
+  cudaErrChk(cudaStreamWaitEvent(heatFluxStream, momentsPipelineDoneEvt, 0));
+#endif
+
+  for (int s = 0; s < ns; ++s) {
+#ifdef GPU_SOLVER
+    // D2D path: copy directly from live GPU solver moment arrays, avoiding the
+    // stale-host bug and the heatFluxStream/solverStream_ host-buffer race.
+    copyHeatFluxBulkD2D(s, heatFluxStream);
+#else
+    copyHeatFluxBulkH2D(s, heatFluxStream);
+#endif
+    cudaErrChk(cudaMemsetAsync(heatFluxCUDAPtr[s], 0,
+                               gridSize * HeatFlux::ComponentCount *
+                               sizeof(cudaMomentType),
+                               heatFluxStream));
+    const uint32_t nop = pclsArrayHostPtr[s]->getNOP();
+    if (nop > 0) {
+      heatFluxKernelUnsorted<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE),
+                                DEFAULT_BLOCK_SIZE, 0, heatFluxStream>>>(
+          momentParamCUDAPtr[s], grid3DCUDACUDAPtr,
+          heatFluxBulkCUDAPtr[s], heatFluxCUDAPtr[s],
+          (cudaMomentType)col->getQOM(s), rhoFloor);
+    }
+    cudaErrChk(cudaEventRecord(heatFluxReadDoneEvt[s], heatFluxStream));
+  }
+
+  for (int s = 0; s < ns; ++s) {
+    copyHeatFluxD2H(s, heatFluxStream);
+    cudaErrChk(cudaEventRecord(heatFluxHostDoneEvt[s], heatFluxStream));
+  }
+}
+
+void c_Solver::finishHeatFluxForOutput(int cycle) {
+  if (!heatFluxEnabled_ || heatFluxScheduledCycle_ != cycle) return;
+
+  timeTasks_set_main_task(TimeTasks::MOMENTS);
+
+  for (int s = 0; s < ns; ++s)
+    cudaErrChk(cudaEventSynchronize(heatFluxHostDoneEvt[s]));
+
+  for (int s = 0; s < ns; ++s)
+    EMf->communicateGhostHeatFlux(s);
+
+  heatFluxScheduledCycle_ = -1;
 }
 
 /**
@@ -1103,7 +1319,8 @@ void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronizeCopy)
  * @return Number of particles removed from the stayed prefix
  *         (MPI exiting + deleted + planet-removed).
  */
-int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLauncher){
+int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLauncher,
+                                const bool waitForHeatFlux){
   cudaSetDevice(cudaDeviceOnNode); // Required when multiple MPI ranks share a node.
 #if ENABLE_SOA_TIMING
   auto _tL0 = std::chrono::high_resolution_clock::now();
@@ -1117,6 +1334,10 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
   // ordered via moverHashedReadyEvt[species] later in this function.
   cudaErrChk(cudaStreamWaitEvent(streams[species],    eventOutputCopy, 0));
   cudaErrChk(cudaStreamWaitEvent(streams[species+ns], eventOutputCopy, 0));
+  if (waitForHeatFlux) {
+    cudaErrChk(cudaStreamWaitEvent(streams[species], heatFluxReadDoneEvt[species], 0));
+    cudaErrChk(cudaStreamWaitEvent(streams[species+ns], heatFluxReadDoneEvt[species], 0));
+  }
 
   // Persistent per-species events (created once in initCUDA, destroyed in
   // deInitCUDA) replacing what used to be per-call event1/event2.
@@ -1351,10 +1572,11 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle)
   // Refresh the shared field-interpolation buffer for the mover. The per-
   // species mover streams consume it through cudaStreamWaitEvent(event0).
   refreshFieldForPclsDeviceBuffer(false);
+  const bool waitForHeatFlux = heatFluxEnabled_ && (heatFluxScheduledCycle_ == cycle);
 
   for(int i=0; i<ns; i++){
     if (i != mergeIdx){
-      exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i, doMomentsInLauncher);
+      exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i, doMomentsInLauncher, waitForHeatFlux);
       toBeMerged[2 * i + 1] +=1;
     }
   }
@@ -1371,6 +1593,8 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle)
     // before mutating SoA via sort/merge. The host sync above only waits for
     // streams[i]; outputStream is independent.
     cudaErrChk(cudaStreamWaitEvent(streams[i], eventOutputCopy, 0));
+    if (waitForHeatFlux)
+      cudaErrChk(cudaStreamWaitEvent(streams[i], heatFluxReadDoneEvt[i], 0));
     // Lazy-init: cellSorters[i] is only constructed in c_Solver::Init() when
     // sortingCycle_ > 0. The merging path however needs the sorter even when
     // periodic sorting is disabled (sortingCycle_ == 0); initialize on first
@@ -1396,7 +1620,7 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle)
         grid3DCUDACUDAPtr, pclsArrayCUDAPtr[i], departureArrayCUDAPtr[i]);
 
     // Treat merge species as unsorted cycle: momentKernelStayed runs in launcher
-    exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i, true);
+    exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i, true, waitForHeatFlux);
 
     toBeMerged[2 * i + 1] = 0;
     mergeIdx = -1; // merged
@@ -2009,6 +2233,15 @@ void c_Solver::MomentsAwait() {
 
   // Phase 3: hat functions (Jhat, rhohat) — already GPU-implemented
   EMf->gpuCalculateHatFunctions();
+
+  // Record momentsPipelineDoneEvt at the tail of the solver stream so that
+  // ScheduleHeatFlux() (next cycle, step 2) can gate its D2D copy of
+  // d_rhons/d_Jxs/d_Jys/d_Jzs until the ghost exchange and hat functions
+  // have committed all writes to those arrays.  Without this gate, the D2D
+  // copy could read partially-updated ghost cells from gpuCommunicateGhostP2G.
+  if (heatFluxEnabled_)
+    cudaErrChk(cudaEventRecord(momentsPipelineDoneEvt, EMf->gpuSolverStream()));
+
   auto tEnd = std::chrono::high_resolution_clock::now();
   //if (myrank == 0) {
   //  double ghostMs  = std::chrono::duration<double, std::milli>(tGhostEnd - tGhostStart).count();
@@ -2119,6 +2352,7 @@ void c_Solver::WriteOutput(int cycle) {
   // ======= Field output =======
   if (!col->field_output_is_off() &&
       (cycle % col->getFieldOutputCycle() == 0 || cycle == first_cycle)) {
+    finishHeatFluxForOutput(cycle);
     ioManager->writeFields(cycle);
   }
 

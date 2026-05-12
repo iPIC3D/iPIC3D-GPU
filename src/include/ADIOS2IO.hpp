@@ -61,6 +61,7 @@ private:
 
     // restart
     string restartTag;
+    int restartWriteCount = 0;
 
 
     // pointer registration
@@ -141,11 +142,12 @@ void appendFieldOutput(int cycle);
 void appendParticleOutput(int cycle);
 
 /**
- * @brief Append one restart/checkpoint step to the ADIOS2 stream.
+ * @brief Write one restart/checkpoint into the selected slot directory.
  * @param cycle Restart label stored in the checkpoint; the loop cycle to
  *              execute first after restart.
+ * @param restartDir Directory containing this checkpoint slot's rank files.
  */
-void appendRestartOutput(int cycle);
+void writeRestartOutput(int cycle, const string& restartDir);
 
 private:
 

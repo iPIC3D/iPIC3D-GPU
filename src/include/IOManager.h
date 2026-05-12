@@ -12,6 +12,7 @@
 #include "ipicfwd.h"
 #include "arraysfwd.h"        // arr3_double, array4_double
 #include "aligned_vector.h"   // vector_double
+#include "RestartSlotManager.h"
 #include <string>
 #include <vector>
 
@@ -171,6 +172,7 @@ private:
     FieldBackend    fieldBackend_    = FieldBackend::NONE;
     ParticleBackend particleBackend_ = ParticleBackend::NONE;
     RestartBackend  restartBackend_  = RestartBackend::NONE;
+    RestartSlotManager restartSlots_;
 
     // ======= Owned backend objects =======
 #ifndef NO_HDF5

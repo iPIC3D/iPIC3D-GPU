@@ -27,16 +27,14 @@
 using std::string;
 using std::stringstream;
 
-// ===========================================================================
-// readLastCycle  —  retrieve the restart cycle label from the newest checkpoint
-// ===========================================================================
+namespace {
 
-int RestartReader::readLastCycle(const std::string& restartDir)
+int readLegacyLastCycle(const std::string& restartDir)
 {
     int last_cycle = -1;
 
 #ifdef USE_ADIOS2
-    // ---- ADIOS2: read from restart_0.bp ----
+    // ---- ADIOS2 legacy layout: read from RestartDirName/restart_0.bp ----
     string filePath = restartDir + "/restart_0.bp";
 
     adios2::ADIOS adios;
@@ -55,24 +53,12 @@ int RestartReader::readLastCycle(const std::string& restartDir)
         }
         engine.Get("cycle", last_cycle);
         engine.EndStep();
-
-        if (MPIdata::get_rank() == 0)
-            std::cout << "[*] Restart cycle label = "
-                      << last_cycle << std::endl;
         break;
     }
     engine.Close();
 
 #elif !defined(NO_HDF5)
-    // ---- HDF5: read from restart0.hdf ----
-    if (MPIdata::get_rank() == 0) {
-        printf("\n");
-        printf("=========================================================================\n");
-        printf("  WARNING: HDF5 restart is a Beta feature. Use with caution!\n");
-        printf("=========================================================================\n");
-        printf("\n");
-    }
-
+    // ---- HDF5 legacy layout: read from RestartDirName/restart0.hdf ----
     string filePath = restartDir + "/restart0.hdf";
 
     hid_t file_id = H5Fopen(filePath.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
@@ -90,15 +76,68 @@ int RestartReader::readLastCycle(const std::string& restartDir)
     H5Dclose(dataset_id);
     H5Fclose(file_id);
 
-    if (MPIdata::get_rank() == 0)
-        std::cout << "[*] Restart cycle label (HDF5) = "
-                  << last_cycle << std::endl;
-
 #else
     eprintf("Restart requires compiling with USE_ADIOS2 or HDF5 (without NO_HDF5).");
 #endif
 
     return last_cycle;
+}
+
+} // namespace
+
+// ===========================================================================
+// readLastCycle  —  retrieve the restart cycle label from the newest checkpoint
+// ===========================================================================
+
+RestartCheckpoint RestartReader::resolveLatestCheckpoint(
+    const std::string& restartDir)
+{
+    const std::string backend = RestartSlotManager::backendName();
+    if (backend.empty()) {
+        eprintf("Restart requires compiling with USE_ADIOS2 or HDF5 (without NO_HDF5).");
+    }
+
+#if !defined(USE_ADIOS2) && !defined(NO_HDF5)
+    if (MPIdata::get_rank() == 0) {
+        printf("\n");
+        printf("=========================================================================\n");
+        printf("  WARNING: HDF5 restart is a Beta feature. Use with caution!\n");
+        printf("=========================================================================\n");
+        printf("\n");
+    }
+#endif
+
+    RestartCheckpoint checkpoint =
+        RestartSlotManager::resolveLatest(restartDir, backend,
+                                          MPIdata::get_nprocs());
+    if (checkpoint.found) {
+        if (MPIdata::get_rank() == 0) {
+            std::cout << "[*] Restart checkpoint = restart_"
+                      << checkpoint.slot
+                      << ", cycle label = " << checkpoint.cycle << std::endl;
+        }
+        return checkpoint;
+    }
+
+    checkpoint.found = true;
+    checkpoint.legacy = true;
+    checkpoint.rootDir = restartDir;
+    checkpoint.dataDir = restartDir;
+    checkpoint.backend = backend;
+    checkpoint.nranks = MPIdata::get_nprocs();
+    checkpoint.cycle = readLegacyLastCycle(restartDir);
+
+    if (MPIdata::get_rank() == 0) {
+        std::cout << "[*] Restart checkpoint = legacy flat layout"
+                  << ", cycle label = " << checkpoint.cycle << std::endl;
+    }
+
+    return checkpoint;
+}
+
+int RestartReader::readLastCycle(const std::string& restartDir)
+{
+    return resolveLatestCheckpoint(restartDir).cycle;
 }
 
 // ===========================================================================

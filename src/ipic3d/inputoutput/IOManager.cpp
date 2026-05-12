@@ -15,6 +15,7 @@
 #include "debug.h"         // eprintf, warning_printf
 #include "Parameters.h"
 #include "RestartReader.h"  // restart reading
+#include "MPIdata.h"
 
 #include <string>
 #include <iostream>
@@ -132,6 +133,14 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
         restartBackend_ = RestartBackend::NONE;
     }
 #endif
+
+    if (restartBackend_ != RestartBackend::NONE &&
+        (restart_cycle_ > 0 || col->getCallFinalize())) {
+        restartSlots_.init(col->getRestartDirName(),
+                           RestartSlotManager::backendName(),
+                           vct->getCartesian_rank(),
+                           MPIdata::get_nprocs());
+    }
 #ifndef USE_ADIOS2
     if (fieldBackend_ == FieldBackend::ADIOS2) {
         eprintf("WriteMethod 'adios2' requires ADIOS2 (compile with USE_ADIOS2=ON)");
@@ -376,24 +385,36 @@ void IOManager::writeTestParticles(int cycle) {
 // ======= Restart output =======
 
 void IOManager::writeRestart(int cycle) {
+    if (restartBackend_ == RestartBackend::NONE) return;
+
+    RestartWriteTarget target = restartSlots_.beginWrite(cycle);
+
     switch (restartBackend_) {
 
     case RestartBackend::ADIOS2:
 #ifdef USE_ADIOS2
-        adiosManager_->appendRestartOutput(cycle);
+        adiosManager_->writeRestartOutput(cycle, target.dataDir);
 #endif
         break;
 
     case RestartBackend::SHDF5:
 #ifndef NO_HDF5
         if (outputWrapperFPP_)
-            outputWrapperFPP_->append_restart(cycle);
+            outputWrapperFPP_->append_restart(cycle, target.dataDir);
 #endif
         break;
 
     case RestartBackend::NONE:
         break;
     }
+
+    // Do not publish a slot until every rank has closed its new rank file.
+#ifndef NO_MPI
+    MPI_Barrier(MPIdata::get_PicGlobalComm());
+#endif
+
+    restartSlots_.publishIfRoot(target);
+    restartSlots_.completeLocal(target);
 }
 
 // ======= Restart reading =======
@@ -406,7 +427,7 @@ void IOManager::readFieldRestart(
 {
     RestartReader::readFields(
         vct, grid, Bxn, Byn, Bzn, Ex, Ey, Ez, rhons, ns,
-        col_->getRestartDirName(), col_->getLast_cycle());
+        col_->getRestartReadDirName(), col_->getLast_cycle());
 }
 
 void IOManager::readParticlesRestart(
@@ -418,7 +439,7 @@ void IOManager::readParticlesRestart(
 {
     RestartReader::readParticles(
         vct, species_number, u, v, w, q, x, y, z, t,
-        col_->getRestartDirName(), col_->getLast_cycle());
+        col_->getRestartReadDirName(), col_->getLast_cycle());
 }
 
 // ======= Finalization =======

@@ -113,6 +113,7 @@ void Collective::ReadInput(string inputfile) {
 
     SaveDirName = config.read < string > ("SaveDirName","data");
     RestartDirName = config.read < string > ("RestartDirName","data");
+    RestartReadDirName = RestartDirName;
     ns = config.read < int >("ns");
     nstestpart = config.read < int >("nsTestPart", 0);
 
@@ -572,10 +573,14 @@ void Collective::ReadInput(string inputfile) {
 
   if (RESTART1) {               // you are restarting 
     RestartDirName = config.read < string > ("RestartDirName","data");
+    RestartReadDirName = RestartDirName;
     restart_status = 1;
 
-    // Delegate cycle reading to RestartReader (in inputoutput/)
-    last_cycle = RestartReader::readLastCycle(RestartDirName);
+    // Resolve A/B restart metadata if present, otherwise use the legacy layout.
+    RestartCheckpoint checkpoint =
+        RestartReader::resolveLatestCheckpoint(RestartDirName);
+    RestartReadDirName = checkpoint.dataDir;
+    last_cycle = checkpoint.cycle;
   }
 
   /*
@@ -620,7 +625,7 @@ void Collective::read_field_restart(
 {
     // Delegate to RestartReader (implementation in inputoutput/RestartReader.cpp)
     RestartReader::readFields(vct, grid, Bxn, Byn, Bzn, Ex, Ey, Ez,
-                              rhons_, ns, getRestartDirName(), last_cycle);
+                              rhons_, ns, getRestartReadDirName(), last_cycle);
 }
 
 void Collective::read_particles_restart(
@@ -637,7 +642,7 @@ void Collective::read_particles_restart(
 {
     // Delegate to RestartReader (implementation in inputoutput/RestartReader.cpp)
     RestartReader::readParticles(vct, species_number, u, v, w, q, x, y, z, t,
-                                 getRestartDirName(), last_cycle);
+                                 getRestartReadDirName(), last_cycle);
 }
 
 
@@ -1049,4 +1054,3 @@ void Collective::save() {
   my_file.close();
 
 }
-

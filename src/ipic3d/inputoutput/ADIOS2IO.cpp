@@ -29,6 +29,10 @@ void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag, int sam
         closeOutputFiles();
     }
 
+    fieldOptions.clear();
+    particleOptions.clear();
+    restartOptions.clear();
+
     this->cartisianRank = vct_in->getCartesian_rank();
     this->saveDirName = col_in->getSaveDirName();
     this->restartDirName = col_in->getRestartDirName();
@@ -89,13 +93,7 @@ void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag, int sam
     }
 
 
-    if (!restartTag.empty()) { 
-        
-        this->ioRestart = adios.DeclareIO("RestartOutput");
-        this->ioRestart.SetEngine("BP5");
-        auto filePath = restartDirName + "/restart_" + to_string(cartisianRank) + ".bp";
-        engineRestart = ioRestart.Open(filePath, col->getRestart_status() == 0 ? adios2::Mode::Write : adios2::Mode::Append, MPI_COMM_SELF);
-
+    if (!restartTag.empty()) {
         // parse the tag and prepae the map
         restartTag.erase(remove(restartTag.begin(), restartTag.end(), ' '), restartTag.end());
         vector<string> tags;
@@ -152,8 +150,18 @@ void ADIOS2Manager::appendParticleOutput(int cycle) {
 }
 
 
-void ADIOS2Manager::appendRestartOutput(int cycle) {
+void ADIOS2Manager::writeRestartOutput(int cycle, const string& restartDir) {
+    if (restartOptions.empty()) return;
 
+    const string ioName = "RestartOutput_" + to_string(cartisianRank) + "_"
+                        + to_string(restartWriteCount++);
+    adios2::IO ioRestart = adios.DeclareIO(ioName);
+    ioRestart.SetEngine("BP5");
+
+    const string filePath = restartDir + "/restart_"
+                          + to_string(cartisianRank) + ".bp";
+    adios2::Engine engineRestart =
+        ioRestart.Open(filePath, adios2::Mode::Write, MPI_COMM_SELF);
     engineRestart.BeginStep();
 
     auto cycleVar = _variableHelper<int>(ioRestart, "cycle");
@@ -163,6 +171,7 @@ void ADIOS2Manager::appendRestartOutput(int cycle) {
     }
 
     engineRestart.EndStep();
+    engineRestart.Close();
 
 }
 
@@ -189,10 +198,6 @@ void ADIOS2Manager::closeOutputFiles() {
 
     if (!particleTag.empty()) {
         engineParticle.Close();
-    }
-
-    if (!restartTag.empty()) {
-        engineRestart.Close();
     }
 
     open = false;

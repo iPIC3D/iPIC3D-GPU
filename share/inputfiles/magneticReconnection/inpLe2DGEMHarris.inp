@@ -141,16 +141,30 @@ GMREStol               = 1E-5    # GMRES solver stopping criterium tolerance
 NiterMover             = 3        # mover predictor corrector iteration
 
 # %%%%%%%%%% Output
+#
+# Field/moment output is written at the first cycle and every FieldOutputCycle.
+# Set FieldOutputCycle <= 0 to disable it.
+#
+# FieldOutputTag: B, E. Legacy shortcuts: Je, Ji, Je2, Ji3, rho.
+#
+# MomentsOutputTag examples:
+#   rho+J+P      -> all species; P expands to PXX,PXY,PXZ,PYY,PYZ,PZZ
+#   rho0+J0+P0   -> species 0 only
+#   Q0           -> heat-flux tensor for species 0
+#   Q_tot        -> heat-flux tensor summed over species
+#   Qxxx0+Qxyz0  -> selected heat-flux components for species 0
+# Heat-flux components: Qxxx,Qxxy,Qxxz,Qxyy,Qxyz,Qxzz,Qyyy,Qyyz,Qyzz,Qzzz.
+#
+# ParticlesOutputCycle <= 0 disables particle output.
+# ParticlesOutputTag accepts: position, velocity, q, ID.
+# RestartOutputCycle <= 0 disables periodic restart output.
 
-FieldOutputCycle       = 200       # Output for field
-
-# Output for field
    FieldOutputCycle = 200
    FieldOutputTag   = B+E
    MomentsOutputTag = rho+J+PXX+PXY+PXZ+PYY+PYZ+PZZ
-# Output for particles if 0 it doesnt save particles data
+
    ParticlesOutputCycle = 0
    ParticlesOutputTag = position+velocity+q
-# restart cycle
+
    RestartOutputCycle = 0
    CallFinalize=1

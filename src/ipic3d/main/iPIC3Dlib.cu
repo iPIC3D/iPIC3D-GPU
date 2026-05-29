@@ -235,14 +235,24 @@ int c_Solver::Init(int argc, char **argv) {
 
   // Print the initial settings to stdout and a file
   if (myrank == 0) {
-    //check and create the output directory, only if it is not a restart run
-    if(restart_status == 0){checkOutputFolder(SaveDirName); if(RestartDirName != SaveDirName)checkOutputFolder(RestartDirName); }
+    // Fresh runs clear old output. Restart runs must preserve restart files but
+    // still need writable output directories for settings/proc files.
+    if (restart_status == 0) {
+      checkOutputFolder(SaveDirName);
+      if (RestartDirName != SaveDirName) checkOutputFolder(RestartDirName);
+    } else {
+      ensureOutputFolder(SaveDirName);
+      if (RestartDirName != SaveDirName) ensureOutputFolder(RestartDirName);
+    }
     
     MPIdata::instance().Print();
     vct->Print();
     col->Print();
     col->save();
   }
+#ifndef NO_MPI
+  MPI_Barrier(MPIdata::get_PicGlobalComm());
+#endif
   // Create the local grid
   grid = new Grid3DCU(col, vct);  // Create the local grid
   EMf = new EMfields3D(col, grid, vct);  // Create Electromagnetic Fields Object

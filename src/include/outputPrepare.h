@@ -4,6 +4,7 @@
 #include <string>
 
 int checkOutputFolder(std::string relativePath);
+int ensureOutputFolder(std::string relativePath);
 
 
 

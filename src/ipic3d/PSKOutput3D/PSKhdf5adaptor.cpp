@@ -140,8 +140,8 @@ void HDF5OutputAdaptor::open(const std::string & name) {
 
   _hdf5_file_id = H5Fcreate(name.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
 
-  if (_hdf5_file_id <= 0) {
-    eprintf("H5FCreate fails");
+  if (_hdf5_file_id < 0) {
+    eprintf("H5Fcreate fails for %s", name.c_str());
     //PSK::OutputException e("H5FCreate fails", "HDF5OutputAdaptor::open2()");
 
     // if using H5F_ACC_EXCL
@@ -173,13 +173,13 @@ void HDF5OutputAdaptor::open_append(const std::string & name) {
   /* Restore previous error handler */
   H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);  // HDF 1.8
 
-  if (_hdf5_file_id <= 0) {
+  if (_hdf5_file_id < 0) {
 
     _hdf5_file_id = H5Fopen(name.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
   }
 
-  if (_hdf5_file_id <= 0) {
-    eprintf("H5Fopen fails");
+  if (_hdf5_file_id < 0) {
+    eprintf("H5Fcreate/H5Fopen fail for %s", name.c_str());
     //PSK::OutputException e("H5Fopen fails", "HDF5OutputAdaptor::open_append()");
 
     //throw e;

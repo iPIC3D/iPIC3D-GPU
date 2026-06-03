@@ -42,3 +42,20 @@ int checkOutputFolder(std::string relativePath){
     return 0;
 
 }
+
+int ensureOutputFolder(std::string relativePath){
+
+    fs::path current_path = fs::current_path();
+    fs::path subdir = current_path / relativePath;
+
+    if (fs::exists(subdir)) {
+        if (!fs::is_directory(subdir)) {
+            throw std::runtime_error("Output path is not a directory");
+        }
+    } else {
+        fs::create_directories(subdir);
+    }
+
+    return 0;
+
+}

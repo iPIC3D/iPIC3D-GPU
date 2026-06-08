@@ -63,10 +63,9 @@ public:
     /**
      * @brief Read EM fields (B, E) and species densities from a restart file.
      *
-     * ADIOS2 backend: reads the full grid including ghost cells from
-     *   restart_<rank>.bp.
-     * HDF5 backend: reads interior-only data from restart<rank>.hdf and
-     *   places it into the node array at offset [1][1][1].
+     * ADIOS2 and HDF5 backends both store active-node data only and place it
+     * into the guarded node arrays at offset [1][1][1]. Ghost nodes are
+     * rebuilt by the field communication step after restart loading.
      *
      * @param vct         Cartesian topology (provides rank).
      * @param grid        Local grid (provides NXN, NYN, NZN).

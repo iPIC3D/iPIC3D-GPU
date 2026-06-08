@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <iostream>
+#include <vector>
 
 #ifdef USE_ADIOS2
 #include "adios2.h"
@@ -28,6 +29,92 @@ using std::string;
 using std::stringstream;
 
 namespace {
+
+#ifdef USE_ADIOS2
+
+struct ActiveNodeRestartLayout {
+    size_t nx = 0;
+    size_t ny = 0;
+    size_t nz = 0;
+
+    size_t count() const { return nx * ny * nz; }
+    adios2::Dims dims() const { return {nx, ny, nz}; }
+};
+
+ActiveNodeRestartLayout makeActiveNodeRestartLayout(const Grid* grid)
+{
+    const int nx = grid->getNXN() - 2;
+    const int ny = grid->getNYN() - 2;
+    const int nz = grid->getNZN() - 2;
+
+    if (nx <= 0 || ny <= 0 || nz <= 0) {
+        eprintf("ERROR: ADIOS2 restart active-node layout has non-positive extent");
+    }
+
+    return {
+        static_cast<size_t>(nx),
+        static_cast<size_t>(ny),
+        static_cast<size_t>(nz)
+    };
+}
+
+std::string dimsToString(const adios2::Dims& dims)
+{
+    std::stringstream ss;
+    ss << "{";
+    for (size_t i = 0; i < dims.size(); ++i) {
+        if (i > 0) ss << ", ";
+        ss << dims[i];
+    }
+    ss << "}";
+    return ss.str();
+}
+
+class ActiveNodeRestartReader {
+public:
+    explicit ActiveNodeRestartReader(const Grid* grid)
+        : layout_(makeActiveNodeRestartLayout(grid)),
+          buffer_(layout_.count())
+    {}
+
+    void readInto(adios2::IO& io, adios2::Engine& engine,
+                  const std::string& variableName, arr3_double dst)
+    {
+        auto var = io.InquireVariable<cudaCommonType>(variableName);
+        if (!var) {
+            eprintf("ERROR: ADIOS2 restart variable %s is missing",
+                    variableName.c_str());
+        }
+
+        const adios2::Dims expectedShape = layout_.dims();
+        const adios2::Dims actualShape = var.Shape();
+        if (actualShape != expectedShape) {
+            const std::string expected = dimsToString(expectedShape);
+            const std::string actual = dimsToString(actualShape);
+            eprintf("ERROR: ADIOS2 restart variable %s has shape %s, expected active-node shape %s",
+                    variableName.c_str(), actual.c_str(), expected.c_str());
+        }
+
+        var.SetSelection({{0, 0, 0}, expectedShape});
+        engine.Get<cudaCommonType>(var, buffer_.data(), adios2::Mode::Sync);
+
+        size_t index = 0;
+        for (size_t ix = 0; ix < layout_.nx; ++ix) {
+            for (size_t iy = 0; iy < layout_.ny; ++iy) {
+                for (size_t iz = 0; iz < layout_.nz; ++iz) {
+                    dst[ix + 1][iy + 1][iz + 1] =
+                        static_cast<double>(buffer_[index++]);
+                }
+            }
+        }
+    }
+
+private:
+    ActiveNodeRestartLayout layout_;
+    std::vector<cudaCommonType> buffer_;
+};
+
+#endif
 
 int readLegacyLastCycle(const std::string& restartDir)
 {
@@ -153,7 +240,7 @@ void RestartReader::readFields(
     const std::string& restartDir, int last_cycle)
 {
 #ifdef USE_ADIOS2
-    // ---- ADIOS2 restart read (includes ghost cells) ----
+    // ---- ADIOS2 restart read (active nodes only, placed into guarded arrays) ----
     const int nxn = grid->getNXN();
     const int nyn = grid->getNYN();
     const int nzn = grid->getNZN();
@@ -196,26 +283,21 @@ void RestartReader::readFields(
                           << lastCycle << std::endl;
         }
 
-        // B field
-        engineField.Get<cudaCommonType>("Bx", (cudaCommonType*)Bxn.get_arr(),
-                                        adios2::Mode::Deferred);
-        engineField.Get<cudaCommonType>("By", (cudaCommonType*)Byn.get_arr(),
-                                        adios2::Mode::Deferred);
-        engineField.Get<cudaCommonType>("Bz", (cudaCommonType*)Bzn.get_arr(),
-                                        adios2::Mode::Deferred);
-        // E field
-        engineField.Get<cudaCommonType>("Ex", (cudaCommonType*)Ex.get_arr(),
-                                        adios2::Mode::Deferred);
-        engineField.Get<cudaCommonType>("Ey", (cudaCommonType*)Ey.get_arr(),
-                                        adios2::Mode::Deferred);
-        engineField.Get<cudaCommonType>("Ez", (cudaCommonType*)Ez.get_arr(),
-                                        adios2::Mode::Deferred);
-        // Species density
+        ActiveNodeRestartReader activeReader(grid);
+
+        activeReader.readInto(ioField, engineField, "Bx", Bxn);
+        activeReader.readInto(ioField, engineField, "By", Byn);
+        activeReader.readInto(ioField, engineField, "Bz", Bzn);
+
+        activeReader.readInto(ioField, engineField, "Ex", Ex);
+        activeReader.readInto(ioField, engineField, "Ey", Ey);
+        activeReader.readInto(ioField, engineField, "Ez", Ez);
+
         for (int i = 0; i < ns; i++) {
-            engineField.Get<cudaCommonType>(
-                "rhosSpecies" + std::to_string(i),
-                (cudaCommonType*)&((*rhons_)[i][0][0][0]),
-                adios2::Mode::Deferred);
+            arr3_double rhoSpecies(rhons_->fetch_arr4()[i], nxn, nyn, nzn);
+            activeReader.readInto(ioField, engineField,
+                                  "rhosSpecies" + std::to_string(i),
+                                  rhoSpecies);
         }
 
         engineField.EndStep();

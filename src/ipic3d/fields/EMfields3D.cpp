@@ -3326,7 +3326,10 @@ void EMfields3D::init()
     communicateNodeBC(nxn, nyn, nzn, Ez, col->bcEz[0], col->bcEz[1], col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5], vct, this);
 
     for (int is = 0; is < ns; is++)
+    {
       grid->interpN2C(rhocs, is, rhons);
+      communicateCenterBC_P(nxc, nyc, nzc, getRHOcs(is), 2, 2, 2, 2, 2, 2, vct, this);
+    }
   }
 }
 

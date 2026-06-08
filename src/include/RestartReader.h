@@ -8,7 +8,7 @@
  * Usage:
  *   - Standalone via static helpers (readLastCycle) during early init
  *   - Through IOManager::readFieldRestart / readParticlesRestart
- *   - Through Collective thin wrappers (backward compatibility)
+ *   - Through Collective thin wrappers
  */
 
 #ifndef RESTART_READER_H
@@ -34,8 +34,7 @@ public:
     /**
      * @brief Read the checkpoint cycle label from the restart directory.
      *
-     * Resolves A/B restart metadata when present, otherwise falls back to the
-     * legacy flat layout. Returns the checkpoint cycle label.
+     * Resolves A/B restart metadata and returns the checkpoint cycle label.
      *
      * @param restartDir  Path to the directory containing restart files.
      * @return            The loop cycle to execute first after restart.
@@ -45,9 +44,9 @@ public:
     /**
      * @brief Resolve the checkpoint directory and cycle label to read.
      *
-     * New restart layouts use RestartDirName/restart_A or restart_B plus
-     * latest_restart.json metadata.  If that metadata is absent, this falls
-     * back to the legacy flat layout directly under RestartDirName.
+     * Restart layouts use RestartDirName/restart_A or restart_B plus
+     * latest_restart.json metadata. Older flat restart layouts are not
+     * supported.
      *
      * @param restartDir  User-provided restart root directory.
      * @return            Checkpoint metadata, including the directory that
@@ -73,7 +72,7 @@ public:
      * @param Ex,Ey,Ez    Electric field node arrays (output).
      * @param rhons       Species density array (output).
      * @param ns          Number of species.
-     * @param restartDir  Path to restart directory.
+     * @param restartDir  Path to the selected restart slot directory.
      * @param last_cycle  Expected restart cycle label (validated against file).
      */
     static void readFields(
@@ -106,7 +105,7 @@ public:
      * @param q               Charge per particle (output).
      * @param x,y,z           Position components (output).
      * @param t               Particle ID (output, stored as double).
-     * @param restartDir      Path to restart directory.
+     * @param restartDir      Path to the selected restart slot directory.
      * @param last_cycle      Expected restart cycle label.
      */
     static void readParticles(

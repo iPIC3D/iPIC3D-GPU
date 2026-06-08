@@ -16,6 +16,7 @@
 #include "Parameters.h"
 #include "RestartReader.h"  // restart reading
 #include "RestartParticleCellMetadata.h"
+#include "RestartMeshMetadata.h"
 #include "MPIdata.h"
 
 #include <string>
@@ -137,10 +138,13 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
 
     if (restartBackend_ != RestartBackend::NONE &&
         (restart_cycle_ > 0 || col->getCallFinalize())) {
+        const RestartMeshMetadata restartMesh =
+            makeCurrentRestartMeshMetadata(col, vct, grid, ns);
         restartSlots_.init(col->getRestartDirName(),
                            RestartSlotManager::backendName(),
                            vct->getCartesian_rank(),
-                           MPIdata::get_nprocs());
+                           MPIdata::get_nprocs(),
+                           restartMesh);
     }
 #ifndef USE_ADIOS2
     if (fieldBackend_ == FieldBackend::ADIOS2) {

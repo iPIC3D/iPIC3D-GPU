@@ -33,6 +33,7 @@
 #endif
 
 struct OutputTagConfig;
+struct RestartParticleCellMetadata;
 
 using namespace PSK;
 
@@ -60,6 +61,8 @@ class OutputWrapperFPP
     int 		  nstestpart);
   void append_output(const char* tag, int cycle, int sample);
   void append_field_moment_output(const OutputTagConfig& cfg, int cycle);
+  void setRestartParticleCellMetadata(
+      const RestartParticleCellMetadata* metadata);
   // `cycle` is the restart label: the loop cycle to execute first after restart.
   void append_restart(int cycle, const string& restartDir);
 };

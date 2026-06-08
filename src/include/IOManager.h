@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+struct RestartParticleCellMetadata;
+
 #ifndef NO_MPI
 #include "mpi.h"
 #endif
@@ -161,6 +163,20 @@ public:
      * @param cycle Simulation cycle to query.
      */
     bool needsParticleSync(int cycle) const;
+
+    /**
+     * @brief Will the given cycle write a restart checkpoint containing particles?
+     *
+     * Used by the solver to decide whether particle data must be GPU-sorted
+     * before the host mirror is populated for restart output.
+     */
+    bool needsRestartParticleSync(int cycle) const;
+
+    /**
+     * @brief Register solver-owned active-cell particle metadata for restart I/O.
+     */
+    void setRestartParticleCellMetadata(
+        const RestartParticleCellMetadata* metadata);
 
     // ======= Accessor helpers =======
     FieldBackend    getFieldBackend()    const { return fieldBackend_; }

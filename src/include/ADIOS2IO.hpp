@@ -16,6 +16,7 @@
 #include "EMfields3D.h"
 #include "Collective.h"
 #include "ParticleSoAHost.h"
+#include "RestartParticleCellMetadata.h"
 
 #include "adios2.h"
 
@@ -86,6 +87,7 @@ private:
     ParticleSoAHost **part; // now we only copy from the CPU buffer
     // particleArrayCUDA **pclsArrayHostPtr;
     ParticleSoAHost **testpart;
+    const RestartParticleCellMetadata* restartParticleCellMetadata = nullptr;
     int ns;
     int nstestpart;
     
@@ -99,6 +101,7 @@ public:
             {"velocity", std::bind(&ADIOS2Manager::_particleVelocity, this, std::placeholders::_1, std::placeholders::_2)},
             {"q", std::bind(&ADIOS2Manager::_particleCharge, this, std::placeholders::_1, std::placeholders::_2)},
             {"ID", std::bind(&ADIOS2Manager::_particleID, this, std::placeholders::_1, std::placeholders::_2)},
+            {"particle_cell_metadata", std::bind(&ADIOS2Manager::_particleCellMetadata, this, std::placeholders::_1, std::placeholders::_2)},
             // field
             {"proc_topology", std::bind(&ADIOS2Manager::_procTopology, this, std::placeholders::_1, std::placeholders::_2)},
             {"E", std::bind(&ADIOS2Manager::_E, this, std::placeholders::_1, std::placeholders::_2)},
@@ -162,6 +165,11 @@ void appendParticleOutput(int cycle);
  * @param restartDir Directory containing this checkpoint slot's rank files.
  */
 void writeRestartOutput(int cycle, const string& restartDir);
+
+void setRestartParticleCellMetadata(
+    const RestartParticleCellMetadata* metadata) {
+    restartParticleCellMetadata = metadata;
+}
 
 private:
 
@@ -423,6 +431,36 @@ void _particleID(adios2::IO &io, adios2::Engine &engine){
 
         engine.Put<cudaCommonType>(var, part[i]->getParticleIDall(), adios2::Mode::Deferred);
     }
+}
+
+void _particleCellMetadata(adios2::IO &io, adios2::Engine &engine) {
+    if (!restartParticleCellMetadata || !restartParticleCellMetadata->valid) {
+        throw std::runtime_error("Restart particle cell metadata was not prepared before ADIOS2 restart write");
+    }
+
+    auto dims = _variableHelper<int>(io, "activeCellDims", {3}, {0}, {3});
+    engine.Put<int>(dims, restartParticleCellMetadata->activeCellDims.data(),
+                    adios2::Mode::Sync);
+
+    const unsigned long activeCells =
+        static_cast<unsigned long>(restartParticleCellMetadata->activeCellCount());
+    const adios2::Dims shape = {activeCells};
+    for (int i = 0; i < ns; i++) {
+        const auto& speciesMetadata = restartParticleCellMetadata->species[i];
+
+        auto offsets = _variableHelper<int>(
+            io, "part" + std::to_string(i) + "CellOffsets",
+            shape, {0}, shape);
+        auto counts = _variableHelper<int>(
+            io, "part" + std::to_string(i) + "CellCounts",
+            shape, {0}, shape);
+
+        engine.Put<int>(offsets, speciesMetadata.cellOffsets.data(),
+                        adios2::Mode::Deferred);
+        engine.Put<int>(counts, speciesMetadata.cellCounts.data(),
+                        adios2::Mode::Deferred);
+    }
+    engine.PerformPuts();
 }
 
 // restart, all of the above

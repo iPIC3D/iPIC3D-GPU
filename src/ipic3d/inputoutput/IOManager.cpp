@@ -15,6 +15,7 @@
 #include "debug.h"         // eprintf, warning_printf
 #include "Parameters.h"
 #include "RestartReader.h"  // restart reading
+#include "RestartParticleCellMetadata.h"
 #include "MPIdata.h"
 
 #include <string>
@@ -511,4 +512,23 @@ bool IOManager::needsParticleSync(int cycle) const {
         cycle % col_->getDiagnosticsOutputCycle() == 0)
         return true;
     return false;
+}
+
+bool IOManager::needsRestartParticleSync(int cycle) const {
+    return restartBackend_ != RestartBackend::NONE &&
+           restart_cycle_ > 0 &&
+           cycle % restart_cycle_ == 0;
+}
+
+void IOManager::setRestartParticleCellMetadata(
+    const RestartParticleCellMetadata* metadata)
+{
+#ifndef NO_HDF5
+    if (outputWrapperFPP_)
+        outputWrapperFPP_->setRestartParticleCellMetadata(metadata);
+#endif
+#ifdef USE_ADIOS2
+    if (adiosManager_)
+        adiosManager_->setRestartParticleCellMetadata(metadata);
+#endif
 }

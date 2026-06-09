@@ -26,6 +26,7 @@
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
 #include "ParticleSoAHost.h"
+#include "RestartParticleCellMetadata.h"
 
 void OutputWrapperFPP::init_output_files(
 	    Collective    *col,
@@ -108,6 +109,14 @@ void OutputWrapperFPP::append_field_moment_output(const OutputTagConfig& cfg, in
 #endif
 }
 
+void OutputWrapperFPP::setRestartParticleCellMetadata(
+    const RestartParticleCellMetadata* metadata)
+{
+#ifndef NO_HDF5
+    hdf5_agent.set_restart_particle_cell_metadata(metadata);
+#endif
+}
+
 void OutputWrapperFPP::append_restart(int cycle, const string& restartDir)
 {
 #ifndef NO_HDF5
@@ -119,6 +128,7 @@ void OutputWrapperFPP::append_restart(int cycle, const string& restartDir)
 		output_mgr.output("proc_topology ", cycle);
 		output_mgr.output("Eall + Ball + rhos + Js + pressure", cycle);
 		output_mgr.output("position + velocity + q + ID", cycle, 0);
+		output_mgr.output("particle_cell_metadata", cycle);
 		output_mgr.output("testpartpos + testpartvel + testpartcharge", cycle, 0);
 		output_mgr.output("last_cycle", cycle);
 		hdf5_agent.close();

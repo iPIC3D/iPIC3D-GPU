@@ -5,6 +5,8 @@
 #include <vector>
 #include <unordered_map>
 #include <functional>
+#include <cstddef>
+#include <stdexcept>
 
 #include "ipicfwd.h"
 #include "cudaTypeDef.cuh"
@@ -14,6 +16,7 @@
 #include "EMfields3D.h"
 #include "Collective.h"
 #include "ParticleSoAHost.h"
+#include "RestartParticleCellMetadata.h"
 
 #include "adios2.h"
 
@@ -63,6 +66,18 @@ private:
     string restartTag;
     int restartWriteCount = 0;
 
+    struct ActiveNodeLayout {
+        std::size_t nx = 0;
+        std::size_t ny = 0;
+        std::size_t nz = 0;
+
+        std::size_t count() const { return nx * ny * nz; }
+        adios2::Dims dims() const { return {nx, ny, nz}; }
+    };
+
+    ActiveNodeLayout activeNodeLayout;
+    std::vector<std::vector<cudaCommonType>> activeNodeWriteBuffers;
+
 
     // pointer registration
     Collective *col;
@@ -72,6 +87,7 @@ private:
     ParticleSoAHost **part; // now we only copy from the CPU buffer
     // particleArrayCUDA **pclsArrayHostPtr;
     ParticleSoAHost **testpart;
+    const RestartParticleCellMetadata* restartParticleCellMetadata = nullptr;
     int ns;
     int nstestpart;
     
@@ -85,6 +101,7 @@ public:
             {"velocity", std::bind(&ADIOS2Manager::_particleVelocity, this, std::placeholders::_1, std::placeholders::_2)},
             {"q", std::bind(&ADIOS2Manager::_particleCharge, this, std::placeholders::_1, std::placeholders::_2)},
             {"ID", std::bind(&ADIOS2Manager::_particleID, this, std::placeholders::_1, std::placeholders::_2)},
+            {"particle_cell_metadata", std::bind(&ADIOS2Manager::_particleCellMetadata, this, std::placeholders::_1, std::placeholders::_2)},
             // field
             {"proc_topology", std::bind(&ADIOS2Manager::_procTopology, this, std::placeholders::_1, std::placeholders::_2)},
             {"E", std::bind(&ADIOS2Manager::_E, this, std::placeholders::_1, std::placeholders::_2)},
@@ -149,6 +166,11 @@ void appendParticleOutput(int cycle);
  */
 void writeRestartOutput(int cycle, const string& restartDir);
 
+void setRestartParticleCellMetadata(
+    const RestartParticleCellMetadata* metadata) {
+    restartParticleCellMetadata = metadata;
+}
+
 private:
 
 /**
@@ -181,6 +203,68 @@ adios2::Variable<T> _variableHelper(adios2::IO &io, const std::string &name, con
     }
 
     return var;            
+}
+
+ActiveNodeLayout _makeActiveNodeLayout() const {
+    if (!grid) {
+        throw std::runtime_error("ADIOS2 restart active-node layout requested before grid registration");
+    }
+
+    const int nx = grid->getNXN() - 2;
+    const int ny = grid->getNYN() - 2;
+    const int nz = grid->getNZN() - 2;
+
+    if (nx <= 0 || ny <= 0 || nz <= 0) {
+        throw std::runtime_error("ADIOS2 restart active-node layout has non-positive extent");
+    }
+
+    return {
+        static_cast<std::size_t>(nx),
+        static_cast<std::size_t>(ny),
+        static_cast<std::size_t>(nz)
+    };
+}
+
+void _prepareActiveNodeWriteBuffers(std::size_t slots) {
+    activeNodeLayout = _makeActiveNodeLayout();
+    if (activeNodeWriteBuffers.size() < slots) {
+        activeNodeWriteBuffers.resize(slots);
+    }
+
+    const std::size_t count = activeNodeLayout.count();
+    for (std::size_t i = 0; i < slots; ++i) {
+        activeNodeWriteBuffers[i].resize(count);
+    }
+}
+
+std::vector<cudaCommonType>& _activeNodeWriteBuffer(std::size_t slot) {
+    if (slot >= activeNodeWriteBuffers.size() ||
+        activeNodeWriteBuffers[slot].size() != activeNodeLayout.count()) {
+        throw std::runtime_error("ADIOS2 restart active-node write buffer is not prepared");
+    }
+    return activeNodeWriteBuffers[slot];
+}
+
+void _packActiveNodes(arr3_double src, std::vector<cudaCommonType>& dst) const {
+    std::size_t index = 0;
+    for (std::size_t ix = 0; ix < activeNodeLayout.nx; ++ix) {
+        for (std::size_t iy = 0; iy < activeNodeLayout.ny; ++iy) {
+            for (std::size_t iz = 0; iz < activeNodeLayout.nz; ++iz) {
+                dst[index++] = static_cast<cudaCommonType>(src[ix + 1][iy + 1][iz + 1]);
+            }
+        }
+    }
+}
+
+void _putActiveNodeArray(adios2::IO &io, adios2::Engine &engine,
+                         const std::string &name, arr3_double src,
+                         std::size_t bufferSlot) {
+    auto &buffer = _activeNodeWriteBuffer(bufferSlot);
+    _packActiveNodes(src, buffer);
+
+    const adios2::Dims shape = activeNodeLayout.dims();
+    auto var = _variableHelper<cudaCommonType>(io, name, shape, {0, 0, 0}, shape);
+    engine.Put<cudaCommonType>(var, buffer.data(), adios2::Mode::Deferred);
 }
 
 // tag mapping
@@ -234,75 +318,63 @@ void _procTopology(adios2::IO &io, adios2::Engine &engine){
     engine.Put<int>(varZright, zright, adios2::Mode::Sync);
 }
 
-// Note that the ghost cells are also included in the output
 void _E(adios2::IO &io, adios2::Engine &engine){
-    const adios2::Dims shape = {static_cast<unsigned long>(grid->getNXN()), static_cast<unsigned long>(grid->getNYN()), static_cast<unsigned long>(grid->getNZN())};
-
-    auto ex = _variableHelper<cudaCommonType>(io, "Ex", shape, {0, 0, 0}, shape);
-    auto ey = _variableHelper<cudaCommonType>(io, "Ey", shape, {0, 0, 0}, shape);
-    auto ez = _variableHelper<cudaCommonType>(io, "Ez", shape, {0, 0, 0}, shape);
-
-    engine.Put<cudaCommonType>(ex, EMf->getEx().get_arr(), adios2::Mode::Deferred);
-    engine.Put<cudaCommonType>(ey, EMf->getEy().get_arr(), adios2::Mode::Deferred);
-    engine.Put<cudaCommonType>(ez, EMf->getEz().get_arr(), adios2::Mode::Deferred);
+    _prepareActiveNodeWriteBuffers(3);
+    _putActiveNodeArray(io, engine, "Ex", EMf->getEx(), 0);
+    _putActiveNodeArray(io, engine, "Ey", EMf->getEy(), 1);
+    _putActiveNodeArray(io, engine, "Ez", EMf->getEz(), 2);
+    engine.PerformPuts();
 }
 
 void _B(adios2::IO &io, adios2::Engine &engine){
-    const adios2::Dims shape = {static_cast<unsigned long>(grid->getNXN()), static_cast<unsigned long>(grid->getNYN()), static_cast<unsigned long>(grid->getNZN())};
-
-    auto bx = _variableHelper<cudaCommonType>(io, "Bx", shape, {0, 0, 0}, shape);
-    auto by = _variableHelper<cudaCommonType>(io, "By", shape, {0, 0, 0}, shape);
-    auto bz = _variableHelper<cudaCommonType>(io, "Bz", shape, {0, 0, 0}, shape);
-
     // Store only the evolved B (Bxn/Byn/Bzn), not B_tot = Bxn + Bx_ext.
     // Bx_ext is recomputed from the analytic expression at init, so storing
     // B_tot would cause Bx_ext to be double-counted on restart.
-    engine.Put<cudaCommonType>(bx, EMf->getBx().get_arr(), adios2::Mode::Deferred);
-    engine.Put<cudaCommonType>(by, EMf->getBy().get_arr(), adios2::Mode::Deferred);
-    engine.Put<cudaCommonType>(bz, EMf->getBz().get_arr(), adios2::Mode::Deferred);
+    _prepareActiveNodeWriteBuffers(3);
+    _putActiveNodeArray(io, engine, "Bx", EMf->getBx(), 0);
+    _putActiveNodeArray(io, engine, "By", EMf->getBy(), 1);
+    _putActiveNodeArray(io, engine, "Bz", EMf->getBz(), 2);
+    engine.PerformPuts();
 }
 
 void _rhos(adios2::IO &io, adios2::Engine &engine){
-    const adios2::Dims shape = {static_cast<unsigned long>(grid->getNXN()), static_cast<unsigned long>(grid->getNYN()), static_cast<unsigned long>(grid->getNZN())};
-
+    _prepareActiveNodeWriteBuffers(1);
     for (int i = 0; i < ns; i++) {
-        auto var = _variableHelper<cudaCommonType>(io, "rhosSpecies" + std::to_string(i), shape, {0, 0, 0}, shape);
-        engine.Put<cudaCommonType>(var, (cudaCommonType*)(EMf->getRHOns()[i]), adios2::Mode::Deferred);
+        _putActiveNodeArray(io, engine, "rhosSpecies" + std::to_string(i),
+                            EMf->getRHOns(i), 0);
+        engine.PerformPuts();
     }
 }
 
 void _Js(adios2::IO &io, adios2::Engine &engine){
-    const adios2::Dims shape = {static_cast<unsigned long>(grid->getNXN()), static_cast<unsigned long>(grid->getNYN()), static_cast<unsigned long>(grid->getNZN())};
-
+    _prepareActiveNodeWriteBuffers(3);
     for (int i = 0; i < ns; i++) {
-        auto jx = _variableHelper<cudaCommonType>(io, "JxsSpecies" + std::to_string(i), shape, {0, 0, 0}, shape);
-        auto jy = _variableHelper<cudaCommonType>(io, "JysSpecies" + std::to_string(i), shape, {0, 0, 0}, shape);
-        auto jz = _variableHelper<cudaCommonType>(io, "JzsSpecies" + std::to_string(i), shape, {0, 0, 0}, shape);
-
-        engine.Put<cudaCommonType>(jx, (cudaCommonType*)(EMf->getJxs()[i]), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(jy, (cudaCommonType*)(EMf->getJys()[i]), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(jz, (cudaCommonType*)(EMf->getJzs()[i]), adios2::Mode::Deferred);
+        _putActiveNodeArray(io, engine, "JxsSpecies" + std::to_string(i),
+                            EMf->getJxs(i), 0);
+        _putActiveNodeArray(io, engine, "JysSpecies" + std::to_string(i),
+                            EMf->getJys(i), 1);
+        _putActiveNodeArray(io, engine, "JzsSpecies" + std::to_string(i),
+                            EMf->getJzs(i), 2);
+        engine.PerformPuts();
     }
 }
 
 void _pressure(adios2::IO &io, adios2::Engine &engine){
-    const adios2::Dims shape = {static_cast<unsigned long>(grid->getNXN()), static_cast<unsigned long>(grid->getNYN()), static_cast<unsigned long>(grid->getNZN())};
-
+    _prepareActiveNodeWriteBuffers(6);
     for (int i = 0; i < ns; i++) {
-        auto pxx = _variableHelper<cudaCommonType>(io, "pXXSpecies" + std::to_string(i), shape, {0, 0, 0}, shape);
-        auto pxy = _variableHelper<cudaCommonType>(io, "pXYSpecies" + std::to_string(i), shape, {0, 0, 0}, shape);
-        auto pxz = _variableHelper<cudaCommonType>(io, "pXZSpecies" + std::to_string(i), shape, {0, 0, 0}, shape);
-        auto pyy = _variableHelper<cudaCommonType>(io, "pYYSpecies" + std::to_string(i), shape, {0, 0, 0}, shape);
-        auto pyz = _variableHelper<cudaCommonType>(io, "pYZSpecies" + std::to_string(i), shape, {0, 0, 0}, shape);
-        auto pzz = _variableHelper<cudaCommonType>(io, "pZZSpecies" + std::to_string(i), shape, {0, 0, 0}, shape);
-
-        engine.Put<cudaCommonType>(pxx, (cudaCommonType*)(EMf->getpXXsn()[i]), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(pxy, (cudaCommonType*)(EMf->getpXYsn()[i]), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(pxz, (cudaCommonType*)(EMf->getpXZsn()[i]), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(pyy, (cudaCommonType*)(EMf->getpYYsn()[i]), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(pyz, (cudaCommonType*)(EMf->getpYZsn()[i]), adios2::Mode::Deferred);
-        engine.Put<cudaCommonType>(pzz, (cudaCommonType*)(EMf->getpZZsn()[i]), adios2::Mode::Deferred);
- 
+        _putActiveNodeArray(io, engine, "pXXSpecies" + std::to_string(i),
+                            EMf->getpXXsn(i), 0);
+        _putActiveNodeArray(io, engine, "pXYSpecies" + std::to_string(i),
+                            EMf->getpXYsn(i), 1);
+        _putActiveNodeArray(io, engine, "pXZSpecies" + std::to_string(i),
+                            EMf->getpXZsn(i), 2);
+        _putActiveNodeArray(io, engine, "pYYSpecies" + std::to_string(i),
+                            EMf->getpYYsn(i), 3);
+        _putActiveNodeArray(io, engine, "pYZSpecies" + std::to_string(i),
+                            EMf->getpYZsn(i), 4);
+        _putActiveNodeArray(io, engine, "pZZSpecies" + std::to_string(i),
+                            EMf->getpZZsn(i), 5);
+        engine.PerformPuts();
     }
 }
 
@@ -359,6 +431,36 @@ void _particleID(adios2::IO &io, adios2::Engine &engine){
 
         engine.Put<cudaCommonType>(var, part[i]->getParticleIDall(), adios2::Mode::Deferred);
     }
+}
+
+void _particleCellMetadata(adios2::IO &io, adios2::Engine &engine) {
+    if (!restartParticleCellMetadata || !restartParticleCellMetadata->valid) {
+        throw std::runtime_error("Restart particle cell metadata was not prepared before ADIOS2 restart write");
+    }
+
+    auto dims = _variableHelper<int>(io, "activeCellDims", {3}, {0}, {3});
+    engine.Put<int>(dims, restartParticleCellMetadata->activeCellDims.data(),
+                    adios2::Mode::Sync);
+
+    const unsigned long activeCells =
+        static_cast<unsigned long>(restartParticleCellMetadata->activeCellCount());
+    const adios2::Dims shape = {activeCells};
+    for (int i = 0; i < ns; i++) {
+        const auto& speciesMetadata = restartParticleCellMetadata->species[i];
+
+        auto offsets = _variableHelper<int>(
+            io, "part" + std::to_string(i) + "CellOffsets",
+            shape, {0}, shape);
+        auto counts = _variableHelper<int>(
+            io, "part" + std::to_string(i) + "CellCounts",
+            shape, {0}, shape);
+
+        engine.Put<int>(offsets, speciesMetadata.cellOffsets.data(),
+                        adios2::Mode::Deferred);
+        engine.Put<int>(counts, speciesMetadata.cellCounts.data(),
+                        adios2::Mode::Deferred);
+    }
+    engine.PerformPuts();
 }
 
 // restart, all of the above

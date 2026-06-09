@@ -14,7 +14,8 @@
 #include "ParallelIO.h"    // free VTK/H5hut/PHDF5 write functions
 #include "debug.h"         // eprintf, warning_printf
 #include "Parameters.h"
-#include "RestartReader.h"  // restart reading
+#include "RestartParticleCellMetadata.h"
+#include "RestartMeshMetadata.h"
 #include "MPIdata.h"
 
 #include <string>
@@ -136,10 +137,13 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
 
     if (restartBackend_ != RestartBackend::NONE &&
         (restart_cycle_ > 0 || col->getCallFinalize())) {
+        const RestartMeshMetadata restartMesh =
+            makeCurrentRestartMeshMetadata(col, vct, grid, ns);
         restartSlots_.init(col->getRestartDirName(),
                            RestartSlotManager::backendName(),
                            vct->getCartesian_rank(),
-                           MPIdata::get_nprocs());
+                           MPIdata::get_nprocs(),
+                           restartMesh);
     }
 #ifndef USE_ADIOS2
     if (fieldBackend_ == FieldBackend::ADIOS2) {
@@ -417,31 +421,6 @@ void IOManager::writeRestart(int cycle) {
     restartSlots_.completeLocal(target);
 }
 
-// ======= Restart reading =======
-
-void IOManager::readFieldRestart(
-    const VCtopology3D* vct, const Grid3DCU* grid,
-    arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
-    arr3_double Ex,  arr3_double Ey,  arr3_double Ez,
-    array4_double* rhons, int ns)
-{
-    RestartReader::readFields(
-        vct, grid, Bxn, Byn, Bzn, Ex, Ey, Ez, rhons, ns,
-        col_->getRestartReadDirName(), col_->getLast_cycle());
-}
-
-void IOManager::readParticlesRestart(
-    const VCtopology3D* vct, int species_number,
-    vector_double& u, vector_double& v, vector_double& w,
-    vector_double& q,
-    vector_double& x, vector_double& y, vector_double& z,
-    vector_double& t)
-{
-    RestartReader::readParticles(
-        vct, species_number, u, v, w, q, x, y, z, t,
-        col_->getRestartReadDirName(), col_->getLast_cycle());
-}
-
 // ======= Finalization =======
 
 void IOManager::finalize() {
@@ -511,4 +490,23 @@ bool IOManager::needsParticleSync(int cycle) const {
         cycle % col_->getDiagnosticsOutputCycle() == 0)
         return true;
     return false;
+}
+
+bool IOManager::needsRestartParticleSync(int cycle) const {
+    return restartBackend_ != RestartBackend::NONE &&
+           restart_cycle_ > 0 &&
+           cycle % restart_cycle_ == 0;
+}
+
+void IOManager::setRestartParticleCellMetadata(
+    const RestartParticleCellMetadata* metadata)
+{
+#ifndef NO_HDF5
+    if (outputWrapperFPP_)
+        outputWrapperFPP_->setRestartParticleCellMetadata(metadata);
+#endif
+#ifdef USE_ADIOS2
+    if (adiosManager_)
+        adiosManager_->setRestartParticleCellMetadata(metadata);
+#endif
 }

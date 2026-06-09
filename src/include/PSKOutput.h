@@ -38,6 +38,7 @@ developers: D. Burgess, June/July 2006
 #include "OutputTagConfig.h"
 #include "PSKException.h"
 #include "ParticleSoAHost.h"
+#include "RestartParticleCellMetadata.h"
 #include "Field.h"
 #include "Collective.h"
 #include "VCtopology3D.h"
@@ -308,6 +309,7 @@ template < class Toa > class myOutputAgent:public PSK::OutputAgent < Toa > {
   Collective *_col;
   int ns;
   std::vector < Particles * >_part;
+  const RestartParticleCellMetadata* restartParticleCellMetadata_ = nullptr;
 
 public:
   myOutputAgent(void) {;
@@ -322,6 +324,11 @@ public:
 
   void set_simulation_pointers_part(Particles * part) {
     _part.push_back(part);
+  }
+
+  void set_restart_particle_cell_metadata(
+      const RestartParticleCellMetadata* metadata) {
+    restartParticleCellMetadata_ = metadata;
   }
 
 //  void set_simulation_pointers_testpart(Particles * part) {
@@ -470,6 +477,35 @@ public:
       this->output_adaptor.write("/topology/Zleft_neighbor", _vct->getZleft_neighbor());
       this->output_adaptor.write("/topology/Zright_neighbor", _vct->getZright_neighbor());
       delete[]coord;
+    }
+
+    if (tag.find("particle_cell_metadata", 0) != string::npos) {
+      if (!restartParticleCellMetadata_ ||
+          !restartParticleCellMetadata_->valid) {
+        eprintf("Restart particle cell metadata was not prepared before HDF5 restart write");
+        return;
+      }
+
+      const int activeCells = restartParticleCellMetadata_->activeCellCount();
+      this->output_adaptor.write(
+          "/particles/active_cell_dims",
+          PSK::Dimens(3),
+          restartParticleCellMetadata_->activeCellDims.data());
+
+      for (int i = 0; i < ns; ++i) {
+        stringstream ii;
+        ii << i;
+        const auto& speciesMetadata =
+            restartParticleCellMetadata_->species[i];
+        this->output_adaptor.write(
+            "/particles/species_" + ii.str() + "/cell_offsets/cycle_" + cc.str(),
+            PSK::Dimens(activeCells),
+            speciesMetadata.cellOffsets.data());
+        this->output_adaptor.write(
+            "/particles/species_" + ii.str() + "/cell_counts/cycle_" + cc.str(),
+            PSK::Dimens(activeCells),
+            speciesMetadata.cellCounts.data());
+      }
     }
 
     // Bfield is written without ghost cells and defined in nodes.

@@ -27,14 +27,12 @@
 #include "ipicdefs.h"
 #include "debug.h"
 #include "Parameters.h"
-#include "ompdefs.h"
 #include "VCtopology3D.h"
 #include "Collective.h"
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
 #include "ParticleCommInjection.h"
 #include "Timing.h"
-#include "ParallelIO.h"
 #include "outputPrepare.h"
 #include "IOManager.h"
 
@@ -42,15 +40,14 @@
 #include "GPUFieldPacking.cuh"
 #endif
 
-//
-#ifndef NO_HDF5
-#include "OutputWrapperFPP.h"
-#endif
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
+#include <algorithm>
 #include <chrono>
+#include <fstream>
+#include <future>
+#include <iostream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 // ======= Timing Debugging =======
@@ -58,11 +55,7 @@
 // (launcher, await, MPI, planet, exchange total).
 #define ENABLE_SOA_TIMING 0
 
-#include "Moments.h" // for debugging
-
 #include "ExosphereIonization.h"
-#include <cstdlib>  // std::getenv
-#include <cstring>  // std::memcpy
 
 #include "cudaTypeDef.cuh"
 #include "momentKernel.cuh"
@@ -70,8 +63,6 @@
 #include "moverKernel.cuh"
 #include "particleExchange.cuh"
 #include "dataAnalysis.cuh"
-#include "thread"
-#include "future"
 #include "particleControlKernel.cuh"
 #include "injectionKernel.cuh"
 
@@ -412,6 +403,13 @@ int c_Solver::Init(int argc, char **argv) {
   pclNumCSV << "species" << ns-1 << std::endl;
 
   initCUDA();
+  if (Parameters::get_doWriteOutput() || restart_cycle > 0 || col->getCallFinalize()) {
+    ioManager->setRestartParticleCellMetadata(&restartParticleCellMetadata_);
+    if (ioManager->needsParticleSync(first_cycle)) {
+      outputCopyAsync(first_cycle - 1);
+      cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    }
+  }
 
   my_clock = new Timing(myrank);
 
@@ -724,8 +722,8 @@ int c_Solver::initCUDA(){
   // Pre-record eventOutputCopy on outputStream once, so that the very first
   // cycle's cudaStreamWaitEvent on it (in cudaLauncherAsync / sortAllSpecies)
   // is well-defined and resolves immediately. This eliminates the need for a
-  // "first-cycle" guard flag; cycle 0 still consumes the initial / restart-
-  // loaded host SoA mirror because outputCopyAsync() has not yet run.
+  // "first-cycle" guard flag; Init() schedules and drains an explicit first-
+  // cycle copy later when configured outputs need host particle data.
   cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
 
   // ======= Allocate merge bookkeeping =======
@@ -2353,10 +2351,10 @@ void c_Solver::WriteOutput(int cycle) {
     // labeled N restarts by executing cycle N again.
     // eventOutputCopy is pre-recorded once at init on outputStream and re-
     // recorded by every outputCopyAsync() that actually issues copies. The
-    // synchronize below is therefore always well-defined: on cycle 0 it
-    // resolves immediately and the host SoA mirror still holds the initial /
-    // restart-loaded state.
+    // synchronize below is therefore always well-defined. First-cycle output
+    // is primed during Init() when host particle data is required.
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    prepareActiveRestartParticleCellMetadata();
     // SoA data is already in host vectors after outputCopyAsync — no conversion needed
     ioManager->writeRestart(cycle);
   }
@@ -2386,6 +2384,82 @@ void c_Solver::WriteOutput(int cycle) {
   }
 }
 
+void c_Solver::ensureRestartParticleCellMetadataBuffers() {
+  const int guardedNx = grid->getNXC();
+  const int guardedNy = grid->getNYC();
+  const int guardedNz = grid->getNZC();
+  const int guardedCells = guardedNx * guardedNy * guardedNz;
+
+  restartGuardedCellOffsets_.resize(ns);
+  restartGuardedCellCounts_.resize(ns);
+  for (int s = 0; s < ns; ++s) {
+    restartGuardedCellOffsets_[s].resize(guardedCells);
+    restartGuardedCellCounts_[s].resize(guardedCells);
+  }
+
+  restartParticleCellMetadata_.resize(
+      ns, guardedNx - 2, guardedNy - 2, guardedNz - 2);
+}
+
+void c_Solver::copyRestartParticleCellMetadataFromDevice(
+    int species, cudaStream_t stream)
+{
+  const int guardedCells = grid->getNXC() * grid->getNYC() * grid->getNZC();
+  if (pclsArrayHostPtr[species]->getNOP() == 0) {
+    std::fill(restartGuardedCellOffsets_[species].begin(),
+              restartGuardedCellOffsets_[species].end(), 0);
+    std::fill(restartGuardedCellCounts_[species].begin(),
+              restartGuardedCellCounts_[species].end(), 0);
+    return;
+  }
+
+  cudaErrChk(cudaMemcpyAsync(
+      restartGuardedCellOffsets_[species].data(),
+      cellSorters[species].getCellStartOffsets(),
+      guardedCells * sizeof(int), cudaMemcpyDeviceToHost, stream));
+  cudaErrChk(cudaMemcpyAsync(
+      restartGuardedCellCounts_[species].data(),
+      cellSorters[species].getCellCounts(),
+      guardedCells * sizeof(int), cudaMemcpyDeviceToHost, stream));
+}
+
+void c_Solver::prepareActiveRestartParticleCellMetadata() {
+  ensureRestartParticleCellMetadataBuffers();
+
+  const int guardedNx = grid->getNXC();
+  const int guardedNy = grid->getNYC();
+  const int guardedNz = grid->getNZC();
+  const int expectedActiveCells =
+      restartParticleCellMetadata_.activeCellCount();
+
+  for (int s = 0; s < ns; ++s) {
+    auto& activeOffsets =
+        restartParticleCellMetadata_.species[s].cellOffsets;
+    auto& activeCounts =
+        restartParticleCellMetadata_.species[s].cellCounts;
+
+    int activeIndex = 0;
+    for (int gz = 1; gz < guardedNz - 1; ++gz) {
+      for (int gy = 1; gy < guardedNy - 1; ++gy) {
+        for (int gx = 1; gx < guardedNx - 1; ++gx) {
+          const int guardedIndex = gx + gy * guardedNx
+                                 + gz * guardedNx * guardedNy;
+          activeOffsets[activeIndex] =
+              restartGuardedCellOffsets_[s][guardedIndex];
+          activeCounts[activeIndex] =
+              restartGuardedCellCounts_[s][guardedIndex];
+          ++activeIndex;
+        }
+      }
+    }
+    if (activeIndex != expectedActiveCells) {
+      eprintf("Restart particle active-cell metadata size mismatch");
+    }
+  }
+
+  restartParticleCellMetadata_.valid = true;
+}
+
 /**
  * @brief Schedule asynchronous GPU-to-host particle copies for a future output cycle.
  *
@@ -2395,16 +2469,47 @@ void c_Solver::WriteOutput(int cycle) {
  */
 void c_Solver::outputCopyAsync(int cycle) {
   if (ioManager->needsParticleSync(cycle + 1)) {
+    const bool restartSync = ioManager->needsRestartParticleSync(cycle + 1);
+    if (restartSync) {
+      ensureRestartParticleCellMetadataBuffers();
+    }
+
     // Explicit edge: wait for every species' end-of-cycle event before reading
     // particle SoA from device. cycleEndEvent[s] is recorded on streams[s] at
     // the end of MoverAwaitAndPclExchange and so happens-after every in-place
-    // SoA write of the current cycle. By cycle 0 these events have been
-    // recorded (MoverAwaitAndPclExchange ran before WriteOutput). Using a
+    // SoA write of the current cycle. First-cycle output priming uses the
+    // events pre-recorded during CUDA initialization. Using a
     // dedicated outputStream isolates the D->H copies from the per-species
     // streams used by the next cycle's mover/sort, so those kernels can run
     // ahead in parallel with output as long as they wait on eventOutputCopy.
-    for (int s = 0; s < ns; ++s)
+    for (int s = 0; s < ns; ++s) {
+      if (restartSync) {
+        cudaErrChk(cudaStreamWaitEvent(streams[s], cycleEndEvent[s], 0));
+        cudaErrChk(cudaStreamWaitEvent(streams[s], eventOutputCopy, 0));
+
+        const uint32_t nop = pclsArrayHostPtr[s]->getNOP();
+        if (nop > 0) {
+          if (!cellSorters[s].initialized) {
+            cellSorters[s].init(*grid3DCUDAHostPtr,
+                                pclsArrayHostPtr[s]->getCapacity(),
+                                streams[s]);
+          }
+          cellSorters[s].prepareBuffers(pclsArrayHostPtr[s], streams[s]);
+          cellSorters[s].enqueueSortAsync(pclsArrayHostPtr[s],
+                                          grid3DCUDACUDAPtr,
+                                          nop, streams[s]);
+          cellSorters[s].finishSort(streams[s]);
+          cudaErrChk(cudaMemcpyAsync(
+              pclsArrayCUDAPtr[s], pclsArrayHostPtr[s],
+              sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[s]));
+        }
+
+        copyRestartParticleCellMetadataFromDevice(s, streams[s]);
+        cudaErrChk(cudaEventRecord(cycleEndEvent[s], streams[s]));
+      }
       cudaErrChk(cudaStreamWaitEvent(outputStream, cycleEndEvent[s], 0));
+    }
+
     for (int i = 0; i < ns; i++) {
       const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
       // Resize the host SoA vectors to receive the current particle count.
@@ -2440,9 +2545,8 @@ void c_Solver::WriteConserved(int cycle) {
     // does NOT block the host. Without the synchronize below, diagnostics on
     // cycle i>first_cycle can read torn / partially-copied host buffers from
     // outputCopyAsync(i-1), producing nonsense conserved quantities.
-    // eventOutputCopy is pre-recorded at init so cycle 0 / first_cycle is
-    // well-defined: the host SoA still holds the initial / restart-loaded
-    // state and the synchronize resolves immediately.
+    // eventOutputCopy is pre-recorded at init and first-cycle output is
+    // explicitly primed when configured outputs need host particle data.
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     Eenergy = EMf->getEenergy();
     Benergy = EMf->getBenergy();
@@ -2570,6 +2674,7 @@ void c_Solver::Finalize() {
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     // Final restart data is written after the last loop iteration has
     // completed, so the resume label is the next loop cycle.
+    prepareActiveRestartParticleCellMetadata();
     ioManager->writeRestart(col->getNcycles() + first_cycle);
   }
 

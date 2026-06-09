@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -65,6 +66,91 @@ bool extractLongLong(const std::string& text, const std::string& key,
     return true;
 }
 
+bool extractDouble(const std::string& text, const std::string& key,
+                   double& value)
+{
+    const std::regex expr(
+        "\"" + key + "\"\\s*:\\s*(-?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][-+]?[0-9]+)?)");
+    std::smatch match;
+    if (!std::regex_search(text, match, expr)) return false;
+    value = std::stod(match[1].str());
+    return true;
+}
+
+bool extractBool(const std::string& text, const std::string& key,
+                 bool& value)
+{
+    const std::regex expr("\"" + key + "\"\\s*:\\s*(true|false|0|1)");
+    std::smatch match;
+    if (!std::regex_search(text, match, expr)) return false;
+
+    const std::string token = match[1].str();
+    value = (token == "true" || token == "1");
+    return true;
+}
+
+void writeBool(std::ostream& out, bool value)
+{
+    out << (value ? "true" : "false");
+}
+
+bool parseMeshMetadata(const std::string& block,
+                       RestartMeshMetadata& mesh)
+{
+    std::string meshBlock;
+    if (!extractObject(block, "mesh", meshBlock)) return false;
+
+    long long tmp = 0;
+    RestartMeshMetadata parsed;
+
+    if (!extractLongLong(meshBlock, "xlen", tmp)) return false;
+    parsed.xlen = static_cast<int>(tmp);
+    if (!extractLongLong(meshBlock, "ylen", tmp)) return false;
+    parsed.ylen = static_cast<int>(tmp);
+    if (!extractLongLong(meshBlock, "zlen", tmp)) return false;
+    parsed.zlen = static_cast<int>(tmp);
+    if (!extractLongLong(meshBlock, "nranks", tmp)) return false;
+    parsed.nranks = static_cast<int>(tmp);
+
+    if (!extractLongLong(meshBlock, "nxc", tmp)) return false;
+    parsed.nxc = static_cast<int>(tmp);
+    if (!extractLongLong(meshBlock, "nyc", tmp)) return false;
+    parsed.nyc = static_cast<int>(tmp);
+    if (!extractLongLong(meshBlock, "nzc", tmp)) return false;
+    parsed.nzc = static_cast<int>(tmp);
+    if (!extractLongLong(meshBlock, "ns", tmp)) return false;
+    parsed.ns = static_cast<int>(tmp);
+
+    extractDouble(meshBlock, "lx", parsed.lx);
+    extractDouble(meshBlock, "ly", parsed.ly);
+    extractDouble(meshBlock, "lz", parsed.lz);
+    extractDouble(meshBlock, "dx", parsed.dx);
+    extractDouble(meshBlock, "dy", parsed.dy);
+    extractDouble(meshBlock, "dz", parsed.dz);
+
+    extractBool(meshBlock, "periodicX", parsed.periodicX);
+    extractBool(meshBlock, "periodicY", parsed.periodicY);
+    extractBool(meshBlock, "periodicZ", parsed.periodicZ);
+    extractBool(meshBlock, "periodicParticleX", parsed.periodicParticleX);
+    extractBool(meshBlock, "periodicParticleY", parsed.periodicParticleY);
+    extractBool(meshBlock, "periodicParticleZ", parsed.periodicParticleZ);
+    extractBool(meshBlock, "fieldsStoreActiveNodesOnly",
+                parsed.fieldsStoreActiveNodesOnly);
+    extractBool(meshBlock, "particlesStoreActiveCellsOnly",
+                parsed.particlesStoreActiveCellsOnly);
+    extractBool(meshBlock, "particlesSortedByActiveCell",
+                parsed.particlesSortedByActiveCell);
+
+    parsed.valid = parsed.xlen > 0 && parsed.ylen > 0 && parsed.zlen > 0 &&
+                   parsed.nranks == parsed.xlen * parsed.ylen * parsed.zlen &&
+                   parsed.nxc > 0 && parsed.nyc > 0 && parsed.nzc > 0 &&
+                   parsed.ns >= 0;
+    if (!parsed.valid) return false;
+
+    mesh = parsed;
+    return true;
+}
+
 bool parseCheckpointBlock(const std::string& block,
                           const std::string& rootDir,
                           const std::string& backend,
@@ -86,7 +172,6 @@ bool parseCheckpointBlock(const std::string& block,
     if (!savedBackend.empty() && savedBackend != backend) return false;
 
     checkpoint.found = true;
-    checkpoint.legacy = false;
     checkpoint.rootDir = rootDir;
     checkpoint.dataDir = RestartSlotManager::slotDir(rootDir, slot);
     checkpoint.slot = slot;
@@ -94,16 +179,23 @@ bool parseCheckpointBlock(const std::string& block,
     checkpoint.cycle = static_cast<int>(cycle);
     checkpoint.nranks = static_cast<int>(nranks);
     checkpoint.generation = generation;
+    if (!parseMeshMetadata(block, checkpoint.mesh)) {
+        eprintf("ERROR: restart checkpoint restart_%s is missing or has "
+                "invalid mesh metadata",
+                slot.c_str());
+    }
     return true;
 }
 
-bool checkpointMatchesManifest(const RestartCheckpoint& checkpoint,
-                               int expectedNranks)
+bool checkpointMatchesManifest(const RestartCheckpoint& checkpoint)
 {
     const fs::path manifestPath =
         fs::path(checkpoint.dataDir) / "manifest.json";
     const std::string manifest = readTextFile(manifestPath);
-    if (manifest.empty()) return false;
+    if (manifest.empty()) {
+        eprintf("ERROR: restart checkpoint restart_%s is missing %s",
+                checkpoint.slot.c_str(), manifestPath.string().c_str());
+    }
 
     RestartCheckpoint manifestCheckpoint;
     if (!parseCheckpointBlock(manifest, checkpoint.rootDir,
@@ -114,14 +206,13 @@ bool checkpointMatchesManifest(const RestartCheckpoint& checkpoint,
     if (manifestCheckpoint.slot != checkpoint.slot) return false;
     if (manifestCheckpoint.cycle != checkpoint.cycle) return false;
     if (manifestCheckpoint.generation != checkpoint.generation) return false;
-    if (manifestCheckpoint.nranks != expectedNranks) return false;
+    if (manifestCheckpoint.nranks != checkpoint.nranks) return false;
     return true;
 }
 
-bool checkpointHasAllRankFiles(const RestartCheckpoint& checkpoint,
-                               int expectedNranks)
+bool checkpointHasAllRankFiles(const RestartCheckpoint& checkpoint)
 {
-    for (int rank = 0; rank < expectedNranks; ++rank) {
+    for (int rank = 0; rank < checkpoint.nranks; ++rank) {
         const fs::path rankFile =
             fs::path(checkpoint.dataDir) /
             RestartSlotManager::rankFileName(checkpoint.backend, rank);
@@ -131,17 +222,17 @@ bool checkpointHasAllRankFiles(const RestartCheckpoint& checkpoint,
 }
 
 bool validateCheckpoint(const RestartCheckpoint& checkpoint,
-                        const std::string& backend,
-                        int nranks)
+                        const std::string& backend)
 {
     if (!checkpoint.found) return false;
     if (checkpoint.slot != "A" && checkpoint.slot != "B") return false;
     if (checkpoint.backend != backend) return false;
     if (checkpoint.cycle < 0) return false;
-    if (checkpoint.nranks != nranks) return false;
+    if (checkpoint.nranks <= 0) return false;
+    if (!checkpoint.mesh.valid) return false;
     if (!fs::is_directory(checkpoint.dataDir)) return false;
-    if (!checkpointMatchesManifest(checkpoint, nranks)) return false;
-    return checkpointHasAllRankFiles(checkpoint, nranks);
+    if (!checkpointMatchesManifest(checkpoint)) return false;
+    return checkpointHasAllRankFiles(checkpoint);
 }
 
 void writeTextAtomically(const fs::path& path, const std::string& text)
@@ -171,16 +262,59 @@ void writeTextAtomically(const fs::path& path, const std::string& text)
     }
 }
 
+void writeMeshObject(std::ostream& out,
+                     const RestartMeshMetadata& mesh,
+                     const std::string& indent)
+{
+    out << indent << "{\n"
+        << indent << "  \"xlen\": " << mesh.xlen << ",\n"
+        << indent << "  \"ylen\": " << mesh.ylen << ",\n"
+        << indent << "  \"zlen\": " << mesh.zlen << ",\n"
+        << indent << "  \"nranks\": " << mesh.nranks << ",\n"
+        << indent << "  \"nxc\": " << mesh.nxc << ",\n"
+        << indent << "  \"nyc\": " << mesh.nyc << ",\n"
+        << indent << "  \"nzc\": " << mesh.nzc << ",\n"
+        << indent << "  \"ns\": " << mesh.ns << ",\n"
+        << std::setprecision(17)
+        << indent << "  \"lx\": " << mesh.lx << ",\n"
+        << indent << "  \"ly\": " << mesh.ly << ",\n"
+        << indent << "  \"lz\": " << mesh.lz << ",\n"
+        << indent << "  \"dx\": " << mesh.dx << ",\n"
+        << indent << "  \"dy\": " << mesh.dy << ",\n"
+        << indent << "  \"dz\": " << mesh.dz << ",\n"
+        << indent << "  \"periodicX\": ";
+    writeBool(out, mesh.periodicX);
+    out << ",\n" << indent << "  \"periodicY\": ";
+    writeBool(out, mesh.periodicY);
+    out << ",\n" << indent << "  \"periodicZ\": ";
+    writeBool(out, mesh.periodicZ);
+    out << ",\n" << indent << "  \"periodicParticleX\": ";
+    writeBool(out, mesh.periodicParticleX);
+    out << ",\n" << indent << "  \"periodicParticleY\": ";
+    writeBool(out, mesh.periodicParticleY);
+    out << ",\n" << indent << "  \"periodicParticleZ\": ";
+    writeBool(out, mesh.periodicParticleZ);
+    out << ",\n" << indent << "  \"fieldsStoreActiveNodesOnly\": ";
+    writeBool(out, mesh.fieldsStoreActiveNodesOnly);
+    out << ",\n" << indent << "  \"particlesStoreActiveCellsOnly\": ";
+    writeBool(out, mesh.particlesStoreActiveCellsOnly);
+    out << ",\n" << indent << "  \"particlesSortedByActiveCell\": ";
+    writeBool(out, mesh.particlesSortedByActiveCell);
+    out << "\n" << indent << "}";
+}
+
 std::string checkpointJson(const RestartWriteTarget& target)
 {
     std::ostringstream out;
     out << "{\n"
-        << "  \"version\": 1,\n"
         << "  \"slot\": \"" << target.slot << "\",\n"
         << "  \"generation\": " << target.generation << ",\n"
         << "  \"cycle\": " << target.cycle << ",\n"
         << "  \"backend\": \"" << target.backend << "\",\n"
-        << "  \"nranks\": " << target.nranks << "\n"
+        << "  \"nranks\": " << target.nranks << ",\n"
+        << "  \"mesh\": ";
+    writeMeshObject(out, target.mesh, "  ");
+    out << "\n"
         << "}\n";
     return out.str();
 }
@@ -194,8 +328,11 @@ void writeCheckpointObject(std::ostream& out,
         << indent << "  \"generation\": " << checkpoint.generation << ",\n"
         << indent << "  \"cycle\": " << checkpoint.cycle << ",\n"
         << indent << "  \"backend\": \"" << checkpoint.backend << "\",\n"
-        << indent << "  \"nranks\": " << checkpoint.nranks << "\n"
-        << indent << "}";
+        << indent << "  \"nranks\": " << checkpoint.nranks << ",\n"
+        << indent << "  \"mesh\": ";
+    writeMeshObject(out, checkpoint.mesh, indent + "  ");
+    out << "\n";
+    out << indent << "}";
 }
 
 std::string latestJson(const RestartWriteTarget& target)
@@ -209,15 +346,15 @@ std::string latestJson(const RestartWriteTarget& target)
     latest.cycle = target.cycle;
     latest.nranks = target.nranks;
     latest.generation = target.generation;
+    latest.mesh = target.mesh;
 
     std::ostringstream out;
     out << "{\n"
-        << "  \"version\": 1,\n"
         << "  \"latest\": ";
     writeCheckpointObject(out, latest, "  ");
     out << ",\n"
         << "  \"previous\": ";
-    if (target.previous.found && !target.previous.legacy) {
+    if (target.previous.found) {
         writeCheckpointObject(out, target.previous, "  ");
         out << "\n";
     } else {
@@ -231,13 +368,15 @@ std::string latestJson(const RestartWriteTarget& target)
 
 void RestartSlotManager::init(const std::string& rootDir,
                               const std::string& backend,
-                              int rank, int nranks)
+                              int rank, int nranks,
+                              const RestartMeshMetadata& mesh)
 {
     rootDir_ = rootDir;
     backend_ = backend;
     rank_ = rank;
     nranks_ = nranks;
-    latest_ = resolveLatest(rootDir_, backend_, nranks_);
+    mesh_ = mesh;
+    latest_ = resolveLatest(rootDir_, backend_);
     initialized_ = true;
 }
 
@@ -254,6 +393,7 @@ RestartWriteTarget RestartSlotManager::beginWrite(int cycle)
     target.rank = rank_;
     target.nranks = nranks_;
     target.previous = latest_;
+    target.mesh = mesh_;
 
     if (!latest_.found) {
         target.slot = "A";
@@ -291,7 +431,6 @@ void RestartSlotManager::publishIfRoot(const RestartWriteTarget& target) const
 void RestartSlotManager::completeLocal(const RestartWriteTarget& target)
 {
     latest_.found = true;
-    latest_.legacy = false;
     latest_.rootDir = target.rootDir;
     latest_.dataDir = target.dataDir;
     latest_.slot = target.slot;
@@ -299,11 +438,11 @@ void RestartSlotManager::completeLocal(const RestartWriteTarget& target)
     latest_.cycle = target.cycle;
     latest_.nranks = target.nranks;
     latest_.generation = target.generation;
+    latest_.mesh = target.mesh;
 }
 
 RestartCheckpoint RestartSlotManager::resolveLatest(const std::string& rootDir,
-                                                    const std::string& backend,
-                                                    int nranks)
+                                                    const std::string& backend)
 {
     const fs::path latestPath = fs::path(rootDir) / "latest_restart.json";
     const std::string latestText = readTextFile(latestPath);
@@ -313,7 +452,7 @@ RestartCheckpoint RestartSlotManager::resolveLatest(const std::string& rootDir,
     RestartCheckpoint latest;
     if (extractObject(latestText, "latest", latestBlock) &&
         parseCheckpointBlock(latestBlock, rootDir, backend, latest) &&
-        validateCheckpoint(latest, backend, nranks)) {
+        validateCheckpoint(latest, backend)) {
         return latest;
     }
 
@@ -321,11 +460,32 @@ RestartCheckpoint RestartSlotManager::resolveLatest(const std::string& rootDir,
     RestartCheckpoint previous;
     if (extractObject(latestText, "previous", previousBlock) &&
         parseCheckpointBlock(previousBlock, rootDir, backend, previous) &&
-        validateCheckpoint(previous, backend, nranks)) {
+        validateCheckpoint(previous, backend)) {
         return previous;
     }
 
     return RestartCheckpoint();
+}
+
+RestartCheckpoint RestartSlotManager::readManifest(const std::string& dataDir,
+                                                   const std::string& backend)
+{
+    const fs::path manifestPath = fs::path(dataDir) / "manifest.json";
+    const std::string manifest = readTextFile(manifestPath);
+    if (manifest.empty()) {
+        eprintf("ERROR: restart directory %s does not contain manifest.json. "
+                "Legacy flat restarts are unsupported.",
+                dataDir.c_str());
+    }
+
+    fs::path rootPath = fs::path(dataDir).parent_path();
+    RestartCheckpoint checkpoint;
+    if (!parseCheckpointBlock(manifest, rootPath.string(), backend, checkpoint)) {
+        eprintf("ERROR: malformed restart manifest in %s",
+                manifestPath.string().c_str());
+    }
+    checkpoint.dataDir = dataDir;
+    return checkpoint;
 }
 
 std::string RestartSlotManager::backendName()

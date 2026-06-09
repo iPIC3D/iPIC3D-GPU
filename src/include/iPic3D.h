@@ -49,8 +49,11 @@ using std::string;
 #include "ParticleSoAHost.h"
 #include "ParticleCommInjection.h"
 #include "HeatFluxComponents.h"
+#include "RestartParticleCellMetadata.h"
 
 #include <fstream>
+#include <future>
+#include <vector>
 
 class IOManager;   // modular I/O manager (see IOManager.h)
 
@@ -258,6 +261,12 @@ namespace iPic3D {
     void finishHeatFluxForOutput(int cycle);
     /** @brief Return true when this cycle's configured field output needs heat flux. */
     bool needsHeatFluxOutput(int cycle) const;
+    /** @brief Ensure restart particle cell metadata buffers match the local grid. */
+    void ensureRestartParticleCellMetadataBuffers();
+    /** @brief Copy guarded sorter cell metadata for one species to host staging. */
+    void copyRestartParticleCellMetadataFromDevice(int species, cudaStream_t stream);
+    /** @brief Convert guarded sorter cell metadata to active-cell restart metadata. */
+    void prepareActiveRestartParticleCellMetadata();
     /**
      * @brief Register one species' host moment arrays as pinned memory.
      *
@@ -297,6 +306,10 @@ namespace iPic3D {
     std::ofstream pclNumCSV;
 
     IOManager     *ioManager; // modular I/O manager (owns backends)
+
+    RestartParticleCellMetadata restartParticleCellMetadata_;
+    std::vector<std::vector<int>> restartGuardedCellOffsets_;
+    std::vector<std::vector<int>> restartGuardedCellCounts_;
 
 
     int cudaDeviceOnNode; // the device this rank should use

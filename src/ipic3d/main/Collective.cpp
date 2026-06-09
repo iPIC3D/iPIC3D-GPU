@@ -588,7 +588,7 @@ void Collective::ReadInput(string inputfile) {
     RestartReadDirName = RestartDirName;
     restart_status = 1;
 
-    // Resolve A/B restart metadata if present, otherwise use the legacy layout.
+    // Resolve the selected A/B restart checkpoint.
     RestartCheckpoint checkpoint =
         RestartReader::resolveLatestCheckpoint(RestartDirName);
     RestartReadDirName = checkpoint.dataDir;

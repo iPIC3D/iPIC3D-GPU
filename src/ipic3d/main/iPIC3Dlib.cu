@@ -27,37 +27,30 @@
 #include "ipicdefs.h"
 #include "debug.h"
 #include "Parameters.h"
-#include "ompdefs.h"
 #include "VCtopology3D.h"
 #include "Collective.h"
 #include "Grid3DCU.h"
 #include "EMfields3D.h"
 #include "ParticleCommInjection.h"
 #include "Timing.h"
-#include "ParallelIO.h"
 #include "outputPrepare.h"
 #include "IOManager.h"
-//
-#ifndef NO_HDF5
-#include "OutputWrapperFPP.h"
-#endif
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <chrono>
-#include <vector>
 #include <algorithm>
+#include <chrono>
+#include <fstream>
+#include <future>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
 
 // ======= Timing Debugging =======
 // Set to 1 to enable per-phase timing printfs
 // (launcher, await, MPI, planet, exchange total).
 #define ENABLE_SOA_TIMING 0
 
-#include "Moments.h" // for debugging
-
 #include "ExosphereIonization.h"
-#include <cstring>  // std::memcpy
 
 #include "cudaTypeDef.cuh"
 #include "momentKernel.cuh"
@@ -65,8 +58,6 @@
 #include "moverKernel.cuh"
 #include "particleExchange.cuh"
 #include "dataAnalysis.cuh"
-#include "thread"
-#include "future"
 #include "particleControlKernel.cuh"
 #include "injectionKernel.cuh"
 

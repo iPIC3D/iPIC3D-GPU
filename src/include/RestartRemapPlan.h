@@ -77,7 +77,5 @@ private:
 };
 
 RestartRankBox restartRankBoxFor(const RestartMeshMetadata& mesh, int rank);
-int restartRankFromCoord(const RestartMeshMetadata& mesh,
-                         int x, int y, int z);
 
 #endif // RESTART_REMAP_PLAN_H

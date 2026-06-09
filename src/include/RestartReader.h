@@ -6,8 +6,7 @@
  * logic (ADIOS2 and HDF5 backends) lives here.
  *
  * Usage:
- *   - Standalone via static helpers (readLastCycle) during early init
- *   - Through IOManager::readFieldRestart / readParticlesRestart
+ *   - Standalone via static helpers during early init
  *   - Through Collective thin wrappers
  */
 
@@ -30,16 +29,6 @@ public:
     // ---------------------------------------------------------------
     // Static helpers (usable before IOManager / RestartReader exist)
     // ---------------------------------------------------------------
-
-    /**
-     * @brief Read the checkpoint cycle label from the restart directory.
-     *
-     * Resolves A/B restart metadata and returns the checkpoint cycle label.
-     *
-     * @param restartDir  Path to the directory containing restart files.
-     * @return            The loop cycle to execute first after restart.
-     */
-    static int readLastCycle(const std::string& restartDir);
 
     /**
      * @brief Resolve the checkpoint directory and cycle label to read.

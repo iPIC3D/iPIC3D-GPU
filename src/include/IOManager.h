@@ -10,10 +10,7 @@
 #define IO_MANAGER_H
 
 #include "ipicfwd.h"
-#include "arraysfwd.h"        // arr3_double, array4_double
-#include "aligned_vector.h"   // vector_double
 #include "RestartSlotManager.h"
-#include <string>
 #include <vector>
 
 struct RestartParticleCellMetadata;
@@ -95,55 +92,6 @@ public:
      *              cycle that a restart will execute first.
      */
     void writeRestart(int cycle);
-
-    // ======= Restart read methods =======
-
-    /**
-     * @brief Read EM fields and species densities from a restart checkpoint.
-     *
-     * Delegates to RestartReader::readFields using the restart directory
-     * and last cycle stored in the Collective configuration.
-     *
-     * @param vct MPI topology descriptor.
-     * @param grid Local grid descriptor.
-     * @param Bxn Restart target array for magnetic field Bx on nodes.
-     * @param Byn Restart target array for magnetic field By on nodes.
-     * @param Bzn Restart target array for magnetic field Bz on nodes.
-     * @param Ex Restart target array for electric field Ex on nodes.
-     * @param Ey Restart target array for electric field Ey on nodes.
-     * @param Ez Restart target array for electric field Ez on nodes.
-     * @param rhons Restart target arrays for per-species charge density.
-     * @param ns Number of particle species.
-     */
-    void readFieldRestart(
-        const VCtopology3D* vct, const Grid3DCU* grid,
-        arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
-        arr3_double Ex,  arr3_double Ey,  arr3_double Ez,
-        array4_double* rhons, int ns);
-
-    /**
-     * @brief Read particle data from a restart checkpoint.
-     *
-     * Delegates to RestartReader::readParticles using the restart directory
-     * and last cycle stored in the Collective configuration.
-     *
-     * @param vct MPI topology descriptor.
-     * @param species_number Species index to read.
-     * @param u Restart target vector for x-velocity.
-     * @param v Restart target vector for y-velocity.
-     * @param w Restart target vector for z-velocity.
-     * @param q Restart target vector for particle charge/weight.
-     * @param x Restart target vector for x-position.
-     * @param y Restart target vector for y-position.
-     * @param z Restart target vector for z-position.
-     * @param t Restart target vector for particle tag/time.
-     */
-    void readParticlesRestart(
-        const VCtopology3D* vct, int species_number,
-        vector_double& u, vector_double& v, vector_double& w,
-        vector_double& q,
-        vector_double& x, vector_double& y, vector_double& z,
-        vector_double& t);
 
     /**
      * @brief Close output files and release backend resources.

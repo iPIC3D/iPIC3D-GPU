@@ -190,9 +190,25 @@ The rank-file format depends on the compile-time backend:
 - **ADIOS2** (`USE_ADIOS2=ON`, default): `restart_A/restart_<rank>.bp` or `restart_B/restart_<rank>.bp`.
 - **Serial HDF5** (`USE_ADIOS2=OFF`, `USE_HDF5=ON`): `restart_A/restart<rank>.hdf` or `restart_B/restart<rank>.hdf`.
 
-On restart, the reader uses `latest_restart.json` to select the newest valid slot. If that slot is incomplete, it tries the previous slot recorded in the metadata. If no A/B metadata exists, it falls back to the legacy flat layout directly inside `RestartDirName`.
+On restart, the reader uses `latest_restart.json` to select the newest valid slot. If that slot is incomplete, it tries the previous slot recorded in the metadata. Legacy flat restart layouts directly inside `RestartDirName` are not supported. The slot manifest records the cycle label, backend, source rank count, and mesh metadata used for compatibility checks and remapping.
 
-**Important:** you must restart with the **same number of MPI processes** as the original run, since each rank reads its own file.
+### Restart remapping
+
+Restart files store only active data: fields and species density on active nodes (`NXN - 2`, `NYN - 2`, `NZN - 2`), and particles sorted by active cell with per-species offset/count metadata. Ghost nodes are rebuilt after loading.
+
+The restart reader can load a checkpoint onto a different MPI topology when all of these conditions hold:
+
+- The global mesh cell counts (`nxc`, `nyc`, `nzc`) are unchanged.
+- The destination topology refines the source topology by powers of two in each direction; coarsening and arbitrary factors are not supported.
+- The checkpoint contains active-node fields and active-cell particle metadata. Current restart files write this format.
+
+`RestartRemapPlan` maps each destination rank to overlapping source active boxes. Fields are copied into guarded arrays at `[1][1][1]`; particles are read as the sorted spans belonging to the destination rank.
+
+### Particle restart loading
+
+Particle reads are span-based and chunked. Cell offset/count metadata is converted into merged spans, the destination host SoA is resized once, then spans are streamed through temporary buffers of at most `1 << 20` particles per component.
+
+The host restart SoA is sized to the restarted count, padded to `DVECWIDTH`. CUDA device SoA allocation still uses `INITIAL_CAPACITY_FACTOR` and can expand later.
 
 ### Input file parameters
 
@@ -236,14 +252,14 @@ For a final checkpoint, the payload is written after the last cycle has complete
 ### What happens during restart initialisation
 
 1. **Input file is read** — all simulation parameters (grid, species, BCs, etc.) are taken from the input file, same as a fresh start.
-2. **Fields** — the case-specific field initialiser is called, but on restart most cases (GEM, Dipole, etc.) detect the restart flag internally and delegate to `init()`, which calls `read_field_restart()` to load B, E, and rho from the checkpoint. Some cases (e.g. Dipole) still set up auxiliary data (external dipolar field) before loading the checkpoint.
-3. **Particles** — instead of generating particles from a distribution function, `restartLoad()` reads positions, velocities, charges, and IDs from the per-rank restart file.
+2. **Fields** — the case-specific field initialiser runs, then `read_field_restart()` loads B, E, and rho, remapping active-node boxes when needed. Ghost nodes and center fields are rebuilt after load.
+3. **Particles** — `restartLoad()` reads positions, velocities, charges, and IDs from the selected slot. With remapping, active-cell metadata selects the source spans for this destination rank.
 4. **Output directory** — the output folder is **not** cleared on restart. Output files are opened in append mode.
 
 ### Requirements
 
 - Restart requires either **ADIOS2** (`USE_ADIOS2=ON`) or **HDF5** (`USE_HDF5=ON`) at compile time. If neither is available, restart will produce a fatal error. The HDF5 restart path is less tested than ADIOS2.
-- The MPI topology (`XLEN × YLEN × ZLEN`) must match between the original and restarted runs.
+- Restart requires the same global mesh dimensions and compatible boundary/input parameters. The MPI topology may either match the checkpoint topology or be refined by powers of two in each direction, as described above.
 
 ## Simulation Cases
 

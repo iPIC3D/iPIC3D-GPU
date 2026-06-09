@@ -14,7 +14,6 @@
 #include "ParallelIO.h"    // free VTK/H5hut/PHDF5 write functions
 #include "debug.h"         // eprintf, warning_printf
 #include "Parameters.h"
-#include "RestartReader.h"  // restart reading
 #include "RestartParticleCellMetadata.h"
 #include "RestartMeshMetadata.h"
 #include "MPIdata.h"
@@ -420,31 +419,6 @@ void IOManager::writeRestart(int cycle) {
 
     restartSlots_.publishIfRoot(target);
     restartSlots_.completeLocal(target);
-}
-
-// ======= Restart reading =======
-
-void IOManager::readFieldRestart(
-    const VCtopology3D* vct, const Grid3DCU* grid,
-    arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
-    arr3_double Ex,  arr3_double Ey,  arr3_double Ez,
-    array4_double* rhons, int ns)
-{
-    RestartReader::readFields(
-        vct, grid, Bxn, Byn, Bzn, Ex, Ey, Ez, rhons, ns,
-        col_->getRestartReadDirName(), col_->getLast_cycle());
-}
-
-void IOManager::readParticlesRestart(
-    const VCtopology3D* vct, int species_number,
-    vector_double& u, vector_double& v, vector_double& w,
-    vector_double& q,
-    vector_double& x, vector_double& y, vector_double& z,
-    vector_double& t)
-{
-    RestartReader::readParticles(
-        vct, species_number, u, v, w, q, x, y, z, t,
-        col_->getRestartReadDirName(), col_->getLast_cycle());
 }
 
 // ======= Finalization =======

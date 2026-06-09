@@ -17,6 +17,7 @@
 #include "ipicmath.h"       // roundup_to_multiple
 #include "CUDA/cudaTypeDef.cuh"  // cudaCommonType
 
+#include <array>
 #include <sstream>
 #include <string>
 #include <iostream>
@@ -101,6 +102,31 @@ size_t boxValueCount(const RestartBox3D& box)
     return static_cast<size_t>(box.nx()) *
            static_cast<size_t>(box.ny()) *
            static_cast<size_t>(box.nz());
+}
+
+template <typename T>
+void scatterActiveNodeBufferToGuardedArray(const RestartNodeCopy& copy,
+                                           const T* src,
+                                           arr3_double dst)
+{
+    size_t index = 0;
+    const auto nx_ = copy.destinationLocal.nx();
+    const auto ny_ = copy.destinationLocal.ny();
+    const auto nz_ = copy.destinationLocal.nz();
+    const auto x_begin = copy.destinationLocal.x.begin;
+    const auto y_begin = copy.destinationLocal.y.begin;
+    const auto z_begin = copy.destinationLocal.z.begin;
+
+    for (int ix = 0; ix < nx_; ++ix) {
+        for (int iy = 0; iy < ny_; ++iy) {
+            for (int iz = 0; iz < nz_; ++iz) {
+                dst[x_begin + ix + 1]
+                   [y_begin + iy + 1]
+                   [z_begin + iz + 1] =
+                    static_cast<double>(src[index++]);
+            }
+        }
+    }
 }
 
 struct ParticleReadSpan {
@@ -209,6 +235,19 @@ void appendParticleSpansForCopy(
     }
 }
 
+struct RestartParticleCellLayout {
+    std::array<int, 3> activeCellDims = {{0, 0, 0}};
+    std::vector<int> offsets;
+    std::vector<int> counts;
+
+    size_t activeCellCount() const
+    {
+        return static_cast<size_t>(activeCellDims[0]) *
+               static_cast<size_t>(activeCellDims[1]) *
+               static_cast<size_t>(activeCellDims[2]);
+    }
+};
+
 long long totalParticleSpanCount(const std::vector<ParticleReadSpan>& spans)
 {
     long long total = 0;
@@ -264,6 +303,34 @@ void copyChunkToParticleVectors(
 
 constexpr long long kRestartParticleChunkSize = 1LL << 20;
 
+template <typename ReadChunk>
+void readParticleSpanChunks(
+    const ParticleReadSpan& span,
+    RestartParticleChunkBuffers& buffers,
+    long long& destinationOffset,
+    vector_double& u, vector_double& v, vector_double& w,
+    vector_double& q,
+    vector_double& x, vector_double& y, vector_double& z,
+    vector_double& t,
+    ReadChunk readChunk)
+{
+    long long remaining = span.count;
+    long long sourceOffset = span.offset;
+    while (remaining > 0) {
+        const size_t chunk =
+            static_cast<size_t>(
+                std::min<long long>(remaining, kRestartParticleChunkSize));
+
+        readChunk(sourceOffset, chunk, buffers);
+        copyChunkToParticleVectors(buffers, chunk, destinationOffset,
+                                   u, v, w, q, x, y, z, t);
+
+        sourceOffset += static_cast<long long>(chunk);
+        destinationOffset += static_cast<long long>(chunk);
+        remaining -= static_cast<long long>(chunk);
+    }
+}
+
 #ifdef USE_ADIOS2
 
 std::string dimsToString(const adios2::Dims& dims)
@@ -276,6 +343,28 @@ std::string dimsToString(const adios2::Dims& dims)
     }
     ss << "}";
     return ss.str();
+}
+
+bool beginLastAdiosStep(adios2::Engine& engine, int last_cycle)
+{
+    const auto stepNum = engine.Steps();
+    for (unsigned int step = 0;
+         engine.BeginStep() == adios2::StepStatus::OK; ++step) {
+        if (step < stepNum - 1) {
+            engine.EndStep();
+            continue;
+        }
+
+        int fileCycle = -1;
+        engine.Get<int>("cycle", fileCycle, adios2::Mode::Sync);
+        if (fileCycle != last_cycle) {
+            engine.EndStep();
+            eprintf("restart cycle label in source rank file does not "
+                    "match the selected checkpoint label");
+        }
+        return true;
+    }
+    return false;
 }
 
 class AdiosActiveNodeRemapReader {
@@ -323,17 +412,7 @@ public:
         var.SetSelection({start, count});
         engine.Get<cudaCommonType>(var, buffer_.data(), adios2::Mode::Sync);
 
-        size_t index = 0;
-        for (int ix = 0; ix < copy.destinationLocal.nx(); ++ix) {
-            for (int iy = 0; iy < copy.destinationLocal.ny(); ++iy) {
-                for (int iz = 0; iz < copy.destinationLocal.nz(); ++iz) {
-                    dst[copy.destinationLocal.x.begin + ix + 1]
-                       [copy.destinationLocal.y.begin + iy + 1]
-                       [copy.destinationLocal.z.begin + iz + 1] =
-                        static_cast<double>(buffer_[index++]);
-                }
-            }
-        }
+        scatterActiveNodeBufferToGuardedArray(copy, buffer_.data(), dst);
     }
 
 private:
@@ -345,7 +424,8 @@ public:
     void readMetadata(adios2::IO& io, adios2::Engine& engine,
                       int species,
                       const RestartCellCopy& copy,
-                      const RestartMeshMetadata& sourceMesh)
+                      const RestartMeshMetadata& sourceMesh,
+                      RestartParticleCellLayout& layout)
     {
         auto dimsVar = io.InquireVariable<int>("activeCellDims");
         if (!dimsVar) {
@@ -355,13 +435,8 @@ public:
         dimsVar.SetSelection({{0}, {3}});
         engine.Get<int>(dimsVar, dimsRaw, adios2::Mode::Sync);
 
-        activeCellDims_ = {{dimsRaw[0], dimsRaw[1], dimsRaw[2]}};
-        validateSourceActiveCellDims(copy, sourceMesh, activeCellDims_);
-
-        const size_t activeCells =
-            static_cast<size_t>(activeCellDims_[0]) *
-            static_cast<size_t>(activeCellDims_[1]) *
-            static_cast<size_t>(activeCellDims_[2]);
+        layout.activeCellDims = {{dimsRaw[0], dimsRaw[1], dimsRaw[2]}};
+        validateSourceActiveCellDims(copy, sourceMesh, layout.activeCellDims);
 
         const std::string spec = std::to_string(species);
         auto offsetsVar =
@@ -372,19 +447,15 @@ public:
             eprintf("ERROR: ADIOS2 restart particle cell metadata is missing");
         }
 
-        offsets_.resize(activeCells);
-        counts_.resize(activeCells);
+        const size_t activeCells = layout.activeCellCount();
+        layout.offsets.resize(activeCells);
+        layout.counts.resize(activeCells);
         offsetsVar.SetSelection({{0}, {activeCells}});
         countsVar.SetSelection({{0}, {activeCells}});
-        engine.Get<int>(offsetsVar, offsets_.data(), adios2::Mode::Sync);
-        engine.Get<int>(countsVar, counts_.data(), adios2::Mode::Sync);
-    }
-
-    void appendSpans(const RestartCellCopy& copy,
-                     std::vector<ParticleReadSpan>& spans) const
-    {
-        appendParticleSpansForCopy(copy, activeCellDims_,
-                                   offsets_, counts_, spans);
+        engine.Get<int>(offsetsVar, layout.offsets.data(),
+                        adios2::Mode::Sync);
+        engine.Get<int>(countsVar, layout.counts.data(),
+                        adios2::Mode::Sync);
     }
 
     void readChunk(adios2::IO& io, adios2::Engine& engine,
@@ -392,24 +463,24 @@ public:
                    RestartParticleChunkBuffers& buffers)
     {
         buffers.resize(count, false);
-        const std::string spec = std::to_string(species);
+        const std::string prefix = "part" + std::to_string(species);
 
-        readDoubleVariable(io, engine, "part" + spec + "VelocityU",
-                           offset, count, buffers.u.data());
-        readDoubleVariable(io, engine, "part" + spec + "VelocityV",
-                           offset, count, buffers.v.data());
-        readDoubleVariable(io, engine, "part" + spec + "VelocityW",
-                           offset, count, buffers.w.data());
-        readDoubleVariable(io, engine, "part" + spec + "charge",
-                           offset, count, buffers.q.data());
-        readDoubleVariable(io, engine, "part" + spec + "PositionX",
-                           offset, count, buffers.x.data());
-        readDoubleVariable(io, engine, "part" + spec + "PositionY",
-                           offset, count, buffers.y.data());
-        readDoubleVariable(io, engine, "part" + spec + "PositionZ",
-                           offset, count, buffers.z.data());
-        readDoubleVariable(io, engine, "part" + spec + "ID",
-                           offset, count, buffers.t.data());
+        readDoubleVariable(io, engine, prefix + "VelocityU", offset, count,
+                           buffers.u.data());
+        readDoubleVariable(io, engine, prefix + "VelocityV", offset, count,
+                           buffers.v.data());
+        readDoubleVariable(io, engine, prefix + "VelocityW", offset, count,
+                           buffers.w.data());
+        readDoubleVariable(io, engine, prefix + "charge", offset, count,
+                           buffers.q.data());
+        readDoubleVariable(io, engine, prefix + "PositionX", offset, count,
+                           buffers.x.data());
+        readDoubleVariable(io, engine, prefix + "PositionY", offset, count,
+                           buffers.y.data());
+        readDoubleVariable(io, engine, prefix + "PositionZ", offset, count,
+                           buffers.z.data());
+        readDoubleVariable(io, engine, prefix + "ID", offset, count,
+                           buffers.t.data());
     }
 
 private:
@@ -427,10 +498,6 @@ private:
         var.SetSelection({{static_cast<size_t>(offset)}, {count}});
         engine.Get<cudaCommonType>(var, dst, adios2::Mode::Sync);
     }
-
-    std::array<int, 3> activeCellDims_ = {{0, 0, 0}};
-    std::vector<int> offsets_;
-    std::vector<int> counts_;
 };
 
 #endif
@@ -504,17 +571,7 @@ public:
                     "dataset %s", datasetPath.c_str());
         }
 
-        size_t index = 0;
-        for (int ix = 0; ix < copy.destinationLocal.nx(); ++ix) {
-            for (int iy = 0; iy < copy.destinationLocal.ny(); ++iy) {
-                for (int iz = 0; iz < copy.destinationLocal.nz(); ++iz) {
-                    dst[copy.destinationLocal.x.begin + ix + 1]
-                       [copy.destinationLocal.y.begin + iy + 1]
-                       [copy.destinationLocal.z.begin + iz + 1] =
-                        buffer_[index++];
-                }
-            }
-        }
+        scatterActiveNodeBufferToGuardedArray(copy, buffer_.data(), dst);
     }
 
 private:
@@ -527,30 +584,25 @@ public:
                       int species,
                       int last_cycle,
                       const RestartCellCopy& copy,
-                      const RestartMeshMetadata& sourceMesh)
+                      const RestartMeshMetadata& sourceMesh,
+                      RestartParticleCellLayout& layout)
     {
         readIntDataset(file_id, "/particles/active_cell_dims", dimsBuffer_);
         if (dimsBuffer_.size() != 3) {
             eprintf("ERROR: HDF5 restart active_cell_dims has invalid size");
         }
-        activeCellDims_ = {{dimsBuffer_[0], dimsBuffer_[1], dimsBuffer_[2]}};
-        validateSourceActiveCellDims(copy, sourceMesh, activeCellDims_);
+        layout.activeCellDims =
+            {{dimsBuffer_[0], dimsBuffer_[1], dimsBuffer_[2]}};
+        validateSourceActiveCellDims(copy, sourceMesh, layout.activeCellDims);
 
         const std::string cycle = "cycle_" + std::to_string(last_cycle);
         const std::string speciesPath =
             "/particles/species_" + std::to_string(species);
 
         readIntDataset(file_id, speciesPath + "/cell_offsets/" + cycle,
-                       offsets_);
+                       layout.offsets);
         readIntDataset(file_id, speciesPath + "/cell_counts/" + cycle,
-                       counts_);
-    }
-
-    void appendSpans(const RestartCellCopy& copy,
-                     std::vector<ParticleReadSpan>& spans) const
-    {
-        appendParticleSpansForCopy(copy, activeCellDims_,
-                                   offsets_, counts_, spans);
+                       layout.counts);
     }
 
     void readChunk(hid_t file_id, int species, int last_cycle,
@@ -576,7 +628,6 @@ public:
                             offset, count, buffers.y.data());
         readDoubleSelection(file_id, speciesPath + "/z/" + cycle,
                             offset, count, buffers.z.data());
-
         readLongSelection(file_id, speciesPath + "/ID/" + cycle,
                           offset, count, buffers.idLong.data());
         for (size_t i = 0; i < count; ++i) {
@@ -689,10 +740,7 @@ private:
                       offset, count, dst);
     }
 
-    std::array<int, 3> activeCellDims_ = {{0, 0, 0}};
     std::vector<int> dimsBuffer_;
-    std::vector<int> offsets_;
-    std::vector<int> counts_;
 };
 
 #endif
@@ -751,17 +799,16 @@ struct RestartReadContext {
     int zlen = 0;
     int nranks = 0;
     bool gridValidated = false;
+    RestartParticleCellLayout particleCellLayout;
     RestartParticleChunkBuffers particleBuffers;
     std::vector<ParticleReadSpan> particleSpans;
 #ifdef USE_ADIOS2
     AdiosActiveNodeRemapReader adiosFieldReader;
-    AdiosParticleRemapReader adiosParticleMetadataReader;
-    AdiosParticleRemapReader adiosParticleDataReader;
+    AdiosParticleRemapReader adiosParticleReader;
 #endif
 #ifndef NO_HDF5
     Hdf5ActiveNodeRemapReader hdf5FieldReader;
-    Hdf5ParticleRemapReader hdf5ParticleMetadataReader;
-    Hdf5ParticleRemapReader hdf5ParticleDataReader;
+    Hdf5ParticleRemapReader hdf5ParticleReader;
 #endif
 };
 
@@ -830,80 +877,38 @@ void readAdiosFieldsRemapped(
         adios2::Engine engineField =
             ioField.Open(name_file, adios2::Mode::Read);
 
-        const auto stepNum = engineField.Steps();
-        bool readStep = false;
-        for (unsigned int step = 0;
-             engineField.BeginStep() == adios2::StepStatus::OK; ++step) {
-            if (step < stepNum - 1) {
-                engineField.EndStep();
-                continue;
-            }
-
-            int fileCycle = -1;
-            engineField.Get<int>("cycle", fileCycle, adios2::Mode::Sync);
-            if (fileCycle != context.lastCycle) {
-                engineField.EndStep();
-                engineField.Close();
-                eprintf("restart cycle label in source rank file does not "
-                        "match the selected checkpoint label");
-            }
-
-            context.adiosFieldReader.readInto(ioField, engineField, "Bx",
-                                              copy, plan.sourceMesh(), Bxn);
-            context.adiosFieldReader.readInto(ioField, engineField, "By",
-                                              copy, plan.sourceMesh(), Byn);
-            context.adiosFieldReader.readInto(ioField, engineField, "Bz",
-                                              copy, plan.sourceMesh(), Bzn);
-            context.adiosFieldReader.readInto(ioField, engineField, "Ex",
-                                              copy, plan.sourceMesh(), Ex);
-            context.adiosFieldReader.readInto(ioField, engineField, "Ey",
-                                              copy, plan.sourceMesh(), Ey);
-            context.adiosFieldReader.readInto(ioField, engineField, "Ez",
-                                              copy, plan.sourceMesh(), Ez);
-
-            for (int i = 0; i < ns; i++) {
-                arr3_double rhoSpecies(rhons->fetch_arr4()[i],
-                                       grid->getNXN(),
-                                       grid->getNYN(),
-                                       grid->getNZN());
-                context.adiosFieldReader.readInto(
-                    ioField, engineField,
-                    "rhosSpecies" + std::to_string(i),
-                    copy, plan.sourceMesh(), rhoSpecies);
-            }
-
-            engineField.EndStep();
-            readStep = true;
-            break;
-        }
-
-        engineField.Close();
-        if (!readStep) {
+        if (!beginLastAdiosStep(engineField, context.lastCycle)) {
+            engineField.Close();
             eprintf("ERROR: ADIOS2 restart file did not contain a readable step");
         }
-    }
-}
 
-bool beginLastAdiosStep(adios2::Engine& engine, int last_cycle)
-{
-    const auto stepNum = engine.Steps();
-    for (unsigned int step = 0;
-         engine.BeginStep() == adios2::StepStatus::OK; ++step) {
-        if (step < stepNum - 1) {
-            engine.EndStep();
-            continue;
+        context.adiosFieldReader.readInto(ioField, engineField, "Bx",
+                                          copy, plan.sourceMesh(), Bxn);
+        context.adiosFieldReader.readInto(ioField, engineField, "By",
+                                          copy, plan.sourceMesh(), Byn);
+        context.adiosFieldReader.readInto(ioField, engineField, "Bz",
+                                          copy, plan.sourceMesh(), Bzn);
+        context.adiosFieldReader.readInto(ioField, engineField, "Ex",
+                                          copy, plan.sourceMesh(), Ex);
+        context.adiosFieldReader.readInto(ioField, engineField, "Ey",
+                                          copy, plan.sourceMesh(), Ey);
+        context.adiosFieldReader.readInto(ioField, engineField, "Ez",
+                                          copy, plan.sourceMesh(), Ez);
+
+        for (int i = 0; i < ns; i++) {
+            arr3_double rhoSpecies(rhons->fetch_arr4()[i],
+                                   grid->getNXN(),
+                                   grid->getNYN(),
+                                   grid->getNZN());
+            context.adiosFieldReader.readInto(
+                ioField, engineField,
+                "rhosSpecies" + std::to_string(i),
+                copy, plan.sourceMesh(), rhoSpecies);
         }
 
-        int fileCycle = -1;
-        engine.Get<int>("cycle", fileCycle, adios2::Mode::Sync);
-        if (fileCycle != last_cycle) {
-            engine.EndStep();
-            eprintf("restart cycle label in source rank file does not "
-                    "match the selected checkpoint label");
-        }
-        return true;
+        engineField.EndStep();
+        engineField.Close();
     }
-    return false;
 }
 
 void collectAdiosParticleSpans(
@@ -931,9 +936,14 @@ void collectAdiosParticleSpans(
                     "a readable step");
         }
 
-        context.adiosParticleMetadataReader.readMetadata(
-            ioParticle, engineParticle, species, copy, plan.sourceMesh());
-        context.adiosParticleMetadataReader.appendSpans(copy, spans);
+        context.adiosParticleReader.readMetadata(
+            ioParticle, engineParticle, species, copy, plan.sourceMesh(),
+            context.particleCellLayout);
+        appendParticleSpansForCopy(copy,
+                                   context.particleCellLayout.activeCellDims,
+                                   context.particleCellLayout.offsets,
+                                   context.particleCellLayout.counts,
+                                   spans);
 
         engineParticle.EndStep();
         engineParticle.Close();
@@ -980,23 +990,15 @@ void readAdiosParticlesRemapped(
         while (spanIndex < spans.size() &&
                spans[spanIndex].sourceRank == sourceRank) {
             const ParticleReadSpan& span = spans[spanIndex];
-            long long remaining = span.count;
-            long long sourceOffset = span.offset;
-            while (remaining > 0) {
-                const size_t chunk =
-                    static_cast<size_t>(
-                        std::min<long long>(remaining,
-                                            kRestartParticleChunkSize));
-                context.adiosParticleDataReader.readChunk(
-                    ioParticle, engineParticle, species,
-                    sourceOffset, chunk, context.particleBuffers);
-                copyChunkToParticleVectors(context.particleBuffers, chunk,
-                                           destinationOffset,
-                                           u, v, w, q, x, y, z, t);
-                sourceOffset += static_cast<long long>(chunk);
-                destinationOffset += static_cast<long long>(chunk);
-                remaining -= static_cast<long long>(chunk);
-            }
+            readParticleSpanChunks(
+                span, context.particleBuffers, destinationOffset,
+                u, v, w, q, x, y, z, t,
+                [&](long long sourceOffset, size_t chunk,
+                    RestartParticleChunkBuffers& buffers) {
+                    context.adiosParticleReader.readChunk(
+                        ioParticle, engineParticle, species,
+                        sourceOffset, chunk, buffers);
+                });
             ++spanIndex;
         }
 
@@ -1079,9 +1081,14 @@ void collectHdf5ParticleSpans(
                     name_file.c_str());
         }
 
-        context.hdf5ParticleMetadataReader.readMetadata(
-            file_id, species, context.lastCycle, copy, plan.sourceMesh());
-        context.hdf5ParticleMetadataReader.appendSpans(copy, spans);
+        context.hdf5ParticleReader.readMetadata(
+            file_id, species, context.lastCycle, copy, plan.sourceMesh(),
+            context.particleCellLayout);
+        appendParticleSpansForCopy(copy,
+                                   context.particleCellLayout.activeCellDims,
+                                   context.particleCellLayout.offsets,
+                                   context.particleCellLayout.counts,
+                                   spans);
         H5Fclose(file_id);
     }
 }
@@ -1120,23 +1127,15 @@ void readHdf5ParticlesRemapped(
         while (spanIndex < spans.size() &&
                spans[spanIndex].sourceRank == sourceRank) {
             const ParticleReadSpan& span = spans[spanIndex];
-            long long remaining = span.count;
-            long long sourceOffset = span.offset;
-            while (remaining > 0) {
-                const size_t chunk =
-                    static_cast<size_t>(
-                        std::min<long long>(remaining,
-                                            kRestartParticleChunkSize));
-                context.hdf5ParticleDataReader.readChunk(
-                    file_id, species, context.lastCycle,
-                    sourceOffset, chunk, context.particleBuffers);
-                copyChunkToParticleVectors(context.particleBuffers, chunk,
-                                           destinationOffset,
-                                           u, v, w, q, x, y, z, t);
-                sourceOffset += static_cast<long long>(chunk);
-                destinationOffset += static_cast<long long>(chunk);
-                remaining -= static_cast<long long>(chunk);
-            }
+            readParticleSpanChunks(
+                span, context.particleBuffers, destinationOffset,
+                u, v, w, q, x, y, z, t,
+                [&](long long sourceOffset, size_t chunk,
+                    RestartParticleChunkBuffers& buffers) {
+                    context.hdf5ParticleReader.readChunk(
+                        file_id, species, context.lastCycle,
+                        sourceOffset, chunk, buffers);
+                });
             ++spanIndex;
         }
 
@@ -1147,10 +1146,6 @@ void readHdf5ParticlesRemapped(
 #endif
 
 } // namespace
-
-// ===========================================================================
-// readLastCycle  —  retrieve the restart cycle label from the newest checkpoint
-// ===========================================================================
 
 RestartCheckpoint RestartReader::resolveLatestCheckpoint(
     const std::string& restartDir)
@@ -1187,11 +1182,6 @@ RestartCheckpoint RestartReader::resolveLatestCheckpoint(
             "Legacy flat restarts are unsupported.",
             restartDir.c_str());
     return RestartCheckpoint();
-}
-
-int RestartReader::readLastCycle(const std::string& restartDir)
-{
-    return resolveLatestCheckpoint(restartDir).cycle;
 }
 
 // ===========================================================================

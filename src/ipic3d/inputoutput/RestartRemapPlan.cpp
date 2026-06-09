@@ -127,12 +127,6 @@ std::array<int, 3> coordFromRank(const RestartMeshMetadata& mesh, int rank)
 
 } // namespace
 
-int restartRankFromCoord(const RestartMeshMetadata& mesh,
-                         int x, int y, int z)
-{
-    return (x * mesh.ylen + y) * mesh.zlen + z;
-}
-
 RestartRankBox restartRankBoxFor(const RestartMeshMetadata& mesh, int rank)
 {
     if (rank < 0 || rank >= mesh.nranks) {

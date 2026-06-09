@@ -1,36 +1,98 @@
-
-
-#include "ipichdf5.h"
-#include "EMfields3D.h"
-#include "Collective.h"
-#include "Basic.h"
-#include "Com3DNonblk.h"
-#include "VCtopology3D.h"
-#include "Grid3DCU.h"
-#include "CG.h"
-#include "GMRES.h"
-#include "ParticleSoAHost.h"
-#include "Moments.h"
-#include "Parameters.h"
-#include "ompdefs.h"
-#include "debug.h"
-#include "string.h"
-#include "mic_particles.h"
-#include "TimeTasks.h"
-#include "ipicmath.h" // for roundup_to_multiple
-#include "Alloc.h"
-#include "asserts.h"
-
-#include "cudaTypeDef.cuh"
 #include "momentKernel.cuh"
-#include "gridCUDA.cuh"
-#include "particleArrayCUDA.cuh"
-#include "particleExchange.cuh"
 
 using commonType = cudaTypeDouble; // calculation type
 
 
 // ======= Particle-based moment deposition =======
+
+__device__ __forceinline__ void depositParticleMomentsToNodes(
+    uint32_t pidx,
+    particleArrayCUDA* pclsArray,
+    grid3DCUDA* grid,
+    cudaTypeArray1<cudaMomentType> moments,
+    commonType inv_dx,
+    commonType inv_dy,
+    commonType inv_dz)
+{
+    const int nxn = grid->nxn;
+    const int nyn = grid->nyn;
+    const int nzn = grid->nzn;
+    const commonType xstart = grid->xStart;
+    const commonType ystart = grid->yStart;
+    const commonType zstart = grid->zStart;
+
+    // Load particle data from SoA
+    const commonType ui = pclsArray->getU()[pidx];
+    const commonType vi = pclsArray->getV()[pidx];
+    const commonType wi = pclsArray->getW()[pidx];
+    const commonType xpcl = pclsArray->getX()[pidx];
+    const commonType ypcl = pclsArray->getY()[pidx];
+    const commonType zpcl = pclsArray->getZ()[pidx];
+    const commonType qi = pclsArray->getQ()[pidx];
+    const commonType velmoments[10] = {
+        1.0, // charge density
+        ui,  // momentum density
+        vi,
+        wi,
+        ui * ui, // second-order moments
+        ui * vi,
+        ui * wi,
+        vi * vi,
+        vi * wi,
+        wi * wi
+    };
+
+    //
+    // compute the weights to distribute the moments
+    //
+    int ix = 2 + int(floor((xpcl - xstart) * inv_dx));
+    int iy = 2 + int(floor((ypcl - ystart) * inv_dy));
+    int iz = 2 + int(floor((zpcl - zstart) * inv_dz));
+    // Safety clamp: prevent negative indices (would wrap to huge uint32_t in toOneDimIndex)
+    // and cap at nxn-1/nyn-1/nzn-1 to avoid OOB on the moments array.
+    if (ix < 1) ix = 1; if (ix > nxn - 1) ix = nxn - 1;
+    if (iy < 1) iy = 1; if (iy > nyn - 1) iy = nyn - 1;
+    if (iz < 1) iz = 1; if (iz > nzn - 1) iz = nzn - 1;
+    const commonType xi0 = xpcl - grid->getXN(ix-1);
+    const commonType eta0 = ypcl - grid->getYN(iy - 1);
+    const commonType zeta0 = zpcl - grid->getZN(iz - 1);
+    const commonType xi1 = grid->getXN(ix) - xpcl;
+    const commonType eta1 = grid->getYN(iy) - ypcl;
+    const commonType zeta1 = grid->getZN(iz) - zpcl;
+    const commonType invVOLqi = grid->invVOL * qi;
+    const commonType weight0 = invVOLqi * xi0;
+    const commonType weight1 = invVOLqi * xi1;
+    const commonType weight00 = weight0 * eta0;
+    const commonType weight01 = weight0 * eta1;
+    const commonType weight10 = weight1 * eta0;
+    const commonType weight11 = weight1 * eta1;
+    const commonType weights[8] = {
+        weight00 * zeta0 * grid->invVOL, // weight000
+        weight00 * zeta1 * grid->invVOL, // weight001
+        weight01 * zeta0 * grid->invVOL, // weight010
+        weight01 * zeta1 * grid->invVOL, // weight011
+        weight10 * zeta0 * grid->invVOL, // weight100
+        weight10 * zeta1 * grid->invVOL, // weight101
+        weight11 * zeta0 * grid->invVOL, // weight110
+        weight11 * zeta1 * grid->invVOL  // weight111
+    };
+
+    uint32_t posIndex[8];
+    posIndex[0] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz);
+    posIndex[1] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz-1);
+    posIndex[2] = toOneDimIndex(nxn, nyn, nzn, ix, iy-1, iz);
+    posIndex[3] = toOneDimIndex(nxn, nyn, nzn, ix, iy-1, iz-1);
+    posIndex[4] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy, iz);
+    posIndex[5] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy, iz-1);
+    posIndex[6] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy-1, iz);
+    posIndex[7] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy-1, iz-1);
+    const uint32_t oneDensity = nxn * nyn * nzn;
+    for (int m = 0; m < 10; m++)    // 10 densities
+    for (int c = 0; c < 8; c++)     // 8 grid nodes
+    {
+        atomicAdd(&moments[oneDensity*m + posIndex[c]], velmoments[m] * weights[c]); // device scope atomic, should be system scope if p2p direct access
+    }
+}
 
 /**
  * @brief Deposit moments for the stayed-particle prefix plus newly appended particles.
@@ -58,94 +120,8 @@ __global__ void momentKernelStayed(const uint32_t* appendCount, momentParameter*
     {
         if(momentParam->departureArray->getArray()[pidx].dest != 0)continue; // skip particles already marked for departure
 
-        // Cache grid metrics locally for the deposition arithmetic.
-        const commonType& inv_dx = grid->invdx;
-        const commonType& inv_dy = grid->invdy;
-        const commonType& inv_dz = grid->invdz;
-        const int& nxn = grid->nxn; // nxn
-        const int& nyn = grid->nyn;
-        const int& nzn = grid->nzn;
-        const commonType& xstart = grid->xStart; // x start
-        const commonType& ystart = grid->yStart;
-        const commonType& zstart = grid->zStart;
-        
-
-        // Load particle data from SoA
-        const commonType ui = pclsArray->getU()[pidx];
-        const commonType vi = pclsArray->getV()[pidx];
-        const commonType wi = pclsArray->getW()[pidx];
-        const commonType xpcl = pclsArray->getX()[pidx];
-        const commonType ypcl = pclsArray->getY()[pidx];
-        const commonType zpcl = pclsArray->getZ()[pidx];
-        const commonType qi = pclsArray->getQ()[pidx];
-        const commonType uui = ui * ui;
-        const commonType uvi = ui * vi;
-        const commonType uwi = ui * wi;
-        const commonType vvi = vi * vi;
-        const commonType vwi = vi * wi;
-        const commonType wwi = wi * wi;
-        commonType velmoments[10];
-        velmoments[0] = 1.; // charge density
-        velmoments[1] = ui; // momentum density
-        velmoments[2] = vi;
-        velmoments[3] = wi;
-        velmoments[4] = uui; // second-order moments
-        velmoments[5] = uvi;
-        velmoments[6] = uwi;
-        velmoments[7] = vvi;
-        velmoments[8] = vwi;
-        velmoments[9] = wwi;
-
-        //
-        // compute the weights to distribute the moments
-        //
-        int ix = 2 + int(floor((xpcl - xstart) * inv_dx));
-        int iy = 2 + int(floor((ypcl - ystart) * inv_dy));
-        int iz = 2 + int(floor((zpcl - zstart) * inv_dz));
-        // Safety clamp: prevent negative indices (would wrap to huge uint32_t in toOneDimIndex)
-        // and cap at nxn-1/nyn-1/nzn-1 to avoid OOB on the moments array.
-        if (ix < 1) ix = 1; if (ix > nxn - 1) ix = nxn - 1;
-        if (iy < 1) iy = 1; if (iy > nyn - 1) iy = nyn - 1;
-        if (iz < 1) iz = 1; if (iz > nzn - 1) iz = nzn - 1;
-        const commonType xi0 = xpcl - grid->getXN(ix-1);
-        const commonType eta0 = ypcl - grid->getYN(iy - 1);
-        const commonType zeta0 = zpcl - grid->getZN(iz - 1);
-        const commonType xi1 = grid->getXN(ix) - xpcl;
-        const commonType eta1 = grid->getYN(iy) - ypcl;
-        const commonType zeta1 = grid->getZN(iz) - zpcl;
-        const commonType invVOLqi = grid->invVOL * qi;
-        const commonType weight0 = invVOLqi * xi0;
-        const commonType weight1 = invVOLqi * xi1;
-        const commonType weight00 = weight0 * eta0;
-        const commonType weight01 = weight0 * eta1;
-        const commonType weight10 = weight1 * eta0;
-        const commonType weight11 = weight1 * eta1;
-        commonType weights[8];
-        weights[0] = weight00 * zeta0 * grid->invVOL; // weight000
-        weights[1] = weight00 * zeta1 * grid->invVOL; // weight001
-        weights[2] = weight01 * zeta0 * grid->invVOL; // weight010
-        weights[3] = weight01 * zeta1 * grid->invVOL; // weight011
-        weights[4] = weight10 * zeta0 * grid->invVOL; // weight100
-        weights[5] = weight10 * zeta1 * grid->invVOL; // weight101
-        weights[6] = weight11 * zeta0 * grid->invVOL; // weight110
-        weights[7] = weight11 * zeta1 * grid->invVOL; // weight111
-
-
-        uint32_t posIndex[8];
-        posIndex[0] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz);
-        posIndex[1] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz-1);
-        posIndex[2] = toOneDimIndex(nxn, nyn, nzn, ix, iy-1, iz);
-        posIndex[3] = toOneDimIndex(nxn, nyn, nzn, ix, iy-1, iz-1);
-        posIndex[4] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy, iz);
-        posIndex[5] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy, iz-1);
-        posIndex[6] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy-1, iz);
-        posIndex[7] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy-1, iz-1);
-        uint32_t oneDensity = nxn * nyn * nzn;
-        for (int m = 0; m < 10; m++)    // 10 densities
-        for (int c = 0; c < 8; c++)     // 8 grid nodes
-        {
-            atomicAdd(&moments[oneDensity*m + posIndex[c]], velmoments[m] * weights[c]); // device scope atomic, should be system scope if p2p direct access
-        }
+        depositParticleMomentsToNodes(pidx, pclsArray, grid, moments,
+                                      grid->invdx, grid->invdy, grid->invdz);
     }
 }
 /**
@@ -167,96 +143,8 @@ __global__ void momentKernelNew(momentParameter* momentParam,
     auto pclsArray = momentParam->pclsArray;
     if(pidx >= pclsArray->getNOP())return;
 
-    // Cache grid metrics locally for the deposition arithmetic.
-    const commonType inv_dx = 1.0 / grid->dx;
-    const commonType inv_dy = 1.0 / grid->dy;
-    const commonType inv_dz = 1.0 / grid->dz;
-    const int nxn = grid->nxn; // nxn
-    const int nyn = grid->nyn;
-    const int nzn = grid->nzn;
-    const commonType xstart = grid->xStart; // x start
-    const commonType ystart = grid->yStart;
-    const commonType zstart = grid->zStart;
-    
-
-    // Load particle data from SoA
-    const commonType ui = pclsArray->getU()[pidx];
-    const commonType vi = pclsArray->getV()[pidx];
-    const commonType wi = pclsArray->getW()[pidx];
-    const commonType xpcl = pclsArray->getX()[pidx];
-    const commonType ypcl = pclsArray->getY()[pidx];
-    const commonType zpcl = pclsArray->getZ()[pidx];
-    const commonType qi = pclsArray->getQ()[pidx];
-    const commonType uui = ui * ui;
-    const commonType uvi = ui * vi;
-    const commonType uwi = ui * wi;
-    const commonType vvi = vi * vi;
-    const commonType vwi = vi * wi;
-    const commonType wwi = wi * wi;
-    commonType velmoments[10];
-    velmoments[0] = 1.; // charge density
-    velmoments[1] = ui; // momentum density
-    velmoments[2] = vi;
-    velmoments[3] = wi;
-    velmoments[4] = uui; // second-order moments
-    velmoments[5] = uvi;
-    velmoments[6] = uwi;
-    velmoments[7] = vvi;
-    velmoments[8] = vwi;
-    velmoments[9] = wwi;
-
-    //
-    // compute the weights to distribute the moments
-    //
-    int ix = 2 + int(floor((xpcl - xstart) * inv_dx));
-    int iy = 2 + int(floor((ypcl - ystart) * inv_dy));
-    int iz = 2 + int(floor((zpcl - zstart) * inv_dz));
-    // Safety clamp: prevent negative indices (would wrap to huge uint32_t in toOneDimIndex)
-    // and cap at nxn-1/nyn-1/nzn-1 to avoid OOB on the moments array.
-    if (ix < 1) ix = 1; if (ix > nxn - 1) ix = nxn - 1;
-    if (iy < 1) iy = 1; if (iy > nyn - 1) iy = nyn - 1;
-    if (iz < 1) iz = 1; if (iz > nzn - 1) iz = nzn - 1;
-    const commonType xi0 = xpcl - grid->getXN(ix-1);
-    const commonType eta0 = ypcl - grid->getYN(iy - 1);
-    const commonType zeta0 = zpcl - grid->getZN(iz - 1);
-    const commonType xi1 = grid->getXN(ix) - xpcl;
-    const commonType eta1 = grid->getYN(iy) - ypcl;
-    const commonType zeta1 = grid->getZN(iz) - zpcl;
-    const commonType invVOLqi = grid->invVOL * qi;
-    const commonType weight0 = invVOLqi * xi0;
-    const commonType weight1 = invVOLqi * xi1;
-    const commonType weight00 = weight0 * eta0;
-    const commonType weight01 = weight0 * eta1;
-    const commonType weight10 = weight1 * eta0;
-    const commonType weight11 = weight1 * eta1;
-    commonType weights[8];
-    weights[0] = weight00 * zeta0 * grid->invVOL; // weight000
-    weights[1] = weight00 * zeta1 * grid->invVOL; // weight001
-    weights[2] = weight01 * zeta0 * grid->invVOL; // weight010
-    weights[3] = weight01 * zeta1 * grid->invVOL; // weight011
-    weights[4] = weight10 * zeta0 * grid->invVOL; // weight100
-    weights[5] = weight10 * zeta1 * grid->invVOL; // weight101
-    weights[6] = weight11 * zeta0 * grid->invVOL; // weight110
-    weights[7] = weight11 * zeta1 * grid->invVOL; // weight111
-
-
-    uint32_t posIndex[8];
-    posIndex[0] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz);
-    posIndex[1] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz-1);
-    posIndex[2] = toOneDimIndex(nxn, nyn, nzn, ix, iy-1, iz);
-    posIndex[3] = toOneDimIndex(nxn, nyn, nzn, ix, iy-1, iz-1);
-    posIndex[4] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy, iz);
-    posIndex[5] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy, iz-1);
-    posIndex[6] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy-1, iz);
-    posIndex[7] = toOneDimIndex(nxn, nyn, nzn, ix-1, iy-1, iz-1);
-    uint32_t oneDensity = nxn * nyn * nzn;
-    for (int m = 0; m < 10; m++)    // 10 densities
-    for (int c = 0; c < 8; c++)     // 8 grid nodes
-    {
-        atomicAdd(&moments[oneDensity*m + posIndex[c]], velmoments[m] * weights[c]); // device scope atomic, should be system scope if p2p direct access
-    }
-
-
+    depositParticleMomentsToNodes(pidx, pclsArray, grid, moments,
+                                  grid->invdx, grid->invdy, grid->invdz);
 }
 
 __global__ void heatFluxKernelUnsorted(
@@ -313,15 +201,16 @@ __global__ void heatFluxKernelUnsorted(
     const commonType weight10 = weight1 * eta0;
     const commonType weight11 = weight1 * eta1;
 
-    commonType weights[8];
-    weights[0] = weight00 * zeta0 * grid->invVOL;
-    weights[1] = weight00 * zeta1 * grid->invVOL;
-    weights[2] = weight01 * zeta0 * grid->invVOL;
-    weights[3] = weight01 * zeta1 * grid->invVOL;
-    weights[4] = weight10 * zeta0 * grid->invVOL;
-    weights[5] = weight10 * zeta1 * grid->invVOL;
-    weights[6] = weight11 * zeta0 * grid->invVOL;
-    weights[7] = weight11 * zeta1 * grid->invVOL;
+    const commonType weights[8] = {
+        weight00 * zeta0 * grid->invVOL,
+        weight00 * zeta1 * grid->invVOL,
+        weight01 * zeta0 * grid->invVOL,
+        weight01 * zeta1 * grid->invVOL,
+        weight10 * zeta0 * grid->invVOL,
+        weight10 * zeta1 * grid->invVOL,
+        weight11 * zeta0 * grid->invVOL,
+        weight11 * zeta1 * grid->invVOL
+    };
 
     uint32_t posIndex[8];
     posIndex[0] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz);
@@ -349,17 +238,18 @@ __global__ void heatFluxKernelUnsorted(
         const commonType cz2 = cz * cz;
         const commonType massWeight = weights[c] / qom;
 
-        commonType q[10];
-        q[0] = cx2 * cx;
-        q[1] = cx2 * cy;
-        q[2] = cx2 * cz;
-        q[3] = cx * cy2;
-        q[4] = cx * cy * cz;
-        q[5] = cx * cz2;
-        q[6] = cy2 * cy;
-        q[7] = cy2 * cz;
-        q[8] = cy * cz2;
-        q[9] = cz2 * cz;
+        const commonType q[10] = {
+            cx2 * cx,
+            cx2 * cy,
+            cx2 * cz,
+            cx * cy2,
+            cx * cy * cz,
+            cx * cz2,
+            cy2 * cy,
+            cy2 * cz,
+            cy * cz2,
+            cz2 * cz
+        };
 
         for (int m = 0; m < 10; ++m)
             atomicAdd(&heatFlux[oneDensity * m + node], q[m] * massWeight);
@@ -482,18 +372,6 @@ __global__ void cellAwareMomentKernel(
             zpcl = pz[pidx];
         }
 
-        // 10 velocity moments
-        const commonType vm0  = active ? 1.0 : 0.0;  // charge density
-        const commonType vm1  = ui;
-        const commonType vm2  = vi;
-        const commonType vm3  = wi;
-        const commonType vm4  = ui * ui;
-        const commonType vm5  = ui * vi;
-        const commonType vm6  = ui * wi;
-        const commonType vm7  = vi * vi;
-        const commonType vm8  = vi * wi;
-        const commonType vm9  = wi * wi;
-
         // Trilinear weights using the same arithmetic as momentKernelStayed.
         const commonType xi0   = xpcl - xn_lo;
         const commonType xi1   = xn_hi - xpcl;
@@ -510,18 +388,28 @@ __global__ void cellAwareMomentKernel(
         const commonType w10 = w1 * eta0;
         const commonType w11 = w1 * eta1;
 
-        const commonType wt0 = w00 * zeta0 * inv_vol;
-        const commonType wt1 = w00 * zeta1 * inv_vol;
-        const commonType wt2 = w01 * zeta0 * inv_vol;
-        const commonType wt3 = w01 * zeta1 * inv_vol;
-        const commonType wt4 = w10 * zeta0 * inv_vol;
-        const commonType wt5 = w10 * zeta1 * inv_vol;
-        const commonType wt6 = w11 * zeta0 * inv_vol;
-        const commonType wt7 = w11 * zeta1 * inv_vol;
-
-        // Store velmoments and weights in arrays for the reduction loop
-        const commonType vm[10] = {vm0, vm1, vm2, vm3, vm4, vm5, vm6, vm7, vm8, vm9};
-        const commonType wt[8]  = {wt0, wt1, wt2, wt3, wt4, wt5, wt6, wt7};
+        const commonType vm[10] = {
+            active ? 1.0 : 0.0, // charge density
+            ui,
+            vi,
+            wi,
+            ui * ui,
+            ui * vi,
+            ui * wi,
+            vi * vi,
+            vi * wi,
+            wi * wi
+        };
+        const commonType wt[8] = {
+            w00 * zeta0 * inv_vol,
+            w00 * zeta1 * inv_vol,
+            w01 * zeta0 * inv_vol,
+            w01 * zeta1 * inv_vol,
+            w10 * zeta0 * inv_vol,
+            w10 * zeta1 * inv_vol,
+            w11 * zeta0 * inv_vol,
+            w11 * zeta1 * inv_vol
+        };
 
         // Warp reduction + single atomicAdd per (moment, node) pair
         for (int m = 0; m < 10; m++) {

@@ -1,29 +1,13 @@
-
-
-#include <iostream>
-#include <math.h>
-#include <limits.h>
+#include <assert.h>
 #include <cstdint>
-#include "asserts.h"
-#include "VCtopology3D.h"
-#include "Collective.h"
-#include "Basic.h"
-#include "Grid3DCU.h"
-#include "Field.h"
-#include "ipicdefs.h"
-#include "TimeTasks.h"
-#include "parallel.h"
-#include "ParticleSoAHost.h"
-
-#include "mic_particles.h"
-#include "debug.h"
-#include <complex>
+#include <math.h>
 
 #include "cudaTypeDef.cuh"
-#include "moverKernel.cuh"
 #include "gridCUDA.cuh"
-#include "particleArrayCUDA.cuh"
 #include "hashedSum.cuh"
+#include "moverKernel.cuh"
+#include "particleArrayCUDA.cuh"
+#include "particleExchange.cuh"
 
 using commonType = cudaParticleType;
 

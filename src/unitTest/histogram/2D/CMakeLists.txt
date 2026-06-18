@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21) # HIP requires 3.21
-project(histogramTest LANGUAGES CXX)
+project(histogram2DTest LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,7 +61,7 @@ if(HIP_ON)
 endif()
 list(APPEND src_files ${cuda_src_files})
 
-add_executable(histogramTest ${src_files})
+add_executable(histogram2DTest ${src_files})
 
 # include
 set(include_path ${INCLUDE_CODE_DIR})
@@ -77,41 +77,41 @@ else()
 endif()
 
 target_include_directories(
-  histogramTest
+  histogram2DTest
   PUBLIC ${include_path}
   )
 
 set(linkLibraries MPI::MPI_CXX)  
 
-target_link_libraries(histogramTest PRIVATE ${linkLibraries})
+target_link_libraries(histogram2DTest PRIVATE ${linkLibraries})
 
 # configure GPU
 if(NOT HIP_ON) # CUDA
 
-  set_target_properties(histogramTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-  set_property(TARGET histogramTest PROPERTY CUDA_ARCHITECTURES 75) # required for double atomicadd
-  set_property(TARGET histogramTest PROPERTY CUDA_STANDARD 17)
-  set_property(TARGET histogramTest PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
-  set_property(TARGET histogramTest PROPERTY LINK_OPTIONS -fno-lto)
+  set_target_properties(histogram2DTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  set_property(TARGET histogram2DTest PROPERTY CUDA_ARCHITECTURES 75) # required for double atomicadd
+  set_property(TARGET histogram2DTest PROPERTY CUDA_STANDARD 17)
+  set_property(TARGET histogram2DTest PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+  set_property(TARGET histogram2DTest PROPERTY LINK_OPTIONS -fno-lto)
 
 else() # HIP
 
-  target_link_libraries(histogramTest PRIVATE hip::device)
-  target_link_libraries(histogramTest PRIVATE hip::host)
+  target_link_libraries(histogram2DTest PRIVATE hip::device)
+  target_link_libraries(histogram2DTest PRIVATE hip::host)
 
-  target_compile_options(histogramTest PUBLIC -fgpu-rdc)
-  target_link_options(histogramTest PUBLIC  -fgpu-rdc --hip-link)
+  target_compile_options(histogram2DTest PUBLIC -fgpu-rdc)
+  target_link_options(histogram2DTest PUBLIC  -fgpu-rdc --hip-link)
 
-  set_property(TARGET histogramTest PROPERTY HIP_ARCHITECTURES gfx90a)
+  set_property(TARGET histogram2DTest PROPERTY HIP_ARCHITECTURES gfx90a)
 
 endif()
 
 
 if(HIP_ON)
-target_compile_definitions(histogramTest PUBLIC HIPIFLY)
+target_compile_definitions(histogram2DTest PUBLIC HIPIFLY)
 endif()
 
-target_compile_definitions(histogramTest PUBLIC NO_HDF5)
+target_compile_definitions(histogram2DTest PUBLIC NO_HDF5)
 
 
 # TEST
@@ -120,5 +120,5 @@ include(CTest)
 enable_testing()
 
 # Test cases
-add_test(NAME histogramTest1 COMMAND histogramTest)
-set_tests_properties(histogramTest1 PROPERTIES TIMEOUT 10) # Timeout in seconds
+add_test(NAME histogram2DTest COMMAND histogram2DTest)
+set_tests_properties(histogram2DTest PROPERTIES TIMEOUT 10) # Timeout in seconds

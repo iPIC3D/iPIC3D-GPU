@@ -35,6 +35,7 @@
 #include <vector>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 #include <algorithm>
 #include <numeric>
 #include <cstring>
@@ -92,7 +93,7 @@ static void printSeparator(const char* title) {
 //  MAIN
 // ═══════════════════════════════════════════════════════════════
 
-int main() {
+static int runTest() {
     bool allPassed = true;
 
     // ─── Planet sphere parameters ──────────────────────────────
@@ -565,4 +566,13 @@ int main() {
     // Host arrayCUDA destructors free internal device arrays automatically
 
     return allPassed ? 0 : 1;
+}
+
+int main() {
+    try {
+        return runTest();
+    } catch (const std::exception& error) {
+        std::cerr << "planetTest failed: " << error.what() << "\n";
+        return EXIT_FAILURE;
+    }
 }

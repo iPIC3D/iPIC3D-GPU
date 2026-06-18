@@ -1,5 +1,7 @@
 #include <iostream>
 #include <vector>
+#include <cstdlib>
+#include <exception>
 #include "cudaTypeDef.cuh"
 #include "cudaReduction.cuh"
 
@@ -34,7 +36,7 @@ dataType cpuReduceMin(const std::vector<dataType>& data) {
 
 
 
-int main(){
+static int runTest(){
 
     const size_t size = 1 << 24;
     constexpr int blockSize = 256;
@@ -87,6 +89,14 @@ int main(){
     return 0;
 }
 
+int main(){
+    try {
+        return runTest();
+    } catch (const std::exception& error) {
+        std::cerr << "reductionTest failed: " << error.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+}
 
 
 

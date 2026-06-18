@@ -58,8 +58,10 @@ option(BENCH_MARK "Print tasks time" OFF)
 option(USE_OPENMP "Use OpenMP in supported loops" ON) # must delete all cmake cache if you change this option
 option(GPU_SOLVER "Run the entire field solver on GPU (requires CUDA-aware MPI)" OFF)
 option(HALO_OVERLAP "Enable halo-computation overlap in the GPU field solver (requires GPU_SOLVER)" OFF)
+option(BUILD_TESTING "Build unit tests" OFF)
 
 include(GNUInstallDirs)
+include(CTest)
 
 # set directories
 set(SOURCE_CODE_DIR src/ipic3d)
@@ -356,6 +358,14 @@ add_install_libdir_to_rpath(iPIC3D)
 
 install(TARGETS iPIC3D)
 
+if(BUILD_TESTING)
+  add_subdirectory(src/unitTest/reduction)
+  add_subdirectory(src/unitTest/histogram/2D)
+  add_subdirectory(src/unitTest/histogram/3D)
+  add_subdirectory(src/unitTest/planet)
+  add_subdirectory(src/unitTest/gpu_maxwell_solver)
+endif()
+
 add_subdirectory(share/inputfiles)
 
 message(STATUS "")
@@ -387,5 +397,6 @@ message(STATUS "  OpenMP                      : ${USE_OPENMP} ")
 message(STATUS "  Catalyst (in-situ)          : ${USE_CATALYST}")
 message(STATUS "  BATSRUS coupling            : ${USE_BATSRUS}")
 message(STATUS "  Benchmark timers            : ${BENCH_MARK}  (LOG_TASKS_TOTAL_TIME macro)")
+message(STATUS "  Unit tests                  : ${BUILD_TESTING}")
 message(STATUS "==========================================")
 message(STATUS "")

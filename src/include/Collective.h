@@ -65,8 +65,10 @@ class Collective
   public:
     /*! constructor: initialize physical parameters with values */
     Collective(int argc, char **argv);
+    Collective(const ConfigFile& config, const std::string& input_name = "in-memory", bool restart = false);
     /*! read input file */
     void ReadInput(string inputfile);
+    void ReadInput(const ConfigFile& config);
     void read_field_restart(const VCtopology3D* vct,const Grid* grid,arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
     						arr3_double Ex, arr3_double Ey, arr3_double Ez,array4_double* rhons_, int ns)const;
 

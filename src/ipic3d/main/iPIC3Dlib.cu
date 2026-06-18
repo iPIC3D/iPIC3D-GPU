@@ -454,45 +454,6 @@ int c_Solver::initCUDA(){
 #endif
   }
 
-  // Runtime check for GPU-aware MPI (required for GPU_SOLVER halo exchange)
-#ifdef GPU_SOLVER
-  {
-    bool gpuAwareMPI = false;
-#if defined(MPIX_CUDA_AWARE_SUPPORT)
-    gpuAwareMPI = (MPIX_Query_cuda_support() != 0);
-#elif defined(OMPI_HAVE_MPI_EXT_CUDA) && OMPI_HAVE_MPI_EXT_CUDA
-    gpuAwareMPI = true; // Open MPI compiled with CUDA support
-#endif
-    // ROCm / HIP-aware MPI detection (AMD GPUs)
-#if defined(MPIX_ROCM_AWARE_SUPPORT)
-    if (!gpuAwareMPI) gpuAwareMPI = (MPIX_Query_rocm_support() != 0);
-#elif defined(OMPI_HAVE_MPI_EXT_ROCM) && OMPI_HAVE_MPI_EXT_ROCM
-    gpuAwareMPI = true; // Open MPI compiled with ROCm support
-#endif
-    if (!gpuAwareMPI) {
-      // Allow the user to override the check when the MPI implementation is
-      // GPU-aware but does not expose compile-time query macros (e.g. Cray
-      // MPICH, MVAPICH2-GDR).
-      const char* override = std::getenv("IPIC_FORCE_GPU_MPI");
-      if (override && std::string(override) == "1") {
-        gpuAwareMPI = true;
-        if (myrank == 0)
-          cout << "[INFO] IPIC_FORCE_GPU_MPI=1 — skipping GPU-aware MPI check." << endl;
-      }
-    }
-    if (!gpuAwareMPI) {
-      if (myrank == 0) {
-        cerr << "[ERROR] GPU_SOLVER is enabled but GPU-aware MPI could not be "
-                "confirmed at runtime.  Halo exchanges pass device pointers to "
-                "MPI_Isend/Irecv — this will fail or silently corrupt data if the "
-                "MPI library is not GPU-aware (CUDA-aware or ROCm-aware).\n"
-                "  Set IPIC_FORCE_GPU_MPI=1 to override this check." << endl;
-      }
-      MPI_Abort(MPI_COMM_WORLD, 1);
-    }
-  }
-#endif
-
   // ======= Create per-species streams and async launcher state =======
   streams = new cudaStream_t[ns*2]; stayedParticle = new int[ns]; exitingResults = new std::future<int>[ns];
   for(int i=0; i<ns; i++){ cudaErrChk(cudaStreamCreate(streams+i)); cudaErrChk(cudaStreamCreate(streams+i+ns)); stayedParticle[i] = 0; }

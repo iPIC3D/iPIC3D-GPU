@@ -1,4 +1,7 @@
 
+#include <cstdlib>
+#include <exception>
+#include <iostream>
 #include <string>
 #include <memory>
 #include <random>
@@ -17,7 +20,7 @@ constexpr int nop = 5000000;
 
 
 
-int main(){
+static int runTest(){
     int histogramSize = VELOCITY_HISTOGRAM3D_SIZE;
 
     velocitySoA pclArray(nop, 0);
@@ -121,8 +124,14 @@ int main(){
 
 }
 
-
-
+int main(){
+    try {
+        return runTest();
+    } catch (const std::exception& error) {
+        std::cerr << "histogram3DTest failed: " << error.what() << "\n";
+        return EXIT_FAILURE;
+    }
+}
 
 
 

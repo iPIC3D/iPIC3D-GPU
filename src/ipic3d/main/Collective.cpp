@@ -80,10 +80,13 @@ const char* Collective::get_name_of_enum(int in)
 
 /*! Read the input file from text file and put the data in a collective wrapper: if it's a restart read from input file basic sim data and load particles and EM field from restart file */
 void Collective::ReadInput(string inputfile) {
+  ConfigFile config(inputfile);
+  ReadInput(config);
+}
+
+void Collective::ReadInput(const ConfigFile& config) {
   using namespace std;
   int test_verbose;
-  // Loading the input file 
-  ConfigFile config(inputfile);
   // the following variables are ALWAYS taken from inputfile, even if restarting 
   {
 
@@ -686,6 +689,13 @@ Collective::Collective(int argc, char **argv) {
     if(MPIdata::get_rank() == 0)std::cout << "Restarting..." << endl;
   }
   ReadInput(inputfile);
+  init_derived_parameters();
+}
+
+Collective::Collective(const ConfigFile& config, const std::string& input_name, bool restart) {
+  inputfile = input_name;
+  RESTART1 = restart;
+  ReadInput(config);
   init_derived_parameters();
 }
 

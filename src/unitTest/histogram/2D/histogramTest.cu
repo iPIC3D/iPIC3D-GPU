@@ -1,160 +1,136 @@
+#include <cmath>
+#include <cstdlib>
+#include <exception>
+#include <iostream>
+#include <vector>
 
-#include <string>
-#include <memory>
-#include <random>
-
-#include "dataAnalysis.cuh"
 #include "dataAnalysisConfig.cuh"
-#include "particleArraySoAView.cuh"
 #include "velocityHistogram.cuh"
 
+namespace {
 
-using namespace velocityHistogram;
+__global__ void fillHistogram2D(const int sampleCount,
+                                const velocityHistogram::histogramTypeIn* u,
+                                const velocityHistogram::histogramTypeIn* v,
+                                const velocityHistogram::histogramTypeIn* q,
+                                velocityHistogram::velocityHistogramCUDA2D* histogram)
+{
+    const int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    const int stride = gridDim.x * blockDim.x;
+    auto* histogramBuffer = histogram->getHistogramCUDA();
 
-using namespace DAConfig;
-
-constexpr int nop = 5000000;
-
-
-
-int main(){
-    int histogramSize = VELOCITY_HISTOGRAM_RES * VELOCITY_HISTOGRAM_RES;
-
-    velocitySoA pclArray(nop, 0);
-    velocityHistogram::velocityHistogram histogram(histogramSize);
-
-
-    // fill the pclArray with random data
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<cudaCommonType> dis(-1.0, 1.0);
-    auto center = MIN_VELOCITY_HIST_E + MAX_VELOCITY_HIST_E;
-    auto left = center - MIN_VELOCITY_HIST_E;
-    auto right = MAX_VELOCITY_HIST_E - center;
-    std::normal_distribution<cudaCommonType> normalDist1(center, right * 0.2);
-    std::normal_distribution<cudaCommonType> normalDist2(center + right * 0.4, right * 0.1);
-
-    auto uCPU = new cudaCommonType[nop];
-    auto vCPU = new cudaCommonType[nop];
-    auto wCPU = new cudaCommonType[nop];
-    auto qCPU = new cudaCommonType[nop];
-
-    auto uPtr = pclArray.getElement(0);  // U
-    auto vPtr = pclArray.getElement(1);  // V
-    auto wPtr = pclArray.getElement(2);  // W
-    auto qPtr = pclArray.getElement(3);  // Q
-
-    for(int i = 0; i < nop; i++){
-        uCPU[i] = dis(gen) > 0.0 ? normalDist1(gen) : normalDist2(gen);
-        vCPU[i] = dis(gen) > 0.0 ? normalDist1(gen) : normalDist2(gen);
-        wCPU[i] = dis(gen) > 0.0 ? normalDist1(gen) : normalDist2(gen);
-        qCPU[i] = dis(gen) / 1e10;
-    }
-
-    cudaErrChk(cudaMemcpy(uPtr, uCPU, nop * sizeof(cudaCommonType), cudaMemcpyHostToDevice));
-    cudaErrChk(cudaMemcpy(vPtr, vCPU, nop * sizeof(cudaCommonType), cudaMemcpyHostToDevice));
-    cudaErrChk(cudaMemcpy(wPtr, wCPU, nop * sizeof(cudaCommonType), cudaMemcpyHostToDevice));
-    cudaErrChk(cudaMemcpy(qPtr, qCPU, nop * sizeof(cudaCommonType), cudaMemcpyHostToDevice));
-
-    // CPU histogram
-
-    std::vector<cudaCommonType> cpuHistUV(histogramSize, 0);
-    std::vector<cudaCommonType> cpuHistVW(histogramSize, 0);
-    std::vector<cudaCommonType> cpuHistUW(histogramSize, 0);
-
-    cudaCommonType minVal = MIN_VELOCITY_HIST_E;
-    cudaCommonType maxVal = MAX_VELOCITY_HIST_E;
-    cudaCommonType resolution = (maxVal - minVal) / VELOCITY_HISTOGRAM_RES;
-
-    for (int i = 0; i < nop; i++){
-        cudaCommonType uVal = uCPU[i];
-        cudaCommonType vVal = vCPU[i];
-        if(uVal >= minVal && uVal <= maxVal && vVal >= minVal && vVal <= maxVal){
-            int binU = static_cast<int>((uVal - minVal) / resolution);
-            if(binU >= VELOCITY_HISTOGRAM_RES) binU = VELOCITY_HISTOGRAM_RES - 1;
-            int binV = static_cast<int>((vVal - minVal) / resolution);
-            if(binV >= VELOCITY_HISTOGRAM_RES) binV = VELOCITY_HISTOGRAM_RES - 1;
-            int index = binV * VELOCITY_HISTOGRAM_RES + binU;
-            cpuHistUV[index] += std::fabs(qCPU[i] * 1e6); // 10e5 in the 2D kernel
-        }
-
-        cudaCommonType wVal = wCPU[i];
-        if(vVal >= minVal && vVal <= maxVal && wVal >= minVal && wVal <= maxVal){
-            int binV = static_cast<int>((vVal - minVal) / resolution);
-            if(binV >= VELOCITY_HISTOGRAM_RES) binV = VELOCITY_HISTOGRAM_RES - 1;
-            int binW = static_cast<int>((wVal - minVal) / resolution);
-            if(binW >= VELOCITY_HISTOGRAM_RES) binW = VELOCITY_HISTOGRAM_RES - 1;
-            int index = binW * VELOCITY_HISTOGRAM_RES + binV;
-            cpuHistVW[index] += std::fabs(qCPU[i] * 1e6);
-        }
-
-        if(uVal >= minVal && uVal <= maxVal && wVal >= minVal && wVal <= maxVal){
-            int binU = static_cast<int>((uVal - minVal) / resolution);
-            if(binU >= VELOCITY_HISTOGRAM_RES) binU = VELOCITY_HISTOGRAM_RES - 1;
-            int binW = static_cast<int>((wVal - minVal) / resolution);
-            if(binW >= VELOCITY_HISTOGRAM_RES) binW = VELOCITY_HISTOGRAM_RES - 1;
-            int index = binW * VELOCITY_HISTOGRAM_RES + binU;
-            cpuHistUW[index] += std::fabs(qCPU[i] * 1e6);
+    for (int sample = tid; sample < sampleCount; sample += stride) {
+        velocityHistogram::histogramTypeIn data[2] = {u[sample], v[sample]};
+        const int bin = histogram->getIndex(data);
+        if (bin >= 0) {
+            atomicAdd(&histogramBuffer[bin], static_cast<velocityHistogram::histogramTypeOut>(fabs(q[sample] * 1e6)));
         }
     }
-
-    // GPU histogram
-    histogram.init(&pclArray, 0, 0, 0);
-    cudaErrChk(cudaDeviceSynchronize());
-    histogram.copyHistogramToHost();
-
-    auto histogramHostPtrUV = histogram.getVelocityHistogramHostPtr(0);
-    auto histogramHostPtrVW = histogram.getVelocityHistogramHostPtr(1);
-    auto histogramHostPtrUW = histogram.getVelocityHistogramHostPtr(2);
-
-    // compare the results
-    bool pass = true;
-    cudaCommonType tolerance = 1e-6;
-
-    for (int i = 0; i < histogramSize; i++){
-        if (std::fabs(histogramHostPtrUV[i] - cpuHistUV[i]) > tolerance){
-            std::cout << "Mismatch in UV histogram at bin " << i 
-                      << ": GPU = " << histogramHostPtrUV[i] 
-                      << ", CPU = " << cpuHistUV[i] << "\n";
-            pass = false;
-            break;
-        }
-        if (std::fabs(histogramHostPtrVW[i] - cpuHistVW[i]) > tolerance){
-            std::cout << "Mismatch in VW histogram at bin " << i 
-                      << ": GPU = " << histogramHostPtrVW[i] 
-                      << ", CPU = " << cpuHistVW[i] << "\n";
-            pass = false;
-            break;
-        }
-        if (std::fabs(histogramHostPtrUW[i] - cpuHistUW[i]) > tolerance){
-            std::cout << "Mismatch in UW histogram at bin " << i 
-                      << ": GPU = " << histogramHostPtrUW[i] 
-                      << ", CPU = " << cpuHistUW[i] << "\n";
-            pass = false;
-            break;
-        }
-    }
-
-    if(pass){
-        std::cout << "Test passed: CPU and GPU histograms match.\n";
-    } else {
-        std::cout << "Test failed: CPU and GPU histograms do not match.\n";
-    }
-
-    delete[] uCPU;
-    delete[] vCPU;
-    delete[] wCPU;
-    delete[] qCPU;
-
-    return !pass;
-
 }
 
+} // namespace
 
+static int runTest()
+{
+    using namespace DAConfig;
+    using namespace velocityHistogram;
 
+    constexpr int bins = VELOCITY_HISTOGRAM2D_RES;
+    constexpr int histogramSize = bins * bins;
+    constexpr int boundaryAndOutOfRangeSamples = 3;
+    constexpr int sampleCount = histogramSize + boundaryAndOutOfRangeSamples;
 
+    histogramTypeIn minRange[2] = {MIN_VELOCITY_HIST_E, MIN_VELOCITY_HIST_E};
+    histogramTypeIn maxRange[2] = {MAX_VELOCITY_HIST_E, MAX_VELOCITY_HIST_E};
+    int binsPerDim[2] = {bins, bins};
 
+    velocityHistogramCUDA2D histogram(histogramSize);
+    histogram.setHistogram(minRange, maxRange, binsPerDim);
+    cudaErrChk(cudaMemset(histogram.getHistogramCUDA(), 0, histogramSize * sizeof(histogramTypeOut)));
 
+    std::vector<histogramTypeIn> u(sampleCount);
+    std::vector<histogramTypeIn> v(sampleCount);
+    std::vector<histogramTypeIn> q(sampleCount, 1e-6);
+    std::vector<histogramTypeOut> expected(histogramSize, 1.0);
 
+    const histogramTypeIn resolution = (maxRange[0] - minRange[0]) / bins;
+    for (int iy = 0; iy < bins; ++iy) {
+        for (int ix = 0; ix < bins; ++ix) {
+            const int sample = iy * bins + ix;
+            u[sample] = minRange[0] + (ix + 0.5) * resolution;
+            v[sample] = minRange[1] + (iy + 0.5) * resolution;
+        }
+    }
 
+    u[histogramSize] = maxRange[0];
+    v[histogramSize] = maxRange[1];
+    q[histogramSize] = 2e-6;
+    expected.back() += 2.0;
 
+    u[histogramSize + 1] = minRange[0] - resolution;
+    v[histogramSize + 1] = minRange[1];
+    q[histogramSize + 1] = 100e-6;
+
+    u[histogramSize + 2] = minRange[0];
+    v[histogramSize + 2] = maxRange[1] + resolution;
+    q[histogramSize + 2] = 100e-6;
+
+    histogramTypeIn* uDevice = nullptr;
+    histogramTypeIn* vDevice = nullptr;
+    histogramTypeIn* qDevice = nullptr;
+    velocityHistogramCUDA2D* histogramDevice = nullptr;
+
+    cudaErrChk(cudaMalloc(&uDevice, sampleCount * sizeof(histogramTypeIn)));
+    cudaErrChk(cudaMalloc(&vDevice, sampleCount * sizeof(histogramTypeIn)));
+    cudaErrChk(cudaMalloc(&qDevice, sampleCount * sizeof(histogramTypeIn)));
+    cudaErrChk(cudaMalloc(&histogramDevice, sizeof(velocityHistogramCUDA2D)));
+
+    cudaErrChk(cudaMemcpy(uDevice, u.data(), sampleCount * sizeof(histogramTypeIn), cudaMemcpyHostToDevice));
+    cudaErrChk(cudaMemcpy(vDevice, v.data(), sampleCount * sizeof(histogramTypeIn), cudaMemcpyHostToDevice));
+    cudaErrChk(cudaMemcpy(qDevice, q.data(), sampleCount * sizeof(histogramTypeIn), cudaMemcpyHostToDevice));
+    cudaErrChk(cudaMemcpy(histogramDevice, &histogram, sizeof(velocityHistogramCUDA2D), cudaMemcpyHostToDevice));
+
+    constexpr int blockSize = 256;
+    fillHistogram2D<<<getGridSize(sampleCount, blockSize), blockSize>>>(sampleCount, uDevice, vDevice, qDevice, histogramDevice);
+    cudaErrChk(cudaGetLastError());
+    cudaErrChk(cudaDeviceSynchronize());
+
+    histogram.copyHistogramAsync();
+    cudaErrChk(cudaDeviceSynchronize());
+
+    const auto* actual = histogram.getHistogram();
+    constexpr double tolerance = 1e-6;
+    bool pass = true;
+    for (int i = 0; i < histogramSize; ++i) {
+        if (std::fabs(static_cast<double>(actual[i] - expected[i])) > tolerance) {
+            std::cout << "Mismatch in 2D histogram at bin " << i
+                      << ": GPU = " << actual[i]
+                      << ", CPU = " << expected[i] << "\n";
+            pass = false;
+            break;
+        }
+    }
+
+    cudaErrChk(cudaFree(histogramDevice));
+    cudaErrChk(cudaFree(qDevice));
+    cudaErrChk(cudaFree(vDevice));
+    cudaErrChk(cudaFree(uDevice));
+
+    if (pass) {
+        std::cout << "Test passed: 2D histogram bins match expected counts.\n";
+    } else {
+        std::cout << "Test failed: 2D histogram bins do not match expected counts.\n";
+    }
+
+    return pass ? 0 : 1;
+}
+
+int main()
+{
+    try {
+        return runTest();
+    } catch (const std::exception& error) {
+        std::cerr << "histogram2DTest failed: " << error.what() << "\n";
+        return EXIT_FAILURE;
+    }
+}

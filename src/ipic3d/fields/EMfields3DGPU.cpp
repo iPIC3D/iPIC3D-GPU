@@ -35,6 +35,7 @@
 #include "Com3DNonblk.h"
 #include "Parameters.h"
 #include "TimeTasks.h"
+#include "errors.h"
 
 #include "cudaTypeDef.cuh"
 #include "GPUSolverMPITypes.h"
@@ -199,10 +200,11 @@ void EMfields3D::gpuSolverAllocate()
   cudaErrChk(cudaHostAlloc(&h_gmresSN, GMRES_M * sizeof(cudaSolverType), cudaHostAllocDefault));
   cudaErrChk(cudaHostAlloc(&h_gmresY,  GMRES_MP1 * sizeof(cudaSolverType), cudaHostAllocDefault));
 
-  // ---- GMRES workspace (lazy allocation in gpuCalculateE) ----
-  d_gmresV    = nullptr;
-  d_gmresW    = nullptr;
-  gmresVAlloc = 0;
+  // ---- Persistent GMRES workspace ----
+  const int nGMRESKrylov = std::max(nMaxwellKrylov, nPoissonKrylov);
+  cudaErrChk(cudaMalloc(&d_gmresV, (size_t)GMRES_MP1 * nGMRESKrylov * sizeof(cudaSolverType)));
+  cudaErrChk(cudaMalloc(&d_gmresW, (size_t)nGMRESKrylov * sizeof(cudaSolverType)));
+  gmresVAlloc = GMRES_MP1 * nGMRESKrylov;
 
   // ---- FGMRES workspace (lazy allocation) ----
   d_fgmresZ    = nullptr;
@@ -1313,7 +1315,7 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov)
 //    • D→H reduction copies use async memcpy into pinned memory.
 //    • Stream syncs are batched: ONE sync per Arnoldi step (before
 //      MPI_Allreduce) plus ONE for the post-ortho norm.
-//    • Device workspace (V, w) is allocated lazily and cached.
+//    • Device workspace (V, w) is allocated persistently in gpuSolverAllocate().
 // =========================================================================
 
 static void gpuGMRES_impl(EMfields3D* field,
@@ -1335,13 +1337,10 @@ static void gpuGMRES_impl(EMfields3D* field,
 {
   const int mp1 = m + 1;
 
-  // Allocate GMRES workspace on device (lazy, cached across calls)
+  // GMRES workspace is allocated persistently in gpuSolverAllocate().
   if (gmresVAlloc < mp1 * n) {
-    if (d_gmresV) cudaFree(d_gmresV);
-    if (d_gmresW) cudaFree(d_gmresW);
-    cudaErrChk(cudaMalloc(&d_gmresV, (size_t)mp1 * n * sizeof(cudaSolverType)));
-    cudaErrChk(cudaMalloc(&d_gmresW, (size_t)n * sizeof(cudaSolverType)));
-    gmresVAlloc = mp1 * n;
+    eprintf("Persistent GPU GMRES workspace too small: allocated %d, required %d", gmresVAlloc, mp1 * n);
+    abort();
   }
   cudaSolverType* d_V = d_gmresV;
   cudaSolverType* d_w = d_gmresW;
@@ -1522,13 +1521,10 @@ static void gpuFGMRES_impl(
 {
   const int mp1 = m + 1;
 
-  // Allocate V[(m+1)*n] and w[n] (shared with GMRES, lazy)
+  // V[(m+1)*n] and w[n] are shared with GMRES and allocated persistently.
   if (gmresVAlloc < mp1 * n) {
-    if (d_gmresV) cudaFree(d_gmresV);
-    if (d_gmresW) cudaFree(d_gmresW);
-    cudaErrChk(cudaMalloc(&d_gmresV, (size_t)mp1 * n * sizeof(cudaSolverType)));
-    cudaErrChk(cudaMalloc(&d_gmresW, (size_t)n * sizeof(cudaSolverType)));
-    gmresVAlloc = mp1 * n;
+    eprintf("Persistent GPU GMRES workspace too small: allocated %d, required %d", gmresVAlloc, mp1 * n);
+    abort();
   }
   // Allocate Z[m*n] (FGMRES-only, lazy)
   if (fgmresZAlloc < m * n) {

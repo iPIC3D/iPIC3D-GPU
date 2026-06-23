@@ -1192,10 +1192,10 @@ class EMfields3D                // :public Field
     // Reduction scratch buffer for GPU BLAS dot/norm operations
     cudaSolverType* d_blasScratch = nullptr;
 
-    // GPU GMRES workspace (allocated on first use in gpuCalculateE)
-    cudaSolverType* d_gmresV    = nullptr;  // [m+1][xkrylovlen]
-    cudaSolverType* d_gmresW    = nullptr;  // [xkrylovlen]
-    int     gmresVAlloc = 0;
+    // GPU GMRES workspace, persistently allocated for max(Maxwell, Poisson).
+    cudaSolverType* d_gmresV    = nullptr;  // [GMRES_MP1][max krylov length]
+    cudaSolverType* d_gmresW    = nullptr;  // [max krylov length]
+    int     gmresVAlloc = 0;                // allocated d_gmresV element count
 
     // GPU FGMRES workspace (Z basis = preconditioned vectors)
     cudaSolverType* d_fgmresZ   = nullptr;  // [m][xkrylovlen]

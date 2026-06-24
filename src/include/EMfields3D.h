@@ -621,6 +621,9 @@ class EMfields3D                // :public Field
      */
     void gpuBlockJacobiPrecond(cudaSolverType* d_x, cudaSolverType* d_b);
 
+    /** Allocate the FGMRES Z workspace on first actual FGMRES use. */
+    void gpuEnsureFGMRESWorkspace(int m, int n);
+
     /** GPU FGMRES(m) with communication-free block-Jacobi preconditioner.
      *  Right-preconditioned flexible GMRES: Z[k] = M⁻¹ V[k], w = A Z[k].
      *  Uses gpuBlockJacobiPrecond as the preconditioner.
@@ -1197,9 +1200,9 @@ class EMfields3D                // :public Field
     cudaSolverType* d_gmresW    = nullptr;  // [max krylov length]
     int     gmresVAlloc = 0;                // allocated d_gmresV element count
 
-    // GPU FGMRES workspace (Z basis = preconditioned vectors)
-    cudaSolverType* d_fgmresZ   = nullptr;  // [m][xkrylovlen]
-    int     fgmresZAlloc = 0;
+    // GPU FGMRES workspace (Z basis = preconditioned vectors), allocated on first FGMRES use.
+    cudaSolverType* d_fgmresZ   = nullptr;  // [GMRES_M][max krylov length]
+    int     fgmresZAlloc = 0;               // allocated d_fgmresZ element count
 
     // ---- GPU Chebyshev workspace (4 Krylov-sized vectors) ----
     cudaSolverType* d_chebY   = nullptr;   // current iterate

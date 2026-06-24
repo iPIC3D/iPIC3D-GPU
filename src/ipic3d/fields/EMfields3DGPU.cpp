@@ -206,8 +206,8 @@ void EMfields3D::gpuSolverAllocate()
   cudaErrChk(cudaMalloc(&d_gmresW, (size_t)nGMRESKrylov * sizeof(cudaSolverType)));
   gmresVAlloc = GMRES_MP1 * nGMRESKrylov;
 
-  // ---- FGMRES workspace (lazy allocation) ----
-  d_fgmresZ    = nullptr;
+  // ---- FGMRES workspace (allocated on first FGMRES use, then reused) ----
+  d_fgmresZ = nullptr;
   fgmresZAlloc = 0;
 
   // ---- Chebyshev workspace (4 Krylov-sized vectors, lazy alloc) ----
@@ -1323,7 +1323,9 @@ static void gpuGMRES_impl(EMfields3D* field,
                           cudaSolverType* d_x, int n, cudaSolverType* d_b,
                           int m, int max_iter, cudaSolverType tol,
                           cudaSolverType* d_scratch,
-                          cudaSolverType*& d_gmresV, cudaSolverType*& d_gmresW, int& gmresVAlloc,
+                          cudaSolverType* const d_gmresV,
+                          cudaSolverType* const d_gmresW,
+                          const int gmresVAlloc,
                           MPI_Comm fieldcomm,
                           cudaStream_t stream,
                           // Persistent PINNED host buffers (from EMfields3D members)
@@ -1338,20 +1340,18 @@ static void gpuGMRES_impl(EMfields3D* field,
   const int mp1 = m + 1;
 
   // GMRES workspace is allocated persistently in gpuSolverAllocate().
-  if (gmresVAlloc < mp1 * n) {
+  if (!d_gmresV || !d_gmresW || gmresVAlloc < mp1 * n) {
     eprintf("Persistent GPU GMRES workspace too small: allocated %d, required %d", gmresVAlloc, mp1 * n);
     abort();
   }
-  cudaSolverType* d_V = d_gmresV;
-  cudaSolverType* d_w = d_gmresW;
 
   // r = b - A*x  →  V[0]
-  (field->*GpuImage)(d_w, d_x);          // w = A*x
-  gpuEq(d_V, d_b, n, stream);            // V[0] = b
-  gpuSub(d_V, d_w, n, stream);           // V[0] = b - A*x
+  (field->*GpuImage)(d_gmresW, d_x);     // w = A*x
+  gpuEq(d_gmresV, d_b, n, stream);       // V[0] = b
+  gpuSub(d_gmresV, d_gmresW, n, stream); // V[0] = b - A*x
 
   // ||r||₂  (async D→H into pinned buffer, one sync)
-  gpuNorm2_async(d_V, n, d_scratch, &h_reduceLocal[0], stream);
+  gpuNorm2_async(d_gmresV, n, d_scratch, &h_reduceLocal[0], stream);
   cudaErrChk(cudaStreamSynchronize(stream));
   double initial_error;
   MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
@@ -1371,7 +1371,7 @@ static void gpuGMRES_impl(EMfields3D* field,
   if (gmresRank == 0)
     printf("Initial residual: %g norm b vector (source) = %g\n", initial_error, normb);
 
-  gpuScale(d_V, 1.0 / initial_error, n, stream);
+  gpuScale(d_gmresV, 1.0 / initial_error, n, stream);
   double error = initial_error;
 
   for (int restart = 0; restart < max_iter; restart++) {
@@ -1385,11 +1385,11 @@ static void gpuGMRES_impl(EMfields3D* field,
 
     for (int k = 0; k < m; k++) {
       // w = A * V[k]
-      (field->*GpuImage)(d_w, d_V + (size_t)k * n);
+      (field->*GpuImage)(d_gmresW, d_gmresV + (size_t)k * n);
 
       // ---- Batched Arnoldi: fuse all k+1 dot products + norm² ----
       // ONE kernel launch → ONE async D→H copy → ONE sync → ONE MPI_Allreduce
-      gpuBatchedDotNorm(d_w, d_V, (size_t)n, k, (size_t)n, d_scratch, stream);
+      gpuBatchedDotNorm(d_gmresW, d_gmresV, (size_t)n, k, (size_t)n, d_scratch, stream);
       cudaErrChk(cudaMemcpyAsync(h_reduceLocal, d_scratch,
                                   (k + 2) * sizeof(cudaSolverType),
                                   cudaMemcpyDeviceToHost, stream));
@@ -1401,12 +1401,12 @@ static void gpuGMRES_impl(EMfields3D* field,
       for (int j = 0; j <= k; j++) {
         double h_jk = h_reduceGlobal[j];
         H[j * m + k] = h_jk;
-        gpuAddscale(-h_jk, d_w, d_V + (size_t)j * n, n, stream);
+        gpuAddscale(-h_jk, d_gmresW, d_gmresV + (size_t)j * n, n, stream);
       }
 
       // H[k+1][k] = ||w_perp||  (post-orthogonalisation norm)
       // Async D→H, single sync
-      gpuNorm2_async(d_w, n, d_scratch, &h_reduceLocal[0], stream);
+      gpuNorm2_async(d_gmresW, n, d_scratch, &h_reduceLocal[0], stream);
       cudaErrChk(cudaStreamSynchronize(stream));
       double global_wNorm;
       MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
@@ -1417,14 +1417,14 @@ static void gpuGMRES_impl(EMfields3D* field,
       const double delta = 0.001;
       if (av + delta * H[(k + 1) * m + k] == av) {
         for (int j = 0; j <= k; j++) {
-          gpuDot_async(d_w, d_V + (size_t)j * n, n, d_scratch, &h_reduceLocal[0], stream);
+          gpuDot_async(d_gmresW, d_gmresV + (size_t)j * n, n, d_scratch, &h_reduceLocal[0], stream);
           cudaErrChk(cudaStreamSynchronize(stream));
           double htmp;
           MPI_Allreduce(&h_reduceLocal[0], &htmp, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
           H[j * m + k] += htmp;
-          gpuAddscale(-htmp, d_w, d_V + (size_t)j * n, n, stream);
+          gpuAddscale(-htmp, d_gmresW, d_gmresV + (size_t)j * n, n, stream);
         }
-        gpuNorm2_async(d_w, n, d_scratch, &h_reduceLocal[0], stream);
+        gpuNorm2_async(d_gmresW, n, d_scratch, &h_reduceLocal[0], stream);
         cudaErrChk(cudaStreamSynchronize(stream));
         MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
         H[(k + 1) * m + k] = sqrt(global_wNorm);
@@ -1432,9 +1432,9 @@ static void gpuGMRES_impl(EMfields3D* field,
 
       // V[k+1] = w / H[k+1][k]
       if (H[(k + 1) * m + k] > 1e-30)
-        gpuScaleCopy(d_V + (size_t)(k + 1) * n, d_w, 1.0 / H[(k + 1) * m + k], n, stream);
+        gpuScaleCopy(d_gmresV + (size_t)(k + 1) * n, d_gmresW, 1.0 / H[(k + 1) * m + k], n, stream);
       else
-        gpuEq(d_V + (size_t)(k + 1) * n, d_w, n, stream);
+        gpuEq(d_gmresV + (size_t)(k + 1) * n, d_gmresW, n, stream);
 
       // Apply previous Givens rotations
       for (int j = 0; j < k; j++) {
@@ -1473,14 +1473,14 @@ static void gpuGMRES_impl(EMfields3D* field,
       y[i] /= H[i * m + i];
     }
     for (int j = 0; j <= kEnd; j++)
-      gpuAddscale(y[j], d_x, d_V + (size_t)j * n, n, stream);
+      gpuAddscale(y[j], d_x, d_gmresV + (size_t)j * n, n, stream);
 
     // ---- True residual check (handles affine operators correctly) ----
-    (field->*GpuImage)(d_w, d_x);
-    gpuEq(d_V, d_b, n, stream);
-    gpuSub(d_V, d_w, n, stream);
+    (field->*GpuImage)(d_gmresW, d_x);
+    gpuEq(d_gmresV, d_b, n, stream);
+    gpuSub(d_gmresV, d_gmresW, n, stream);
 
-    gpuNorm2_async(d_V, n, d_scratch, &h_reduceLocal[0], stream);
+    gpuNorm2_async(d_gmresV, n, d_scratch, &h_reduceLocal[0], stream);
     cudaErrChk(cudaStreamSynchronize(stream));
     MPI_Allreduce(&h_reduceLocal[0], &error, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
     error = sqrt(error);
@@ -1491,10 +1491,40 @@ static void gpuGMRES_impl(EMfields3D* field,
                restart, kEnd, error / initial_error);
       return;
     }
-    gpuScale(d_V, 1.0 / error, n, stream);
+    gpuScale(d_gmresV, 1.0 / error, n, stream);
   }
   if (gmresRank == 0)
     std::cout << "  [GMRES] WARNING: did not converge after " << max_iter << " restarts" << std::endl;
+}
+
+// =========================================================================
+//  GPU FGMRES workspace: allocate Z only on first actual FGMRES use
+// =========================================================================
+
+void EMfields3D::gpuEnsureFGMRESWorkspace(int m, int n)
+{
+  const int nMaxwellKrylov = 3 * (nxn - 2) * (nyn - 2) * (nzn - 2);
+  const int nPoissonKrylov = (nxc - 2) * (nyc - 2) * (nzc - 2);
+  const int nGMRESKrylov = std::max(nMaxwellKrylov, nPoissonKrylov);
+
+  if (m > GMRES_M || n > nGMRESKrylov) {
+    eprintf("Requested FGMRES workspace exceeds persistent sizing: requested m=%d n=%d, max m=%d n=%d",
+            m, n, GMRES_M, nGMRESKrylov);
+    abort();
+  }
+
+  const int required = GMRES_M * nGMRESKrylov;
+  if (!d_fgmresZ) {
+    cudaErrChk(cudaMalloc(&d_fgmresZ, (size_t)required * sizeof(cudaSolverType)));
+    fgmresZAlloc = required;
+    return;
+  }
+
+  if (fgmresZAlloc < required) {
+    eprintf("Persistent GPU FGMRES Z workspace too small: allocated %d, required %d",
+            fgmresZAlloc, required);
+    abort();
+  }
 }
 
 // =========================================================================
@@ -1512,8 +1542,11 @@ static void gpuFGMRES_impl(
     cudaSolverType* d_x, int n, cudaSolverType* d_b,
     int m, int max_iter, cudaSolverType tol,
     cudaSolverType* d_scratch,
-    cudaSolverType*& d_gmresV, cudaSolverType*& d_gmresW, int& gmresVAlloc,
-    cudaSolverType*& d_fgmresZ, int& fgmresZAlloc,
+    cudaSolverType* const d_gmresV,
+    cudaSolverType* const d_gmresW,
+    const int gmresVAlloc,
+    cudaSolverType* const d_fgmresZ,
+    const int fgmresZAlloc,
     MPI_Comm fieldcomm, cudaStream_t stream,
     cudaSolverType* h_reduceLocal, cudaSolverType* h_reduceGlobal,
     cudaSolverType* H, cudaSolverType* g, cudaSolverType* cs, cudaSolverType* sn, cudaSolverType* y,
@@ -1522,27 +1555,22 @@ static void gpuFGMRES_impl(
   const int mp1 = m + 1;
 
   // V[(m+1)*n] and w[n] are shared with GMRES and allocated persistently.
-  if (gmresVAlloc < mp1 * n) {
+  if (!d_gmresV || !d_gmresW || gmresVAlloc < mp1 * n) {
     eprintf("Persistent GPU GMRES workspace too small: allocated %d, required %d", gmresVAlloc, mp1 * n);
     abort();
   }
-  // Allocate Z[m*n] (FGMRES-only, lazy)
-  if (fgmresZAlloc < m * n) {
-    if (d_fgmresZ) cudaFree(d_fgmresZ);
-    cudaErrChk(cudaMalloc(&d_fgmresZ, (size_t)m * n * sizeof(cudaSolverType)));
-    fgmresZAlloc = m * n;
+  if (!d_fgmresZ || fgmresZAlloc < m * n) {
+    eprintf("Persistent GPU FGMRES Z workspace too small: allocated %d, required %d", fgmresZAlloc, m * n);
+    abort();
   }
-  cudaSolverType* d_V = d_gmresV;
-  cudaSolverType* d_w = d_gmresW;
-  cudaSolverType* d_Z = d_fgmresZ;
 
   // r = b - A*x → V[0]
-  (field->*GpuImage)(d_w, d_x);
-  gpuEq(d_V, d_b, n, stream);
-  gpuSub(d_V, d_w, n, stream);
+  (field->*GpuImage)(d_gmresW, d_x);
+  gpuEq(d_gmresV, d_b, n, stream);
+  gpuSub(d_gmresV, d_gmresW, n, stream);
 
   // ||r||₂
-  gpuNorm2_async(d_V, n, d_scratch, &h_reduceLocal[0], stream);
+  gpuNorm2_async(d_gmresV, n, d_scratch, &h_reduceLocal[0], stream);
   cudaErrChk(cudaStreamSynchronize(stream));
   double initial_error;
   MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
@@ -1562,7 +1590,7 @@ static void gpuFGMRES_impl(
     printf("  [%s] Initial residual: %g  norm(b) = %g\n", label, initial_error, normb);
 
   double rho_tol = initial_error * tol;
-  gpuScale(d_V, 1.0 / initial_error, n, stream);
+  gpuScale(d_gmresV, 1.0 / initial_error, n, stream);
   double error = initial_error;
 
   for (int restart = 0; restart < max_iter; restart++) {
@@ -1578,13 +1606,13 @@ static void gpuFGMRES_impl(
       kk = k;
 
       // Z[k] = M⁻¹ V[k]
-      (field->*GpuPrecond)(d_Z + (size_t)k * n, d_V + (size_t)k * n);
+      (field->*GpuPrecond)(d_fgmresZ + (size_t)k * n, d_gmresV + (size_t)k * n);
 
       // w = A * Z[k]
-      (field->*GpuImage)(d_w, d_Z + (size_t)k * n);
+      (field->*GpuImage)(d_gmresW, d_fgmresZ + (size_t)k * n);
 
       // Batched Arnoldi: fuse k+1 dot products + ||w||²
-      gpuBatchedDotNorm(d_w, d_V, (size_t)n, k, (size_t)n, d_scratch, stream);
+      gpuBatchedDotNorm(d_gmresW, d_gmresV, (size_t)n, k, (size_t)n, d_scratch, stream);
       cudaErrChk(cudaMemcpyAsync(h_reduceLocal, d_scratch,
                                   (k + 2) * sizeof(cudaSolverType),
                                   cudaMemcpyDeviceToHost, stream));
@@ -1595,10 +1623,10 @@ static void gpuFGMRES_impl(
       for (int j = 0; j <= k; j++) {
         double h_jk = h_reduceGlobal[j];
         H[j * m + k] = h_jk;
-        gpuAddscale(-h_jk, d_w, d_V + (size_t)j * n, n, stream);
+        gpuAddscale(-h_jk, d_gmresW, d_gmresV + (size_t)j * n, n, stream);
       }
 
-      gpuNorm2_async(d_w, n, d_scratch, &h_reduceLocal[0], stream);
+      gpuNorm2_async(d_gmresW, n, d_scratch, &h_reduceLocal[0], stream);
       cudaErrChk(cudaStreamSynchronize(stream));
       double global_wNorm;
       MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
@@ -1609,23 +1637,23 @@ static void gpuFGMRES_impl(
       const double delta_reorth = 0.001;
       if (av + delta_reorth * H[(k + 1) * m + k] == av) {
         for (int j = 0; j <= k; j++) {
-          gpuDot_async(d_w, d_V + (size_t)j * n, n, d_scratch, &h_reduceLocal[0], stream);
+          gpuDot_async(d_gmresW, d_gmresV + (size_t)j * n, n, d_scratch, &h_reduceLocal[0], stream);
           cudaErrChk(cudaStreamSynchronize(stream));
           double htmp;
           MPI_Allreduce(&h_reduceLocal[0], &htmp, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
           H[j * m + k] += htmp;
-          gpuAddscale(-htmp, d_w, d_V + (size_t)j * n, n, stream);
+          gpuAddscale(-htmp, d_gmresW, d_gmresV + (size_t)j * n, n, stream);
         }
-        gpuNorm2_async(d_w, n, d_scratch, &h_reduceLocal[0], stream);
+        gpuNorm2_async(d_gmresW, n, d_scratch, &h_reduceLocal[0], stream);
         cudaErrChk(cudaStreamSynchronize(stream));
         MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
         H[(k + 1) * m + k] = sqrt(global_wNorm);
       }
 
       if (H[(k + 1) * m + k] > 1e-30)
-        gpuScaleCopy(d_V + (size_t)(k + 1) * n, d_w, 1.0 / H[(k + 1) * m + k], n, stream);
+        gpuScaleCopy(d_gmresV + (size_t)(k + 1) * n, d_gmresW, 1.0 / H[(k + 1) * m + k], n, stream);
       else
-        gpuEq(d_V + (size_t)(k + 1) * n, d_w, n, stream);
+        gpuEq(d_gmresV + (size_t)(k + 1) * n, d_gmresW, n, stream);
 
       for (int j = 0; j < k; j++) {
         double h0 = H[j * m + k];
@@ -1659,15 +1687,15 @@ static void gpuFGMRES_impl(
         y[i] /= H[i * m + i];
       }
       for (int j = 0; j <= kEnd; j++)
-        gpuAddscale(y[j], d_x, d_Z + (size_t)j * n, n, stream);
+        gpuAddscale(y[j], d_x, d_fgmresZ + (size_t)j * n, n, stream);
     }
 
     // True residual check (mandatory for flexible preconditioning)
-    (field->*GpuImage)(d_w, d_x);
-    gpuEq(d_V, d_b, n, stream);
-    gpuSub(d_V, d_w, n, stream);
+    (field->*GpuImage)(d_gmresW, d_x);
+    gpuEq(d_gmresV, d_b, n, stream);
+    gpuSub(d_gmresV, d_gmresW, n, stream);
 
-    gpuNorm2_async(d_V, n, d_scratch, &h_reduceLocal[0], stream);
+    gpuNorm2_async(d_gmresV, n, d_scratch, &h_reduceLocal[0], stream);
     cudaErrChk(cudaStreamSynchronize(stream));
     MPI_Allreduce(&h_reduceLocal[0], &error, 1, mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
     error = sqrt(error);
@@ -1678,7 +1706,7 @@ static void gpuFGMRES_impl(
                label, restart, kk, error / initial_error);
       return;
     }
-    gpuScale(d_V, 1.0 / error, n, stream);
+    gpuScale(d_gmresV, 1.0 / error, n, stream);
   }
 
   if (rank == 0)
@@ -1823,6 +1851,7 @@ void EMfields3D::gpuFGMRES_BlockJacobiPrecond(
   }
 
   blockJacobiDinvStale = true;
+  gpuEnsureFGMRESWorkspace(m, n);
 
   gpuFGMRES_impl(this, &EMfields3D::gpuMaxwellImage,
                  &EMfields3D::gpuBlockJacobiPrecond,
@@ -2684,6 +2713,7 @@ void EMfields3D::gpuFGMRES_PoissonChebyshev(
     MPI_Comm fieldcomm)
 {
   computePoissonChebyshevEigenvalues();
+  gpuEnsureFGMRESWorkspace(m, n);
 
   gpuFGMRES_impl(this, &EMfields3D::gpuPoissonImage,
                  &EMfields3D::gpuChebyshevPrecondPoisson,

@@ -22,13 +22,11 @@
 #include <stdio.h>
 #include <iostream>
 #include "BlockCommunicator.h"
-#include "IDgenerator.h"
 #include "../main/Parameters.cpp"
 #include "../utility/debug.cpp"
 #include "../utility/asserts.cpp"
 #include "../utility/errors.cpp"
 #include "../utility/MPIdata.cpp"
-#include "../utility/IDgenerator.cpp"
 // not sure on what systems this will be available
 #include <ext/stdio_filebuf.h>
 using namespace std;
@@ -502,22 +500,11 @@ void test_particle_communication()
   MPI_Comm_free(&dn_comm);
 }
 
-void test_pcl_id_generator()
-{
-  const int nop=100;
-  doubleIDgenerator pclIDgenerator;
-  pclIDgenerator.reserve_particles_in_range(0,nop);
-  dprint(pclIDgenerator.generateID());
-  dprint(pclIDgenerator.generateID());
-  dprint(pclIDgenerator.generateID());
-}
-
 int main(int argc, char **argv)
 {
   MPIdata::init(&argc, &argv);
 
   test_particle_communication();
-  test_pcl_id_generator();
 
   MPIdata::finalize_mpi();
   //MPI_Finalize();

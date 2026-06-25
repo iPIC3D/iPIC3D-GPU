@@ -15,7 +15,7 @@
 #include "ipichdf5.h"       // HDF5 headers (guarded by NO_HDF5)
 #include "ipicdefs.h"       // DVECWIDTH
 #include "ipicmath.h"       // roundup_to_multiple
-#include "CUDA/cudaTypeDef.cuh"  // cudaCommonType
+#include "CUDA/cudaTypeDef.cuh"  // cudaCommonType, cudaPclType_ID
 
 #include <array>
 #include <sstream>
@@ -143,10 +143,9 @@ struct RestartParticleChunkBuffers {
     std::vector<double> x;
     std::vector<double> y;
     std::vector<double> z;
-    std::vector<double> t;
-    std::vector<long> idLong;
+    std::vector<cudaPclType_ID> id;
 
-    void resize(size_t count, bool needLongIds)
+    void resize(size_t count, bool trackParticleID)
     {
         u.resize(count);
         v.resize(count);
@@ -155,8 +154,12 @@ struct RestartParticleChunkBuffers {
         x.resize(count);
         y.resize(count);
         z.resize(count);
-        t.resize(count);
-        if (needLongIds) idLong.resize(count);
+        if (trackParticleID) {
+            id.resize(count);
+            std::fill(id.begin(), id.end(), PARTICLE_ID_INVALID);
+        } else {
+            id.clear();
+        }
     }
 };
 
@@ -260,7 +263,8 @@ void resizeParticleVectors(
     vector_double& u, vector_double& v, vector_double& w,
     vector_double& q,
     vector_double& x, vector_double& y, vector_double& z,
-    vector_double& t)
+    vector_cudaPclType_ID& id,
+    bool trackParticleID)
 {
     if (totalParticles > std::numeric_limits<int>::max()) {
         eprintf("ERROR: restart particle count exceeds int-supported "
@@ -273,12 +277,18 @@ void resizeParticleVectors(
     u.reserve(padded_nop);  v.reserve(padded_nop);
     w.reserve(padded_nop);  q.reserve(padded_nop);
     x.reserve(padded_nop);  y.reserve(padded_nop);
-    z.reserve(padded_nop);  t.reserve(padded_nop);
+    z.reserve(padded_nop);
+    if (trackParticleID) id.reserve(padded_nop);
 
     u.resize(nop);  v.resize(nop);
     w.resize(nop);  q.resize(nop);
     x.resize(nop);  y.resize(nop);
-    z.resize(nop);  t.resize(nop);
+    z.resize(nop);
+    if (trackParticleID) {
+        id.resize(nop);
+    } else {
+        id.clear();
+    }
 }
 
 void copyChunkToParticleVectors(
@@ -288,7 +298,8 @@ void copyChunkToParticleVectors(
     vector_double& u, vector_double& v, vector_double& w,
     vector_double& q,
     vector_double& x, vector_double& y, vector_double& z,
-    vector_double& t)
+    vector_cudaPclType_ID& id,
+    bool trackParticleID)
 {
     const size_t dst = static_cast<size_t>(destinationOffset);
     std::copy_n(buffers.u.data(), count, &u[dst]);
@@ -298,7 +309,9 @@ void copyChunkToParticleVectors(
     std::copy_n(buffers.x.data(), count, &x[dst]);
     std::copy_n(buffers.y.data(), count, &y[dst]);
     std::copy_n(buffers.z.data(), count, &z[dst]);
-    std::copy_n(buffers.t.data(), count, &t[dst]);
+    if (trackParticleID) {
+        std::copy_n(buffers.id.data(), count, &id[dst]);
+    }
 }
 
 constexpr long long kRestartParticleChunkSize = 1LL << 20;
@@ -311,7 +324,8 @@ void readParticleSpanChunks(
     vector_double& u, vector_double& v, vector_double& w,
     vector_double& q,
     vector_double& x, vector_double& y, vector_double& z,
-    vector_double& t,
+    vector_cudaPclType_ID& id,
+    bool trackParticleID,
     ReadChunk readChunk)
 {
     long long remaining = span.count;
@@ -323,7 +337,8 @@ void readParticleSpanChunks(
 
         readChunk(sourceOffset, chunk, buffers);
         copyChunkToParticleVectors(buffers, chunk, destinationOffset,
-                                   u, v, w, q, x, y, z, t);
+                                   u, v, w, q, x, y, z, id,
+                                   trackParticleID);
 
         sourceOffset += static_cast<long long>(chunk);
         destinationOffset += static_cast<long long>(chunk);
@@ -460,9 +475,10 @@ public:
 
     void readChunk(adios2::IO& io, adios2::Engine& engine,
                    int species, long long offset, size_t count,
-                   RestartParticleChunkBuffers& buffers)
+                   RestartParticleChunkBuffers& buffers,
+                   bool trackParticleID)
     {
-        buffers.resize(count, false);
+        buffers.resize(count, trackParticleID);
         const std::string prefix = "part" + std::to_string(species);
 
         readDoubleVariable(io, engine, prefix + "VelocityU", offset, count,
@@ -479,8 +495,9 @@ public:
                            buffers.y.data());
         readDoubleVariable(io, engine, prefix + "PositionZ", offset, count,
                            buffers.z.data());
-        readDoubleVariable(io, engine, prefix + "ID", offset, count,
-                           buffers.t.data());
+        if (trackParticleID)
+            readIDVariableIfPresent(io, engine, prefix + "ID", offset, count,
+                                    buffers.id.data());
     }
 
 private:
@@ -497,6 +514,30 @@ private:
 
         var.SetSelection({{static_cast<size_t>(offset)}, {count}});
         engine.Get<cudaCommonType>(var, dst, adios2::Mode::Sync);
+    }
+
+    void readIDVariableIfPresent(adios2::IO& io, adios2::Engine& engine,
+                                 const std::string& variableName,
+                                 long long offset, size_t count,
+                                 cudaPclType_ID* dst)
+    {
+        auto var = io.InquireVariable<cudaPclType_ID>(variableName);
+        if (!var) {
+            auto legacyVar = io.InquireVariable<cudaCommonType>(variableName);
+            if (!legacyVar) return;
+
+            std::vector<cudaCommonType> legacy(count);
+            legacyVar.SetSelection({{static_cast<size_t>(offset)}, {count}});
+            engine.Get<cudaCommonType>(legacyVar, legacy.data(),
+                                       adios2::Mode::Sync);
+            for (size_t i = 0; i < count; ++i) {
+                dst[i] = static_cast<cudaPclType_ID>(legacy[i]);
+            }
+            return;
+        }
+
+        var.SetSelection({{static_cast<size_t>(offset)}, {count}});
+        engine.Get<cudaPclType_ID>(var, dst, adios2::Mode::Sync);
     }
 };
 
@@ -607,9 +648,10 @@ public:
 
     void readChunk(hid_t file_id, int species, int last_cycle,
                    long long offset, size_t count,
-                   RestartParticleChunkBuffers& buffers)
+                   RestartParticleChunkBuffers& buffers,
+                   bool trackParticleID)
     {
-        buffers.resize(count, true);
+        buffers.resize(count, trackParticleID);
         const std::string cycle = "cycle_" + std::to_string(last_cycle);
         const std::string speciesPath =
             "/particles/species_" + std::to_string(species);
@@ -628,11 +670,9 @@ public:
                             offset, count, buffers.y.data());
         readDoubleSelection(file_id, speciesPath + "/z/" + cycle,
                             offset, count, buffers.z.data());
-        readLongSelection(file_id, speciesPath + "/ID/" + cycle,
-                          offset, count, buffers.idLong.data());
-        for (size_t i = 0; i < count; ++i) {
-            buffers.t[i] = static_cast<double>(buffers.idLong[i]);
-        }
+        if (trackParticleID)
+            readIDSelectionIfPresent(file_id, speciesPath + "/ID/" + cycle,
+                                     offset, count, buffers.id.data());
     }
 
 private:
@@ -730,13 +770,17 @@ private:
                       offset, count, dst);
     }
 
-    void readLongSelection(hid_t file_id,
-                           const std::string& datasetPath,
-                           long long offset,
-                           size_t count,
-                           long* dst)
+    void readIDSelectionIfPresent(hid_t file_id,
+                                  const std::string& datasetPath,
+                                  long long offset,
+                                  size_t count,
+                                  cudaPclType_ID* dst)
     {
-        readSelection(file_id, datasetPath, H5T_NATIVE_LONG,
+        const htri_t exists = H5Lexists(file_id, datasetPath.c_str(),
+                                        H5P_DEFAULT);
+        if (exists <= 0) return;
+
+        readSelection(file_id, datasetPath, H5T_NATIVE_UINT64,
                       offset, count, dst);
     }
 
@@ -956,14 +1000,16 @@ void readAdiosParticlesRemapped(
     vector_double& u, vector_double& v, vector_double& w,
     vector_double& q,
     vector_double& x, vector_double& y, vector_double& z,
-    vector_double& t)
+    vector_cudaPclType_ID& id,
+    bool trackParticleID)
 {
     std::vector<ParticleReadSpan>& spans = context.particleSpans;
     spans.clear();
     collectAdiosParticleSpans(context, species, spans);
 
     const long long totalParticles = totalParticleSpanCount(spans);
-    resizeParticleVectors(totalParticles, u, v, w, q, x, y, z, t);
+    resizeParticleVectors(totalParticles, u, v, w, q, x, y, z, id,
+                          trackParticleID);
     if (totalParticles == 0) return;
 
     long long destinationOffset = 0;
@@ -992,12 +1038,12 @@ void readAdiosParticlesRemapped(
             const ParticleReadSpan& span = spans[spanIndex];
             readParticleSpanChunks(
                 span, context.particleBuffers, destinationOffset,
-                u, v, w, q, x, y, z, t,
+                u, v, w, q, x, y, z, id, trackParticleID,
                 [&](long long sourceOffset, size_t chunk,
                     RestartParticleChunkBuffers& buffers) {
                     context.adiosParticleReader.readChunk(
                         ioParticle, engineParticle, species,
-                        sourceOffset, chunk, buffers);
+                        sourceOffset, chunk, buffers, trackParticleID);
                 });
             ++spanIndex;
         }
@@ -1099,14 +1145,16 @@ void readHdf5ParticlesRemapped(
     vector_double& u, vector_double& v, vector_double& w,
     vector_double& q,
     vector_double& x, vector_double& y, vector_double& z,
-    vector_double& t)
+    vector_cudaPclType_ID& id,
+    bool trackParticleID)
 {
     std::vector<ParticleReadSpan>& spans = context.particleSpans;
     spans.clear();
     collectHdf5ParticleSpans(context, species, spans);
 
     const long long totalParticles = totalParticleSpanCount(spans);
-    resizeParticleVectors(totalParticles, u, v, w, q, x, y, z, t);
+    resizeParticleVectors(totalParticles, u, v, w, q, x, y, z, id,
+                          trackParticleID);
     if (totalParticles == 0) return;
 
     long long destinationOffset = 0;
@@ -1129,12 +1177,12 @@ void readHdf5ParticlesRemapped(
             const ParticleReadSpan& span = spans[spanIndex];
             readParticleSpanChunks(
                 span, context.particleBuffers, destinationOffset,
-                u, v, w, q, x, y, z, t,
+                u, v, w, q, x, y, z, id, trackParticleID,
                 [&](long long sourceOffset, size_t chunk,
                     RestartParticleChunkBuffers& buffers) {
                     context.hdf5ParticleReader.readChunk(
                         file_id, species, context.lastCycle,
-                        sourceOffset, chunk, buffers);
+                        sourceOffset, chunk, buffers, trackParticleID);
                 });
             ++spanIndex;
         }
@@ -1232,7 +1280,7 @@ void RestartReader::readFields(
 }
 
 // ===========================================================================
-// readParticles  —  position, velocity, charge and ID for one species
+// readParticles  —  position, velocity, charge, and optional ID for one species
 // ===========================================================================
 
 void RestartReader::readParticles(
@@ -1241,7 +1289,8 @@ void RestartReader::readParticles(
     vector_double& u, vector_double& v, vector_double& w,
     vector_double& q,
     vector_double& x, vector_double& y, vector_double& z,
-    vector_double& t,
+    vector_cudaPclType_ID& id,
+    bool trackParticleID,
     const std::string& restartDir, int last_cycle)
 {
 #ifdef USE_ADIOS2
@@ -1257,7 +1306,8 @@ void RestartReader::readParticles(
     }
 
     readAdiosParticlesRemapped(context, species_number,
-                               u, v, w, q, x, y, z, t);
+                               u, v, w, q, x, y, z, id,
+                               trackParticleID);
 
 #elif !defined(NO_HDF5)
     RestartReadContext& context =
@@ -1272,7 +1322,8 @@ void RestartReader::readParticles(
     }
 
     readHdf5ParticlesRemapped(context, species_number,
-                              u, v, w, q, x, y, z, t);
+                              u, v, w, q, x, y, z, id,
+                              trackParticleID);
 
 #else
     eprintf("Restart requires compiling with USE_ADIOS2 or HDF5 (without NO_HDF5).");

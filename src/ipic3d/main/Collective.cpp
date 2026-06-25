@@ -23,6 +23,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <cctype>
 #include <sstream>
 #include <vector>
 #include "input_array.h"
@@ -48,6 +49,48 @@ static const char *enumNames[] =
   "NUMBER_OF_ENUMS",
   "INVALID_ENUM"
 };
+
+namespace {
+
+bool parseTrackParticleIDToken(const std::string& token)
+{
+  std::string lower;
+  lower.reserve(token.size());
+  for (char ch : token)
+    lower.push_back(static_cast<char>(
+        std::tolower(static_cast<unsigned char>(ch))));
+
+  if (lower == "0" || lower == "false" || lower == "f" ||
+      lower == "no" || lower == "n" || lower == "none")
+    return false;
+  return true;
+}
+
+std::vector<unsigned char> parseTrackParticleIDMask(
+    const ConfigFile& config, int count)
+{
+  std::vector<unsigned char> mask(static_cast<size_t>(count), 0);
+  const std::string raw =
+      config.read<std::string>("TrackParticleID", std::string());
+  std::istringstream iss(raw);
+  std::vector<unsigned char> values;
+  std::string token;
+  while (iss >> token)
+    values.push_back(parseTrackParticleIDToken(token) ? 1 : 0);
+
+  if (values.empty())
+    return mask;
+  if (values.size() == 1) {
+    std::fill(mask.begin(), mask.end(), values[0]);
+    return mask;
+  }
+
+  const size_t ncopy = std::min(mask.size(), values.size());
+  std::copy(values.begin(), values.begin() + ncopy, mask.begin());
+  return mask;
+}
+
+} // namespace
 
 int Collective::read_enum_parameter(const char* option_name, const char* default_value,
   const ConfigFile& config)
@@ -119,6 +162,7 @@ void Collective::ReadInput(const ConfigFile& config) {
     RestartReadDirName = RestartDirName;
     ns = config.read < int >("ns");
     nstestpart = config.read < int >("nsTestPart", 0);
+    TrackParticleID = parseTrackParticleIDMask(config, ns + nstestpart);
 
     // Per-species enable mask for the (v_par,v_perp) macrocell spectra.
     // Read as a free-form list ("1 0 1 ..."); missing trailing entries
@@ -598,21 +642,6 @@ void Collective::ReadInput(const ConfigFile& config) {
     last_cycle = checkpoint.cycle;
   }
 
-  /*
-  TrackParticleID = new bool[ns];
-  array_bool TrackParticleID0 = config.read < array_bool > ("TrackParticleID");
-  TrackParticleID[0] = TrackParticleID0.a;
-  if (ns > 1)
-    TrackParticleID[1] = TrackParticleID0.b;
-  if (ns > 2)
-    TrackParticleID[2] = TrackParticleID0.c;
-  if (ns > 3)
-    TrackParticleID[3] = TrackParticleID0.d;
-  if (ns > 4)
-    TrackParticleID[4] = TrackParticleID0.e;
-  if (ns > 5)
-    TrackParticleID[5] = TrackParticleID0.f;
-    */
 }
 
 bool Collective::field_output_is_off()const
@@ -653,10 +682,11 @@ void Collective::read_particles_restart(
     vector_double& x,
     vector_double& y,
     vector_double& z,
-    vector_double& t)const
+    vector_cudaPclType_ID& id)const
 {
     // Delegate to RestartReader (implementation in inputoutput/RestartReader.cpp)
-    RestartReader::readParticles(vct, species_number, u, v, w, q, x, y, z, t,
+    RestartReader::readParticles(vct, species_number, u, v, w, q, x, y, z, id,
+                                 getTrackParticleID(species_number),
                                  getRestartReadDirName(), last_cycle);
 }
 

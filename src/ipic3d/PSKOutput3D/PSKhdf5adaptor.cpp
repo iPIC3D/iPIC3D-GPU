@@ -381,8 +381,35 @@ void HDF5OutputAdaptor::write(const std::string & tag, const Dimens dimens, cons
 
 void HDF5OutputAdaptor::write(const std::string & tag, const Dimens dimens, const longid *i_array)
 {
-  assert_eq(sizeof(long),sizeof(longid));
-  write(tag, dimens, (const long *) i_array);
+    if (dimens.size() == 0) {
+      eprintf("Zero Dimens size");
+    }
+
+    std::string ptag = purify_object_name(tag);
+
+    std::vector < hid_t > hid_array;
+    std::string dataset_name;
+
+    get_dataset_context(tag, hid_array, dataset_name);
+
+    hsize_t *hdf5dims = new hsize_t[dimens.size()];
+    for (int i = 0; i < dimens.size(); ++i)
+      hdf5dims[i] = dimens[i];
+
+    herr_t hdf5err = H5LTmake_dataset(hid_array[hid_array.size() - 1],
+                                      dataset_name.c_str(),
+                                      dimens.size(), hdf5dims,
+                                      H5T_NATIVE_UINT64, i_array);
+
+    if (hdf5err < 0) {
+      eprintf("make_dataset fails for %s", tag.c_str());
+    }
+
+    // close groups, if any, but don't try to close the file id at [0]
+    for (int i = hid_array.size() - 1; i > 0; --i)
+      hdf5err = H5Gclose(hid_array[i]);
+
+    delete[] hdf5dims;
 }
 
 void HDF5OutputAdaptor::write(const std::string & tag, const Dimens dimens, const std::vector < int >&i_array) {

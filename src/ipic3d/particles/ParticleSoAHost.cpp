@@ -39,6 +39,7 @@ ParticleSoAHost::ParticleSoAHost(int speciesNum, CollectiveIO* col,
 {
   // --- Species identity ---
   isTestParticle_ = (speciesNum >= col->getNs());
+  trackParticleID_ = col->getTrackParticleID(speciesNum);
   chargeOverMass_ = col->getQOM(speciesNum);
   numParticlesPerCell_ = col->getNpcel(speciesNum);
   numPclPerCellX_ = col->getNpcelx(speciesNum);
@@ -109,9 +110,11 @@ ParticleSoAHost::ParticleSoAHost(int speciesNum, CollectiveIO* col,
   velocityCapMinZ_ = -velocityCapMaxZ_;
 
   // --- Particle ID generator ---
-  const int expectedNOP = static_cast<int>(
-    double(grid->get_num_cells_rr()) * col->getNpcel(speciesNum));
-  particleIDGenerator_.reserve_num_particles(expectedNOP);
+  if (trackParticleID_) {
+    particleIDGenerator_.initialize(vct_->getCartesian_rank(), vct_->getNprocs(),
+                                    speciesNumber_,
+                                    col_->getNs() + col_->getNsTestPart());
+  }
 
   // --- Sorting arrays ---
   numParticlesInBucket_    = new array3_int(numCellsX_, numCellsY_, numCellsZ_);
@@ -143,7 +146,9 @@ void ParticleSoAHost::maxwellian(Field* EMf)
   const int nyr = numCellsY_ - 2;
   const int nzr = numCellsZ_ - 2;
   const int nop = nxr * nyr * nzr * numParticlesPerCell_;
-  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
+  const auto baseSequence = trackParticleID_
+      ? particleIDGenerator_.reserveHostSequenceBlock(nop)
+      : ParticleIDGenerator::counter_type{0};
   const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
 
   prepareSoAForNOP(nop);
@@ -181,7 +186,8 @@ void ParticleSoAHost::maxwellian(Field* EMf)
         x[idx] = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
         y[idx] = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
         z[idx] = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
-        t[idx] = baseID + idx;
+        if (trackParticleID_)
+          id[idx] = particleIDGenerator_.idFromSequence(baseSequence + idx);
       }
     }
   }
@@ -198,7 +204,9 @@ void ParticleSoAHost::maxwellianNullPoints(Field* EMf)
   const int nyr = numCellsY_ - 2;
   const int nzr = numCellsZ_ - 2;
   const int nop = nxr * nyr * nzr * numParticlesPerCell_;
-  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
+  const auto baseSequence = trackParticleID_
+      ? particleIDGenerator_.reserveHostSequenceBlock(nop)
+      : ParticleIDGenerator::counter_type{0};
   const double chargeSign = chargeOverMass_ / fabs(chargeOverMass_);
   const double chargeFactor = chargeSign * grid_->getVOL() / numParticlesPerCell_;
 
@@ -245,7 +253,8 @@ void ParticleSoAHost::maxwellianNullPoints(Field* EMf)
         x[idx] = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
         y[idx] = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
         z[idx] = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
-        t[idx] = baseID + idx;
+        if (trackParticleID_)
+          id[idx] = particleIDGenerator_.idFromSequence(baseSequence + idx);
       }
     }
   }
@@ -256,7 +265,7 @@ void ParticleSoAHost::maxwellianNullPoints(Field* EMf)
  *
  * Drift: v_drift = Jxs/rhons per cell (from currentFromAmpere).
  * Thermal: vth = sqrt(pXXsn/rhons - (Jxs/rhons)^2) per cell.
- * Matches the ECsim reference-state initialization (at t=0 this gives global uth
+ * Matches the ECsim reference-state initialization (at id=0 this gives global uth
  * algebraically, but preserves the mechanism for discrete numerical effects and
  * future extension to non-trivial pressure profiles).
  *
@@ -270,7 +279,9 @@ void ParticleSoAHost::maxwellianAmpereVaryingThermal(Field* EMf)
   const int nyr = numCellsY_ - 2;
   const int nzr = numCellsZ_ - 2;
   const int nop = nxr * nyr * nzr * numParticlesPerCell_;
-  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
+  const auto baseSequence = trackParticleID_
+      ? particleIDGenerator_.reserveHostSequenceBlock(nop)
+      : ParticleIDGenerator::counter_type{0};
   const double chargeSign = chargeOverMass_ / fabs(chargeOverMass_);  // +1 ions, -1 electrons
   const double chargeFactor = chargeSign * grid_->getVOL() / numParticlesPerCell_;
 
@@ -333,7 +344,8 @@ void ParticleSoAHost::maxwellianAmpereVaryingThermal(Field* EMf)
         x[idx] = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
         y[idx] = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
         z[idx] = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
-        t[idx] = baseID + idx;
+        if (trackParticleID_)
+          id[idx] = particleIDGenerator_.idFromSequence(baseSequence + idx);
       }
     }
   }
@@ -352,7 +364,9 @@ void ParticleSoAHost::maxwellianDoubleHarris(Field* EMf)
   const int nyr = numCellsY_ - 2;
   const int nzr = numCellsZ_ - 2;
   const int nop = nxr * nyr * nzr * numParticlesPerCell_;
-  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
+  const auto baseSequence = trackParticleID_
+      ? particleIDGenerator_.reserveHostSequenceBlock(nop)
+      : ParticleIDGenerator::counter_type{0};
   const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
   const double domainYUpper = domainLengthY_ / 2.0;
 
@@ -398,7 +412,8 @@ void ParticleSoAHost::maxwellianDoubleHarris(Field* EMf)
         x[idx] = posX;
         y[idx] = posY;
         z[idx] = posZ;
-        t[idx] = baseID + idx;
+        if (trackParticleID_)
+          id[idx] = particleIDGenerator_.idFromSequence(baseSequence + idx);
       }
     }
   }
@@ -417,7 +432,9 @@ void ParticleSoAHost::maxwellianHumpPerturbation(Field* EMf)
   const int nyr = numCellsY_ - 2;
   const int nzr = numCellsZ_ - 2;
   const int nop = nxr * nyr * nzr * numParticlesPerCell_;
-  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
+  const auto baseSequence = trackParticleID_
+      ? particleIDGenerator_.reserveHostSequenceBlock(nop)
+      : ParticleIDGenerator::counter_type{0};
   const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
 
   prepareSoAForNOP(nop);
@@ -459,7 +476,8 @@ void ParticleSoAHost::maxwellianHumpPerturbation(Field* EMf)
         x[idx] = posX;
         y[idx] = posY;
         z[idx] = posZ;
-        t[idx] = baseID + idx;
+        if (trackParticleID_)
+          id[idx] = particleIDGenerator_.idFromSequence(baseSequence + idx);
       }
     }
   }
@@ -478,7 +496,9 @@ void ParticleSoAHost::pitch_angle_energy(Field* EMf)
   const int nyr = numCellsY_ - 2;
   const int nzr = numCellsZ_ - 2;
   const int nop = nxr * nyr * nzr * numParticlesPerCell_;
-  const double baseID = static_cast<double>(nop) * vct_->getCartesian_rank();
+  const auto baseSequence = trackParticleID_
+      ? particleIDGenerator_.reserveHostSequenceBlock(nop)
+      : ParticleIDGenerator::counter_type{0};
   const double chargeFactor = (chargeOverMass_ / fabs(chargeOverMass_)) * grid_->getVOL() / numParticlesPerCell_;
 
   prepareSoAForNOP(nop);
@@ -520,7 +540,8 @@ void ParticleSoAHost::pitch_angle_energy(Field* EMf)
         x[idx] = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) + grid_->getXN(i, j, k);
         y[idx] = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) + grid_->getYN(i, j, k);
         z[idx] = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) + grid_->getZN(i, j, k);
-        t[idx] = baseID + idx;
+        if (trackParticleID_)
+          id[idx] = particleIDGenerator_.idFromSequence(baseSequence + idx);
       }
     }
   }
@@ -554,7 +575,28 @@ void ParticleSoAHost::force_free(Field* EMf)
  */
 void ParticleSoAHost::restartLoad()
 {
-  col_->read_particles_restart(vct_, speciesNumber_, u, v, w, q, x, y, z, t);
+  col_->read_particles_restart(vct_, speciesNumber_, u, v, w, q, x, y, z, id);
+  if (!trackParticleID_) {
+    id.clear();
+    return;
+  }
+
+  const int nop = getNOP();
+  if (static_cast<int>(id.size()) != nop) {
+    const int oldSize = id.size();
+    id.resize(nop);
+    for (int i = oldSize; i < nop; ++i) {
+      id[i] = PARTICLE_ID_INVALID;
+    }
+  }
+
+  particleIDGenerator_.seedFromExistingIDs(nop > 0 ? id.getList() : nullptr,
+                                           nop, mpiComm_);
+  for (int i = 0; i < nop; ++i) {
+    if (id[i] == PARTICLE_ID_INVALID) {
+      id[i] = particleIDGenerator_.generateHostID();
+    }
+  }
 }
 
 // ======= Diagnostics =======
@@ -629,11 +671,13 @@ void ParticleSoAHost::sort_particles_serial()
   if (numParticles == 0) return;
 
   Larray<double> uSorted(numParticles), vSorted(numParticles), wSorted(numParticles), qSorted(numParticles);
-  Larray<double> xSorted(numParticles), ySorted(numParticles), zSorted(numParticles), tSorted(numParticles);
+  Larray<double> xSorted(numParticles), ySorted(numParticles), zSorted(numParticles);
+  Larray<cudaPclType_ID> idSorted;
   uSorted.resize(numParticles); vSorted.resize(numParticles);
   wSorted.resize(numParticles); qSorted.resize(numParticles);
   xSorted.resize(numParticles); ySorted.resize(numParticles);
-  zSorted.resize(numParticles); tSorted.resize(numParticles);
+  zSorted.resize(numParticles);
+  if (trackParticleID_) idSorted.resize(numParticles);
 
   numParticlesInBucket_->setall(0);
 
@@ -665,11 +709,13 @@ void ParticleSoAHost::sort_particles_serial()
     uSorted[destIndex] = u[pidx]; vSorted[destIndex] = v[pidx];
     wSorted[destIndex] = w[pidx]; qSorted[destIndex] = q[pidx];
     xSorted[destIndex] = x[pidx]; ySorted[destIndex] = y[pidx];
-    zSorted[destIndex] = z[pidx]; tSorted[destIndex] = t[pidx];
+    zSorted[destIndex] = z[pidx];
+    if (trackParticleID_) idSorted[destIndex] = id[pidx];
   }
 
   u.swap(uSorted); v.swap(vSorted); w.swap(wSorted); q.swap(qSorted);
-  x.swap(xSorted); y.swap(ySorted); z.swap(zSorted); t.swap(tSorted);
+  x.swap(xSorted); y.swap(ySorted); z.swap(zSorted);
+  if (trackParticleID_) id.swap(idSorted);
 }
 
 void ParticleSoAHost::sort_particles_parallel(int* cellCount, int* cellOffset)
@@ -682,11 +728,13 @@ void ParticleSoAHost::sort_particles_parallel(int* cellCount, int* cellOffset)
   const int numThreads = omp_get_max_threads();
 
   Larray<double> uSorted(numParticles), vSorted(numParticles), wSorted(numParticles), qSorted(numParticles);
-  Larray<double> xSorted(numParticles), ySorted(numParticles), zSorted(numParticles), tSorted(numParticles);
+  Larray<double> xSorted(numParticles), ySorted(numParticles), zSorted(numParticles);
+  Larray<cudaPclType_ID> idSorted;
   uSorted.resize(numParticles); vSorted.resize(numParticles);
   wSorted.resize(numParticles); qSorted.resize(numParticles);
   xSorted.resize(numParticles); ySorted.resize(numParticles);
-  zSorted.resize(numParticles); tSorted.resize(numParticles);
+  zSorted.resize(numParticles);
+  if (trackParticleID_) idSorted.resize(numParticles);
 
   std::vector<std::vector<int>> threadLocalCounts(numThreads, std::vector<int>(totalCells, 0));
   std::vector<std::vector<int>> threadLocalOffsets(numThreads, std::vector<int>(totalCells, 0));
@@ -733,12 +781,14 @@ void ParticleSoAHost::sort_particles_parallel(int* cellCount, int* cellOffset)
       uSorted[destIndex] = u[pidx]; vSorted[destIndex] = v[pidx];
       wSorted[destIndex] = w[pidx]; qSorted[destIndex] = q[pidx];
       xSorted[destIndex] = x[pidx]; ySorted[destIndex] = y[pidx];
-      zSorted[destIndex] = z[pidx]; tSorted[destIndex] = t[pidx];
+      zSorted[destIndex] = z[pidx];
+      if (trackParticleID_) idSorted[destIndex] = id[pidx];
     }
   }
 
   u.swap(uSorted); v.swap(vSorted); w.swap(wSorted); q.swap(qSorted);
-  x.swap(xSorted); y.swap(ySorted); z.swap(zSorted); t.swap(tSorted);
+  x.swap(xSorted); y.swap(ySorted); z.swap(zSorted);
+  if (trackParticleID_) id.swap(idSorted);
 }
 
 // ======= Boundary-condition configuration queries =======
@@ -888,7 +938,8 @@ void ParticleSoAHost::appendFromAoS(const SpeciesParticle* buffer, int count)
   const int newNOP = oldNOP + count;
   const int padded = roundup_to_multiple(newNOP, DVECWIDTH);
   u.reserve(padded); v.reserve(padded); w.reserve(padded); q.reserve(padded);
-  x.reserve(padded); y.reserve(padded); z.reserve(padded); t.reserve(padded);
+  x.reserve(padded); y.reserve(padded); z.reserve(padded);
+  if (trackParticleID_) id.reserve(padded);
   for (int idx = 0; idx < count; idx++) {
     u.push_back(buffer[idx].get_u());
     v.push_back(buffer[idx].get_v());
@@ -897,8 +948,6 @@ void ParticleSoAHost::appendFromAoS(const SpeciesParticle* buffer, int count)
     x.push_back(buffer[idx].get_x());
     y.push_back(buffer[idx].get_y());
     z.push_back(buffer[idx].get_z());
-    t.push_back(buffer[idx].get_t());
+    if (trackParticleID_) id.push_back(buffer[idx].get_id());
   }
 }
-
-

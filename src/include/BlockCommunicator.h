@@ -48,8 +48,7 @@ struct Block
   // hack to piggy-back information onto message
   int signal; // char
  private: // initialized at compile time
-  // assumes using MPI_DOUBLE
-  static const int NUMBERS_PER_ELEMENT = sizeof(type)/sizeof(double);
+  static const int BYTES_PER_ELEMENT = sizeof(type);
  public:
   int get_capacity()const{return capacity;}
  public:
@@ -159,7 +158,7 @@ struct Block
     //  listID, commID,
     //  dest.rank(), dest.tag_name(),
     //  nop);
-    MPI_Isend((double*)&block[0], NUMBERS_PER_ELEMENT*block.size(), MPI_DOUBLE,
+    MPI_Isend(&block[0], BYTES_PER_ELEMENT * block.size(), MPI_BYTE,
       dest.rank(), dest.tag(), dest.comm(), &request);
     //dprintf("finished sending block number %d", listID);
   }
@@ -188,7 +187,7 @@ struct Block
     // make sure that space exists to receive
     int newsize = signal_hack() ? capacity+1 : capacity;
     block.resize(newsize);
-    MPI_Irecv((double*)&block[0], NUMBERS_PER_ELEMENT*block.size(), MPI_DOUBLE,
+    MPI_Irecv(&block[0], BYTES_PER_ELEMENT * block.size(), MPI_BYTE,
       source.rank(), source.tag(), source.comm(), &request);
   }
   // processing received data
@@ -199,8 +198,9 @@ struct Block
   {
     int count;
     int commID = -1;
-    MPI_Get_count(&status, MPI_DOUBLE, &count);
-    int num_elements_received = count / NUMBERS_PER_ELEMENT;
+    MPI_Get_count(&status, MPI_BYTE, &count);
+    assert(count % BYTES_PER_ELEMENT == 0);
+    int num_elements_received = count / BYTES_PER_ELEMENT;
     // hack: handle the signal particle
     if(signal_hack())
     {
@@ -527,7 +527,7 @@ class BlockCommunicator
     // append the particle to the block.
     fetch_curr_block().fast_push_back(in);
     //dprintf("sending particle %d in direction %d.%s",
-    //  int(in.get_t()),connection.rank(), connection.tag_name());
+    //  int(in.get_id()),connection.rank(), connection.tag_name());
 
     // if the block is full, send it
     if(__builtin_expect(fetch_curr_block().isfull(),false))

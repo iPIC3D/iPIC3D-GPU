@@ -4,6 +4,7 @@
 #include "cudaTypeDef.cuh"
 #include "particleArrayCUDA.cuh"
 #include "gridCUDA.cuh"
+#include "ParticleIDGenerator.cuh"
 
 /**
  * @brief Per-face injection cell range (pre-computed, constant across cycles).
@@ -53,6 +54,8 @@ struct injectionParameter {
     int pclOffset[6];   // pclOffset[f] = sum of faces[0..f-1].nCells * nppc
     int totalInjected;  // total particles across all 6 faces
 
+    ParticleIDGenerator particleIDGenerator;
+
     bool enabled;       // master enable flag (false → kernel is a no-op)
 };
 
@@ -73,14 +76,12 @@ struct injectionParameter {
  * @param pclsArray      Device SoA particle container
  * @param params         Constant injection parameters (faces, physics, grid)
  * @param soaWriteOffset First SoA index to write (= stayedParticle[i])
- * @param baseParticleID Pre-reserved ID block base (unique per cycle+species)
  * @param rngSeed        Per-cycle seed for Philox RNG
  */
 __global__ void injectionKernel(
     particleArrayCUDA*         pclsArray,
     const injectionParameter*  params,
     uint32_t                   soaWriteOffset,
-    double                     baseParticleID,
     unsigned long long         rngSeed);
 
 #endif // _INJECTIONKERNEL_CUH_

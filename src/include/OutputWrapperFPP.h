@@ -45,6 +45,7 @@ class OutputWrapperFPP
   myOutputAgent < PSK::HDF5OutputAdaptor > hdf5_agent;  // Create an Output Agent for HDF5 output
   #endif // NO_HDF5
   int cartesian_rank;
+  const Collective* col_;
   string SaveDirName;
   string RestartDirName;
   string output_file;

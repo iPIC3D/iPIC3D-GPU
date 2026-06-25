@@ -327,9 +327,11 @@ int c_Solver::Init(int argc, char **argv) {
           break;
         default:                        particlesHost[i]->maxwellian(EMf); break;
       }
-      particlesHost[i]->reserve_remaining_particle_IDs();
     }
   }
+
+  for (int i = 0; i < ns; i++)
+    particlesHost[i]->reserve_remaining_particle_IDs();
 
   // ======= Allocate test particles, if configured =======
   nstestpart = col->getNsTestPart();
@@ -349,6 +351,7 @@ int c_Solver::Init(int argc, char **argv) {
     {
       testpart[i] = new ParticleSoAHost(i+ns,col,vct,grid);//species id for test particles is increased by ns
       testpart[i]->pitch_angle_energy(EMf);
+      testpart[i]->reserve_remaining_particle_IDs();
     }
   }
 
@@ -466,6 +469,10 @@ int c_Solver::initCUDA(){
   cudaErrChk(cudaStreamCreate(&fieldH2DStream));
   if (heatFluxEnabled_)
     cudaErrChk(cudaStreamCreate(&heatFluxStream));
+
+  for (int i = 0; i < ns; i++)
+    particlesHost[i]->initializeParticleIDDeviceCounter(streams[i]);
+
   {
     // ======= Allocate device-resident particle containers and staging buffers =======
     pclsArrayHostPtr = new particleArrayCUDA*[ns];
@@ -1476,7 +1483,7 @@ int c_Solver::cudaLauncherAsync(const int species, const bool doMomentsInLaunche
 
   cudaErrChk(cudaEventRecord(event2, streams[species+ns]));
 
-  // Prepare comm buffer and copy exiting particles D→H (single AoS memcpy)
+  // Prepare comm buffer and copy exiting particles D→H.
   particlesCommInj[species]->clearCommBuffer();
   if (count_exiting > 0) {
     particlesCommInj[species]->prepareCommBufferForNOP(count_exiting);
@@ -1879,9 +1886,6 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
     // ======= Launch GPU injection kernels (async on per-species stream) =======
     for (int i = 0; i < ns; i++) {
       if (injectedBCS[i] > 0) {
-        // Reserve unique particle IDs for this batch.
-        double baseID = particlesCommInj[i]->reserveIDBlock(injectedBCS[i]);
-
         // Per-cycle seed: deterministic but different each cycle+species.
         unsigned long long rngSeed =
             (unsigned long long)cycle * 6364136223846793005ULL +
@@ -1896,7 +1900,6 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
             pclsArrayCUDAPtr[i],
             injectionParamCUDAPtr[i],
             (uint32_t)stayedParticle[i],
-            baseID,
             rngSeed);
       }
     }
@@ -2016,7 +2019,8 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle)
     if (incomingCount > 0)
       scatterAoSToSoAKernel<<<getGridSize(incomingCount, DEFAULT_BLOCK_SIZE), DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
           incomingStagingHostPtr[i]->getArray(),
-          pclsArrayCUDAPtr[i], (uint32_t)sortedCount, (uint32_t)incomingCount);
+          pclsArrayCUDAPtr[i], (uint32_t)sortedCount, (uint32_t)incomingCount,
+          particlesHost[i]->getParticleIDGenerator());
 
     // Finalize moments according to the active sorted/unsorted pipeline.
     if (sortThisCycle_) {
@@ -2476,16 +2480,17 @@ void c_Solver::outputCopyAsync(int cycle) {
       // Resize the host SoA vectors to receive the current particle count.
       particlesHost[i]->prepareSoAForNOP(nop);
       if (nop == 0) continue;
-      const size_t bytes = nop * sizeof(double);
       // Direct GPU SoA -> host SoA transfer with no AoS intermediary.
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getUallMut(), pclsArrayHostPtr[i]->getU(), bytes, cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getVallMut(), pclsArrayHostPtr[i]->getV(), bytes, cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getWallMut(), pclsArrayHostPtr[i]->getW(), bytes, cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getQallMut(), pclsArrayHostPtr[i]->getQ(), bytes, cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getXallMut(), pclsArrayHostPtr[i]->getX(), bytes, cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getYallMut(), pclsArrayHostPtr[i]->getY(), bytes, cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getZallMut(), pclsArrayHostPtr[i]->getZ(), bytes, cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getTallMut(), pclsArrayHostPtr[i]->getT(), bytes, cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getUallMut(), pclsArrayHostPtr[i]->getU(), nop * sizeof(cudaPclType_U), cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getVallMut(), pclsArrayHostPtr[i]->getV(), nop * sizeof(cudaPclType_V), cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getWallMut(), pclsArrayHostPtr[i]->getW(), nop * sizeof(cudaPclType_W), cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getQallMut(), pclsArrayHostPtr[i]->getQ(), nop * sizeof(cudaPclType_Q), cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getXallMut(), pclsArrayHostPtr[i]->getX(), nop * sizeof(cudaPclType_X), cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getYallMut(), pclsArrayHostPtr[i]->getY(), nop * sizeof(cudaPclType_Y), cudaMemcpyDefault, outputStream));
+      cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getZallMut(), pclsArrayHostPtr[i]->getZ(), nop * sizeof(cudaPclType_Z), cudaMemcpyDefault, outputStream));
+      if (particlesHost[i]->tracksParticleID()) {
+        cudaErrChk(cudaMemcpyAsync(particlesHost[i]->getIDallMut(), pclsArrayHostPtr[i]->getID(), nop * sizeof(cudaPclType_ID), cudaMemcpyDefault, outputStream));
+      }
     }
     cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
   }

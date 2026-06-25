@@ -186,7 +186,7 @@ struct CellSorter {
     __host__ void init(const grid3DCUDA& grid, uint32_t initial_capacity, cudaStream_t s) {
         num_cells = grid.nxc * grid.nyc * grid.nzc;
         buffers.allocate(initial_capacity, num_cells, s);
-        // Scratch must hold nop doubles (8 bytes each) for the cycling swap.
+        // Scratch must hold one full SoA field for the cycling swap.
         scratch.ensure_capacity(initial_capacity * sizeof(double));
         initialized = true;
     }

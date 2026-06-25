@@ -383,7 +383,7 @@ void _pressure(adios2::IO &io, adios2::Engine &engine){
     position -> particle position (x,y)
     velocity -> particle velocity (u,v,w)
     q -> particle charge
-    ID -> particle ID (note: TrackParticleID has to be set true in Collective)
+    ID -> particle ID for tracked species
 */
 void _particlePosition(adios2::IO &io, adios2::Engine &engine){
     for (int i = 0; i < ns; i++) {
@@ -425,11 +425,13 @@ void _particleCharge(adios2::IO &io, adios2::Engine &engine){
 
 void _particleID(adios2::IO &io, adios2::Engine &engine){
     for (int i = 0; i < ns; i++) {
+        if (!part[i]->tracksParticleID()) continue;
+
         const unsigned long sizeNOP = static_cast<unsigned long>(part[i]->getNOP());
 
-        auto var = _variableHelper<cudaCommonType>(io, "part" + std::to_string(i) + "ID", {sizeNOP}, {0}, {sizeNOP});
+        auto var = _variableHelper<cudaPclType_ID>(io, "part" + std::to_string(i) + "ID", {sizeNOP}, {0}, {sizeNOP});
 
-        engine.Put<cudaCommonType>(var, part[i]->getParticleIDall(), adios2::Mode::Deferred);
+        engine.Put<cudaPclType_ID>(var, part[i]->getParticleIDall(), adios2::Mode::Deferred);
     }
 }
 

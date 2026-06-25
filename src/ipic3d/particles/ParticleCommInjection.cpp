@@ -22,6 +22,7 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <cstring>
 #include <random>
 #include <chrono>
 
@@ -63,15 +64,13 @@ ParticleCommInjection::ParticleCommInjection(ParticleSoAHost& hostParticles)
   : hostParticles_(hostParticles),
     col_(hostParticles.getCollective()),
     vct_(hostParticles.getVirtualTopology()),
-    grid_(hostParticles.getGrid()),
-    particleIDGenerator_()
+    grid_(hostParticles.getGrid())
 {
   // --- MPI communicator (own copy) ---
   MPI_Comm_dup(vct_->getParticleComm(), &mpiComm_);
 
   // --- BlockCommunicator setup ---
   using namespace Direction;
-
   sendXleft_.init(Connection::null2self(vct_->getXleft_neighbor_P(), XDN, XDN, mpiComm_));
   sendXrght_.init(Connection::null2self(vct_->getXright_neighbor_P(), XUP, XUP, mpiComm_));
   recvXleft_.init(Connection::null2self(vct_->getXleft_neighbor_P(), XUP, XDN, mpiComm_));
@@ -148,10 +147,6 @@ ParticleCommInjection::ParticleCommInjection(ParticleSoAHost& hostParticles)
   // Seed BC reemission RNG (single-thread, few particles per cycle)
   bcRng_.seed(static_cast<uint64_t>(MPIdata::get_rank()) * 31 +
               static_cast<uint64_t>(speciesNumber_) * 127 + 9973);
-
-  // Reserve ID generator
-  const double numPclEstimate = double(grid_->get_num_cells_rr()) * col_->getNpcel(speciesNumber_);
-  particleIDGenerator_.reserve_num_particles(static_cast<int>(numPclEstimate));
 
   // Compute injection count once (depends only on grid, BC, topology — all constant).
   cachedInjectionCount_ = computeInjectionCountImpl();
@@ -801,7 +796,9 @@ void ParticleCommInjection::populateCellWithParticles(
   int cellIndexX, int cellIndexY, int cellIndexZ,
   double chargePerParticle,
   double dxPerPcl, double dyPerPcl, double dzPerPcl,
-  int baseIdx, std::mt19937_64& rng)
+  int baseIdx,
+  ParticleIDGenerator::counter_type baseSequence,
+  std::mt19937_64& rng)
 {
   const double cellLowX = grid_->getXN(cellIndexX, cellIndexY, cellIndexZ);
   const double cellLowY = grid_->getYN(cellIndexX, cellIndexY, cellIndexZ);
@@ -826,7 +823,7 @@ void ParticleCommInjection::populateCellWithParticles(
 
     pclList[baseIdx + subIdx] = SpeciesParticle(velX, velY, velZ, chargePerParticle,
                                                  posX, posY, posZ,
-                                                 particleIDGenerator_.generateID());
+                                                 hostParticles_.particleIDFromSequence(baseSequence + subIdx));
     subIdx++;
   }
 }
@@ -900,6 +897,9 @@ void ParticleCommInjection::fillInjectionParameter(injectionParameter* param) co
   // Default: disabled
   param->enabled = false;
   param->totalInjected = 0;
+  if (hostParticles_.tracksParticleID()) {
+    param->particleIDGenerator = hostParticles_.getParticleIDGenerator();
+  }
 
   if (!vct_->isBoundaryProcess_P()) return;
 
@@ -1112,9 +1112,8 @@ void ParticleCommInjection::repopulateParticlesOnlyInjection()
   auto _inj1 = std::chrono::high_resolution_clock::now();
 #endif
 
-  // --- Step 3: switch ID generator to multi-thread mode ---
-  particleIDGenerator_.reserve_particles_in_range(
-      static_cast<double>(baseOffset));
+  // --- Step 3: reserve one shared particle-ID block for this batch ---
+  const auto baseSequence = hostParticles_.reserveParticleIDSequenceBlock(totalInjected);
 
 #if ENABLE_INJECTION_TIMING
   auto _inj2 = std::chrono::high_resolution_clock::now();
@@ -1146,7 +1145,7 @@ void ParticleCommInjection::repopulateParticlesOnlyInjection()
         populateCellWithParticles(
           faces[f].ixBeg + lix, faces[f].iyBeg + ljy, faces[f].izBeg + lkz,
           chargePerParticle, dxPerPcl, dyPerPcl, dzPerPcl,
-          writeIdx, rng);
+          writeIdx, baseSequence + pclOffset[f] + c * numParticlesPerCell_, rng);
       }
     }
   } // implicit barrier
@@ -1263,7 +1262,7 @@ void ParticleCommInjection::openBCParticlesOutflow()
         {
           commPcls.push_back(SpeciesParticle(injU, injV, injW, injQ,
                                                injX, injY, injZ,
-                                               particleIDGenerator_.generateID()));
+                                               hostParticles_.generateParticleID()));
         }
       }
     }

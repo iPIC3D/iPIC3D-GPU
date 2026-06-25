@@ -19,10 +19,20 @@ __global__ void injectionKernel(
     particleArrayCUDA*         pclsArray,
     const injectionParameter*  params,
     uint32_t                   soaWriteOffset,
-    double                     baseParticleID,
     unsigned long long         rngSeed)
 {
     const int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int blockStart = blockIdx.x * blockDim.x;
+    const int remaining = params->totalInjected - blockStart;
+    const unsigned int blockCount =
+        remaining > blockDim.x ? blockDim.x : (remaining > 0 ? (unsigned int)remaining : 0u);
+    const bool trackParticleID = pclsArray->tracksParticleID();
+
+    __shared__ ParticleIDGenerator::counter_type blockBaseSequence;
+    if (threadIdx.x == 0 && blockCount > 0 && trackParticleID)
+        blockBaseSequence = params->particleIDGenerator.reserveSequenceBlock(blockCount);
+    __syncthreads();
+
     if (globalIdx >= params->totalInjected) return;
 
     // --- 1. Find which face this thread belongs to ---
@@ -79,6 +89,7 @@ __global__ void injectionKernel(
              (velX * velX + velY * velY + velZ * velZ) > params->speedOfLightSq);
 
     // --- 6. Write 8 SoA fields (coalesced, non-overlapping with stayed prefix) ---
+    // The ID field stores the particle identifier.
     const uint32_t writeIdx = soaWriteOffset + (uint32_t)globalIdx;
 
     pclsArray->getU()[writeIdx] = velX;
@@ -88,5 +99,8 @@ __global__ void injectionKernel(
     pclsArray->getX()[writeIdx] = posX;
     pclsArray->getY()[writeIdx] = posY;
     pclsArray->getZ()[writeIdx] = posZ;
-    pclsArray->getT()[writeIdx] = baseParticleID + (double)globalIdx;
+    if (trackParticleID) {
+        pclsArray->getID()[writeIdx] =
+            params->particleIDGenerator.idFromSequence(blockBaseSequence + threadIdx.x);
+    }
 }

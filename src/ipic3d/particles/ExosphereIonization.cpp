@@ -317,7 +317,7 @@ ExosphereIonization::sampleIonizedParticles(int speciesIndex, int maxParticles)
                         velocityX, velocityY, velocityZ,
                         chargePerParticle,
                         positionX, positionY, positionZ,
-                        0.0 /* particleTag */);
+                        PARTICLE_ID_INVALID /* particle ID assigned during GPU scatter */);
 
                     chargeAccumulator += chargePerParticle;
                 }

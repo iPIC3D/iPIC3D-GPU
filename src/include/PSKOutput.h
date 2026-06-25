@@ -355,7 +355,7 @@ public:
     position -> particle position (x,y)
     velocity -> particle velocity (u,v,w)
     q -> particle charge
-    ID -> particle ID (note: TrackParticleID has to be set true in Collective)
+    ID -> particle ID for tracked species
     k_energy -> kinetic energy for each species
     B_energy -> energy of magnetic field
     E_energy -> energy of electric field
@@ -965,13 +965,10 @@ public:
       }
     }
 
-
     // Particle ID
-    //
-    // (why was this using "long")?
-
     if (tag.find("ID", 0) != string::npos & sample == 0) {
       for (int i = 0; i < ns; ++i) {
+        if (!_part[i]->tracksParticleID()) continue;
         stringstream ii;
         ii << i;
         this->output_adaptor.write("/particles/species_" + ii.str() + "/ID/cycle_" + cc.str(), PSK::Dimens(_part[i]->getNOP()), _part[i]->getParticleIDall());
@@ -980,23 +977,26 @@ public:
     // Test Particle ID
     else if (tag.find("testparttag", 0) != string::npos & sample == 0) {
       for (int i = 0; i < nstestpart; ++i) {
+        if (!_part[i+ns]->tracksParticleID()) continue;
         stringstream ii;
         ii <<  (_part[i+ns]->get_species_num());
         this->output_adaptor.write("/testparticles/species_" + ii.str() + "/ID/cycle_" + cc.str(), PSK::Dimens(_part[i+ns]->getNOP()), _part[i+ns]->getParticleIDall());
       }
     }
     else if (tag.find("ID", 0) != string::npos & sample != 0) {
-      std::vector <double>ID;
+      std::vector <cudaPclType_ID>ID;
       for (int i = 0; i < ns; ++i) {
+        if (!_part[i]->tracksParticleID()) continue;
         stringstream ii;
         ii << i;
-        const double* pclID = _part[i]->getParticleIDall();
+        const cudaPclType_ID* pclID = _part[i]->getParticleIDall();
         const int num_samples = _part[i]->getNOP()/sample;
+        ID.clear();
         ID.reserve(num_samples);
 
         for (int n = 0; n < _part[i]->getNOP(); n += sample)
           ID.push_back(pclID[n]);
-        this->output_adaptor.write("/particles/species_" + ii.str() + "/ID/cycle_" + cc.str(), PSK::Dimens(ID.size()), &ID[0]);
+        this->output_adaptor.write("/particles/species_" + ii.str() + "/ID/cycle_" + cc.str(), PSK::Dimens(ID.size()), ID.empty() ? nullptr : ID.data());
 
       }
     }

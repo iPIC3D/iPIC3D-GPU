@@ -6,7 +6,8 @@
 /**
  * @brief Lightweight POD descriptor for SoA particle data on the GPU.
  *
- * Holds 8 device pointers (one per particle field) plus count and capacity.
+ * Holds device pointers for particle fields plus count and capacity.
+ * The ID pointer is null when particle tracking is disabled for this species.
  * Trivially copyable to device — pass by pointer to kernels.
  * No ownership semantics: the owning container (particleArrayCUDA) manages allocation.
  */
@@ -18,11 +19,10 @@ struct ParticleSoADevice {
     cudaPclType_X* x;    // position x
     cudaPclType_Y* y;    // position y
     cudaPclType_Z* z;    // position z
-    cudaPclType_T* t;    // subcycle time / particle ID
+    cudaPclType_ID* id;   // particle ID, null when tracking is disabled
     uint32_t nop;        // current number of particles
     uint32_t capacity;   // allocated capacity (elements per field)
+    bool trackParticleID;
 };
-
-static constexpr int PARTICLE_SOA_NUM_FIELDS = 8;
 
 #endif

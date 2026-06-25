@@ -294,9 +294,7 @@ class PclBlock
   dfloat* fetch_u(){return data[4];}
   dfloat* fetch_v(){return data[5];}
   dfloat* fetch_w(){return data[6];}
-  dfloat* fetch_t(){return data[7];}
-  // we will not track IDs
-  //long long* fetch_ID(){return (long long*) data[7];}
+  dfloat* fetch_subcycle_time(){return data[7];}
 };
 bool operator== (const PclBlock &lhs, const PclBlock &rhs)
 {
@@ -1308,7 +1306,7 @@ void push_SoA_blocks_stopping_at_face()
         dfloat* u = pclBlock.fetch_u();
         dfloat* v = pclBlock.fetch_v();
         dfloat* w = pclBlock.fetch_w();
-        dfloat* t = pclBlock.fetch_t();
+        dfloat* t = pclBlock.fetch_subcycle_time();
         ASSUME_ALIGNED(x);
         ASSUME_ALIGNED(y);
         ASSUME_ALIGNED(z);

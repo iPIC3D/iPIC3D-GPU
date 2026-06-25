@@ -26,7 +26,6 @@
 #include "Particle.h"
 #include "BlockCommunicator.h"
 #include "aligned_vector.h"
-#include "IDgenerator.h"
 #include "cudaTypeDef.cuh"
 #include "ipicdefs.h"
 #include "ipicmath.h"
@@ -130,11 +129,6 @@ public:
    *  Must be called once at init time (all fields are constant). */
   void fillInjectionParameter(injectionParameter* param) const;
 
-  /** Reserve a contiguous block of particle IDs for GPU-side injection.
-   *  Returns the base ID; the kernel assigns base + globalIdx.
-   *  Must be called single-threaded before each kernel launch. */
-  double reserveIDBlock(int count) { return particleIDGenerator_.reserveIDBlock(count); }
-
   /** Open BC: duplicate boundary particles, delete exiting ones (into comm buffer). */
   void openBCParticlesOutflow();
 
@@ -230,7 +224,9 @@ private:
   void populateCellWithParticles(int cellIndexX, int cellIndexY, int cellIndexZ,
                                  double chargePerParticle,
                                  double dxPerPcl, double dyPerPcl, double dzPerPcl,
-                                 int baseIdx, std::mt19937_64& rng);
+                                 int baseIdx,
+                                 ParticleIDGenerator::counter_type baseSequence,
+                                 std::mt19937_64& rng);
 
   /** Swap-remove particle at index from comm buffer. */
   void deleteCommParticle(int particleIndex) {
@@ -284,9 +280,6 @@ private:
   BlockCommunicator<SpeciesParticle> recvXleft_, recvXrght_;
   BlockCommunicator<SpeciesParticle> recvYleft_, recvYrght_;
   BlockCommunicator<SpeciesParticle> recvZleft_, recvZrght_;
-
-  // --- Particle-ID generator (for injected particles) ---
-  doubleIDgenerator particleIDGenerator_;
 
   // --- Thread-local RNG for BC reemission (single-thread, few particles) ---
   std::mt19937_64 bcRng_;

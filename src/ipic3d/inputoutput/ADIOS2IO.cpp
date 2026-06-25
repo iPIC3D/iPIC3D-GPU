@@ -36,7 +36,16 @@ void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag, int sam
     this->cartisianRank = vct_in->getCartesian_rank();
     this->saveDirName = col_in->getSaveDirName();
     this->restartDirName = col_in->getRestartDirName();
-    this->restartTag = col_in->getRestartOutputCycle()? "proc_topology+E+B+rhos+Js+pressure+position+velocity+q+ID+particle_cell_metadata"s : ""s;
+    if (col_in->getRestartOutputCycle()) {
+        this->restartTag =
+            "proc_topology+E+B+rhos+Js+pressure+position+velocity+q"s;
+        if (col_in->anyRegularParticleID()) {
+            this->restartTag += "+ID";
+        }
+        this->restartTag += "+particle_cell_metadata";
+    } else {
+        this->restartTag = ""s;
+    }
 
     this->fieldTag = fieldTag;
     this->particleTag = particleTag;

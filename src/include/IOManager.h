@@ -72,7 +72,7 @@ public:
     void writeFields(int cycle);
 
     /**
-     * @brief Write particle data (position, velocity, charge, ID).
+     * @brief Write particle data (position, velocity, charge, optional ID).
      *
      * @param cycle Simulation cycle being written.
      */

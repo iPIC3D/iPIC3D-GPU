@@ -70,10 +70,10 @@ class Collective
     void ReadInput(string inputfile);
     void ReadInput(const ConfigFile& config);
     void read_field_restart(const VCtopology3D* vct,const Grid* grid,arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
-    						arr3_double Ex, arr3_double Ey, arr3_double Ez,array4_double* rhons_, int ns)const;
+                            arr3_double Ex, arr3_double Ey, arr3_double Ez,array4_double* rhons_, int ns)const;
 
     void read_particles_restart(const VCtopology3D* vct,int species_number,vector_double& u,vector_double& v,vector_double& w,
-    							vector_double& q,vector_double& x,vector_double& y,vector_double& z,vector_double& t)const;
+                                vector_double& q,vector_double& x,vector_double& y,vector_double& z,vector_cudaPclType_ID& id)const;
 
     void init_derived_parameters();
     /*! Print physical parameters */
@@ -211,7 +211,6 @@ class Collective
     int    getCurrentFromAmpere()const{ return currentFromAmpere; }
     int    getSpatiallyVaryingThermal()const{ return spatiallyVaryingThermal; }
     //bool getVerbose()const{ return (verbose); }
-    //bool getTrackParticleID(int nspecies)const{ return (TrackParticleID[nspecies]); }
     int getRestart_status()const{ return (restart_status); }
     string getSaveDirName()const{ return (SaveDirName); }
     string getRestartDirName()const{ return (RestartDirName); }
@@ -224,6 +223,22 @@ class Collective
     string getMomentsOutputTag()const{return MomentsOutputTag;}
     const OutputTagConfig& getOutputConfig()const{return outputConfig_;}
     string getPclOutputTag()const{return ParticlesOutputTag;}
+    bool getTrackParticleID(int species)const{
+      return species >= 0 && species < static_cast<int>(TrackParticleID.size())
+          ? TrackParticleID[species] != 0
+          : false;
+    }
+    bool anyRegularParticleID()const{
+      for (int s = 0; s < ns && s < static_cast<int>(TrackParticleID.size()); ++s)
+        if (TrackParticleID[s]) return true;
+      return false;
+    }
+    bool anyTestParticleID()const{
+      const int total = static_cast<int>(TrackParticleID.size());
+      for (int s = ns; s < total; ++s)
+        if (TrackParticleID[s]) return true;
+      return false;
+    }
     string getPoissonCorrection()const{ return (PoissonCorrection); }
     int getPoissonCorrectionCycle()const{ return (PoissonCorrectionCycle); }
     string getdivBCorrection()const{ return (divBCorrection); }
@@ -370,6 +385,8 @@ class Collective
     int ns;
     /*! number of test particle species */
     int nstestpart;
+    /*! Per-species particle ID tracking mask. Includes test-particle species. */
+    std::vector<unsigned char> TrackParticleID;
     /*! number of particles per cell */
     std::unique_ptr<int[]> npcel;
     /*! number of particles per cell - X direction */
@@ -421,8 +438,6 @@ class Collective
     int divBCorrectionCycle;
     /*! Sort particles every SortingCycle cycles (0=disabled) */
     int SortingCycle;
-    /*! TrackParticleID */
-    //bool *TrackParticleID;
     /*! SaveDirName */
     string SaveDirName;
     /*! RestartDirName */

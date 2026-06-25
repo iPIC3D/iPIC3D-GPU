@@ -194,7 +194,8 @@ __global__ void particleSplittingKernel<false>(moverParameter* moverParam, grid3
     auto soaX = pclsArray->getX();
     auto soaY = pclsArray->getY();
     auto soaZ = pclsArray->getZ();
-    auto soaT = pclsArray->getT();
+    auto soaID = pclsArray->getID();
+    const bool trackParticleID = pclsArray->tracksParticleID();
 
     const auto x0 = soaX[pidx];
     const auto y0 = soaY[pidx];
@@ -246,7 +247,8 @@ __global__ void particleSplittingKernel<false>(moverParameter* moverParam, grid3
     soaX[index] = x0 + delta;
     soaY[index] = y0 + delta;
     soaZ[index] = z0 + delta;
-    soaT[index] = 114515.0;
+    if (trackParticleID)
+        soaID[index] = moverParam->particleIDGenerator.generateID();
 }
 /**
  * @brief Split every existing particle multiple times when the deficit exceeds the current population.
@@ -284,7 +286,8 @@ __global__ void particleSplittingKernel<true>(moverParameter* moverParam, grid3D
     auto soaX = pclsArray->getX();
     auto soaY = pclsArray->getY();
     auto soaZ = pclsArray->getZ();
-    auto soaT = pclsArray->getT();
+    auto soaID = pclsArray->getID();
+    const bool trackParticleID = pclsArray->tracksParticleID();
 
     for(int i = 0; i < splittingTimes; i ++)
     {
@@ -340,7 +343,8 @@ __global__ void particleSplittingKernel<true>(moverParameter* moverParam, grid3D
         soaX[index] = x0 + delta;
         soaY[index] = y0 + delta;
         soaZ[index] = z0 + delta;
-        soaT[index] = 114515.0;
+        if (trackParticleID)
+            soaID[index] = moverParam->particleIDGenerator.generateID();
     }
 
 }

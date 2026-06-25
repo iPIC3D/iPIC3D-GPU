@@ -9,13 +9,13 @@
 #include "ParticleSoAHost.h"
 #include "arrayCUDA.cuh"
 #include "ParticleSoADevice.cuh"
+#include "ParticleIDGenerator.cuh"
 
 /**
  * @brief GPU particle container — pure SoA.
  *
- * Owns 8 separate device arrays (one per particle field) via ParticleSoADevice.
- * All compute kernels (mover, moment, sort, merge, planet, data-analysis)
- * read and write through the SoA accessors getU(), getV(), ... getT().
+ * Owns separate device arrays for particle fields via ParticleSoADevice.
+ * The ID array is allocated only when particle tracking is enabled.
  *
  * No persistent AoS allocation.  Small AoS staging buffers for H↔D transfer
  * of exchange / planet / exosphere particles live outside this class
@@ -25,7 +25,7 @@ class particleArrayCUDA
 {
 private:
     uint32_t initialNOP;
-    ParticleSoADevice soa;      // 8 device pointers + nop + capacity (single source of truth)
+    ParticleSoADevice soa;      // device field pointers + metadata
     cudaStream_t stream;
 
     static uint32_t roundUpSoA(uint32_t size) {
@@ -33,8 +33,9 @@ private:
         return size + align - 1 - ((size + align - 1) % align);
     }
 
-    __host__ void allocateSoA(uint32_t cap) {
+    __host__ void allocateSoA(uint32_t cap, bool trackParticleID) {
         soa.capacity = cap;
+        soa.trackParticleID = trackParticleID;
         cudaErrChk(cudaMalloc(&soa.u, cap * sizeof(cudaPclType_U)));
         cudaErrChk(cudaMalloc(&soa.v, cap * sizeof(cudaPclType_V)));
         cudaErrChk(cudaMalloc(&soa.w, cap * sizeof(cudaPclType_W)));
@@ -42,12 +43,15 @@ private:
         cudaErrChk(cudaMalloc(&soa.x, cap * sizeof(cudaPclType_X)));
         cudaErrChk(cudaMalloc(&soa.y, cap * sizeof(cudaPclType_Y)));
         cudaErrChk(cudaMalloc(&soa.z, cap * sizeof(cudaPclType_Z)));
-        cudaErrChk(cudaMalloc(&soa.t, cap * sizeof(cudaPclType_T)));
+        if (trackParticleID)
+            cudaErrChk(cudaMalloc(&soa.id, cap * sizeof(cudaPclType_ID)));
+        else
+            soa.id = nullptr;
     }
 
     __host__ void freeSoA() {
         cudaFree(soa.u); cudaFree(soa.v); cudaFree(soa.w); cudaFree(soa.q);
-        cudaFree(soa.x); cudaFree(soa.y); cudaFree(soa.z); cudaFree(soa.t);
+        cudaFree(soa.x); cudaFree(soa.y); cudaFree(soa.z); cudaFree(soa.id);
         soa = {};
     }
 
@@ -65,11 +69,11 @@ public:
     {
         const uint32_t nop = pSoA->getNOP();
         const uint32_t cap = roundUpSoA(static_cast<uint32_t>(nop * expand));
-        allocateSoA(cap);
+        allocateSoA(cap, pSoA->tracksParticleID());
         soa.nop = nop;
 
         if (nop > 0) {
-            // ParticleSoAHost stores double* — memcpy raw bytes per field
+            // ParticleSoAHost stores typed SoA fields; copy each field by its own element size.
             cudaErrChk(cudaMemcpyAsync(soa.u, pSoA->getUall(), nop * sizeof(cudaPclType_U), cudaMemcpyDefault, deviceStream));
             cudaErrChk(cudaMemcpyAsync(soa.v, pSoA->getVall(), nop * sizeof(cudaPclType_V), cudaMemcpyDefault, deviceStream));
             cudaErrChk(cudaMemcpyAsync(soa.w, pSoA->getWall(), nop * sizeof(cudaPclType_W), cudaMemcpyDefault, deviceStream));
@@ -77,7 +81,8 @@ public:
             cudaErrChk(cudaMemcpyAsync(soa.x, pSoA->getXall(), nop * sizeof(cudaPclType_X), cudaMemcpyDefault, deviceStream));
             cudaErrChk(cudaMemcpyAsync(soa.y, pSoA->getYall(), nop * sizeof(cudaPclType_Y), cudaMemcpyDefault, deviceStream));
             cudaErrChk(cudaMemcpyAsync(soa.z, pSoA->getZall(), nop * sizeof(cudaPclType_Z), cudaMemcpyDefault, deviceStream));
-            cudaErrChk(cudaMemcpyAsync(soa.t, pSoA->getParticleIDall(), nop * sizeof(cudaPclType_T), cudaMemcpyDefault, deviceStream));
+            if (soa.trackParticleID)
+                cudaErrChk(cudaMemcpyAsync(soa.id, pSoA->getParticleIDall(), nop * sizeof(cudaPclType_ID), cudaMemcpyDefault, deviceStream));
             cudaErrChk(cudaStreamSynchronize(deviceStream));
         }
     }
@@ -116,6 +121,7 @@ public:
     __host__ __device__ __forceinline__ uint32_t getCapacity() const { return soa.capacity; }
     /** Alias kept for callers that used getSize() to mean "allocated capacity". */
     __host__ __device__ __forceinline__ uint32_t getSize()     const { return soa.capacity; }
+    __host__ __device__ __forceinline__ bool tracksParticleID() const { return soa.trackParticleID; }
 
     // ── SoA accessors ──
 
@@ -126,7 +132,7 @@ public:
     __host__ __device__ __forceinline__ cudaPclType_X* getX() { return soa.x; }
     __host__ __device__ __forceinline__ cudaPclType_Y* getY() { return soa.y; }
     __host__ __device__ __forceinline__ cudaPclType_Z* getZ() { return soa.z; }
-    __host__ __device__ __forceinline__ cudaPclType_T* getT() { return soa.t; }
+    __host__ __device__ __forceinline__ cudaPclType_ID* getID() { return soa.id; }
 
     __host__ __device__ __forceinline__ ParticleSoADevice*       getSoA()       { return &soa; }
     __host__ __device__ __forceinline__ const ParticleSoADevice* getSoA() const { return &soa; }
@@ -164,10 +170,25 @@ public:
             cudaFree(fieldA); fieldA = newA;
             cudaFree(fieldB); fieldB = newB;
         };
+        auto expandOne = [&](auto*& field) {
+            using FT = std::remove_pointer_t<std::decay_t<decltype(field)>>;
+            FT* newField = nullptr;
+            cudaErrChk(cudaMalloc(&newField, newCap * sizeof(FT)));
+            if (nop > 0) {
+                cudaErrChk(cudaMemcpyAsync(newField, field, nop * sizeof(FT),
+                                           cudaMemcpyDefault, deviceStream));
+            }
+            cudaErrChk(cudaStreamSynchronize(deviceStream));
+            cudaFree(field);
+            field = newField;
+        };
         expandPair(soa.u, soa.v);   // group 1: u, v
         expandPair(soa.w, soa.q);   // group 2: w, q
         expandPair(soa.x, soa.y);   // group 3: x, y
-        expandPair(soa.z, soa.t);   // group 4: z, t
+        if (soa.trackParticleID)
+            expandPair(soa.z, soa.id);  // group 4: z, id
+        else
+            expandOne(soa.z);
 
         soa.capacity = newCap;
         return soa.capacity;
@@ -185,9 +206,11 @@ public:
  * @param pclsArray      device-resident particleArrayCUDA (destination SoA)
  * @param destOffset     first particle index in SoA to write to
  * @param count          number of particles to scatter
+ * @param particleIDGenerator Shared species-local ID generator
  */
 __global__ void scatterAoSToSoAKernel(const SpeciesParticle* __restrict__ aosStagingBuf,
                                        particleArrayCUDA* pclsArray,
-                                       uint32_t destOffset, uint32_t count);
+                                       uint32_t destOffset, uint32_t count,
+                                       ParticleIDGenerator particleIDGenerator);
 
 #endif

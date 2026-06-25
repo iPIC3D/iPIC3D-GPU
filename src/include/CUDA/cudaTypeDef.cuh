@@ -17,7 +17,9 @@ inline constexpr uint64_t WARP_FULL_MASK = 0xFFFFFFFFFFFFFFFF;
 using warp_mask_t = uint64_t;
 #endif
 
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <type_traits>
 
@@ -60,7 +62,7 @@ static_assert(std::is_same<cudaMomentType, double>::value,
     "gpuScatterMomentsD2D still assumes cudaMomentType == double. "
     "Add a type-conversion kernel before changing cudaMomentType.");
 
-// ── Per-field particle types (all default to double; change individually for mixed precision) ──
+// ── Per-field particle types; phase-space fields are floating point, IDs are integers. ──
 using cudaPclType_U = cudaTypeDouble;  // velocity x
 using cudaPclType_V = cudaTypeDouble;  // velocity y
 using cudaPclType_W = cudaTypeDouble;  // velocity z
@@ -68,7 +70,10 @@ using cudaPclType_Q = cudaTypeDouble;  // charge
 using cudaPclType_X = cudaTypeDouble;  // position x
 using cudaPclType_Y = cudaTypeDouble;  // position y
 using cudaPclType_Z = cudaTypeDouble;  // position z
-using cudaPclType_T = cudaTypeDouble;  // subcycle time / particle ID
+using cudaPclType_ID = std::uint64_t;  // particle ID
+
+inline constexpr cudaPclType_ID PARTICLE_ID_INVALID =
+    std::numeric_limits<cudaPclType_ID>::max();
 
 template <class T, int dim2, int dim3, int dim4>
 using cudaTypeArray4 = T (*)[dim2][dim3][dim4];

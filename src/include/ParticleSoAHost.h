@@ -2,9 +2,9 @@
  * ParticleSoAHost — Unified SoA host container for particle data.
  *
  * This is the single authoritative host-side particle storage class.
- * Holds 8 pinned-memory SoA arrays (pclVelX, pclVelY, pclVelZ, pclCharge,
- * pclPosX, pclPosY, pclPosZ, pclID) plus all species metadata extracted
- * from Collective, Grid, and VCtopology3D.
+ * Holds pinned-memory SoA arrays for velocity, charge, and position.
+ * When TrackParticleID is enabled for this species, it also holds an ID array.
+ * All species metadata is extracted from Collective, Grid, and VCtopology3D.
  *
  * Provides:
  *  - Particle generation (maxwellian, restart, pitch_angle_energy, etc.)
@@ -35,9 +35,9 @@
 #include "aligned_vector.h"  // vector_cudaParticleType_registered (pinned Larray)
 #include "ipicdefs.h"        // DVECWIDTH
 #include "ipicmath.h"        // roundup_to_multiple, sample_maxwellian
-#include "IDgenerator.h"     // doubleIDgenerator
 #include "ipicfwd.h"         // Grid, Field, CollectiveIO, VirtualTopology3D
 #include "cudaTypeDef.cuh"   // cudaParticleType, cudaCommonType
+#include "ParticleIDGenerator.cuh"
 #include "Alloc.h"           // array3_int
 
 // Forward declarations
@@ -110,7 +110,9 @@ public:
   const cudaPclType_X* getXall()          const { return &x[0]; }
   const cudaPclType_Y* getYall()          const { return &y[0]; }
   const cudaPclType_Z* getZall()          const { return &z[0]; }
-  const cudaPclType_T* getParticleIDall() const { return &t[0]; }
+  const cudaPclType_ID* getParticleIDall() const {
+    return trackParticleID_ && getNOP() > 0 ? &id[0] : nullptr;
+  }
 
   // ===== Mutable SoA bulk pointers (targets for cudaMemcpyAsync D->H) =====
 
@@ -121,7 +123,9 @@ public:
   cudaPclType_X* getXallMut() { return &x[0]; }
   cudaPclType_Y* getYallMut() { return &y[0]; }
   cudaPclType_Z* getZallMut() { return &z[0]; }
-  cudaPclType_T* getTallMut() { return &t[0]; }
+  cudaPclType_ID* getIDallMut() {
+    return trackParticleID_ && getNOP() > 0 ? &id[0] : nullptr;
+  }
 
   // ===== Per-element accessors (used by PSKOutput / IO backends) =====
 
@@ -132,12 +136,15 @@ public:
   double getX(int index) const { return x[index]; }
   double getY(int index) const { return y[index]; }
   double getZ(int index) const { return z[index]; }
-  double getT(int index) const { return t[index]; }
+  cudaPclType_ID getID(int index) const {
+    return trackParticleID_ ? id[index] : PARTICLE_ID_INVALID;
+  }
 
   // ===== Species metadata =====
 
   int    get_species_num() const { return speciesNumber_; }
   double getQOM()          const { return chargeOverMass_; }
+  bool   tracksParticleID() const { return trackParticleID_; }
 
   // ===== Grid / domain geometry accessors =====
 
@@ -158,20 +165,25 @@ public:
   void prepareSoAForNOP(int numParticles) {
     const int padded = roundup_to_multiple(numParticles, DVECWIDTH);
     u.reserve(padded); v.reserve(padded); w.reserve(padded); q.reserve(padded);
-    x.reserve(padded); y.reserve(padded); z.reserve(padded); t.reserve(padded);
+    x.reserve(padded); y.reserve(padded); z.reserve(padded);
+    if (trackParticleID_) id.reserve(padded);
     u.resize(numParticles); v.resize(numParticles); w.resize(numParticles); q.resize(numParticles);
-    x.resize(numParticles); y.resize(numParticles); z.resize(numParticles); t.resize(numParticles);
+    x.resize(numParticles); y.resize(numParticles); z.resize(numParticles);
+    if (trackParticleID_) id.resize(numParticles);
+    else id.resize(0);
   }
 
   void reserveSpace(int numParticles) {
     const int padded = roundup_to_multiple(numParticles, DVECWIDTH);
     u.reserve(padded); v.reserve(padded); w.reserve(padded); q.reserve(padded);
-    x.reserve(padded); y.reserve(padded); z.reserve(padded); t.reserve(padded);
+    x.reserve(padded); y.reserve(padded); z.reserve(padded);
+    if (trackParticleID_) id.reserve(padded);
   }
 
   void clearParticles() {
     u.resize(0); v.resize(0); w.resize(0); q.resize(0);
-    x.resize(0); y.resize(0); z.resize(0); t.resize(0);
+    x.resize(0); y.resize(0); z.resize(0);
+    id.resize(0);
   }
 
   /** Pad capacities to DVECWIDTH for vectorized access. */
@@ -183,7 +195,8 @@ public:
     x.reserve(roundup_to_multiple(x.size(), DVECWIDTH));
     y.reserve(roundup_to_multiple(y.size(), DVECWIDTH));
     z.reserve(roundup_to_multiple(z.size(), DVECWIDTH));
-    t.reserve(roundup_to_multiple(t.size(), DVECWIDTH));
+    if (trackParticleID_)
+      id.reserve(roundup_to_multiple(id.size(), DVECWIDTH));
   }
 
   // ===== Particle creation =====
@@ -193,22 +206,22 @@ public:
     double velocityX, double velocityY, double velocityZ, double charge,
     double positionX, double positionY, double positionZ)
   {
-    const double particleID = particleIDGenerator_.generateID();
     u.push_back(velocityX); v.push_back(velocityY); w.push_back(velocityZ);
     q.push_back(charge);
     x.push_back(positionX); y.push_back(positionY); z.push_back(positionZ);
-    t.push_back(particleID);
+    if (trackParticleID_)
+      id.push_back(particleIDGenerator_.generateHostID());
   }
 
   /** Push a single particle with an explicit ID. */
   void add_new_particle(
     double velocityX, double velocityY, double velocityZ, double charge,
-    double positionX, double positionY, double positionZ, double particleID)
+    double positionX, double positionY, double positionZ, cudaPclType_ID particleID)
   {
     u.push_back(velocityX); v.push_back(velocityY); w.push_back(velocityZ);
     q.push_back(charge);
     x.push_back(positionX); y.push_back(positionY); z.push_back(positionZ);
-    t.push_back(particleID);
+    if (trackParticleID_) id.push_back(particleID);
   }
 
   /** Swap-remove particle at index. O(1). */
@@ -219,15 +232,46 @@ public:
       u[particleIndex] = u[lastIndex]; v[particleIndex] = v[lastIndex];
       w[particleIndex] = w[lastIndex]; q[particleIndex] = q[lastIndex];
       x[particleIndex] = x[lastIndex]; y[particleIndex] = y[lastIndex];
-      z[particleIndex] = z[lastIndex]; t[particleIndex] = t[lastIndex];
+      z[particleIndex] = z[lastIndex];
+      if (trackParticleID_) id[particleIndex] = id[lastIndex];
     }
     u.pop_back(); v.pop_back(); w.pop_back(); q.pop_back();
-    x.pop_back(); y.pop_back(); z.pop_back(); t.pop_back();
+    x.pop_back(); y.pop_back(); z.pop_back();
+    if (trackParticleID_) id.pop_back();
   }
 
   /** Reserve remaining particle-ID space (call after initial fill). */
   void reserve_remaining_particle_IDs() {
-    particleIDGenerator_.reserve_particles_in_range(getNOP());
+    if (!trackParticleID_) return;
+    const int nop = getNOP();
+    particleIDGenerator_.seedFromExistingIDs(nop > 0 ? getParticleIDall() : nullptr,
+                                             nop, mpiComm_);
+  }
+
+  void initializeParticleIDDeviceCounter(cudaStream_t stream = 0) {
+    if (!trackParticleID_) return;
+    particleIDGenerator_.ensureDeviceCounter(stream);
+  }
+
+  ParticleIDGenerator::counter_type reserveParticleIDSequenceBlock(
+      ParticleIDGenerator::counter_type count, cudaStream_t stream = 0) {
+    if (!trackParticleID_) return 0;
+    return particleIDGenerator_.reserveHostSequenceBlock(count, stream);
+  }
+
+  cudaPclType_ID particleIDFromSequence(
+      ParticleIDGenerator::counter_type sequence) const {
+    if (!trackParticleID_) return PARTICLE_ID_INVALID;
+    return particleIDGenerator_.idFromSequence(sequence);
+  }
+
+  cudaPclType_ID generateParticleID(cudaStream_t stream = 0) {
+    if (!trackParticleID_) return PARTICLE_ID_INVALID;
+    return particleIDGenerator_.generateHostID(stream);
+  }
+
+  ParticleIDGenerator getParticleIDGenerator() const {
+    return particleIDGenerator_.handle();
   }
 
   // ===== Particle initialisation (implemented in ParticleSoAHost.cpp) =====
@@ -411,7 +455,7 @@ public:
   LarrayRegistered<cudaPclType_X> x;
   LarrayRegistered<cudaPclType_Y> y;
   LarrayRegistered<cudaPclType_Z> z;
-  LarrayRegistered<cudaPclType_T> t;
+  LarrayRegistered<cudaPclType_ID> id;
 
 private:
 
@@ -419,6 +463,7 @@ private:
   int        speciesNumber_     = 0;
   double     chargeOverMass_    = 0.0;     // qom
   bool       isTestParticle_    = false;
+  bool       trackParticleID_   = false;
 
   // ===== Borrowed references (NOT owned, NOT freed) =====
   const CollectiveIO*       col_  = nullptr;
@@ -498,10 +543,10 @@ private:
   array3_int* bucketOffset_            = nullptr;
 
   // ===== Unique particle-ID generator =====
-  doubleIDgenerator particleIDGenerator_;
+  ParticleIDGeneratorState particleIDGenerator_;
 };
 
-// Convenience typedef used by PSKOutput and legacy IO
+// Convenience typedef used by PSKOutput and I/O code.
 typedef ParticleSoAHost Particles;
 
 #endif // PARTICLE_SOA_HOST_H

@@ -40,9 +40,6 @@ struct OutputTagConfig;
 void WriteFieldsH5hut(int nspec, Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle, const OutputTagConfig& cfg);
 void WritePartclH5hut(int nspec, Grid3DCU *grid, ParticleSoAHost **part, CollectiveIO *col, VCtopology3D *vct, int cycle);
 
-void ReadPartclH5hut(int nspec, ParticleSoAHost **part, Collective *col, VCtopology3D *vct, Grid3DCU *grid);
-void ReadFieldsH5hut(int nspec, EMfields3D *EMf,       Collective *col, VCtopology3D *vct, Grid3DCU *grid);
-
 void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle, const OutputTagConfig& cfg);
 
 

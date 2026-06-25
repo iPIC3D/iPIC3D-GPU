@@ -44,7 +44,10 @@ __global__ void planetExtractionKernel(
     pcl.set_x(pclsArray->getX()[pidx]);
     pcl.set_y(pclsArray->getY()[pidx]);
     pcl.set_z(pclsArray->getZ()[pidx]);
-    pcl.set_t(pclsArray->getT()[pidx]);
+    if (pclsArray->tracksParticleID())
+        pcl.set_id(pclsArray->getID()[pidx]);
+    else
+        pcl.set_id(PARTICLE_ID_INVALID);
     planetArr->getArray()[index] = pcl;
 }
 

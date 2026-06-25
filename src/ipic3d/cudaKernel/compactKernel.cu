@@ -74,11 +74,11 @@ __global__ void compactParticles2(particleArrayCUDA* pclsArray, departureArrayTy
 	pclsArray->getV()[pidx] = pclsArray->getV()[srcIdx];
 	pclsArray->getW()[pidx] = pclsArray->getW()[srcIdx];
 	pclsArray->getQ()[pidx] = pclsArray->getQ()[srcIdx];
-	pclsArray->getT()[pidx] = pclsArray->getT()[srcIdx];
+	if (pclsArray->tracksParticleID())
+		pclsArray->getID()[pidx] = pclsArray->getID()[srcIdx];
 
 
 }
-
 
 
 

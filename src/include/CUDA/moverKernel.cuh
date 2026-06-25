@@ -8,6 +8,7 @@
 #include "gridCUDA.cuh"
 #include "particleExchange.cuh"
 #include "hashedSum.cuh"
+#include "ParticleIDGenerator.cuh"
 
 /**
  * @brief Device-side parameter bundle consumed by the GPU mover kernels.
@@ -49,6 +50,7 @@ public: // common parameter
     cudaCommonType deleteBoundary[6];
     cudaCommonType openBoundary[6];
     uint32_t appendCountAtomic; // the number of duplicated particles to be appended to the array, just in time
+    ParticleIDGenerator particleIDGenerator;
 
     // For repopulate injection, XLeft, XRight, YLeft, YRight, ZLeft, ZRight
     bool doRepopulateInjection;
@@ -78,6 +80,8 @@ public:
         // create the particle array, stream 0
         pclsArray = particleArrayCUDA(pclHost).copyToDevice();
         departureArray = departureArrayType(pclHost->getNOP() * 1.5).copyToDevice();
+        if (pclHost->tracksParticleID())
+            particleIDGenerator = pclHost->getParticleIDGenerator();
 
     }
 
@@ -101,6 +105,8 @@ public:
         pclsArray = pclsArrayCUDAPtr;
         departureArray = departureArrayCUDAPtr;
         hashedSumArray = hashedSumArrayCUDAPtr;
+        if (pclHost->tracksParticleID())
+            particleIDGenerator = pclHost->getParticleIDGenerator();
 
     }
 };

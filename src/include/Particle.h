@@ -39,7 +39,7 @@ class SpeciesParticle
   cudaParticleType u[3]; // velocity components (u, v, w) [normalized to speed of light c]
   cudaParticleType q;    // charge of the macroparticle [simulation units]
   cudaParticleType x[3]; // position components (x, y, z) [in cell-length units]
-  cudaParticleType t;    // subcycle time remaining; also reused as particle ID for tracking
+  cudaPclType_ID id;     // particle identifier
  public:
   __host__ __device__ SpeciesParticle(){}
   __host__ __device__ SpeciesParticle(
@@ -50,7 +50,7 @@ class SpeciesParticle
     cudaParticleType x_,  // x-position
     cudaParticleType y_,  // y-position
     cudaParticleType z_,  // z-position
-    cudaParticleType t_)  // subcycle time / particle ID
+    cudaPclType_ID id_)   // particle identifier
   {
     u[0]=u_;
     u[1]=v_;
@@ -59,26 +59,25 @@ class SpeciesParticle
     x[0]=x_;
     x[1]=y_;
     x[2]=z_;
-    t=t_;
+    id=id_;
   }
   // accessors
   // cudaParticleType component(int i){ return u[i]; } // a hack
   __host__ __device__ cudaParticleType get_u(int i)const{ return u[i]; }
   __host__ __device__ cudaParticleType get_q()const{ return q; }
   __host__ __device__ cudaParticleType get_x(int i)const{ return x[i]; }
-  __host__ __device__ cudaParticleType get_t()const{ return t; }
+  __host__ __device__ cudaPclType_ID get_id()const{ return id; }
 
   __host__ __device__ void set_u(cudaTypeSingle* in, int n=3) { for(int i=0;i<n;i++) u[i] = in[i]; }
   __host__ __device__ void set_u(int i, cudaTypeSingle in) { u[i] = in; }
   __host__ __device__ void set_q(cudaTypeSingle in) { q = in; }
   __host__ __device__ void set_x(int i, cudaTypeSingle in) { x[i] = in; }
-  __host__ __device__ void set_t(cudaTypeSingle in){ t=in; }
 
   __host__ __device__ void set_u(cudaTypeDouble* in, int n=3) { for(int i=0;i<n;i++) u[i] = in[i]; }
   __host__ __device__ void set_u(int i, cudaTypeDouble in) { u[i] = in; }
   __host__ __device__ void set_q(cudaTypeDouble in) { q = in; }
   __host__ __device__ void set_x(int i, cudaTypeDouble in) { x[i] = in; }
-  __host__ __device__ void set_t(cudaTypeDouble in){ t=in; }
+  __host__ __device__ void set_id(cudaPclType_ID in){ id=in; }
 
   __host__ __device__ void set_x_u(cudaParticleType x, cudaParticleType y, cudaParticleType z, 
                                     cudaParticleType u, cudaParticleType v, cudaParticleType w){
@@ -92,9 +91,8 @@ class SpeciesParticle
 
   }
   
-  // tracking particles would actually use q for the ID
-  longid get_ID()const{ return longid(t); }
-  void set_ID(longid in){ t = cudaParticleType(in); }
+  longid get_ID()const{ return longid(id); }
+  void set_ID(longid in){ id = cudaPclType_ID(in); }
   // alternative accessors
   __host__ __device__ cudaParticleType get_x()const{ return x[0]; }
   __host__ __device__ cudaParticleType get_y()const{ return x[1]; }
@@ -109,7 +107,7 @@ class SpeciesParticle
   __host__ __device__ cudaParticleType& fetch_u(){ return u[0]; }
   __host__ __device__ cudaParticleType& fetch_v(){ return u[1]; }
   __host__ __device__ cudaParticleType& fetch_w(){ return u[2]; }
-  __host__ __device__ cudaParticleType& fetch_t(){ return t; }
+  __host__ __device__ cudaPclType_ID& fetch_id(){ return id; }
 
   __host__ __device__ void set_x(cudaTypeSingle in){ x[0]=in; }
   __host__ __device__ void set_y(cudaTypeSingle in){ x[1]=in; }
@@ -127,53 +125,17 @@ class SpeciesParticle
 
   __host__ __device__ void set_to_zero()
   {
-    for(int i=0;i<8;i++) u[i]=0;
+    u[0] = 0; u[1] = 0; u[2] = 0; q = 0;
+    x[0] = 0; x[1] = 0; x[2] = 0; id = 0;
   }
   __host__ __device__ void set(
     cudaParticleType _u, cudaParticleType _v, cudaParticleType _w, cudaParticleType _q,
-    cudaParticleType _x, cudaParticleType _y, cudaParticleType _z, cudaParticleType _t
+    cudaParticleType _x, cudaParticleType _y, cudaParticleType _z, cudaPclType_ID _id
     )
   {
     u[0] = _u; u[1] = _v; u[2] = _w; q = _q;
-    x[0] = _x; x[1] = _y; x[2] = _z; t = _t;
+    x[0] = _x; x[1] = _y; x[2] = _z; id = _id;
   }
 };
-
-// to support SoA notation
-//
-// this class will simply be defined differently
-// when underlying representation is SoA
-//
-//class FetchPclComponent
-//{
-//  int offset;
-//  Larray<SpeciesParticle>& list;
-// public:
-//  FetchPclComponent( Larray<SpeciesParticle>& _list, int _offset)
-//  : list(_list), offset(_offset)
-//  { }
-//  cudaParticleType operator[](int i)
-//  {
-//    return list[i].component(offset);
-//    // return component(offset)[i];
-//  }
-//};
-
-// intended to occupy 64 bytes
-//
-// dust particle for second-order-accuracy implicit advance
-#if 0
-class IDpcl
-{
-  int c[3]; // cell
-  float q; // charge
-  float x[3]; // position
-  float t; // subcycle time
-  float hdx[3]; // xavg = x + hdx
-  float qom; // charge to mass ratio of particle
-  float u[3];
-  float m; // mass of particle
-};
-#endif
 
 #endif

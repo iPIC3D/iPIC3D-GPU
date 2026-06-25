@@ -611,7 +611,8 @@ __host__ void CellSorter::finishSort(cudaStream_t s)
     scatter_and_swap(soa->x);
     scatter_and_swap(soa->y);
     scatter_and_swap(soa->z);
-    scatter_and_swap(soa->t);
+    if (soa->trackParticleID)
+        scatter_and_swap(soa->id);
 }
 
 // ======= CellSorter convenience wrapper =======

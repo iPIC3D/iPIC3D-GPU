@@ -14,7 +14,7 @@
 #define RESTART_READER_H
 
 #include "arraysfwd.h"        // arr3_double, array4_double
-#include "aligned_vector.h"   // vector_double
+#include "aligned_vector.h"   // vector_double, vector_cudaPclType_ID
 #include "RestartSlotManager.h"
 #include <string>
 
@@ -77,13 +77,13 @@ public:
     // ---------------------------------------------------------------
 
     /**
-     * @brief Read particle data (position, velocity, charge, ID) from
+     * @brief Read particle data (position, velocity, charge, optional ID) from
      *        a restart file.
      *
      * ADIOS2 backend: reads from restart_<rank>.bp (variables named
      *   part<i>PositionX, etc.).
      * HDF5 backend: reads from restart<rank>.hdf (datasets under
-     *   /particles/species_<i>/{x,y,z,u,v,w,q,ID}/cycle_N).
+     *   /particles/species_<i>/{x,y,z,u,v,w,q[,ID]}/cycle_N).
      *
      * Vectors are resized to the particle count found in the file,
      * with capacity rounded up to DVECWIDTH.
@@ -93,7 +93,8 @@ public:
      * @param u,v,w           Velocity components (output).
      * @param q               Charge per particle (output).
      * @param x,y,z           Position components (output).
-     * @param t               Particle ID (output, stored as double).
+     * @param id              Particle ID field (output when trackParticleID).
+     * @param trackParticleID Read particle IDs from the checkpoint.
      * @param restartDir      Path to the selected restart slot directory.
      * @param last_cycle      Expected restart cycle label.
      */
@@ -103,7 +104,8 @@ public:
         vector_double& u, vector_double& v, vector_double& w,
         vector_double& q,
         vector_double& x, vector_double& y, vector_double& z,
-        vector_double& t,
+        vector_cudaPclType_ID& id,
+        bool trackParticleID,
         const std::string& restartDir, int last_cycle);
 };
 

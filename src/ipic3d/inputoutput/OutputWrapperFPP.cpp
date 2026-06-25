@@ -39,6 +39,7 @@ void OutputWrapperFPP::init_output_files(
 	    int 		  nstestpart)
 {
 #ifndef NO_HDF5
+    col_ = col;
     cartesian_rank = vct->getCartesian_rank();
     stringstream num_proc_ss;
     num_proc_ss << cartesian_rank;
@@ -127,9 +128,17 @@ void OutputWrapperFPP::append_restart(int cycle, const string& restartDir)
 		hdf5_agent.open(restart_file);
 		output_mgr.output("proc_topology ", cycle);
 		output_mgr.output("Eall + Ball + rhos + Js + pressure", cycle);
-		output_mgr.output("position + velocity + q + ID", cycle, 0);
+		string particleTag = "position + velocity + q";
+		if (col_->anyRegularParticleID()) {
+			particleTag += " + ID";
+		}
+		output_mgr.output(particleTag, cycle, 0);
 		output_mgr.output("particle_cell_metadata", cycle);
-		output_mgr.output("testpartpos + testpartvel + testpartcharge", cycle, 0);
+		string testParticleTag = "testpartpos + testpartvel + testpartcharge";
+		if (col_->anyTestParticleID()) {
+			testParticleTag += " + testparttag";
+		}
+		output_mgr.output(testParticleTag, cycle, 0);
 		output_mgr.output("last_cycle", cycle);
 		hdf5_agent.close();
 #endif

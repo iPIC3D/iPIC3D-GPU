@@ -33,9 +33,57 @@
 #include "EMfields3D.h"
 #include "math.h"
 #include <algorithm>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <vector>
+
+#ifdef USEH5HUT
+namespace {
+
+void writeParticlesH5hut(
+    H5output& file,
+    int species,
+    long long nop,
+    const cudaPclType_ID* id,
+    const double* q,
+    const double* x,
+    const double* y,
+    const double* z,
+    const double* u,
+    const double* v,
+    const double* w,
+    int cartesianRank,
+    MPI_Comm comm)
+{
+  static_assert(sizeof(long long) == sizeof(cudaPclType_ID),
+                "H5hut particle ID output assumes 64-bit long long IDs");
+
+  std::vector<long long> rankTag(static_cast<size_t>(nop),
+                                 static_cast<long long>(cartesianRank));
+  std::vector<long long> particleTag(static_cast<size_t>(nop));
+  if (nop > 0) {
+    std::memcpy(particleTag.data(), id,
+                static_cast<size_t>(nop) * sizeof(cudaPclType_ID));
+  }
+
+  file.WriteParticles(
+      species, nop,
+      rankTag.data(),
+      particleTag.data(),
+      const_cast<double*>(q),
+      const_cast<double*>(x),
+      const_cast<double*>(y),
+      const_cast<double*>(z),
+      const_cast<double*>(u),
+      const_cast<double*>(v),
+      const_cast<double*>(w),
+      comm);
+}
+
+} // namespace
+#endif
 
 /*! Function used to write the EM fields using the parallel HDF5 library */
 void WriteOutputParallel(Grid3DCU *grid, EMfields3D *EMf, CollectiveIO *col, VCtopology3D *vct, int cycle, const OutputTagConfig& cfg){
@@ -396,15 +444,30 @@ void WritePartclH5hut(int nspec, Grid3DCU *grid, ParticleSoAHost **part, Collect
   file.OpenPartclFile(nspec, vct->getFieldComm());
   for (int i=0; i<nspec; i++){
     // SoA data is authoritative — no conversion needed
-    file.WriteParticles(i, part[i]->getNOP(),
-                           part[i]->getQall(),
-                           part[i]->getXall(),
-                           part[i]->getYall(),
-                           part[i]->getZall(),
-                           part[i]->getUall(),
-                           part[i]->getVall(),
-                           part[i]->getWall(),
-                           vct->getFieldComm());
+    const int nop = part[i]->getNOP();
+    if (part[i]->tracksParticleID()) {
+      writeParticlesH5hut(file, i, nop,
+                          nop > 0 ? part[i]->getParticleIDall() : nullptr,
+                          part[i]->getQall(),
+                          part[i]->getXall(),
+                          part[i]->getYall(),
+                          part[i]->getZall(),
+                          part[i]->getUall(),
+                          part[i]->getVall(),
+                          part[i]->getWall(),
+                          vct->getCartesian_rank(),
+                          vct->getFieldComm());
+    } else {
+      file.WriteParticles(i, nop,
+                          part[i]->getQall(),
+                          part[i]->getXall(),
+                          part[i]->getYall(),
+                          part[i]->getZall(),
+                          part[i]->getUall(),
+                          part[i]->getVall(),
+                          part[i]->getWall(),
+                          vct->getFieldComm());
+    }
   }
   file.ClosePartclFile();
 
@@ -417,148 +480,6 @@ void WritePartclH5hut(int nspec, Grid3DCU *grid, ParticleSoAHost **part, Collect
 #endif
 
 }
-
-#if 0
-void ReadPartclH5hut(int nspec, ParticleSoAHost **part, Collective *col, VCtopology3D *vct, Grid3DCU *grid){
-#ifdef USEH5HUT
-
-  H5input infile;
-  double L[3] = {col->getLx(), col->getLy(), col->getLz()};
-
-  infile.SetNameCycle(col->getinitfile(), col->getLast_cycle());
-  infile.OpenPartclFile(nspec);
-
-  infile.ReadParticles(vct->getCartesian_rank(), vct->getNproc(), vct->getDims(), L, vct->getFieldComm());
-
-  for (int s = 0; s < nspec; s++){
-    part[s]->allocate(s, infile.GetNp(s), col, vct, grid);
-
-    infile.DumpPartclX(part[s]->getXref(), s);
-    infile.DumpPartclY(part[s]->getYref(), s);
-    infile.DumpPartclZ(part[s]->getZref(), s);
-    infile.DumpPartclU(part[s]->getUref(), s);
-    infile.DumpPartclV(part[s]->getVref(), s);
-    infile.DumpPartclW(part[s]->getWref(), s);
-    infile.DumpPartclQ(part[s]->getQref(), s);
-  }
-  infile.ClosePartclFile();
-
-//--- TEST PARTICLE LECTURE:
-//  for (int s = 0; s < nspec; s++){
-//    for (int n = 0; n < part[s].getNOP(); n++){
-//      double ix = part[s].getX(n);
-//      double iy = part[s].getY(n);
-//      double iz = part[s].getZ(n);
-//      if (ix<=0 || iy<=0 || iz <=0) {
-//        cout << " ERROR: This particle has negative position. " << endl;
-//        cout << "        n = " << n << "/" << part[s].getNOP();
-//        cout << "       ix = " << ix;
-//        cout << "       iy = " << iy;
-//        cout << "       iz = " << iz;
-//      }
-//    }
-//  }
-//--- END TEST
-
-#endif
-}
-#endif
-
-#if 0
-void ReadFieldsH5hut(int nspec, EMfields3D *EMf, Collective *col, VCtopology3D *vct, Grid3DCU *grid){
-#ifdef USEH5HUT
-
-  H5input infile;
-
-  infile.SetNameCycle(col->getinitfile(), col->getLast_cycle());
-
-  infile.OpenFieldsFile("Node", nspec, col->getNxc()+1,
-                                       col->getNyc()+1,
-                                       col->getNzc()+1,
-                                       vct->getCoordinates(),
-                                       vct->getDims(),
-                                       vct->getFieldComm());
-
-  infile.ReadFields(EMf->getEx(), "Ex", grid->getNXN(), grid->getNYN(), grid->getNZN());
-  infile.ReadFields(EMf->getEy(), "Ey", grid->getNXN(), grid->getNYN(), grid->getNZN());
-  infile.ReadFields(EMf->getEz(), "Ez", grid->getNXN(), grid->getNYN(), grid->getNZN());
-  infile.ReadFields(EMf->getBx(), "Bx", grid->getNXN(), grid->getNYN(), grid->getNZN());
-  infile.ReadFields(EMf->getBy(), "By", grid->getNXN(), grid->getNYN(), grid->getNZN());
-  infile.ReadFields(EMf->getBz(), "Bz", grid->getNXN(), grid->getNYN(), grid->getNZN());
-
-  for (int is = 0; is < nspec; is++){
-    std::stringstream  ss;
-    ss << is;
-    std::string s_is = ss.str();
-    infile.ReadFields(EMf->getRHOns(is), "rho_"+s_is, grid->getNXN(), grid->getNYN(), grid->getNZN());
-  }
-
-  infile.CloseFieldsFile();
-
-  // initialize B on centers
-    MPI_Barrier(MPIdata::get_PicGlobalComm());
-
-  // Comm ghost nodes for B-field
-  communicateNodeBC(grid->getNXN(), grid->getNYN(), grid->getNZN(), EMf->getBx(), col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct);
-  communicateNodeBC(grid->getNXN(), grid->getNYN(), grid->getNZN(), EMf->getBy(), col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct);
-  communicateNodeBC(grid->getNXN(), grid->getNYN(), grid->getNZN(), EMf->getBz(), col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct);
-
-  grid->interpN2C(EMf->getBxc(), EMf->getBx());
-  grid->interpN2C(EMf->getByc(), EMf->getBy());
-  grid->interpN2C(EMf->getBzc(), EMf->getBz());
-
-  // Comm ghost cells for B-field
-  communicateNodeBC(grid->getNXN(), grid->getNYN(), grid->getNZN(), EMf->getBx(), col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct);
-  communicateNodeBC(grid->getNXN(), grid->getNYN(), grid->getNZN(), EMf->getBy(), col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct);
-  communicateNodeBC(grid->getNXN(), grid->getNYN(), grid->getNZN(), EMf->getBz(), col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct);
-
-  // communicate E
-  communicateNodeBC(grid->getNXN(), grid->getNYN(), grid->getNZN(), EMf->getEx(), col->bcBx[0],col->bcBx[1],col->bcBx[2],col->bcBx[3],col->bcBx[4],col->bcBx[5], vct);
-  communicateNodeBC(grid->getNXN(), grid->getNYN(), grid->getNZN(), EMf->getEy(), col->bcBy[0],col->bcBy[1],col->bcBy[2],col->bcBy[3],col->bcBy[4],col->bcBy[5], vct);
-  communicateNodeBC(grid->getNXN(), grid->getNYN(), grid->getNZN(), EMf->getEz(), col->bcBz[0],col->bcBz[1],col->bcBz[2],col->bcBz[3],col->bcBz[4],col->bcBz[5], vct);
-
-  for (int is = 0; is < nspec; is++)
-    grid->interpN2C(EMf->getRHOcs(), is, EMf->getRHOns());
-
-//---READ FROM THE CELLS:
-//
-//  infile.OpenFieldsFile("Cell", nspec, col->getNxc(),
-//                                       col->getNyc(),
-//                                       col->getNzc(),
-//                                       vct->getCoordinates(),
-//                                       vct->getDims(),
-//                                       vct->getComm());
-//
-//  infile.ReadFields(EMf->getExc(), "Exc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  infile.ReadFields(EMf->getEyc(), "Eyc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  infile.ReadFields(EMf->getEzc(), "Ezc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  infile.ReadFields(EMf->getBxc(), "Bxc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  infile.ReadFields(EMf->getByc(), "Byc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  infile.ReadFields(EMf->getBzc(), "Bzc", grid->getNXC(), grid->getNYC(), grid->getNZC());
-//
-//  for (int is = 0; is < nspec; is++){
-//    std::stringstream  ss;
-//    ss << is;
-//    std::string s_is = ss.str();
-//    infile.ReadFields(EMf->getRHOcs(is, 0), "rhoc_"+s_is, grid->getNXC(), grid->getNYC(), grid->getNZC());
-//  }
-//
-//  infile.CloseFieldsFile();
-//
-//  // initialize B on nodes
-//  grid->interpC2N(EMf->getBx(), EMf->getBxc());
-//  grid->interpC2N(EMf->getBy(), EMf->getByc());
-//  grid->interpC2N(EMf->getBz(), EMf->getBzc());
-//
-//  for (int is = 0; is < nspec; is++)
-//    grid->interpC2N(EMf->getRHOns(), is, EMf->getRHOcs());
-//
-//---END READ FROM THE CELLS
-
-#endif
-}
-#endif
-
 
 #include <functional>
 

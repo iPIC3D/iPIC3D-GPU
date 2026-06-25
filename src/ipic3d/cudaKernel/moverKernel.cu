@@ -556,7 +556,8 @@ __device__ uint32_t deleteAppendOpenBCOutflow(commonType xpcl, commonType ypcl, 
                 pclsArray->getV()[index] = vel[1];
                 pclsArray->getW()[index] = vel[2];
                 pclsArray->getQ()[index] = charge;
-                pclsArray->getT()[index] = 114514.0;
+                if (pclsArray->tracksParticleID())
+                    pclsArray->getID()[index] = moverParam->particleIDGenerator.generateID();
 
                 if(newPos[0] < grid->xStart)
                 {

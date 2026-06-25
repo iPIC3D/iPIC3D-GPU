@@ -17,7 +17,8 @@
 
 __global__ void scatterAoSToSoAKernel(const SpeciesParticle* __restrict__ aosStagingBuf,
                                        particleArrayCUDA* pclsArray,
-                                       uint32_t destOffset, uint32_t count)
+                                       uint32_t destOffset, uint32_t count,
+                                       ParticleIDGenerator particleIDGenerator)
 {
     const uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
     if (tidx >= count) return;
@@ -30,7 +31,12 @@ __global__ void scatterAoSToSoAKernel(const SpeciesParticle* __restrict__ aosSta
     pclsArray->getX()[pidx] = pcl.get_x();
     pclsArray->getY()[pidx] = pcl.get_y();
     pclsArray->getZ()[pidx] = pcl.get_z();
-    pclsArray->getT()[pidx] = pcl.get_t();
+    if (pclsArray->tracksParticleID()) {
+        const cudaPclType_ID particleID = pcl.get_id();
+        pclsArray->getID()[pidx] = particleID != PARTICLE_ID_INVALID
+            ? particleID
+            : particleIDGenerator.generateID();
+    }
 }
 
 // ======= SoA view borrowing =======
@@ -44,9 +50,6 @@ __host__ void particleArraySoAView<cudaParticleType, 4>::borrowFrom(particleArra
     ptrs[2] = pclArray->getW();
     ptrs[3] = pclArray->getQ();
 }
-
-
-
 
 
 

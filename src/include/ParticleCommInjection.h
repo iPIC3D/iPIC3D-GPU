@@ -12,8 +12,8 @@
  *  3. recommunicateParticlesUntilDone(): iterative flush/recv/Allreduce loop
  *  4. handleReceivedParticles(): receives AoS blocks, applies BCs, appends
  *     surviving particles to AoS comm buffer
- *  5. repopulateParticlesOnlyInjection() / openBCParticlesOutflow():
- *     inject new particles into AoS comm buffer
+ *  5. GPU injection uses computeInjectionCount() / fillInjectionParameter()
+ *     to append boundary-injected particles directly into the device SoA
  *  6. Caller reads commPcls for single H→D upload + scatterAoSToSoAKernel
  *
  * No persistent storage of "all" particles — only transient exchange buffer.
@@ -116,21 +116,14 @@ public:
 
   // ===== Boundary injection =====
 
-  /** Inject new Maxwellian particles at REEMISSION boundaries (into comm buffer). */
-  void repopulateParticlesOnlyInjection();
-
-  /** Compute the number of particles that repopulateParticlesOnlyInjection()
-   *  would create, without actually generating them.  Used to pre-size
-   *  device SoA arrays before a GPU injection kernel. */
+  /** Compute the number of particles the GPU injection kernel will create.
+   *  Used to pre-size device SoA arrays before launch. */
   int computeInjectionCount() const;
 
   /** Populate an injectionParameter struct for the GPU injection kernel.
    *  The struct is fully initialized and ready for cudaMemcpy H→D.
    *  Must be called once at init time (all fields are constant). */
   void fillInjectionParameter(injectionParameter* param) const;
-
-  /** Open BC: duplicate boundary particles, delete exiting ones (into comm buffer). */
-  void openBCParticlesOutflow();
 
   // ===== Append from external AoS (CPU-side: exosphere injection) =====
 
@@ -220,14 +213,6 @@ private:
     commPcls.push_back(pcl);
   }
 
-  /** Helper: populate one cell with Maxwellian particles into comm buffer. */
-  void populateCellWithParticles(int cellIndexX, int cellIndexY, int cellIndexZ,
-                                 double chargePerParticle,
-                                 double dxPerPcl, double dyPerPcl, double dzPerPcl,
-                                 int baseIdx,
-                                 ParticleIDGenerator::counter_type baseSequence,
-                                 std::mt19937_64& rng);
-
   /** Swap-remove particle at index from comm buffer. */
   void deleteCommParticle(int particleIndex) {
     const int lastIndex = getCommNOP() - 1;
@@ -260,7 +245,6 @@ private:
   double subdomainZstart_, subdomainZend_;
   int    numCellsX_, numCellsY_, numCellsZ_;
   double speedOfLight_;
-  double timeStep_;
   double injectionDensity_;
   int    numPclPerCellX_, numPclPerCellY_, numPclPerCellZ_;
   int    numParticlesPerCell_;

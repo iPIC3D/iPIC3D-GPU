@@ -109,7 +109,7 @@ EMfields3D::EMfields3D(Collective *col, Grid *grid, VirtualTopology3D *vct) :
   x_center_planet(col->getx_center_planet()),
   y_center_planet(col->gety_center_planet()),
   z_center_planet(col->getz_center_planet()),
-  L_square(col->getL_square()),
+  Planet_radius(col->getPlanet_radius()),
   delt(c * th * dt), // declared after these
   //
   // array allocation: nodes
@@ -3316,11 +3316,11 @@ void EMfields3D::init()
 
     if (col->getCase() == "Dipole")
     {
-      ConstantChargePlanet(col->getL_square(), col->getx_center_planet(), col->gety_center_planet(), col->getz_center_planet());
+      ConstantChargePlanet(col->getPlanet_radius(), col->getx_center_planet(), col->gety_center_planet(), col->getz_center_planet());
     }
     else if (col->getCase() == "Dipole2D")
     {
-      ConstantChargePlanet2DPlaneXZ(col->getL_square(), col->getx_center_planet(), col->getz_center_planet());
+      ConstantChargePlanet2DPlaneXZ(col->getPlanet_radius(), col->getx_center_planet(), col->getz_center_planet());
     }
     // I am not sure what this open BC does, but perhaps it is responsible for energy losses in the restart? Jan 2017, Slavik.
     else if ((col->getCase().find("TaylorGreen") != std::string::npos) && (col->getCase() != "NullPoints"))
@@ -4692,7 +4692,7 @@ void EMfields3D::initDipole()
     cout << "B1x   (external dipole field) - X  = " << B1x << endl;
     cout << "B1y                              = " << B1y << endl;
     cout << "B1z                              = " << B1z << endl;
-    cout << "L_square - no magnetic field inside a sphere with radius L_square  = " << L_square << endl;
+    cout << "Planet_radius - no magnetic field inside the planet = " << Planet_radius << endl;
     cout << "Center dipole - X                = " << x_center_dipole << endl;
     cout << "Center dipole - Y                = " << y_center_dipole << endl;
     cout << "Center dipole - Z                = " << z_center_dipole << endl;
@@ -4725,7 +4725,7 @@ void EMfields3D::initDipole()
 
         double blp[3];
         // radius of the planet
-        double a = L_square;
+        double a = Planet_radius;
 
         double x = grid->getXN(i, j, k);
         double y = grid->getYN(i, j, k);
@@ -4800,7 +4800,7 @@ void EMfields3D::initDipole2D()
     cout << "B1x   (external dipole field)    = " << B1x << endl;
     cout << "B1y                              = " << B1y << endl;
     cout << "B1z                              = " << B1z << endl;
-    cout << "L_square - no magnetic field inside a sphere with radius L_square  = " << L_square << endl;
+    cout << "Planet_radius - no magnetic field inside the planet = " << Planet_radius << endl;
     cout << "Center dipole - X                = " << x_center_dipole << endl;
     cout << "Center dipole - Y                = " << y_center_dipole << endl;
     cout << "Center dipole - Z                = " << z_center_dipole << endl;
@@ -4834,7 +4834,7 @@ void EMfields3D::initDipole2D()
         Ez[i][j][k] = ebc[2];
 
         double blp[3];
-        double a = L_square;
+        double a = Planet_radius;
 
         double xc = x_center_dipole;
         double zc = z_center_dipole;

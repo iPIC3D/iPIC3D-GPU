@@ -879,8 +879,8 @@ class EMfields3D                // :public Field
     double y_center_planet;
     /** planet center - Z direction   */
     double z_center_planet;
-    /** Characteristic length */
-    double L_square;
+    /** Planet radius */
+    double Planet_radius;
 
     /*! PSI: magnetic potential (indexX, indexY, indexZ), defined on central points between nodes */
     array3_double PSI;

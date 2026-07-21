@@ -552,13 +552,13 @@ int c_Solver::initCUDA(){
       moverParamHostPtr[i]->sphereOrigin[0] = col->getx_center_planet();
       moverParamHostPtr[i]->sphereOrigin[1] = col->gety_center_planet();
       moverParamHostPtr[i]->sphereOrigin[2] = col->getz_center_planet();
-      moverParamHostPtr[i]->sphereRadius = col->getL_square();
+      moverParamHostPtr[i]->sphereRadius = col->getPlanet_radius();
     } else if (caseType_ == CaseType::Dipole2D) {
       moverParamHostPtr[i]->doSphere = 2;
       moverParamHostPtr[i]->sphereOrigin[0] = col->getx_center_planet();
       moverParamHostPtr[i]->sphereOrigin[1] = 0.0;
       moverParamHostPtr[i]->sphereOrigin[2] = col->getz_center_planet();
-      moverParamHostPtr[i]->sphereRadius = col->getL_square();
+      moverParamHostPtr[i]->sphereRadius = col->getPlanet_radius();
     } else {
       moverParamHostPtr[i]->doSphere = 0;
     }
@@ -2197,10 +2197,10 @@ void c_Solver::MomentsAwait() {
   // Enforce constant charge inside planet BEFORE summing over species,
   // so that rhon (and downstream rhoc, rhoh) includes the planet fix.
   if (col->getCase() == "Dipole") {
-    EMf->gpuConstantChargePlanet(col->getL_square(),
+    EMf->gpuConstantChargePlanet(col->getPlanet_radius(),
         col->getx_center_planet(), col->gety_center_planet(), col->getz_center_planet());
   } else if (col->getCase() == "Dipole2D") {
-    EMf->gpuConstantChargePlanet2DPlaneXZ(col->getL_square(),
+    EMf->gpuConstantChargePlanet2DPlaneXZ(col->getPlanet_radius(),
         col->getx_center_planet(), col->getz_center_planet());
   }
   EMf->gpuSumOverSpecies();
@@ -2235,9 +2235,9 @@ void c_Solver::MomentsAwait() {
   EMf->setZeroDerivedMoments();
   // Fill the planet interior with the constant charge used by the legacy boundary model.
   if (caseType_ == CaseType::Dipole) {
-    EMf->ConstantChargePlanet(col->getL_square(),col->getx_center_planet(),col->gety_center_planet(),col->getz_center_planet());
+    EMf->ConstantChargePlanet(col->getPlanet_radius(),col->getx_center_planet(),col->gety_center_planet(),col->getz_center_planet());
   } else if (caseType_ == CaseType::Dipole2D) {
-    EMf->ConstantChargePlanet2DPlaneXZ(col->getL_square(),col->getx_center_planet(),col->getz_center_planet());
+    EMf->ConstantChargePlanet2DPlaneXZ(col->getPlanet_radius(),col->getx_center_planet(),col->getz_center_planet());
   }
   // Legacy OpenBC constant-charge path is intentionally left disabled here.
   //EMf->ConstantChargeOpenBC();

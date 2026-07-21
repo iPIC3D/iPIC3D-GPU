@@ -1,228 +1,191 @@
- # Publications that use results from iPIC3D need to properly cite  
- # 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- # plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
- #
- #        Copyright 2015 KTH Royal Institute of Technology
- # Licensed under the Apache License, Version 2.0 (the "License");
- # you may not use this file except in compliance with the License.
- # You may obtain a copy of the License at 
- #
- #         http://www.apache.org/licenses/LICENSE-2.0
- #
- # Unless required by applicable law or agreed to in writing, software
- # distributed under the License is distributed on an "AS IS" BASIS,
- # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- # See the License for the specific language governing permissions and
- # limitations under the License.
+# Publications that use results from iPIC3D need to properly cite
+# 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+# plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+#
+# Copyright 2015 KTH Royal Institute of Technology
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#         http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# Directories
-SaveDirName = data
-RestartDirName = data
+# Runtime input options configured for this Dipole/exosphere test.
+# Controls for other cases or disabled features are kept at inert defaults.
+# Compile-time constants in iPIC3Dlib.cu are not input-file options.
+# Brackets show the value used when a key is omitted; required keys have no default.
 
-Case              = Dipole 
-PoissonCorrection = no         # Poisson correction
-WriteMethod       = pvtk       # Output method [ shdf5 || pvtk ||nbcvtk]
-SimulationName    = Dipole3D_Exosphere   # Simulation name for the output
+# %%%%%%%%%%%%%%%%%%%% RUN AND I/O %%%%%%%%%%%%%%%%%%%%
+SaveDirName    = data                  # Fresh-run output directory [default: data]
+RestartDirName = data                  # Checkpoint directory [default: data]
+Case           = Dipole                # Case-sensitive initialization case [required]
+SimulationName = Dipole3D_Exosphere    # Output dataset name [required]
+# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, H5hut, adios2.
+WriteMethod    = pvtk                  # [required]
 
-#  %%%%%%%%%%%%%%%%%%% INITIAL MAGNETIC FIELD %%%%%%%%%%%%%%%%%%
-B0x = 0.0
-B0y = 0.0
-B0z = 0.0001
+# %%%%%%%%%%%%%%%%%%%% TIME INTEGRATION %%%%%%%%%%%%%%%%%%%%
+dt      = 0.15                         # Time step [required]
+ncycles = 1000                         # Cycles in this run [required]
+th      = 1.0                          # Implicit decentering parameter [default: 1.0]
+c       = 1.0                          # Normalized light speed [default: 1.0]
 
-# External magnetic field parameters: DIPOLE - Magnetic Moment in Z direction
-B1x = 0.0
-B1y = 0.0
-B1z = 2.0
+# %%%%%%%%%%%%%%%%%%%% INITIAL FIELDS %%%%%%%%%%%%%%%%%%%%
+# Uniform background magnetic field.
+B0x = 0.0                              # [default: 0.0]
+B0y = 0.0                              # [default: 0.0]
+B0z = 0.0001                           # [default: 0.0]
 
-#  %%%%%%%%%%%%%%%%%%% TIME %%%%%%%%%%%%%%%%%%
-dt = 0.15                   # dt = time step  
-ncycles = 1000		 #!!!    # cycles
-th = 1.0                     # th = decentering parameter
-c = 1.0                      # c = light speed 
+# Current Dipole initialization uses B1z; B1x/B1y are parsed but unused.
+B1x = 0.0                              # [default: 0.0]
+B1y = 0.0                              # [default: 0.0]
+B1z = 2.0                              # [default: 0.0]
 
-#  %%%%%%%%%%%%%%%%%%% SMOOTH %%%%%%%%%%%%%%%%%%
-Smooth = 0.5                  # Smoothing value (5-points stencil)
-SmoothNiter = 6               # Number of smoothing iterations (default 6)
+Smooth      = 0.5                      # Smoothing coefficient; 1 disables [default: 1.0]
+SmoothNiter = 6                        # Smoothing passes [default: 6]
 
-#  %%%%%%%%%%%%%%%%%%% DIV(B) CLEANING %%%%%%%%%%%%%%%%%%
-divBCorrection = yes           # Enable divergence-of-B cleaning (default no)
-divBCorrectionCycle = 10       # Apply div(B) correction every N cycles (default 10)
+PoissonCorrection      = no            # Exact "yes" enables div(E) cleaning [default: no]
+PoissonCorrectionCycle = 10            # div(E) cleaning interval [default: 10]
+divBCorrection          = yes           # Exact "yes" enables div(B) cleaning [default: no]
+divBCorrectionCycle     = 10            # div(B) cleaning interval [default: 10]
 
-# %%%%%%%%%%%%%%%%%% BOX SIZE %%%%%%%%%%%%%%%
-Lx =   12.0                  # Lx = simulation box length - x direction   
-Ly =   12.0                  # Ly = simulation box length - y direction
-Lz =   12.0                  # Lz = simulation box length - z direction   
+# %%%%%%%%%%%%%%%%%%%% DOMAIN AND TOPOLOGY %%%%%%%%%%%%%%%%%%%%
+Lx = 12.0                               # Global x length [default: 10.0]
+Ly = 12.0                               # Global y length [default: 10.0]
+Lz = 12.0                               # Global z length [default: 10.0]
 
-x_center_dipole =   6.5       # center of the dipole - X
-y_center_dipole =   6.0       # center of the dipole - Y
-z_center_dipole =   6.0       # center of the dipole - Z  
-x_center_planet =   6.5       # center of the planet - X
-y_center_planet =   6.0       # center of the planet - Y
-z_center_planet =   6.0       # center of the planet - Z  
-L_square =   0.5             # radius of the planet
+x_center_dipole = 6.5                   # Dipole center x [default: 5.0]
+y_center_dipole = 6.0                   # Dipole center y [default: 5.0]
+z_center_dipole = 6.0                   # Dipole center z [default: 5.0]
+x_center_planet = 6.5                   # Planet center x [default: 5.0]
+y_center_planet = 6.0                   # Planet center y [default: 5.0]
+z_center_planet = 6.0                   # Planet center z [default: 5.0]
+Planet_radius   = 0.5                   # Planet radius [default: 5.0]
 
-nxc =  80                  # nxc = number of cells - x direction        
-nyc =  80                  # nyc = number of cells - y direction
-nzc =  80                   # nzc = number of cells - z direction        
+nxc = 80                                # Global x cells [default: 64]
+nyc = 80                                # Global y cells [default: 64]
+nzc = 80                                # Global z cells [default: 64]
 
-# %%%%%%%%%%%%%% MPI TOPOLOGY %%%%%%%%%%%%%%
-# number of MPI subdomains in each direction
-XLEN = 1
-YLEN = 2
-ZLEN = 2
-# topology (1=true, 0=false): USE PERIODIC IN ALL DIRECTIONS
-PERIODICX = 0
-PERIODICY = 0
-PERIODICZ = 0
+# XLEN*YLEN*ZLEN must equal the MPI process count.
+XLEN = 1                                # MPI subdomains in x [default: 1]
+YLEN = 2                                # MPI subdomains in y [default: 1]
+ZLEN = 2                                # MPI subdomains in z [default: 1]
 
-# %%%%%%%%%%%%%% PARTICLES %%%%%%%%%%%%%%%%%
-#    ns = total number of species (solar wind + planetary)
-#    0 = SW electrons
-#    1 = SW protons
-#    2 = planetary electrons
-#    3 = planetary ions
-#    4 = planetary electrons (2nd neutral species)
-#    5 = planetary ions      (2nd neutral species)
-ns = 6
+# Periodicity; omitted particle flags inherit these values. 1=periodic, 0=nonperiodic.
+PERIODICX   = 0                         # [default: true]
+PERIODICY   = 0                         # [default: true]
+PERIODICZ   = 0                         # [default: true]
 
-# Solar wind / planetary species split
-ns_solar_wind = 2              # number of solar wind species (first ns_solar_wind in arrays)
-ns_planetary  = 4              # number of planetary species  (remaining ns - ns_solar_wind)
+# %%%%%%%%%%%%%%%%%%%% PARTICLES %%%%%%%%%%%%%%%%%%%%
+# Species: SW e-, SW i+, planetary e1-, i1+, e2-, i2+.
+ns            = 6                       # Total species count [required]
+ns_solar_wind = 2                       # Solar-wind species [default: ns]
+ns_planetary  = 4                       # Planetary species, must equal ns-ns_solar_wind [default: 0]
 
-# Initial density (for SW species; planetary species set to 0 since they are injected)
-rhoINIT =  1.0  1.0  0.0  0.0  0.0  0.0
-# Injection density (for SW boundary injection)
-rhoINJECT =  1.0  1.0  0.0  0.0  0.0  0.0
+# Initial density (planetary species set to 0)
+rhoINIT   = 1.0  1.0  0.0  0.0  0.0  0.0   # Initial densities [required]
+rhoINJECT = 1.0  1.0  0.0  0.0  0.0  0.0   # Boundary injection densities [required]
 
-# npcelx = number of particles per cell - Direction X 
-npcelx =  4  4  0  0  0  0
-# npcely = number of particles per cell - Direction Y 
-npcely =  4  4  0  0  0  0
-# npcelz = number of particles per cell - Direction Z 
-npcelz =  4  4  0  0  0  0
+npcelx = 4  4  0  0  0  0              # Particles per cell in x [required]
+npcely = 4  4  0  0  0  0              # Particles per cell in y [required]
+npcelz = 4  4  0  0  0  0              # Particles per cell in z [required]
 
 # qom = charge to mass ratio for different species
 #        SW_e    SW_i    PL_e1   PL_i1   PL_e2   PL_i2
-qom =  -25.0    1.0    -25.0    1.0    -25.0    1.0
+qom =  -25.0    1.0    -25.0    1.0    -25.0    1.0  # [required]
 
-# uth = thermal velocity for different species - Direction X
-uth  = 0.045  0.0063  0.045  0.0005  0.045  0.0005
-# vth = thermal velocity for different species - Direction Y
-vth  = 0.045  0.0063  0.045  0.0005  0.045  0.0005
-# wth = thermal velocity for different species - Direction Z
-wth  = 0.045  0.0063  0.045  0.0005  0.045  0.0005
+# Thermal velocity
+uth = 0.045  0.0063  0.045  0.0005  0.045  0.0005  # x thermal speeds [required]
+vth = 0.045  0.0063  0.045  0.0005  0.045  0.0005  # y thermal speeds [required]
+wth = 0.045  0.0063  0.045  0.0005  0.045  0.0005  # z thermal speeds [required]
 
-# u0 = drift velocity   - Direction X
-u0 = 0.02  0.02  0.0  0.0  0.0  0.0
-# v0 = drift velocity   - Direction Y
-v0 = 0.0   0.0   0.0  0.0  0.0  0.0
-# w0 = drift velocity   - Direction Z
-w0 = 0.0   0.0   0.0  0.0  0.0  0.0
+# Drift velocity
+u0 = 0.02  0.02  0.0  0.0  0.0  0.0    # x drift speeds [required]
+v0 = 0.0   0.0   0.0  0.0  0.0  0.0    # y drift speeds [required]
+w0 = 0.0   0.0   0.0  0.0  0.0  0.0    # z drift speeds [required]
 
-SortingCycle=1
-
-# %%%%%%%%%%%%%% MACROCELL VELOCITY SPECTRA %%%%%%%%%%%%%%%%%
-# Per-subdomain macrocell tiling for the (v_par, v_perp) 2D velocity
-# spectra in the GPU data-analysis pipeline. Set all three to 0 to
-# disable the feature at run time (compile flag MACROCELL_SPECTRA_ENABLE
-# must also be on).
-#
-# Interior cells per subdomain in this run:
-#   Nx_int = nxc/XLEN = 80/1 = 80
-#   Ny_int = nyc/YLEN = 80/2 = 40
-#   Nz_int = nzc/ZLEN = 80/2 = 40
-# With (Cx,Cy,Cz)=(10,10,10) -> 8 x 4 x 4 = 128 macrocells per subdomain.
-VelocitySpectra = 1             # 1=run the (v_par,v_perp) spectra pipeline, 0=disable (default)
-MacrocellNx = 10
-MacrocellNy = 10
-MacrocellNz = 10
-
-# Per-species on/off mask for the (v_par, v_perp) macrocell spectra.
-# 1 = compute spectra for that species, 0 = skip. Default (omitted) = all off.
-# Order matches the species index used everywhere else (SW e-, SW i+, PL e1-, PL i1+, PL e2-, PL i2+).
-VelocitySpectraSpecies = 1 1 0 0 1
-
-# %%%%%%%%%%%%%% EXOSPHERE IONIZATION %%%%%%%%%%%%%%%%%
-# Photoionization of Chamberlain neutral exosphere
-AddExosphereInjection = 1               # 1=enable exosphere injection, 0=disable (default 0)
-RmaxExosphereInjection = 3.0            # max radial distance for injection in d_i (default 3.0)
-
-# Neutral species parameters (one value per planetary species pair)
-#   Quasi-neutrality: paired electron/ion species share identical parameters
-#   so the same integer particle count is injected per cell for each.
-#                            PL_e1     PL_i1     PL_e2     PL_i2
-NeutralSurfaceDensity =      1e7       1e7       1e7       1e7       # neutral surface density [n_sw units]
-ExosphericScaleHeight =      0.25      0.25      0.25      0.25      # exospheric scale height [d_i units]
-PhotoionizationFrequency =   5e-11     5e-11     0.0       0.0       # photoionization frequency [1/wci]
-MacroParticleWeightRatio =   400.0       400.0       400.0       400.0       # macro-particle weight ratio planet/SW
+TrackParticleID = 0  0  0  0  0  0     # Per-species ID mask [default: all 0]
+SortingCycle     = 1                     # GPU cell-sort interval; 0 disables [default: 0]
 
 
-# &&&&&&&&&&&& boundary conditions &&&&&&&&&&&&&&&
-# PHI Electrostatic Potential     
-# 0,1 = Dirichilet boundary condition ;     
-# 2   = Neumann boundary condition
-#    Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
-    bcPHIfaceXright = 1
-    bcPHIfaceXleft  = 1
-    bcPHIfaceYright = 1
-    bcPHIfaceYleft  = 1
-    bcPHIfaceZright = 1
-    bcPHIfaceZleft  = 1
-    
-#    EM field boundary condition
-#    0 = perfect conductor
-#    1 = magnetic mirror
-#    2 = open (inflow/outflow)
-#    Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
-    bcEMfaceXright = 2
-    bcEMfaceXleft =  2
-    bcEMfaceYright = 2
-    bcEMfaceYleft =  2
-    bcEMfaceZright = 2
-    bcEMfaceZleft =  2
+# %%%%%%%%%%%%%%%%%%%% VELOCITY SPECTRA %%%%%%%%%%%%%%%%%%%%
+# Generates 2D (v_par, v_perp with respect to B field) velocity spectra
+# Spectra are generated per macrocell
+# Requires compile-time MACROCELL_SPECTRA_ENABLE switch = True in /src/include/dataAnalysis/dataAnalysisConfig.cuh
+# Default MACROCELL_SPECTRA_ENABLE = True
+VelocitySpectra = 1                      # Runtime master switch; 0 disables [default: 0]
+MacrocellNx     = 10                     # Macrocell x size in local cells [default: 0]
+MacrocellNy     = 10                     # Macrocell y size in local cells [default: 0]
+MacrocellNz     = 10                     # Macrocell z size in local cells [default: 0]
+VelocitySpectraSpecies = 1 1 0 0 1 0    # Per-species enable mask [default: all 0]
 
-#  %%%%%%%%%%%%%%%%%%% SAL ABSORBING LAYER %%%%%%%%%%%%%%%%%%
-# Smoothly Absorbing Layer at the EM boundaries (reduces reflections)
-    yes_sal = 1                 # 1=enable SAL, 0=disable (default 0)
-    n_layers_sal = 3            # number of absorbing layers at boundaries (default 3)
+# %%%%%%%%%%%%%%%%%%%% EXOSPHERE IONIZATION %%%%%%%%%%%%%%%%%%%%
+AddExosphereInjection            = 1     # 1 enables photoionization injection [default: 0]
+RmaxExosphereInjection           = 3.0   # Outer radius; must exceed Planet_radius [default: 3.0]
+MaxExosphereParticlesPerSpecies  = 0     # Per-rank/cycle cap; 0=no user cap [default: 0]
 
-#    Particles Boundary condition
-#    0 = exit
-#    1 = perfect mirror
-#    2 = reemission (injection) - delete particles in 3 cells layer, resample from maxwellian + reflect particles outside the domain resampling velocity from maxwellian
-#    3 = open boundary - open bcs with an effective particle buffer in ghost cells to avoid over depletion 
-#    Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
-    bcPfaceXright = 3  #outflow
-    bcPfaceXleft =  2
-    bcPfaceYright = 2
-    bcPfaceYleft =  2
-    bcPfaceZright = 2
-    bcPfaceZleft =  2
+# One entry per planetary species; paired electron/ion values should match.
+# Order: planetary e1-, i1+, e2-, i2+.
+NeutralSurfaceDensity    = 1e7    1e7    1e7    1e7   # Surface density [required if ns_planetary > 0]
+ExosphericScaleHeight    = 0.25   0.25   0.25   0.25  # Scale height [required if ns_planetary > 0]
+PhotoionizationFrequency = 5e-11  5e-11  0.0    0.0   # Ionization rate [required if ns_planetary > 0]
+MacroParticleWeightRatio = 400.0  400.0  400.0  400.0 # Weight factor [required if ns_planetary > 0]
 
-# Reflection type for electrons not removed from the planet volume
-# 0 - hard collision -> normal reflection (default 0)
-# 1 - isotropic scattering
-planetReflectionType = 1
+# %%%%%%%%%%%%%%%%%%%% BOUNDARY CONDITIONS %%%%%%%%%%%%%%%%%%%%
+# Phi BC: 0/1=Dirichlet, 2=Neumann; periodicity overrides face values.
+bcPHIfaceXright = 1                     # [default: 1]
+bcPHIfaceXleft  = 1                     # [default: 1]
+bcPHIfaceYright = 1                     # [default: 1]
+bcPHIfaceYleft  = 1                     # [default: 1]
+bcPHIfaceZright = 1                     # [default: 1]
+bcPHIfaceZleft  = 1                     # [default: 1]
 
-#  print to video results 
-    verbose = 1
-# velocity of the injection from the wall
-    Vinj= 0.02
+# EM BC: 0=conductor, 1=magnetic mirror, 2=open/inflow.
+bcEMfaceXright = 2                      # [required]
+bcEMfaceXleft  = 2                      # [required]
+bcEMfaceYright = 2                      # [required]
+bcEMfaceYleft  = 2                      # [required]
+bcEMfaceZright = 2                      # [required]
+bcEMfaceZleft  = 2                      # [required]
 
-# CG solver stopping criterium tolerance
-    CGtol = 1E-3
-# GMRES solver stopping criterium tolerance
-    GMREStol = 1E-5
-# mover predictor corrector iteration
-    NiterMover = 8
-# Output for field
-   FieldOutputCycle = 100
-   FieldOutputTag   = B+E+rho
-   #MomentsOutputTag = rho+PXX+PXY+PXZ+PYY+PYZ+PZZ
-   MomentsOutputTag = rho
-# Output for particles if 0 it doesnt save particles data
-   ParticlesOutputCycle = 0
-   ParticlesOutputTag = position+velocity+q 
-# restart cycle
-   RestartOutputCycle = 0
-   CallFinalize=1
+yes_sal      = 1                        # Enable absorbing layers [default: 0]
+n_layers_sal = 3                        # Layer thickness in cells [default: 3]
+
+# Particle BC: 0=exit, 1=mirror, 2=reemit, 3=open outflow, 4=open inflow.
+bcPfaceXright = 3                       # [default: 1]
+bcPfaceXleft  = 2                       # [default: 1]
+bcPfaceYright = 2                       # [default: 1]
+bcPfaceYleft  = 2                       # [default: 1]
+bcPfaceZright = 2                       # [default: 1]
+bcPfaceZleft  = 2                       # [default: 1]
+
+ApplyInflowBcsEImage = 1                # Include inflow E terms [default: 1]
+planetReflectionType = 1                # 0=specular, 1=diffuse [default: 0]
+
+# %%%%%%%%%%%%%%%%%%%% NUMERICAL SOLVERS %%%%%%%%%%%%%%%%%%%%
+CGtol      = 1E-3                       # CG tolerance; current call disabled [default: 1e-3]
+GMREStol   = 1E-5                       # Maxwell GMRES/FGMRES tolerance [default: 1e-3]
+NiterMover = 5                          # Predictor-corrector iterations [default: 3]
+
+# GPU Maxwell solver:
+SolverType        = GMRES                # [default: GMRES]
+
+# GPU Chebyshev preconditioner for
+# Poisson problems div(E)/div(B) cleaning.
+PoissonChebMaxIter       = 10             # Preconditioner iterations [default: 10]
+PoissonChebRescaleEigMin = 1.0            # Lower-bound multiplier [default: 1.0]
+PoissonChebRescaleEigMax = 1.0            # Upper-bound multiplier [default: 1.0]
+
+# %%%%%%%%%%%%%%%%%%%% OUTPUT AND RESTART %%%%%%%%%%%%%%%%%%%%
+FieldOutputCycle       = 100              # Field/moment interval; <=0 disables [default: 100]
+FieldOutputTag         = B+E+rho          # B/E and total rho, joined with + [default: empty]
+MomentsOutputTag       = rho              # Species moments joined with + [default: empty]
+ParticlesOutputCycle   = 0                # Particle interval; <=0 disables [default: 0]
+ParticlesOutputTag     = position+velocity+q  # Particle fields [default: empty]
+DiagnosticsOutputCycle = 100              # Scalar interval [default: FieldOutputCycle]
+RestartOutputCycle     = 0                # Checkpoint interval; <=0 disables [default: 5000]
+CallFinalize           = 1                # Final checkpoint if restart output enabled [default: true]

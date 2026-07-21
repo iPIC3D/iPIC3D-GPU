@@ -56,8 +56,8 @@ ExosphereIonization::ExosphereIonization(
     for (int i = 0; i < n; i++) speciesInjectedCharge[i] = 0.0;
 
     // Validate: max injection radius must exceed planet radius
-    assert(collective->getMaxInjectionRadius() > collective->getL_square()
-           && "RmaxExosphereInjection must be larger than planet radius (L_square)");
+    assert(collective->getMaxInjectionRadius() > collective->getPlanet_radius()
+           && "RmaxExosphereInjection must be larger than Planet_radius");
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -157,7 +157,7 @@ ExosphereIonization::sampleIonizedParticles(int speciesIndex, int maxParticles)
     speciesInjectedCharge[neutralIndex] = 0.0;
 
     // ── Physical parameters from input file ──
-    const double planetRadius       = collective->getL_square();
+    const double planetRadius       = collective->getPlanet_radius();
     const double surfaceDensity     = collective->getNeutralSurfaceDensity(neutralIndex);
     const double ionizationFreq     = collective->getPhotoionizationFrequency(neutralIndex);
     const double exoScaleHeight     = collective->getExosphericScaleHeight(neutralIndex);

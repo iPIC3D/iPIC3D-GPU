@@ -93,7 +93,7 @@ class Collective
     double getx_center_planet()const{ return (x_center_planet); }
     double gety_center_planet()const{ return (y_center_planet); }
     double getz_center_planet()const{ return (z_center_planet); }
-    double getL_square()const{ return (L_square); }
+    double getPlanet_radius()const{ return (Planet_radius); }
 
     // ── Planet reflection model ──
     // 0 = specular (mirror) reflection,  1 = diffuse (isotropic) scattering
@@ -333,8 +333,8 @@ class Collective
     double y_center_planet;
     /*! object center - Z direction */
     double z_center_planet;
-   /*! object size - assuming a cubic box */
-    double L_square;
+    /*! planet radius */
+    double Planet_radius;
 
     /*! planet reflection type: 0=specular, 1=diffuse (isotropic) */
     int planetReflectionType;

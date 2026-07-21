@@ -329,7 +329,20 @@ void Collective::ReadInput(const ConfigFile& config) {
   x_center_planet = config.read < double >("x_center_planet",5.0);
   y_center_planet = config.read < double >("y_center_planet",5.0);
   z_center_planet = config.read < double >("z_center_planet",5.0);
-  L_square = config.read < double >("L_square",5.0);
+  Planet_radius = config.read<double>("Planet_radius", 5.0);
+  if (config.keyExists("L_square")) {
+    const bool hasPlanetRadius = config.keyExists("Planet_radius");
+    if (!hasPlanetRadius)
+      Planet_radius = config.read<double>("L_square");
+
+    if (MPIdata::get_rank() == 0) {
+      cerr << "WARNING: input parameter 'L_square' is deprecated; use "
+           << "'Planet_radius' instead";
+      if (hasPlanetRadius)
+        cerr << ". The 'L_square' value is ignored";
+      cerr << "." << endl;
+    }
+  }
 
   // ── Planet reflection model: 0=specular (default), 1=diffuse (isotropic) ──
   planetReflectionType = config.read<int>("planetReflectionType", 0);
@@ -878,7 +891,7 @@ void Collective::Print() {
     cout << "Solar wind species         : " << numSolarWindSpecies << " (indices 0.." << numSolarWindSpecies-1 << ")" << endl;
     cout << "Planetary species          : " << numPlanetarySpecies << " (indices " << numSolarWindSpecies << ".." << ns-1 << ")" << endl;
     cout << "Max injection radius       : " << maxInjectionRadius << " d_i" << endl;
-    cout << "Planet radius (L_square)   : " << L_square << " d_i" << endl;
+    cout << "Planet radius              : " << Planet_radius << " d_i" << endl;
     for (int i = 0; i < numPlanetarySpecies; i++) {
       int globalIdx = numSolarWindSpecies + i;
       cout << "  Species " << globalIdx << " (neutral " << i << "):" << endl;

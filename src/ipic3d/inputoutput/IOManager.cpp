@@ -53,8 +53,7 @@ IOManager::~IOManager() {
 #ifdef USE_ADIOS2
     delete adiosManager_;
 #endif
-    // Free VTK write buffers (delArr needs the first two dimensions).
-    // Note: the original code never freed these; this fixes that leak.
+    // Free VTK write buffers (delArr needs the first two dimensions)
     if (fieldwritebuffer_ && fieldBufDim0_ > 0) {
         delArr4(fieldwritebuffer_, fieldBufDim0_, localWriteNy_, localWriteNx_);
     }

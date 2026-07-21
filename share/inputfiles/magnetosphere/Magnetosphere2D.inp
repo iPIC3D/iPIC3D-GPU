@@ -59,7 +59,7 @@ Lz =   50.0                  # Lz = simulation box length - z direction
 x_center =   20.0             # center of the dipole - X
 y_center =   0.5             # center of the dipole - Y
 z_center =   25.0            # center of the dipole - Z  
-L_square =   0.8             # radius of the planet
+Planet_radius = 0.8          # radius of the planet
 
 nxc =  512                  # nxc = number of cells - x direction        
 nyc =  1                     # nyc = number of cells - y direction

@@ -382,7 +382,7 @@ public:
       this->output_adaptor.write("/collective/x_center_planet", _col->getx_center_planet());
       this->output_adaptor.write("/collective/y_center_planet", _col->gety_center_planet());
       this->output_adaptor.write("/collective/z_center_planet", _col->getz_center_planet());
-      this->output_adaptor.write("/collective/L_square", _col->getL_square());
+      this->output_adaptor.write("/collective/Planet_radius", _col->getPlanet_radius());
       this->output_adaptor.write("/collective/Bx0", _col->getB0x());
       this->output_adaptor.write("/collective/By0", _col->getB0y());
       this->output_adaptor.write("/collective/Bz0", _col->getB0z());

@@ -39,7 +39,7 @@ Lz =   51.32	  	          # Lz = simulation box length - z direction
 x_center =   1.                  # Lx = simulation box length - x direction in m  
 y_center =   1.                  # Ly = simulation box length - y direction in m
 z_center =   1.                  # Lz = simulation box length - z direction in m  
-L_square =   .1
+Planet_radius =   .1
 
 nxc =  1                     # nxc = number of cells - x direction        
 nyc =  512                   # nyc = number of cells - y direction

@@ -100,7 +100,7 @@ private:
      *
      * @param surfaceDensity  Neutral density at the planet surface (in n_sw units).
      * @param distance        Radial distance from planet center.
-     * @param planetRadius    Planet radius (L_square).
+     * @param planetRadius    Planet radius.
      * @param scaleHeight     Exospheric scale height (exosphericScaleHeight).
      * @return Neutral density at the given distance (in n_sw units).
      */

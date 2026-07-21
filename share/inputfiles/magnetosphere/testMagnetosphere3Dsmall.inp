@@ -56,7 +56,7 @@ z_center_dipole =   5.0       # center of the dipole - Z
 x_center_planet =   6.0       # center of the planet - X
 y_center_planet =   5.0       # center of the planet - Y
 z_center_planet =   5.0       # center of the planet - Z  
-L_square =   0.5             # radius of the planet
+Planet_radius = 0.5          # radius of the planet
 
 nxc =  30                  # nxc = number of cells - x direction        
 nyc =  30                  # nyc = number of cells - y direction

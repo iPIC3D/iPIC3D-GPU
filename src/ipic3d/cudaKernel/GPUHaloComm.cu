@@ -129,34 +129,40 @@ __global__ void gpuBCfaceZright(cudaSolverType* __restrict__ arr,
 // =========================================================================
 
 __global__ void gpuSelfCopyFaceX(cudaSolverType* __restrict__ arr,
-                                  int nx, int ny, int nz)
+                                  int nx, int ny, int nz, int offset)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (j >= ny - 1 || k >= nz - 1) return;
+    const int xLoSrc = 1 + offset;
+    const int xHiSrc = nx - 2 - offset;
     // left ghost = right interior, right ghost = left interior
-    arr[idx3(0,      j, k, ny, nz)] = arr[idx3(nx - 2, j, k, ny, nz)];
-    arr[idx3(nx - 1, j, k, ny, nz)] = arr[idx3(1,      j, k, ny, nz)];
+    arr[idx3(0,      j, k, ny, nz)] = arr[idx3(xHiSrc, j, k, ny, nz)];
+    arr[idx3(nx - 1, j, k, ny, nz)] = arr[idx3(xLoSrc, j, k, ny, nz)];
 }
 
 __global__ void gpuSelfCopyFaceY(cudaSolverType* __restrict__ arr,
-                                  int nx, int ny, int nz)
+                                  int nx, int ny, int nz, int offset)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i >= nx - 1 || k >= nz - 1) return;
-    arr[idx3(i, 0,      k, ny, nz)] = arr[idx3(i, ny - 2, k, ny, nz)];
-    arr[idx3(i, ny - 1, k, ny, nz)] = arr[idx3(i, 1,      k, ny, nz)];
+    const int yLoSrc = 1 + offset;
+    const int yHiSrc = ny - 2 - offset;
+    arr[idx3(i, 0,      k, ny, nz)] = arr[idx3(i, yHiSrc, k, ny, nz)];
+    arr[idx3(i, ny - 1, k, ny, nz)] = arr[idx3(i, yLoSrc, k, ny, nz)];
 }
 
 __global__ void gpuSelfCopyFaceZ(cudaSolverType* __restrict__ arr,
-                                  int nx, int ny, int nz)
+                                  int nx, int ny, int nz, int offset)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i >= nx - 1 || j >= ny - 1) return;
-    arr[idx3(i, j, 0,      ny, nz)] = arr[idx3(i, j, nz - 2, ny, nz)];
-    arr[idx3(i, j, nz - 1, ny, nz)] = arr[idx3(i, j, 1,      ny, nz)];
+    const int zLoSrc = 1 + offset;
+    const int zHiSrc = nz - 2 - offset;
+    arr[idx3(i, j, 0,      ny, nz)] = arr[idx3(i, j, zHiSrc, ny, nz)];
+    arr[idx3(i, j, nz - 1, ny, nz)] = arr[idx3(i, j, zLoSrc, ny, nz)];
 }
 
 // =========================================================================
@@ -164,110 +170,116 @@ __global__ void gpuSelfCopyFaceZ(cudaSolverType* __restrict__ arr,
 // =========================================================================
 
 __global__ void gpuSelfCopyEdgeX(cudaSolverType* __restrict__ arr,
-                                  int nx, int ny, int nz,
+                                  int nx, int ny, int nz, int offset,
                                   bool hasZright, bool hasZleft,
                                   bool hasYright, bool hasYleft)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int xLoSrc = 1 + offset;
+    const int xHiSrc = nx - 2 - offset;
     // Along Y (1..ny-2) for Z-neighbour edges, along Z (1..nz-2) for Y-neighbour edges
     if (hasZright) {
         int iy = tid + 1;
         if (iy < ny - 1) {
-            arr[idx3(0,      iy, nz - 1, ny, nz)] = arr[idx3(nx - 2, iy, nz - 1, ny, nz)];
-            arr[idx3(nx - 1, iy, nz - 1, ny, nz)] = arr[idx3(1,      iy, nz - 1, ny, nz)];
+            arr[idx3(0,      iy, nz - 1, ny, nz)] = arr[idx3(xHiSrc, iy, nz - 1, ny, nz)];
+            arr[idx3(nx - 1, iy, nz - 1, ny, nz)] = arr[idx3(xLoSrc, iy, nz - 1, ny, nz)];
         }
     }
     if (hasZleft) {
         int iy = tid + 1;
         if (iy < ny - 1) {
-            arr[idx3(0,      iy, 0, ny, nz)] = arr[idx3(nx - 2, iy, 0, ny, nz)];
-            arr[idx3(nx - 1, iy, 0, ny, nz)] = arr[idx3(1,      iy, 0, ny, nz)];
+            arr[idx3(0,      iy, 0, ny, nz)] = arr[idx3(xHiSrc, iy, 0, ny, nz)];
+            arr[idx3(nx - 1, iy, 0, ny, nz)] = arr[idx3(xLoSrc, iy, 0, ny, nz)];
         }
     }
     if (hasYright) {
         int iz = tid + 1;
         if (iz < nz - 1) {
-            arr[idx3(0,      ny - 1, iz, ny, nz)] = arr[idx3(nx - 2, ny - 1, iz, ny, nz)];
-            arr[idx3(nx - 1, ny - 1, iz, ny, nz)] = arr[idx3(1,      ny - 1, iz, ny, nz)];
+            arr[idx3(0,      ny - 1, iz, ny, nz)] = arr[idx3(xHiSrc, ny - 1, iz, ny, nz)];
+            arr[idx3(nx - 1, ny - 1, iz, ny, nz)] = arr[idx3(xLoSrc, ny - 1, iz, ny, nz)];
         }
     }
     if (hasYleft) {
         int iz = tid + 1;
         if (iz < nz - 1) {
-            arr[idx3(0,      0, iz, ny, nz)] = arr[idx3(nx - 2, 0, iz, ny, nz)];
-            arr[idx3(nx - 1, 0, iz, ny, nz)] = arr[idx3(1,      0, iz, ny, nz)];
+            arr[idx3(0,      0, iz, ny, nz)] = arr[idx3(xHiSrc, 0, iz, ny, nz)];
+            arr[idx3(nx - 1, 0, iz, ny, nz)] = arr[idx3(xLoSrc, 0, iz, ny, nz)];
         }
     }
 }
 
 __global__ void gpuSelfCopyEdgeY(cudaSolverType* __restrict__ arr,
-                                  int nx, int ny, int nz,
+                                  int nx, int ny, int nz, int offset,
                                   bool hasXright, bool hasXleft,
                                   bool hasZright, bool hasZleft)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int yLoSrc = 1 + offset;
+    const int yHiSrc = ny - 2 - offset;
     if (hasXright) {
         int iz = tid + 1;
         if (iz < nz - 1) {
-            arr[idx3(nx - 1, 0,      iz, ny, nz)] = arr[idx3(nx - 1, ny - 2, iz, ny, nz)];
-            arr[idx3(nx - 1, ny - 1, iz, ny, nz)] = arr[idx3(nx - 1, 1,      iz, ny, nz)];
+            arr[idx3(nx - 1, 0,      iz, ny, nz)] = arr[idx3(nx - 1, yHiSrc, iz, ny, nz)];
+            arr[idx3(nx - 1, ny - 1, iz, ny, nz)] = arr[idx3(nx - 1, yLoSrc, iz, ny, nz)];
         }
     }
     if (hasXleft) {
         int iz = tid + 1;
         if (iz < nz - 1) {
-            arr[idx3(0, 0,      iz, ny, nz)] = arr[idx3(0, ny - 2, iz, ny, nz)];
-            arr[idx3(0, ny - 1, iz, ny, nz)] = arr[idx3(0, 1,      iz, ny, nz)];
+            arr[idx3(0, 0,      iz, ny, nz)] = arr[idx3(0, yHiSrc, iz, ny, nz)];
+            arr[idx3(0, ny - 1, iz, ny, nz)] = arr[idx3(0, yLoSrc, iz, ny, nz)];
         }
     }
     if (hasZright) {
         int ix = tid + 1;
         if (ix < nx - 1) {
-            arr[idx3(ix, 0,      nz - 1, ny, nz)] = arr[idx3(ix, ny - 2, nz - 1, ny, nz)];
-            arr[idx3(ix, ny - 1, nz - 1, ny, nz)] = arr[idx3(ix, 1,      nz - 1, ny, nz)];
+            arr[idx3(ix, 0,      nz - 1, ny, nz)] = arr[idx3(ix, yHiSrc, nz - 1, ny, nz)];
+            arr[idx3(ix, ny - 1, nz - 1, ny, nz)] = arr[idx3(ix, yLoSrc, nz - 1, ny, nz)];
         }
     }
     if (hasZleft) {
         int ix = tid + 1;
         if (ix < nx - 1) {
-            arr[idx3(ix, 0,      0, ny, nz)] = arr[idx3(ix, ny - 2, 0, ny, nz)];
-            arr[idx3(ix, ny - 1, 0, ny, nz)] = arr[idx3(ix, 1,      0, ny, nz)];
+            arr[idx3(ix, 0,      0, ny, nz)] = arr[idx3(ix, yHiSrc, 0, ny, nz)];
+            arr[idx3(ix, ny - 1, 0, ny, nz)] = arr[idx3(ix, yLoSrc, 0, ny, nz)];
         }
     }
 }
 
 __global__ void gpuSelfCopyEdgeZ(cudaSolverType* __restrict__ arr,
-                                  int nx, int ny, int nz,
+                                  int nx, int ny, int nz, int offset,
                                   bool hasYright, bool hasYleft,
                                   bool hasXright, bool hasXleft)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int zLoSrc = 1 + offset;
+    const int zHiSrc = nz - 2 - offset;
     if (hasYright) {
         int ix = tid + 1;
         if (ix < nx - 1) {
-            arr[idx3(ix, ny - 1, 0,      ny, nz)] = arr[idx3(ix, ny - 1, nz - 2, ny, nz)];
-            arr[idx3(ix, ny - 1, nz - 1, ny, nz)] = arr[idx3(ix, ny - 1, 1,      ny, nz)];
+            arr[idx3(ix, ny - 1, 0,      ny, nz)] = arr[idx3(ix, ny - 1, zHiSrc, ny, nz)];
+            arr[idx3(ix, ny - 1, nz - 1, ny, nz)] = arr[idx3(ix, ny - 1, zLoSrc, ny, nz)];
         }
     }
     if (hasYleft) {
         int ix = tid + 1;
         if (ix < nx - 1) {
-            arr[idx3(ix, 0, 0,      ny, nz)] = arr[idx3(ix, 0, nz - 2, ny, nz)];
-            arr[idx3(ix, 0, nz - 1, ny, nz)] = arr[idx3(ix, 0, 1,      ny, nz)];
+            arr[idx3(ix, 0, 0,      ny, nz)] = arr[idx3(ix, 0, zHiSrc, ny, nz)];
+            arr[idx3(ix, 0, nz - 1, ny, nz)] = arr[idx3(ix, 0, zLoSrc, ny, nz)];
         }
     }
     if (hasXright) {
         int iy = tid + 1;
         if (iy < ny - 1) {
-            arr[idx3(nx - 1, iy, 0,      ny, nz)] = arr[idx3(nx - 1, iy, nz - 2, ny, nz)];
-            arr[idx3(nx - 1, iy, nz - 1, ny, nz)] = arr[idx3(nx - 1, iy, 1,      ny, nz)];
+            arr[idx3(nx - 1, iy, 0,      ny, nz)] = arr[idx3(nx - 1, iy, zHiSrc, ny, nz)];
+            arr[idx3(nx - 1, iy, nz - 1, ny, nz)] = arr[idx3(nx - 1, iy, zLoSrc, ny, nz)];
         }
     }
     if (hasXleft) {
         int iy = tid + 1;
         if (iy < ny - 1) {
-            arr[idx3(0, iy, 0,      ny, nz)] = arr[idx3(0, iy, nz - 2, ny, nz)];
-            arr[idx3(0, iy, nz - 1, ny, nz)] = arr[idx3(0, iy, 1,      ny, nz)];
+            arr[idx3(0, iy, 0,      ny, nz)] = arr[idx3(0, iy, zHiSrc, ny, nz)];
+            arr[idx3(0, iy, nz - 1, ny, nz)] = arr[idx3(0, iy, zLoSrc, ny, nz)];
         }
     }
 }
@@ -277,75 +289,81 @@ __global__ void gpuSelfCopyEdgeZ(cudaSolverType* __restrict__ arr,
 // =========================================================================
 
 __global__ void gpuSelfCopyCornerX(cudaSolverType* __restrict__ arr,
-                                    int nx, int ny, int nz,
+                                    int nx, int ny, int nz, int offset,
                                     bool hasYleft, bool hasYright,
                                     bool hasZleft, bool hasZright)
 {
     // Single-thread kernel (only 4 elements at most)
     if (threadIdx.x != 0) return;
+    const int xLoSrc = 1 + offset;
+    const int xHiSrc = nx - 2 - offset;
     if (hasYleft && hasZleft) {
-        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(nx - 2, 0, 0, ny, nz)];
-        arr[idx3(nx - 1, 0, 0, ny, nz)]  = arr[idx3(1, 0, 0, ny, nz)];
+        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(xHiSrc, 0, 0, ny, nz)];
+        arr[idx3(nx - 1, 0, 0, ny, nz)]  = arr[idx3(xLoSrc, 0, 0, ny, nz)];
     }
     if (hasYleft && hasZright) {
-        arr[idx3(0, 0, nz - 1, ny, nz)]       = arr[idx3(nx - 2, 0, nz - 1, ny, nz)];
-        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]  = arr[idx3(1, 0, nz - 1, ny, nz)];
+        arr[idx3(0, 0, nz - 1, ny, nz)]       = arr[idx3(xHiSrc, 0, nz - 1, ny, nz)];
+        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]  = arr[idx3(xLoSrc, 0, nz - 1, ny, nz)];
     }
     if (hasYright && hasZleft) {
-        arr[idx3(0, ny - 1, 0, ny, nz)]       = arr[idx3(nx - 2, ny - 1, 0, ny, nz)];
-        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]  = arr[idx3(1, ny - 1, 0, ny, nz)];
+        arr[idx3(0, ny - 1, 0, ny, nz)]       = arr[idx3(xHiSrc, ny - 1, 0, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]  = arr[idx3(xLoSrc, ny - 1, 0, ny, nz)];
     }
     if (hasYright && hasZright) {
-        arr[idx3(0, ny - 1, nz - 1, ny, nz)]       = arr[idx3(nx - 2, ny - 1, nz - 1, ny, nz)];
-        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(1, ny - 1, nz - 1, ny, nz)];
+        arr[idx3(0, ny - 1, nz - 1, ny, nz)]       = arr[idx3(xHiSrc, ny - 1, nz - 1, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(xLoSrc, ny - 1, nz - 1, ny, nz)];
     }
 }
 
 __global__ void gpuSelfCopyCornerY(cudaSolverType* __restrict__ arr,
-                                    int nx, int ny, int nz,
+                                    int nx, int ny, int nz, int offset,
                                     bool hasXleft, bool hasXright,
                                     bool hasZleft, bool hasZright)
 {
     if (threadIdx.x != 0) return;
+    const int yLoSrc = 1 + offset;
+    const int yHiSrc = ny - 2 - offset;
     if (hasXleft && hasZleft) {
-        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(0, ny - 2, 0, ny, nz)];
-        arr[idx3(0, ny - 1, 0, ny, nz)]  = arr[idx3(0, 1, 0, ny, nz)];
+        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(0, yHiSrc, 0, ny, nz)];
+        arr[idx3(0, ny - 1, 0, ny, nz)]  = arr[idx3(0, yLoSrc, 0, ny, nz)];
     }
     if (hasXleft && hasZright) {
-        arr[idx3(0, 0, nz - 1, ny, nz)]       = arr[idx3(0, ny - 2, nz - 1, ny, nz)];
-        arr[idx3(0, ny - 1, nz - 1, ny, nz)]  = arr[idx3(0, 1, nz - 1, ny, nz)];
+        arr[idx3(0, 0, nz - 1, ny, nz)]       = arr[idx3(0, yHiSrc, nz - 1, ny, nz)];
+        arr[idx3(0, ny - 1, nz - 1, ny, nz)]  = arr[idx3(0, yLoSrc, nz - 1, ny, nz)];
     }
     if (hasXright && hasZleft) {
-        arr[idx3(nx - 1, 0, 0, ny, nz)]       = arr[idx3(nx - 1, ny - 2, 0, ny, nz)];
-        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]  = arr[idx3(nx - 1, 1, 0, ny, nz)];
+        arr[idx3(nx - 1, 0, 0, ny, nz)]       = arr[idx3(nx - 1, yHiSrc, 0, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]  = arr[idx3(nx - 1, yLoSrc, 0, ny, nz)];
     }
     if (hasXright && hasZright) {
-        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]       = arr[idx3(nx - 1, ny - 2, nz - 1, ny, nz)];
-        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(nx - 1, 1, nz - 1, ny, nz)];
+        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]       = arr[idx3(nx - 1, yHiSrc, nz - 1, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(nx - 1, yLoSrc, nz - 1, ny, nz)];
     }
 }
 
 __global__ void gpuSelfCopyCornerZ(cudaSolverType* __restrict__ arr,
-                                    int nx, int ny, int nz,
+                                    int nx, int ny, int nz, int offset,
                                     bool hasYleft, bool hasYright,
                                     bool hasXleft, bool hasXright)
 {
     if (threadIdx.x != 0) return;
+    const int zLoSrc = 1 + offset;
+    const int zHiSrc = nz - 2 - offset;
     if (hasYleft && hasXleft) {
-        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(0, 0, nz - 2, ny, nz)];
-        arr[idx3(0, 0, nz - 1, ny, nz)]  = arr[idx3(0, 0, 1, ny, nz)];
+        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(0, 0, zHiSrc, ny, nz)];
+        arr[idx3(0, 0, nz - 1, ny, nz)]  = arr[idx3(0, 0, zLoSrc, ny, nz)];
     }
     if (hasYleft && hasXright) {
-        arr[idx3(nx - 1, 0, 0, ny, nz)]       = arr[idx3(nx - 1, 0, nz - 2, ny, nz)];
-        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]  = arr[idx3(nx - 1, 0, 1, ny, nz)];
+        arr[idx3(nx - 1, 0, 0, ny, nz)]       = arr[idx3(nx - 1, 0, zHiSrc, ny, nz)];
+        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]  = arr[idx3(nx - 1, 0, zLoSrc, ny, nz)];
     }
     if (hasYright && hasXleft) {
-        arr[idx3(0, ny - 1, 0, ny, nz)]       = arr[idx3(0, ny - 1, nz - 2, ny, nz)];
-        arr[idx3(0, ny - 1, nz - 1, ny, nz)]  = arr[idx3(0, ny - 1, 1, ny, nz)];
+        arr[idx3(0, ny - 1, 0, ny, nz)]       = arr[idx3(0, ny - 1, zHiSrc, ny, nz)];
+        arr[idx3(0, ny - 1, nz - 1, ny, nz)]  = arr[idx3(0, ny - 1, zLoSrc, ny, nz)];
     }
     if (hasYright && hasXright) {
-        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]       = arr[idx3(nx - 1, ny - 1, nz - 2, ny, nz)];
-        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(nx - 1, ny - 1, 1, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]       = arr[idx3(nx - 1, ny - 1, zHiSrc, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(nx - 1, ny - 1, zLoSrc, ny, nz)];
     }
 }
 
@@ -354,36 +372,42 @@ __global__ void gpuSelfCopyCornerZ(cudaSolverType* __restrict__ arr,
 // =========================================================================
 
 __global__ void gpuBatchSelfCopyFaceX(cudaSolverType* const* __restrict__ fields,
-                                       int nx, int ny, int nz)
+                                       int nx, int ny, int nz, int offset)
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (j >= ny - 1 || k >= nz - 1) return;
     cudaSolverType* arr = fields[blockIdx.z];
-    arr[idx3(0,      j, k, ny, nz)] = arr[idx3(nx - 2, j, k, ny, nz)];
-    arr[idx3(nx - 1, j, k, ny, nz)] = arr[idx3(1,      j, k, ny, nz)];
+    const int xLoSrc = 1 + offset;
+    const int xHiSrc = nx - 2 - offset;
+    arr[idx3(0,      j, k, ny, nz)] = arr[idx3(xHiSrc, j, k, ny, nz)];
+    arr[idx3(nx - 1, j, k, ny, nz)] = arr[idx3(xLoSrc, j, k, ny, nz)];
 }
 
 __global__ void gpuBatchSelfCopyFaceY(cudaSolverType* const* __restrict__ fields,
-                                       int nx, int ny, int nz)
+                                       int nx, int ny, int nz, int offset)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i >= nx - 1 || k >= nz - 1) return;
     cudaSolverType* arr = fields[blockIdx.z];
-    arr[idx3(i, 0,      k, ny, nz)] = arr[idx3(i, ny - 2, k, ny, nz)];
-    arr[idx3(i, ny - 1, k, ny, nz)] = arr[idx3(i, 1,      k, ny, nz)];
+    const int yLoSrc = 1 + offset;
+    const int yHiSrc = ny - 2 - offset;
+    arr[idx3(i, 0,      k, ny, nz)] = arr[idx3(i, yHiSrc, k, ny, nz)];
+    arr[idx3(i, ny - 1, k, ny, nz)] = arr[idx3(i, yLoSrc, k, ny, nz)];
 }
 
 __global__ void gpuBatchSelfCopyFaceZ(cudaSolverType* const* __restrict__ fields,
-                                       int nx, int ny, int nz)
+                                       int nx, int ny, int nz, int offset)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i >= nx - 1 || j >= ny - 1) return;
     cudaSolverType* arr = fields[blockIdx.z];
-    arr[idx3(i, j, 0,      ny, nz)] = arr[idx3(i, j, nz - 2, ny, nz)];
-    arr[idx3(i, j, nz - 1, ny, nz)] = arr[idx3(i, j, 1,      ny, nz)];
+    const int zLoSrc = 1 + offset;
+    const int zHiSrc = nz - 2 - offset;
+    arr[idx3(i, j, 0,      ny, nz)] = arr[idx3(i, j, zHiSrc, ny, nz)];
+    arr[idx3(i, j, nz - 1, ny, nz)] = arr[idx3(i, j, zLoSrc, ny, nz)];
 }
 
 // =========================================================================
@@ -392,111 +416,120 @@ __global__ void gpuBatchSelfCopyFaceZ(cudaSolverType* const* __restrict__ fields
 
 __global__ void gpuBatchSelfCopyEdgeX(cudaSolverType* const* __restrict__ fields,
                                        int nx, int ny, int nz,
+                                       int offset,
                                        bool hasZright, bool hasZleft,
                                        bool hasYright, bool hasYleft)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     cudaSolverType* arr = fields[blockIdx.y];
+    const int xLoSrc = 1 + offset;
+    const int xHiSrc = nx - 2 - offset;
     if (hasZright) {
         int iy = tid + 1;
         if (iy < ny - 1) {
-            arr[idx3(0,      iy, nz - 1, ny, nz)] = arr[idx3(nx - 2, iy, nz - 1, ny, nz)];
-            arr[idx3(nx - 1, iy, nz - 1, ny, nz)] = arr[idx3(1,      iy, nz - 1, ny, nz)];
+            arr[idx3(0,      iy, nz - 1, ny, nz)] = arr[idx3(xHiSrc, iy, nz - 1, ny, nz)];
+            arr[idx3(nx - 1, iy, nz - 1, ny, nz)] = arr[idx3(xLoSrc, iy, nz - 1, ny, nz)];
         }
     }
     if (hasZleft) {
         int iy = tid + 1;
         if (iy < ny - 1) {
-            arr[idx3(0,      iy, 0, ny, nz)] = arr[idx3(nx - 2, iy, 0, ny, nz)];
-            arr[idx3(nx - 1, iy, 0, ny, nz)] = arr[idx3(1,      iy, 0, ny, nz)];
+            arr[idx3(0,      iy, 0, ny, nz)] = arr[idx3(xHiSrc, iy, 0, ny, nz)];
+            arr[idx3(nx - 1, iy, 0, ny, nz)] = arr[idx3(xLoSrc, iy, 0, ny, nz)];
         }
     }
     if (hasYright) {
         int iz = tid + 1;
         if (iz < nz - 1) {
-            arr[idx3(0,      ny - 1, iz, ny, nz)] = arr[idx3(nx - 2, ny - 1, iz, ny, nz)];
-            arr[idx3(nx - 1, ny - 1, iz, ny, nz)] = arr[idx3(1,      ny - 1, iz, ny, nz)];
+            arr[idx3(0,      ny - 1, iz, ny, nz)] = arr[idx3(xHiSrc, ny - 1, iz, ny, nz)];
+            arr[idx3(nx - 1, ny - 1, iz, ny, nz)] = arr[idx3(xLoSrc, ny - 1, iz, ny, nz)];
         }
     }
     if (hasYleft) {
         int iz = tid + 1;
         if (iz < nz - 1) {
-            arr[idx3(0,      0, iz, ny, nz)] = arr[idx3(nx - 2, 0, iz, ny, nz)];
-            arr[idx3(nx - 1, 0, iz, ny, nz)] = arr[idx3(1,      0, iz, ny, nz)];
+            arr[idx3(0,      0, iz, ny, nz)] = arr[idx3(xHiSrc, 0, iz, ny, nz)];
+            arr[idx3(nx - 1, 0, iz, ny, nz)] = arr[idx3(xLoSrc, 0, iz, ny, nz)];
         }
     }
 }
 
 __global__ void gpuBatchSelfCopyEdgeY(cudaSolverType* const* __restrict__ fields,
                                        int nx, int ny, int nz,
+                                       int offset,
                                        bool hasXright, bool hasXleft,
                                        bool hasZright, bool hasZleft)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     cudaSolverType* arr = fields[blockIdx.y];
+    const int yLoSrc = 1 + offset;
+    const int yHiSrc = ny - 2 - offset;
     if (hasXright) {
         int iz = tid + 1;
         if (iz < nz - 1) {
-            arr[idx3(nx - 1, 0,      iz, ny, nz)] = arr[idx3(nx - 1, ny - 2, iz, ny, nz)];
-            arr[idx3(nx - 1, ny - 1, iz, ny, nz)] = arr[idx3(nx - 1, 1,      iz, ny, nz)];
+            arr[idx3(nx - 1, 0,      iz, ny, nz)] = arr[idx3(nx - 1, yHiSrc, iz, ny, nz)];
+            arr[idx3(nx - 1, ny - 1, iz, ny, nz)] = arr[idx3(nx - 1, yLoSrc, iz, ny, nz)];
         }
     }
     if (hasXleft) {
         int iz = tid + 1;
         if (iz < nz - 1) {
-            arr[idx3(0, 0,      iz, ny, nz)] = arr[idx3(0, ny - 2, iz, ny, nz)];
-            arr[idx3(0, ny - 1, iz, ny, nz)] = arr[idx3(0, 1,      iz, ny, nz)];
+            arr[idx3(0, 0,      iz, ny, nz)] = arr[idx3(0, yHiSrc, iz, ny, nz)];
+            arr[idx3(0, ny - 1, iz, ny, nz)] = arr[idx3(0, yLoSrc, iz, ny, nz)];
         }
     }
     if (hasZright) {
         int ix = tid + 1;
         if (ix < nx - 1) {
-            arr[idx3(ix, 0,      nz - 1, ny, nz)] = arr[idx3(ix, ny - 2, nz - 1, ny, nz)];
-            arr[idx3(ix, ny - 1, nz - 1, ny, nz)] = arr[idx3(ix, 1,      nz - 1, ny, nz)];
+            arr[idx3(ix, 0,      nz - 1, ny, nz)] = arr[idx3(ix, yHiSrc, nz - 1, ny, nz)];
+            arr[idx3(ix, ny - 1, nz - 1, ny, nz)] = arr[idx3(ix, yLoSrc, nz - 1, ny, nz)];
         }
     }
     if (hasZleft) {
         int ix = tid + 1;
         if (ix < nx - 1) {
-            arr[idx3(ix, 0,      0, ny, nz)] = arr[idx3(ix, ny - 2, 0, ny, nz)];
-            arr[idx3(ix, ny - 1, 0, ny, nz)] = arr[idx3(ix, 1,      0, ny, nz)];
+            arr[idx3(ix, 0,      0, ny, nz)] = arr[idx3(ix, yHiSrc, 0, ny, nz)];
+            arr[idx3(ix, ny - 1, 0, ny, nz)] = arr[idx3(ix, yLoSrc, 0, ny, nz)];
         }
     }
 }
 
 __global__ void gpuBatchSelfCopyEdgeZ(cudaSolverType* const* __restrict__ fields,
                                        int nx, int ny, int nz,
+                                       int offset,
                                        bool hasYright, bool hasYleft,
                                        bool hasXright, bool hasXleft)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     cudaSolverType* arr = fields[blockIdx.y];
+    const int zLoSrc = 1 + offset;
+    const int zHiSrc = nz - 2 - offset;
     if (hasYright) {
         int ix = tid + 1;
         if (ix < nx - 1) {
-            arr[idx3(ix, ny - 1, 0,      ny, nz)] = arr[idx3(ix, ny - 1, nz - 2, ny, nz)];
-            arr[idx3(ix, ny - 1, nz - 1, ny, nz)] = arr[idx3(ix, ny - 1, 1,      ny, nz)];
+            arr[idx3(ix, ny - 1, 0,      ny, nz)] = arr[idx3(ix, ny - 1, zHiSrc, ny, nz)];
+            arr[idx3(ix, ny - 1, nz - 1, ny, nz)] = arr[idx3(ix, ny - 1, zLoSrc, ny, nz)];
         }
     }
     if (hasYleft) {
         int ix = tid + 1;
         if (ix < nx - 1) {
-            arr[idx3(ix, 0, 0,      ny, nz)] = arr[idx3(ix, 0, nz - 2, ny, nz)];
-            arr[idx3(ix, 0, nz - 1, ny, nz)] = arr[idx3(ix, 0, 1,      ny, nz)];
+            arr[idx3(ix, 0, 0,      ny, nz)] = arr[idx3(ix, 0, zHiSrc, ny, nz)];
+            arr[idx3(ix, 0, nz - 1, ny, nz)] = arr[idx3(ix, 0, zLoSrc, ny, nz)];
         }
     }
     if (hasXright) {
         int iy = tid + 1;
         if (iy < ny - 1) {
-            arr[idx3(nx - 1, iy, 0,      ny, nz)] = arr[idx3(nx - 1, iy, nz - 2, ny, nz)];
-            arr[idx3(nx - 1, iy, nz - 1, ny, nz)] = arr[idx3(nx - 1, iy, 1,      ny, nz)];
+            arr[idx3(nx - 1, iy, 0,      ny, nz)] = arr[idx3(nx - 1, iy, zHiSrc, ny, nz)];
+            arr[idx3(nx - 1, iy, nz - 1, ny, nz)] = arr[idx3(nx - 1, iy, zLoSrc, ny, nz)];
         }
     }
     if (hasXleft) {
         int iy = tid + 1;
         if (iy < ny - 1) {
-            arr[idx3(0, iy, 0,      ny, nz)] = arr[idx3(0, iy, nz - 2, ny, nz)];
-            arr[idx3(0, iy, nz - 1, ny, nz)] = arr[idx3(0, iy, 1,      ny, nz)];
+            arr[idx3(0, iy, 0,      ny, nz)] = arr[idx3(0, iy, zHiSrc, ny, nz)];
+            arr[idx3(0, iy, nz - 1, ny, nz)] = arr[idx3(0, iy, zLoSrc, ny, nz)];
         }
     }
 }
@@ -507,76 +540,85 @@ __global__ void gpuBatchSelfCopyEdgeZ(cudaSolverType* const* __restrict__ fields
 
 __global__ void gpuBatchSelfCopyCornerX(cudaSolverType* const* __restrict__ fields,
                                          int nx, int ny, int nz,
+                                         int offset,
                                          bool hasYleft, bool hasYright,
                                          bool hasZleft, bool hasZright)
 {
     cudaSolverType* arr = fields[blockIdx.x];
     if (threadIdx.x != 0) return;
+    const int xLoSrc = 1 + offset;
+    const int xHiSrc = nx - 2 - offset;
     if (hasYleft && hasZleft) {
-        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(nx - 2, 0, 0, ny, nz)];
-        arr[idx3(nx - 1, 0, 0, ny, nz)]  = arr[idx3(1, 0, 0, ny, nz)];
+        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(xHiSrc, 0, 0, ny, nz)];
+        arr[idx3(nx - 1, 0, 0, ny, nz)]  = arr[idx3(xLoSrc, 0, 0, ny, nz)];
     }
     if (hasYleft && hasZright) {
-        arr[idx3(0, 0, nz - 1, ny, nz)]       = arr[idx3(nx - 2, 0, nz - 1, ny, nz)];
-        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]  = arr[idx3(1, 0, nz - 1, ny, nz)];
+        arr[idx3(0, 0, nz - 1, ny, nz)]       = arr[idx3(xHiSrc, 0, nz - 1, ny, nz)];
+        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]  = arr[idx3(xLoSrc, 0, nz - 1, ny, nz)];
     }
     if (hasYright && hasZleft) {
-        arr[idx3(0, ny - 1, 0, ny, nz)]       = arr[idx3(nx - 2, ny - 1, 0, ny, nz)];
-        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]  = arr[idx3(1, ny - 1, 0, ny, nz)];
+        arr[idx3(0, ny - 1, 0, ny, nz)]       = arr[idx3(xHiSrc, ny - 1, 0, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]  = arr[idx3(xLoSrc, ny - 1, 0, ny, nz)];
     }
     if (hasYright && hasZright) {
-        arr[idx3(0, ny - 1, nz - 1, ny, nz)]       = arr[idx3(nx - 2, ny - 1, nz - 1, ny, nz)];
-        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(1, ny - 1, nz - 1, ny, nz)];
+        arr[idx3(0, ny - 1, nz - 1, ny, nz)]       = arr[idx3(xHiSrc, ny - 1, nz - 1, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(xLoSrc, ny - 1, nz - 1, ny, nz)];
     }
 }
 
 __global__ void gpuBatchSelfCopyCornerY(cudaSolverType* const* __restrict__ fields,
                                          int nx, int ny, int nz,
+                                         int offset,
                                          bool hasXleft, bool hasXright,
                                          bool hasZleft, bool hasZright)
 {
     cudaSolverType* arr = fields[blockIdx.x];
     if (threadIdx.x != 0) return;
+    const int yLoSrc = 1 + offset;
+    const int yHiSrc = ny - 2 - offset;
     if (hasXleft && hasZleft) {
-        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(0, ny - 2, 0, ny, nz)];
-        arr[idx3(0, ny - 1, 0, ny, nz)]  = arr[idx3(0, 1, 0, ny, nz)];
+        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(0, yHiSrc, 0, ny, nz)];
+        arr[idx3(0, ny - 1, 0, ny, nz)]  = arr[idx3(0, yLoSrc, 0, ny, nz)];
     }
     if (hasXleft && hasZright) {
-        arr[idx3(0, 0, nz - 1, ny, nz)]       = arr[idx3(0, ny - 2, nz - 1, ny, nz)];
-        arr[idx3(0, ny - 1, nz - 1, ny, nz)]  = arr[idx3(0, 1, nz - 1, ny, nz)];
+        arr[idx3(0, 0, nz - 1, ny, nz)]       = arr[idx3(0, yHiSrc, nz - 1, ny, nz)];
+        arr[idx3(0, ny - 1, nz - 1, ny, nz)]  = arr[idx3(0, yLoSrc, nz - 1, ny, nz)];
     }
     if (hasXright && hasZleft) {
-        arr[idx3(nx - 1, 0, 0, ny, nz)]       = arr[idx3(nx - 1, ny - 2, 0, ny, nz)];
-        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]  = arr[idx3(nx - 1, 1, 0, ny, nz)];
+        arr[idx3(nx - 1, 0, 0, ny, nz)]       = arr[idx3(nx - 1, yHiSrc, 0, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]  = arr[idx3(nx - 1, yLoSrc, 0, ny, nz)];
     }
     if (hasXright && hasZright) {
-        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]       = arr[idx3(nx - 1, ny - 2, nz - 1, ny, nz)];
-        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(nx - 1, 1, nz - 1, ny, nz)];
+        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]       = arr[idx3(nx - 1, yHiSrc, nz - 1, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(nx - 1, yLoSrc, nz - 1, ny, nz)];
     }
 }
 
 __global__ void gpuBatchSelfCopyCornerZ(cudaSolverType* const* __restrict__ fields,
                                          int nx, int ny, int nz,
+                                         int offset,
                                          bool hasYleft, bool hasYright,
                                          bool hasXleft, bool hasXright)
 {
     cudaSolverType* arr = fields[blockIdx.x];
     if (threadIdx.x != 0) return;
+    const int zLoSrc = 1 + offset;
+    const int zHiSrc = nz - 2 - offset;
     if (hasYleft && hasXleft) {
-        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(0, 0, nz - 2, ny, nz)];
-        arr[idx3(0, 0, nz - 1, ny, nz)]  = arr[idx3(0, 0, 1, ny, nz)];
+        arr[idx3(0, 0, 0, ny, nz)]       = arr[idx3(0, 0, zHiSrc, ny, nz)];
+        arr[idx3(0, 0, nz - 1, ny, nz)]  = arr[idx3(0, 0, zLoSrc, ny, nz)];
     }
     if (hasYleft && hasXright) {
-        arr[idx3(nx - 1, 0, 0, ny, nz)]       = arr[idx3(nx - 1, 0, nz - 2, ny, nz)];
-        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]  = arr[idx3(nx - 1, 0, 1, ny, nz)];
+        arr[idx3(nx - 1, 0, 0, ny, nz)]       = arr[idx3(nx - 1, 0, zHiSrc, ny, nz)];
+        arr[idx3(nx - 1, 0, nz - 1, ny, nz)]  = arr[idx3(nx - 1, 0, zLoSrc, ny, nz)];
     }
     if (hasYright && hasXleft) {
-        arr[idx3(0, ny - 1, 0, ny, nz)]       = arr[idx3(0, ny - 1, nz - 2, ny, nz)];
-        arr[idx3(0, ny - 1, nz - 1, ny, nz)]  = arr[idx3(0, ny - 1, 1, ny, nz)];
+        arr[idx3(0, ny - 1, 0, ny, nz)]       = arr[idx3(0, ny - 1, zHiSrc, ny, nz)];
+        arr[idx3(0, ny - 1, nz - 1, ny, nz)]  = arr[idx3(0, ny - 1, zLoSrc, ny, nz)];
     }
     if (hasYright && hasXright) {
-        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]       = arr[idx3(nx - 1, ny - 1, nz - 2, ny, nz)];
-        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(nx - 1, ny - 1, 1, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, 0, ny, nz)]       = arr[idx3(nx - 1, ny - 1, zHiSrc, ny, nz)];
+        arr[idx3(nx - 1, ny - 1, nz - 1, ny, nz)]  = arr[idx3(nx - 1, ny - 1, zLoSrc, ny, nz)];
     }
 }
 

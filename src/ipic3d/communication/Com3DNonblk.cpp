@@ -83,25 +83,32 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector,const VirtualTop
 
     sendcnt = recvcnt;
 
-    int offset = (isCenterFlag ?0:1);
+    // Node copies skip the shared boundary-node plane; center copies do not.
+    const int offset = (isCenterFlag ? 0 : 1);
+    const int xLoSrc = 1 + offset;
+    const int xHiSrc = nx - 2 - offset;
+    const int yLoSrc = 1 + offset;
+    const int yHiSrc = ny - 2 - offset;
+    const int zLoSrc = 1 + offset;
+    const int zHiSrc = nz - 2 - offset;
 
     if(communicationCnt[0] == 1){
-        MPI_Isend(&vector[1+offset][1][1],    1, yzFacetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
+        MPI_Isend(&vector[xLoSrc][1][1], 1, yzFacetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
     }
     if(communicationCnt[1] == 1){
-        MPI_Isend(&vector[nx-2-offset][1][1], 1, yzFacetype, right_neighborX,tag_XR, comm, &reqList[sendcnt++]);
+        MPI_Isend(&vector[xHiSrc][1][1], 1, yzFacetype, right_neighborX,tag_XR, comm, &reqList[sendcnt++]);
     }
     if(communicationCnt[2] == 1){
-        MPI_Isend(&vector[1][1+offset][1],    1, xzFacetype, left_neighborY, tag_YL, comm, &reqList[sendcnt++]);
+        MPI_Isend(&vector[1][yLoSrc][1], 1, xzFacetype, left_neighborY, tag_YL, comm, &reqList[sendcnt++]);
     }
     if(communicationCnt[3] == 1){
-        MPI_Isend(&vector[1][ny-2-offset][1], 1, xzFacetype, right_neighborY,tag_YR, comm, &reqList[sendcnt++]);
+        MPI_Isend(&vector[1][yHiSrc][1], 1, xzFacetype, right_neighborY,tag_YR, comm, &reqList[sendcnt++]);
     }
     if(communicationCnt[4] == 1){
-        MPI_Isend(&vector[1][1][1+offset],    1, xyFacetype, left_neighborZ, tag_ZL, comm, &reqList[sendcnt++]);
+        MPI_Isend(&vector[1][1][zLoSrc], 1, xyFacetype, left_neighborZ, tag_ZL, comm, &reqList[sendcnt++]);
     }
     if(communicationCnt[5] == 1){
-        MPI_Isend(&vector[1][1][nz-2-offset], 1, xyFacetype, right_neighborZ,tag_ZR, comm, &reqList[sendcnt++]);
+        MPI_Isend(&vector[1][1][zHiSrc], 1, xyFacetype, right_neighborZ,tag_ZR, comm, &reqList[sendcnt++]);
     }
     assert_eq(recvcnt,sendcnt-recvcnt);
 
@@ -109,22 +116,22 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector,const VirtualTop
     if (right_neighborX == myrank &&  left_neighborX== myrank){
         for (int iy = 1; iy < ny-1; iy++)
             for (int iz = 1; iz < nz-1; iz++) {
-                vector[0][iy][iz] = vector[nx-2][iy][iz];
-                vector[nx-1][iy][iz] = vector[1][iy][iz];
+                vector[0][iy][iz] = vector[xHiSrc][iy][iz];
+                vector[nx-1][iy][iz] = vector[xLoSrc][iy][iz];
             }
     }
     if (right_neighborY == myrank &&  left_neighborY == myrank){
         for (int ix = 1; ix < nx-1; ix++)
             for (int iz = 1; iz < nz-1; iz++) {
-                vector[ix][0][iz] = vector[ix][ny-2][iz];
-                vector[ix][ny-1][iz] = vector[ix][1][iz];
+                vector[ix][0][iz] = vector[ix][yHiSrc][iz];
+                vector[ix][ny-1][iz] = vector[ix][yLoSrc][iz];
             }
     }
     if (right_neighborZ == myrank &&  left_neighborZ == myrank){
         for (int ix = 1; ix < nx-1; ix++)
             for (int iy = 1; iy < ny-1; iy++) {
-                vector[ix][iy][0]    = vector[ix][iy][nz-2];
-                vector[ix][iy][nz-1] = vector[ix][iy][1];
+                vector[ix][iy][0]    = vector[ix][iy][zHiSrc];
+                vector[ix][iy][nz-1] = vector[ix][iy][zLoSrc];
             }
     }
 
@@ -221,56 +228,56 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector,const VirtualTop
 
 		if(communicationCnt[0] == 1){
 			if(communicationCnt[4] == 1 && communicationCnt[5] == 1){
-				MPI_Isend(&vector[1][1][0],   1,  yEdgetype2,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[xLoSrc][1][0],   1,  yEdgetype2,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[4] == 1){
-				MPI_Isend(&vector[1][1][0],   1,  yEdgetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[xLoSrc][1][0],   1,  yEdgetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[5] == 1){
-				MPI_Isend(&vector[1][1][nz-1],1,  yEdgetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[xLoSrc][1][nz-1],1,  yEdgetype, left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
 			}
 		}
 		if(communicationCnt[1] == 1){
 			if(communicationCnt[4] == 1 && communicationCnt[5] == 1){
-				MPI_Isend(&vector[nx-2][1][0],1,   yEdgetype2,right_neighborX, tag_XR, comm,&reqList[sendcnt++]);
+				MPI_Isend(&vector[xHiSrc][1][0],1,   yEdgetype2,right_neighborX, tag_XR, comm,&reqList[sendcnt++]);
 			}else if(communicationCnt[4] == 1){
-				MPI_Isend(&vector[nx-2][1][0],1,   yEdgetype,right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[xHiSrc][1][0],1,   yEdgetype,right_neighborX, tag_XR, comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[5] == 1){
-				MPI_Isend(&vector[nx-2][1][nz-1],1,yEdgetype,right_neighborX, tag_XR,comm,&reqList[sendcnt++]);
+				MPI_Isend(&vector[xHiSrc][1][nz-1],1,yEdgetype,right_neighborX, tag_XR,comm,&reqList[sendcnt++]);
 			}
 		}
 		if(communicationCnt[2] == 1){
 			if(communicationCnt[0] == 1 && communicationCnt[1] == 1){
-				MPI_Isend(&vector[0][1][1],1,   zEdgetype2, left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[0][yLoSrc][1],1,   zEdgetype2, left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[0] == 1){
-				MPI_Isend(&vector[0][1][1],1,   zEdgetype,  left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[0][yLoSrc][1],1,   zEdgetype,  left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[1] == 1){
-				MPI_Isend(&vector[nx-1][1][1],1,zEdgetype,left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[nx-1][yLoSrc][1],1,zEdgetype,left_neighborY, tag_YL,   comm, &reqList[sendcnt++]);
 			}
 		}
 		if(communicationCnt[3] == 1){
 			if(communicationCnt[0] == 1 && communicationCnt[1] == 1){
-				MPI_Isend(&vector[0][ny-2][1],1,   zEdgetype2, right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[0][yHiSrc][1],1,   zEdgetype2, right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[0] == 1){
-				MPI_Isend(&vector[0][ny-2][1],1,   zEdgetype,  right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[0][yHiSrc][1],1,   zEdgetype,  right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[1] == 1){
-				MPI_Isend(&vector[nx-1][ny-2][1],1,zEdgetype,right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[nx-1][yHiSrc][1],1,zEdgetype,right_neighborY, tag_YR,   comm, &reqList[sendcnt++]);
 			}
 		}
 		if(communicationCnt[4] == 1){
 			if(communicationCnt[2] == 1 && communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][0][1],1, xEdgetype2, left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][0][zLoSrc],1, xEdgetype2, left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[2] == 1){
-				MPI_Isend(&vector[1][0][1],1, xEdgetype,  left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][0][zLoSrc],1, xEdgetype,  left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][ny-1][1],1,xEdgetype,left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][ny-1][zLoSrc],1,xEdgetype,left_neighborZ, tag_ZL,   comm, &reqList[sendcnt++]);
 			}
 		}
 		if(communicationCnt[5] == 1){
 			if(communicationCnt[2] == 1 && communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][0][nz-2],1,    xEdgetype2, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][0][zHiSrc],1,    xEdgetype2, right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[2] == 1){
-				MPI_Isend(&vector[1][0][nz-2],1,    xEdgetype,  right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][0][zHiSrc],1,    xEdgetype,  right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
 			}else if(communicationCnt[3] == 1){
-				MPI_Isend(&vector[1][ny-1][nz-2],1, xEdgetype,  right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[1][ny-1][zHiSrc],1, xEdgetype,  right_neighborZ, tag_ZR, comm, &reqList[sendcnt++]);
 			}
 		}
 
@@ -280,52 +287,52 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector,const VirtualTop
 		if(right_neighborX == myrank &&  left_neighborX== myrank){
            if(right_neighborZ != MPI_PROC_NULL ){
                 for (int iy = 1; iy < ny-1; iy++){
-                    vector[0][iy][nz-1]    = vector[nx-2][iy][nz-1];
-                    vector[nx-1][iy][nz-1] = vector[1][iy][nz-1];
+                    vector[0][iy][nz-1]    = vector[xHiSrc][iy][nz-1];
+                    vector[nx-1][iy][nz-1] = vector[xLoSrc][iy][nz-1];
                 }
            }
            if(left_neighborZ != MPI_PROC_NULL ){
                 for (int iy = 1; iy < ny-1; iy++){
-                    vector[0][iy][0]    = vector[nx-2][iy][0];
-                    vector[nx-1][iy][0] = vector[1][iy][0];
+                    vector[0][iy][0]    = vector[xHiSrc][iy][0];
+                    vector[nx-1][iy][0] = vector[xLoSrc][iy][0];
                 }
            }
            if(right_neighborY != MPI_PROC_NULL ){
                 for (int iz = 1; iz < nz-1; iz++) {
-                    vector[0][ny-1][iz]    = vector[nx-2][ny-1][iz];
-                    vector[nx-1][ny-1][iz] = vector[1][ny-1][iz];
+                    vector[0][ny-1][iz]    = vector[xHiSrc][ny-1][iz];
+                    vector[nx-1][ny-1][iz] = vector[xLoSrc][ny-1][iz];
                 }
            }
            if(left_neighborY != MPI_PROC_NULL ){
                 for (int iz = 1; iz < nz-1; iz++) {
-                    vector[0][0][iz]       = vector[nx-2][0][iz];
-                    vector[nx-1][0][iz]    = vector[1][0][iz];
+                    vector[0][0][iz]       = vector[xHiSrc][0][iz];
+                    vector[nx-1][0][iz]    = vector[xLoSrc][0][iz];
                 }
            }
         }
 		if(right_neighborY == myrank &&  left_neighborY == myrank){
 		   if(right_neighborX != MPI_PROC_NULL ){
                 for (int iz = 1; iz < nz-1; iz++) {
-                    vector[nx-1][0][iz]    = vector[nx-1][ny-2][iz];
-                    vector[nx-1][ny-1][iz] = vector[nx-1][1][iz];
+                    vector[nx-1][0][iz]    = vector[nx-1][yHiSrc][iz];
+                    vector[nx-1][ny-1][iz] = vector[nx-1][yLoSrc][iz];
 			}
 		  }
           if(left_neighborX != MPI_PROC_NULL){
                 for (int iz = 1; iz < nz-1; iz++) {
-                    vector[0][0][iz]       = vector[0][ny-2][iz];
-                    vector[0][ny-1][iz]    = vector[0][1][iz];
+                    vector[0][0][iz]       = vector[0][yHiSrc][iz];
+                    vector[0][ny-1][iz]    = vector[0][yLoSrc][iz];
                 }
 		  }
 		  if(right_neighborZ != MPI_PROC_NULL){
                 for (int ix = 1; ix < nx-1; ix++){
-                    vector[ix][0][nz-1]    = vector[ix][ny-2][nz-1];
-                    vector[ix][ny-1][nz-1] = vector[ix][1][nz-1];
+                    vector[ix][0][nz-1]    = vector[ix][yHiSrc][nz-1];
+                    vector[ix][ny-1][nz-1] = vector[ix][yLoSrc][nz-1];
                 }
 		  }
 		  if(left_neighborZ != MPI_PROC_NULL){
                 for (int ix = 1; ix < nx-1; ix++){
-                    vector[ix][0][0]       = vector[ix][ny-2][0];
-                    vector[ix][ny-1][0]    = vector[ix][1][0];
+                    vector[ix][0][0]       = vector[ix][yHiSrc][0];
+                    vector[ix][ny-1][0]    = vector[ix][yLoSrc][0];
                 }
 		  }
 		}
@@ -333,26 +340,26 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector,const VirtualTop
 		if(right_neighborZ == myrank &&  left_neighborZ == myrank){
             if(right_neighborY != MPI_PROC_NULL ){
                 for (int ix = 1; ix < nx-1; ix++){
-                    vector[ix][ny-1][0]    = vector[ix][ny-1][nz-2];
-                    vector[ix][ny-1][nz-1] = vector[ix][ny-1][1];
+                    vector[ix][ny-1][0]    = vector[ix][ny-1][zHiSrc];
+                    vector[ix][ny-1][nz-1] = vector[ix][ny-1][zLoSrc];
                 }
             }
             if(left_neighborY != MPI_PROC_NULL ){
                 for (int ix = 1; ix < nx-1; ix++){
-                    vector[ix][0][0]    = vector[ix][0][nz-2];
-                    vector[ix][0][nz-1] = vector[ix][0][1];
+                    vector[ix][0][0]    = vector[ix][0][zHiSrc];
+                    vector[ix][0][nz-1] = vector[ix][0][zLoSrc];
                 }
             }
             if(right_neighborX != MPI_PROC_NULL ){
                 for (int iy = 1; iy < ny-1; iy++){
-                    vector[nx-1][iy][0]    = vector[nx-1][iy][nz-2];
-                    vector[nx-1][iy][nz-1] = vector[nx-1][iy][1];
+                    vector[nx-1][iy][0]    = vector[nx-1][iy][zHiSrc];
+                    vector[nx-1][iy][nz-1] = vector[nx-1][iy][zLoSrc];
                 }
             }
             if(left_neighborX != MPI_PROC_NULL ){
                 for (int iy = 1; iy < ny-1; iy++){
-                    vector[0][iy][0]    = vector[0][iy][nz-2];
-                    vector[0][iy][nz-1] = vector[0][iy][1];
+                    vector[0][iy][0]    = vector[0][iy][zHiSrc];
+                    vector[0][iy][nz-1] = vector[0][iy][zLoSrc];
                 }
             }
         }
@@ -396,10 +403,10 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector,const VirtualTop
 			sendcnt=recvcnt;
 
 			if(communicationCnt[0] == 1){
-				MPI_Isend(&vector[1][0][0],   1,cornertype,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[xLoSrc][0][0],   1,cornertype,left_neighborX, tag_XL, comm, &reqList[sendcnt++]);
 			}
 			if(communicationCnt[1] == 1){
-				MPI_Isend(&vector[nx-2][0][0],1,cornertype,right_neighborX, tag_XR,comm, &reqList[sendcnt++]);
+				MPI_Isend(&vector[xHiSrc][0][0],1,cornertype,right_neighborX, tag_XR,comm, &reqList[sendcnt++]);
 			}
 		}
 
@@ -409,59 +416,59 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double ***vector,const VirtualTop
 		//Delay local data copy
 		if (left_neighborX== myrank && right_neighborX == myrank){
 			if( (left_neighborY != MPI_PROC_NULL) && (left_neighborZ != MPI_PROC_NULL)){
-				vector[0][0][0]       = vector[nx-2][0][0];
-				vector[nx-1][0][0]    = vector[1][0][0];
+				vector[0][0][0]       = vector[xHiSrc][0][0];
+				vector[nx-1][0][0]    = vector[xLoSrc][0][0];
 			}
 			if( (left_neighborY != MPI_PROC_NULL) && (right_neighborZ != MPI_PROC_NULL)){
-				vector[0][0][nz-1]    = vector[nx-2][0][nz-1];
-				vector[nx-1][0][nz-1] = vector[1][0][nz-1];
+				vector[0][0][nz-1]    = vector[xHiSrc][0][nz-1];
+				vector[nx-1][0][nz-1] = vector[xLoSrc][0][nz-1];
 			}
 			if( (right_neighborY != MPI_PROC_NULL) && (left_neighborZ != MPI_PROC_NULL)){
-				vector[0][ny-1][0]    = vector[nx-2][ny-1][0];
-				vector[nx-1][ny-1][0] = vector[1][ny-1][0];
+				vector[0][ny-1][0]    = vector[xHiSrc][ny-1][0];
+				vector[nx-1][ny-1][0] = vector[xLoSrc][ny-1][0];
 			}
 			if( (right_neighborY != MPI_PROC_NULL) && (right_neighborZ != MPI_PROC_NULL)){
-				vector[0][ny-1][nz-1]    = vector[nx-2][ny-1][nz-1];
-				vector[nx-1][ny-1][nz-1] = vector[1][ny-1][nz-1];
+				vector[0][ny-1][nz-1]    = vector[xHiSrc][ny-1][nz-1];
+				vector[nx-1][ny-1][nz-1] = vector[xLoSrc][ny-1][nz-1];
 			}
 		}
 		else if (left_neighborY== myrank && right_neighborY == myrank){
 			if( (left_neighborX != MPI_PROC_NULL) && (left_neighborZ != MPI_PROC_NULL)){
-				vector[0][0][0]       = vector[0][ny-2][0];
-				vector[0][ny-1][0]    = vector[0][1][0];
+				vector[0][0][0]       = vector[0][yHiSrc][0];
+				vector[0][ny-1][0]    = vector[0][yLoSrc][0];
 			}
 			if( (left_neighborX != MPI_PROC_NULL) && (right_neighborZ != MPI_PROC_NULL)){
-				vector[0][0][nz-1]    = vector[0][ny-2][nz-1];
-				vector[0][ny-1][nz-1]    = vector[0][1][nz-1];
+				vector[0][0][nz-1]    = vector[0][yHiSrc][nz-1];
+				vector[0][ny-1][nz-1]    = vector[0][yLoSrc][nz-1];
 			}
 			if( (right_neighborX != MPI_PROC_NULL) && (left_neighborZ != MPI_PROC_NULL)){
-				vector[nx-1][0][0]    = vector[nx-1][ny-2][0];
-				vector[nx-1][ny-1][0] = vector[nx-1][1][0];
+				vector[nx-1][0][0]    = vector[nx-1][yHiSrc][0];
+				vector[nx-1][ny-1][0] = vector[nx-1][yLoSrc][0];
 			}
 			if( (right_neighborX != MPI_PROC_NULL) && (right_neighborZ != MPI_PROC_NULL)){
-				vector[nx-1][0][nz-1]    = vector[nx-1][ny-2][nz-1];
-				vector[nx-1][ny-1][nz-1] = vector[nx-1][1][nz-1];
+				vector[nx-1][0][nz-1]    = vector[nx-1][yHiSrc][nz-1];
+				vector[nx-1][ny-1][nz-1] = vector[nx-1][yLoSrc][nz-1];
 			}
 		}
 		else if (left_neighborZ== myrank && right_neighborZ == myrank){
 			if( (left_neighborY != MPI_PROC_NULL) && (left_neighborX != MPI_PROC_NULL)){
-				vector[0][0][0]       = vector[0][0][nz-2];
-				vector[0][0][nz-1]    = vector[0][0][1];
+				vector[0][0][0]       = vector[0][0][zHiSrc];
+				vector[0][0][nz-1]    = vector[0][0][zLoSrc];
 			}
 
 			if( (left_neighborY != MPI_PROC_NULL) && (right_neighborX != MPI_PROC_NULL)){
-				vector[nx-1][0][0]    = vector[nx-1][0][nz-2];
-				vector[nx-1][0][nz-1] = vector[nx-1][0][1];
+				vector[nx-1][0][0]    = vector[nx-1][0][zHiSrc];
+				vector[nx-1][0][nz-1] = vector[nx-1][0][zLoSrc];
 			}
 
 			if( (right_neighborY != MPI_PROC_NULL) && (left_neighborX != MPI_PROC_NULL)){
-				vector[0][ny-1][0]    = vector[0][ny-1][nz-2];
-				vector[0][ny-1][nz-1] = vector[0][ny-1][1];
+				vector[0][ny-1][0]    = vector[0][ny-1][zHiSrc];
+				vector[0][ny-1][nz-1] = vector[0][ny-1][zLoSrc];
 			}
 
 			if( (right_neighborY != MPI_PROC_NULL) && (right_neighborX != MPI_PROC_NULL)){
-				vector[nx-1][ny-1][0]    = vector[nx-1][ny-1][nz-2];
-				vector[nx-1][ny-1][nz-1] = vector[nx-1][ny-1][1];
+				vector[nx-1][ny-1][0]    = vector[nx-1][ny-1][zHiSrc];
+				vector[nx-1][ny-1][nz-1] = vector[nx-1][ny-1][zLoSrc];
 			}
 		}
 

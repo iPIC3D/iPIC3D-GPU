@@ -364,6 +364,7 @@ if(BUILD_TESTING)
   add_subdirectory(src/unitTest/histogram/3D)
   add_subdirectory(src/unitTest/planet)
   add_subdirectory(src/unitTest/gpu_maxwell_solver)
+  add_subdirectory(src/unitTest/halo_communication)
 endif()
 
 add_subdirectory(share/inputfiles)

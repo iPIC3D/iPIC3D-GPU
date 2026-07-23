@@ -67,6 +67,66 @@ include(CTest)
 set(SOURCE_CODE_DIR src/ipic3d)
 set(INCLUDE_CODE_DIR src/include)
 
+# Format all project-owned C, C++, and CUDA sources without traversing build
+# directories. CONFIGURE_DEPENDS makes CMake regenerate the list when source
+# files are added or removed.
+find_program(
+  IPIC3D_CLANG_FORMAT
+  NAMES clang-format clang-format-22
+  DOC "clang-format executable used by the format target"
+  )
+
+set(
+  IPIC3D_FORMAT_SOURCE_DIRS
+  "${CMAKE_SOURCE_DIR}/src"
+  "${CMAKE_SOURCE_DIR}/share"
+  "${CMAKE_SOURCE_DIR}/inSituVisualization"
+  "${CMAKE_SOURCE_DIR}/postprocessing_tools"
+  )
+set(IPIC3D_FORMAT_EXTENSIONS c cc cpp cxx h hh hpp cu cuh)
+set(IPIC3D_FORMAT_PATTERNS)
+foreach(format_dir IN LISTS IPIC3D_FORMAT_SOURCE_DIRS)
+  foreach(format_ext IN LISTS IPIC3D_FORMAT_EXTENSIONS)
+    list(APPEND IPIC3D_FORMAT_PATTERNS "${format_dir}/*.${format_ext}")
+  endforeach()
+endforeach()
+
+file(
+  GLOB_RECURSE
+  IPIC3D_FORMAT_SOURCES
+  CONFIGURE_DEPENDS
+  LIST_DIRECTORIES false
+  RELATIVE "${CMAKE_SOURCE_DIR}"
+  ${IPIC3D_FORMAT_PATTERNS}
+  )
+list(
+  FILTER IPIC3D_FORMAT_SOURCES
+  EXCLUDE
+  REGEX "(^|/)(\\.git|CMakeFiles|build[^/]*|thirdparty)(/|$)"
+  )
+list(SORT IPIC3D_FORMAT_SOURCES)
+list(LENGTH IPIC3D_FORMAT_SOURCES IPIC3D_FORMAT_SOURCE_COUNT)
+
+if(IPIC3D_CLANG_FORMAT)
+  add_custom_target(
+    format
+    COMMAND "${IPIC3D_CLANG_FORMAT}" --style=file -i ${IPIC3D_FORMAT_SOURCES}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Formatting ${IPIC3D_FORMAT_SOURCE_COUNT} C/C++/CUDA source files"
+    VERBATIM
+    COMMAND_EXPAND_LISTS
+    )
+
+else()
+  add_custom_target(
+    format
+    COMMAND "${CMAKE_COMMAND}" -E echo
+            "clang-format was not found; set IPIC3D_CLANG_FORMAT to its executable"
+    COMMAND "${CMAKE_COMMAND}" -E false
+    VERBATIM
+    )
+endif()
+
 
 # Find ParaView
 if(USE_CATALYST)

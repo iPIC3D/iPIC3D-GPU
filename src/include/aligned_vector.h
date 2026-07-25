@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -18,15 +19,17 @@
  * limitations under the License.
  */
 
+#ifndef ALIGNED_VECTOR_H
+#define ALIGNED_VECTOR_H
 
 // this uses std::vector, which
 // must include about 8000 lines
 //
-//#include "aligned_allocator.h"
-//#include <vector> // needed for aligned_vector
-//#define aligned_vector(type) std::vector<type, aligned_allocator<type, 64> >
+// #include "aligned_allocator.h"
+// #include <vector> // needed for aligned_vector
+// #define aligned_vector(type) std::vector<type, aligned_allocator<type, 64> >
 //
-// this approximate implementation of std::vector 
+// this approximate implementation of std::vector
 // includes only about 2800 lines
 //
 #include "Larray.h"
@@ -35,22 +38,26 @@
 #define aligned_vector_registered(type) LarrayRegistered<type>
 
 // canonical workaround for lack of support in C++ for templated typedef
-//template <typename T>
-//struct aligned_vector
+// template <typename T>
+// struct aligned_vector
 //{
 //    typedef Larray<T> type;
 //    //typedef std::vector<type, aligned_allocator<type, 64> > type;
 //};
 //
 //// and yet another layer of indirection to avoid template brackets...
-//class SpeciesParticle;
-//typedef aligned_vector<SpeciesParticle>::type SpeciesParticleVector;
+// class SpeciesParticle;
+// typedef aligned_vector<SpeciesParticle>::type SpeciesParticleVector;
 class SpeciesParticle;
 typedef aligned_vector(SpeciesParticle) vector_SpeciesParticle;
 typedef aligned_vector(double) vector_double;
 
-typedef aligned_vector_registered(SpeciesParticle) vector_SpeciesParticle_registered;
+typedef aligned_vector_registered(SpeciesParticle)
+    vector_SpeciesParticle_registered;
 
 #include "cudaTypeDef.cuh"
 typedef aligned_vector(cudaPclType_ID) vector_cudaPclType_ID;
-typedef aligned_vector_registered(cudaParticleType) vector_cudaParticleType_registered;
+typedef aligned_vector_registered(cudaParticleType)
+    vector_cudaParticleType_registered;
+
+#endif // ALIGNED_VECTOR_H

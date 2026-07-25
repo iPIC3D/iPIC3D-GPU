@@ -17,10 +17,10 @@
 
 #include <mpi.h>
 
+#include "CUDA/GPUFieldArray.cuh"
 #include "Collective.h"
 #include "Com3DNonblk.h"
 #include "ConfigFile.h"
-#include "CUDA/GPUFieldArray.cuh"
 #include "EMfields3D.h"
 #include "Grid3DCU.h"
 #include "MPIdata.h"
@@ -47,17 +47,17 @@ constexpr const char* kOnes12 = "1 1 1 1 1 1 1 1 1 1 1 1";
 
 constexpr std::array<const char*, 8> kZeroSpeciesKeys = {
     "rhoINIT", "rhoINJECT", "uth", "vth", "wth", "u0", "v0", "w0"};
-constexpr std::array<const char*, 3> kUnitParticleKeys = {
-    "npcelx", "npcely", "npcelz"};
+constexpr std::array<const char*, 3> kUnitParticleKeys = {"npcelx", "npcely",
+                                                          "npcelz"};
 constexpr std::array<const char*, 6> kPhiBoundaryKeys = {
-    "bcPHIfaceXright", "bcPHIfaceXleft", "bcPHIfaceYright",
-    "bcPHIfaceYleft", "bcPHIfaceZright", "bcPHIfaceZleft"};
+    "bcPHIfaceXright", "bcPHIfaceXleft",  "bcPHIfaceYright",
+    "bcPHIfaceYleft",  "bcPHIfaceZright", "bcPHIfaceZleft"};
 constexpr std::array<const char*, 6> kEmBoundaryKeys = {
-    "bcEMfaceXright", "bcEMfaceXleft", "bcEMfaceYright",
-    "bcEMfaceYleft", "bcEMfaceZright", "bcEMfaceZleft"};
+    "bcEMfaceXright", "bcEMfaceXleft",  "bcEMfaceYright",
+    "bcEMfaceYleft",  "bcEMfaceZright", "bcEMfaceZleft"};
 constexpr std::array<const char*, 6> kParticleBoundaryKeys = {
-    "bcPfaceXright", "bcPfaceXleft", "bcPfaceYright",
-    "bcPfaceYleft", "bcPfaceZright", "bcPfaceZleft"};
+    "bcPfaceXright", "bcPfaceXleft",  "bcPfaceYright",
+    "bcPfaceYleft",  "bcPfaceZright", "bcPfaceZleft"};
 constexpr std::array<const char*, 4> kDisabledOutputCycleKeys = {
     "FieldOutputCycle", "ParticlesOutputCycle", "RestartOutputCycle",
     "DiagnosticsOutputCycle"};
@@ -93,7 +93,8 @@ constexpr std::array<Scenario, 1> kSelfScenarios = {{
 template <size_t N, typename Value>
 void addConfigValues(ConfigFile& cfg, const std::array<const char*, N>& keys,
                      const Value& value) {
-  for (const char* key : keys) cfg.add(key, value);
+  for (const char* key : keys)
+    cfg.add(key, value);
 }
 
 ConfigFile makeConfig(const Scenario& scenario) {
@@ -157,18 +158,24 @@ ConfigFile makeConfig(const Scenario& scenario) {
 
 const char* caseName(ExchangeCase exchangeCase) {
   switch (exchangeCase) {
-    case ExchangeCase::Conventional: return "conventional";
-    case ExchangeCase::Additive: return "additive";
-    case ExchangeCase::All: return "all";
+  case ExchangeCase::Conventional:
+    return "conventional";
+  case ExchangeCase::Additive:
+    return "additive";
+  case ExchangeCase::All:
+    return "all";
   }
   return "unknown";
 }
 
 const char* backendName(Backend backend) {
   switch (backend) {
-    case Backend::Cpu: return "cpu";
-    case Backend::Gpu: return "gpu";
-    case Backend::Both: return "both";
+  case Backend::Cpu:
+    return "cpu";
+  case Backend::Gpu:
+    return "gpu";
+  case Backend::Both:
+    return "both";
   }
   return "unknown";
 }
@@ -190,22 +197,34 @@ Options parseOptions(int argc, char** argv) {
     if (arg != "--case" && arg != "--suite" && arg != "--backend") {
       throw std::runtime_error("unknown argument '" + arg + "'");
     }
-    if (++i >= argc) throw std::runtime_error("missing value for " + arg);
+    if (++i >= argc)
+      throw std::runtime_error("missing value for " + arg);
     const std::string value = argv[i];
     if (arg == "--case") {
-      if (value == "conventional") options.exchangeCase = ExchangeCase::Conventional;
-      else if (value == "additive") options.exchangeCase = ExchangeCase::Additive;
-      else if (value == "all") options.exchangeCase = ExchangeCase::All;
-      else throw std::runtime_error("unknown --case value '" + value + "'");
+      if (value == "conventional")
+        options.exchangeCase = ExchangeCase::Conventional;
+      else if (value == "additive")
+        options.exchangeCase = ExchangeCase::Additive;
+      else if (value == "all")
+        options.exchangeCase = ExchangeCase::All;
+      else
+        throw std::runtime_error("unknown --case value '" + value + "'");
     } else if (arg == "--suite") {
-      if (value == "distributed") options.suite = Suite::Distributed;
-      else if (value == "self") options.suite = Suite::Self;
-      else throw std::runtime_error("unknown --suite value '" + value + "'");
+      if (value == "distributed")
+        options.suite = Suite::Distributed;
+      else if (value == "self")
+        options.suite = Suite::Self;
+      else
+        throw std::runtime_error("unknown --suite value '" + value + "'");
     } else {
-      if (value == "cpu") options.backend = Backend::Cpu;
-      else if (value == "gpu") options.backend = Backend::Gpu;
-      else if (value == "both") options.backend = Backend::Both;
-      else throw std::runtime_error("unknown --backend value '" + value + "'");
+      if (value == "cpu")
+        options.backend = Backend::Cpu;
+      else if (value == "gpu")
+        options.backend = Backend::Gpu;
+      else if (value == "both")
+        options.backend = Backend::Both;
+      else
+        throw std::runtime_error("unknown --backend value '" + value + "'");
     }
   }
   return options;
@@ -224,30 +243,34 @@ bool runsCase(ExchangeCase selection, ExchangeCase candidate) {
 }
 
 class HostFields {
- public:
+public:
   HostFields(int nx, int ny, int nz)
       : field0_(nx, ny, nz), field1_(nx, ny, nz), field2_(nx, ny, nz) {}
 
   arr3_double& operator[](int field) {
-    if (field == 0) return field0_;
-    if (field == 1) return field1_;
+    if (field == 0)
+      return field0_;
+    if (field == 1)
+      return field1_;
     return field2_;
   }
 
- private:
+private:
   arr3_double field0_;
   arr3_double field1_;
   arr3_double field2_;
 };
 
 class DeviceFields {
- public:
+public:
   DeviceFields(int nx, int ny, int nz)
       : field0_(nx, ny, nz), field1_(nx, ny, nz), field2_(nx, ny, nz) {}
 
   GPUFieldArray3& operator[](int field) {
-    if (field == 0) return field0_;
-    if (field == 1) return field1_;
+    if (field == 0)
+      return field0_;
+    if (field == 1)
+      return field1_;
     return field2_;
   }
 
@@ -255,32 +278,35 @@ class DeviceFields {
     return {field0_.devPtr(), field1_.devPtr(), field2_.devPtr()};
   }
 
- private:
+private:
   GPUFieldArray3 field0_;
   GPUFieldArray3 field1_;
   GPUFieldArray3 field2_;
 };
 
 class StreamGuard {
- public:
-  StreamGuard() { cudaErrChk(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking)); }
+public:
+  StreamGuard() {
+    cudaErrChk(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking));
+  }
   ~StreamGuard() {
-    if (stream_ != nullptr) cudaStreamDestroy(stream_);
+    if (stream_ != nullptr)
+      cudaStreamDestroy(stream_);
   }
   cudaStream_t get() const { return stream_; }
 
- private:
+private:
   cudaStream_t stream_ = nullptr;
 };
 
 class HaloBufferGuard {
- public:
+public:
   explicit HaloBufferGuard(EMfields3D& fields) : fields_(fields) {
     fields_.gpuAllocateHaloBuffers();
   }
   ~HaloBufferGuard() { fields_.gpuFreeHaloBuffers(); }
 
- private:
+private:
   EMfields3D& fields_;
 };
 
@@ -291,15 +317,14 @@ struct Checker {
   const char* backend;
   int failures = 0;
 
-  void exact(double actual, double expected, int field,
-             int i, int j, int k) {
-    if (std::isfinite(actual) && actual == expected) return;
+  void exact(double actual, double expected, int field, int i, int j, int k) {
+    if (std::isfinite(actual) && actual == expected)
+      return;
     ++failures;
     if (failures <= 12) {
       std::cerr << "[rank " << rank << "] " << scenario << " " << exchange
-                << " " << backend << " field " << field << " ("
-                << i << "," << j << "," << k << ") = "
-                << std::setprecision(17) << actual
+                << " " << backend << " field " << field << " (" << i << "," << j
+                << "," << k << ") = " << std::setprecision(17) << actual
                 << ", expected " << expected << "\n";
     }
   }
@@ -323,18 +348,15 @@ int canonicalCoordinate(int coordinate, int globalCells, bool periodic) {
 }
 
 double ghostSentinel(int field, int i, int j, int k) {
-  return -4000000000000.0 - field * 100000000.0
-         - i * 10000.0 - j * 100.0 - k;
+  return -4000000000000.0 - field * 100000000.0 - i * 10000.0 - j * 100.0 - k;
 }
 
 double conventionalValue(int field, int gx, int gy, int gz) {
-  return 1.0 + field * 1000000000.0
-         + gx * 1000000.0 + gy * 1000.0 + gz;
+  return 1.0 + field * 1000000000.0 + gx * 1000000.0 + gy * 1000.0 + gz;
 }
 
 double localContribution(int field, int rank, int i, int j, int k) {
-  return 1.0 + field * 10000000.0 + rank * 100000.0
-         + i * 1000.0 + j * 10.0 + k;
+  return 1.0 + field * 10000000.0 + rank * 100000.0 + i * 1000.0 + j * 10.0 + k;
 }
 
 bool isPhysical(int index, int extent) {
@@ -347,7 +369,8 @@ int rawGlobalCoordinate(int processCoordinate, int localCells, int index) {
 
 bool ghostHasNeighbor(int index, int extent, int processCoordinate,
                       int processCount, bool periodic) {
-  if (index == 0) return periodic || processCoordinate > 0;
+  if (index == 0)
+    return periodic || processCoordinate > 0;
   if (index == extent - 1) {
     return periodic || processCoordinate + 1 < processCount;
   }
@@ -355,30 +378,28 @@ bool ghostHasNeighbor(int index, int extent, int processCoordinate,
 }
 
 void initializeConventional(HostFields& fields, const Scenario& scenario,
-                            const VCtopology3D& vct,
-                            int nx, int ny, int nz) {
+                            const VCtopology3D& vct, int nx, int ny, int nz) {
   for (int field = 0; field < kFieldCount; ++field) {
     for (int i = 0; i < nx; ++i) {
       for (int j = 0; j < ny; ++j) {
         for (int k = 0; k < nz; ++k) {
-          if (!isPhysical(i, nx) || !isPhysical(j, ny)
-              || !isPhysical(k, nz)) {
+          if (!isPhysical(i, nx) || !isPhysical(j, ny) || !isPhysical(k, nz)) {
             fields[field].fetch(i, j, k) = ghostSentinel(field, i, j, k);
             continue;
           }
           const std::array<int, 3> index = {i, j, k};
           std::array<int, 3> global{};
           for (int axis = 0; axis < 3; ++axis) {
-            const int raw = rawGlobalCoordinate(vct.getCoordinates(axis),
-                                                scenario.localCells[axis],
-                                                index[axis]);
+            const int raw =
+                rawGlobalCoordinate(vct.getCoordinates(axis),
+                                    scenario.localCells[axis], index[axis]);
             const int globalCells =
                 scenario.localCells[axis] * scenario.dims[axis];
             global[axis] = canonicalCoordinate(raw, globalCells,
                                                scenario.periodic[axis] != 0);
           }
-          fields[field].fetch(i, j, k) = conventionalValue(
-              field, global[0], global[1], global[2]);
+          fields[field].fetch(i, j, k) =
+              conventionalValue(field, global[0], global[1], global[2]);
         }
       }
     }
@@ -386,27 +407,27 @@ void initializeConventional(HostFields& fields, const Scenario& scenario,
 }
 
 bool conventionalOutputIsDefined(const Scenario& scenario,
-                                 const VCtopology3D& vct,
-                                 int i, int j, int k,
+                                 const VCtopology3D& vct, int i, int j, int k,
                                  int nx, int ny, int nz) {
   const std::array<int, 3> index = {i, j, k};
   const std::array<int, 3> extent = {nx, ny, nz};
   int ghostAxes = 0;
   bool hasMissingNeighbor = false;
   for (int axis = 0; axis < 3; ++axis) {
-    if (isPhysical(index[axis], extent[axis])) continue;
+    if (isPhysical(index[axis], extent[axis]))
+      continue;
     ++ghostAxes;
-    hasMissingNeighbor = hasMissingNeighbor
-        || !ghostHasNeighbor(index[axis], extent[axis],
-                             vct.getCoordinates(axis), scenario.dims[axis],
-                             scenario.periodic[axis] != 0);
+    hasMissingNeighbor =
+        hasMissingNeighbor ||
+        !ghostHasNeighbor(index[axis], extent[axis], vct.getCoordinates(axis),
+                          scenario.dims[axis], scenario.periodic[axis] != 0);
   }
   return ghostAxes != 3 || !hasMissingNeighbor;
 }
 
 double expectedConventional(const Scenario& scenario, const VCtopology3D& vct,
-                            int field, int i, int j, int k,
-                            int nx, int ny, int nz) {
+                            int field, int i, int j, int k, int nx, int ny,
+                            int nz) {
   const std::array<int, 3> index = {i, j, k};
   const std::array<int, 3> extent = {nx, ny, nz};
 
@@ -422,14 +443,13 @@ double expectedConventional(const Scenario& scenario, const VCtopology3D& vct,
     const int raw = rawGlobalCoordinate(vct.getCoordinates(axis),
                                         scenario.localCells[axis], index[axis]);
     const int globalCells = scenario.localCells[axis] * scenario.dims[axis];
-    global[axis] = canonicalCoordinate(raw, globalCells,
-                                       scenario.periodic[axis] != 0);
+    global[axis] =
+        canonicalCoordinate(raw, globalCells, scenario.periodic[axis] != 0);
   }
   return conventionalValue(field, global[0], global[1], global[2]);
 }
 
-void initializeAdditive(HostFields& fields, int rank,
-                        int nx, int ny, int nz) {
+void initializeAdditive(HostFields& fields, int rank, int nx, int ny, int nz) {
   for (int field = 0; field < kFieldCount; ++field) {
     for (int i = 0; i < nx; ++i) {
       for (int j = 0; j < ny; ++j) {
@@ -446,23 +466,25 @@ void initializeAdditive(HostFields& fields, int rank,
 
 size_t globalNodeIndex(const std::array<int, 3>& node,
                        const std::array<int, 3>& nodeCounts) {
-  return (static_cast<size_t>(node[0]) * nodeCounts[1] + node[1])
-         * nodeCounts[2] + node[2];
+  return (static_cast<size_t>(node[0]) * nodeCounts[1] + node[1]) *
+             nodeCounts[2] +
+         node[2];
 }
 
-std::array<std::vector<double>, kFieldCount> buildAdditiveOracle(
-    const Scenario& scenario, const VCtopology3D& vct, int rank,
-    int nx, int ny, int nz) {
+std::array<std::vector<double>, kFieldCount>
+buildAdditiveOracle(const Scenario& scenario, const VCtopology3D& vct, int rank,
+                    int nx, int ny, int nz) {
   std::array<int, 3> globalCells{};
   std::array<int, 3> nodeCounts{};
   for (int axis = 0; axis < 3; ++axis) {
     globalCells[axis] = scenario.localCells[axis] * scenario.dims[axis];
     nodeCounts[axis] = globalCells[axis] + (scenario.periodic[axis] ? 0 : 1);
   }
-  const size_t totalNodes = static_cast<size_t>(nodeCounts[0])
-                            * nodeCounts[1] * nodeCounts[2];
+  const size_t totalNodes =
+      static_cast<size_t>(nodeCounts[0]) * nodeCounts[1] * nodeCounts[2];
   std::array<std::vector<double>, kFieldCount> sums;
-  for (auto& sum : sums) sum.assign(totalNodes, 0.0);
+  for (auto& sum : sums)
+    sum.assign(totalNodes, 0.0);
 
   for (int i = 1; i <= nx - 2; ++i) {
     for (int j = 1; j <= ny - 2; ++j) {
@@ -470,9 +492,8 @@ std::array<std::vector<double>, kFieldCount> buildAdditiveOracle(
         const std::array<int, 3> index = {i, j, k};
         std::array<int, 3> node{};
         for (int axis = 0; axis < 3; ++axis) {
-          const int raw = rawGlobalCoordinate(vct.getCoordinates(axis),
-                                              scenario.localCells[axis],
-                                              index[axis]);
+          const int raw = rawGlobalCoordinate(
+              vct.getCoordinates(axis), scenario.localCells[axis], index[axis]);
           node[axis] = canonicalCoordinate(raw, globalCells[axis],
                                            scenario.periodic[axis] != 0);
         }
@@ -492,21 +513,21 @@ std::array<std::vector<double>, kFieldCount> buildAdditiveOracle(
 }
 
 int checkConventional(HostFields& fields, const Scenario& scenario,
-                      const VCtopology3D& vct, int rank,
-                      const char* backend, int nx, int ny, int nz) {
+                      const VCtopology3D& vct, int rank, const char* backend,
+                      int nx, int ny, int nz) {
   Checker check{rank, scenario.name, "conventional", backend};
   for (int field = 0; field < kFieldCount; ++field) {
     for (int i = 0; i < nx; ++i) {
       for (int j = 0; j < ny; ++j) {
         for (int k = 0; k < nz; ++k) {
-          if (!conventionalOutputIsDefined(scenario, vct, i, j, k,
-                                           nx, ny, nz)) {
+          if (!conventionalOutputIsDefined(scenario, vct, i, j, k, nx, ny,
+                                           nz)) {
             continue;
           }
-          check.exact(fields[field].get(i, j, k),
-                      expectedConventional(scenario, vct, field, i, j, k,
-                                           nx, ny, nz),
-                      field, i, j, k);
+          check.exact(
+              fields[field].get(i, j, k),
+              expectedConventional(scenario, vct, field, i, j, k, nx, ny, nz),
+              field, i, j, k);
         }
       }
     }
@@ -515,8 +536,8 @@ int checkConventional(HostFields& fields, const Scenario& scenario,
 }
 
 int checkAdditive(HostFields& fields, const Scenario& scenario,
-                  const VCtopology3D& vct, int rank,
-                  const char* backend, int nx, int ny, int nz) {
+                  const VCtopology3D& vct, int rank, const char* backend,
+                  int nx, int ny, int nz) {
   Checker check{rank, scenario.name, "additive", backend};
   const auto sums = buildAdditiveOracle(scenario, vct, rank, nx, ny, nz);
 
@@ -533,16 +554,15 @@ int checkAdditive(HostFields& fields, const Scenario& scenario,
         const std::array<int, 3> index = {i, j, k};
         std::array<int, 3> node{};
         for (int axis = 0; axis < 3; ++axis) {
-          const int raw = rawGlobalCoordinate(vct.getCoordinates(axis),
-                                              scenario.localCells[axis],
-                                              index[axis]);
+          const int raw = rawGlobalCoordinate(
+              vct.getCoordinates(axis), scenario.localCells[axis], index[axis]);
           node[axis] = canonicalCoordinate(raw, globalCells[axis],
                                            scenario.periodic[axis] != 0);
         }
         const size_t flat = globalNodeIndex(node, nodeCounts);
         for (int field = 0; field < kFieldCount; ++field) {
-          check.exact(fields[field].get(i, j, k), sums[field][flat],
-                      field, i, j, k);
+          check.exact(fields[field].get(i, j, k), sums[field][flat], field, i,
+                      j, k);
         }
       }
     }
@@ -551,13 +571,14 @@ int checkAdditive(HostFields& fields, const Scenario& scenario,
 }
 
 int runCpu(ExchangeCase exchangeCase, const Scenario& scenario,
-           const VCtopology3D& vct, EMfields3D& emFields,
-           int rank, int nx, int ny, int nz) {
+           const VCtopology3D& vct, EMfields3D& emFields, int rank, int nx,
+           int ny, int nz) {
   HostFields fields(nx, ny, nz);
   if (exchangeCase == ExchangeCase::Conventional) {
     initializeConventional(fields, scenario, vct, nx, ny, nz);
     for (int field = 0; field < kFieldCount; ++field) {
-      communicateNode_P(nx, ny, nz, fields[field].fetch_arr3(), &vct, &emFields);
+      communicateNode_P(nx, ny, nz, fields[field].fetch_arr3(), &vct,
+                        &emFields);
     }
     return checkConventional(fields, scenario, vct, rank, "cpu", nx, ny, nz);
   }
@@ -570,8 +591,8 @@ int runCpu(ExchangeCase exchangeCase, const Scenario& scenario,
 }
 
 int runGpu(ExchangeCase exchangeCase, const Scenario& scenario,
-           const VCtopology3D& vct, EMfields3D& emFields,
-           int rank, int nx, int ny, int nz) {
+           const VCtopology3D& vct, EMfields3D& emFields, int rank, int nx,
+           int ny, int nz) {
   HostFields host(nx, ny, nz);
   if (exchangeCase == ExchangeCase::Conventional) {
     initializeConventional(host, scenario, vct, nx, ny, nz);
@@ -590,10 +611,10 @@ int runGpu(ExchangeCase exchangeCase, const Scenario& scenario,
   }
   auto pointers = device.pointers();
   HaloBufferGuard haloBuffers(emFields);
-  emFields.gpuBatchedHaloExchange(
-      pointers.data(), kFieldCount, nx, ny, nz,
-      exchangeCase == ExchangeCase::Additive, false,
-      exchangeCase == ExchangeCase::Additive, true, stream.get());
+  emFields.gpuBatchedHaloExchange(pointers.data(), kFieldCount, nx, ny, nz,
+                                  exchangeCase == ExchangeCase::Additive, false,
+                                  exchangeCase == ExchangeCase::Additive, true,
+                                  stream.get());
   cudaErrChk(cudaGetLastError());
   cudaErrChk(cudaStreamSynchronize(stream.get()));
 
@@ -627,21 +648,20 @@ int runScenario(ExchangeCase exchangeCase, Backend backend,
     const int nz = grid.getNZN();
 
     int localFailures = 0;
-    if (nx != scenario.localCells[0] + 3
-        || ny != scenario.localCells[1] + 3
-        || nz != scenario.localCells[2] + 3) {
+    if (nx != scenario.localCells[0] + 3 || ny != scenario.localCells[1] + 3 ||
+        nz != scenario.localCells[2] + 3) {
       Checker check{rank, scenario.name, caseName(exchangeCase),
                     backendName(backend)};
       check.fail("unexpected local node-grid dimensions");
       localFailures += check.failures;
     } else {
       if (runsCpu(backend)) {
-        localFailures += runCpu(exchangeCase, scenario, vct, emFields,
-                                rank, nx, ny, nz);
+        localFailures +=
+            runCpu(exchangeCase, scenario, vct, emFields, rank, nx, ny, nz);
       }
       if (runsGpu(backend)) {
-        localFailures += runGpu(exchangeCase, scenario, vct, emFields,
-                                rank, nx, ny, nz);
+        localFailures +=
+            runGpu(exchangeCase, scenario, vct, emFields, rank, nx, ny, nz);
       }
     }
 
@@ -649,8 +669,10 @@ int runScenario(ExchangeCase exchangeCase, Backend backend,
                   MPIdata::get_PicGlobalComm());
   }
 
-  if (fieldComm != MPI_COMM_NULL) MPI_Comm_free(&fieldComm);
-  if (particleComm != MPI_COMM_NULL) MPI_Comm_free(&particleComm);
+  if (fieldComm != MPI_COMM_NULL)
+    MPI_Comm_free(&fieldComm);
+  if (particleComm != MPI_COMM_NULL)
+    MPI_Comm_free(&particleComm);
 
   if (rank == 0) {
     if (globalFailures == 0) {
@@ -668,15 +690,16 @@ int runScenario(ExchangeCase exchangeCase, Backend backend,
 
 bool selectDeviceForRank() {
   MPI_Comm sharedComm = MPI_COMM_NULL;
-  MPI_Comm_split_type(MPIdata::get_PicGlobalComm(), MPI_COMM_TYPE_SHARED,
-                      0, MPI_INFO_NULL, &sharedComm);
+  MPI_Comm_split_type(MPIdata::get_PicGlobalComm(), MPI_COMM_TYPE_SHARED, 0,
+                      MPI_INFO_NULL, &sharedComm);
   int sharedRank = 0;
   MPI_Comm_rank(sharedComm, &sharedRank);
 
   int deviceCount = 0;
   const cudaError_t countError = cudaGetDeviceCount(&deviceCount);
   bool ready = countError == cudaSuccess && deviceCount > 0;
-  if (ready) ready = cudaSetDevice(sharedRank % deviceCount) == cudaSuccess;
+  if (ready)
+    ready = cudaSetDevice(sharedRank % deviceCount) == cudaSuccess;
   MPI_Comm_free(&sharedComm);
   return ready;
 }
@@ -691,14 +714,14 @@ int runScenarios(const std::array<Scenario, N>& scenarios,
                               scenario, rank);
     }
     if (runsCase(options.exchangeCase, ExchangeCase::Additive)) {
-      failures += runScenario(ExchangeCase::Additive, options.backend,
-                              scenario, rank);
+      failures +=
+          runScenario(ExchangeCase::Additive, options.backend, scenario, rank);
     }
   }
   return failures;
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
   MPIdata::init(&argc, &argv);
@@ -709,7 +732,8 @@ int main(int argc, char** argv) {
     const int nprocs = MPIdata::get_nprocs();
     const Options options = parseOptions(argc, argv);
     if (options.help) {
-      if (rank == 0) printUsage();
+      if (rank == 0)
+        printUsage();
       MPIdata::finalize_mpi();
       return EXIT_SUCCESS;
     }
@@ -718,8 +742,8 @@ int main(int argc, char** argv) {
     if (nprocs != requiredRanks) {
       if (rank == 0) {
         std::cerr << "haloCommunicationTest "
-                  << (options.suite == Suite::Distributed
-                          ? "distributed" : "self")
+                  << (options.suite == Suite::Distributed ? "distributed"
+                                                          : "self")
                   << " suite requires " << requiredRanks
                   << " MPI rank(s), but received " << nprocs << ".\n";
       }

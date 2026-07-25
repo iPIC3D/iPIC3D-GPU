@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -18,16 +19,16 @@
  * limitations under the License.
  */
 
-#ifndef OutputWrapperFPP_h
-#define OutputWrapperFPP_h
+#ifndef OUTPUT_WRAPPER_FPP_H
+#define OUTPUT_WRAPPER_FPP_H
 // ===
 // OutputWrapperFPP: output wrapper for file-per-process output
 //
 //   This class should provide a mechanism to avoid having
 //   repeatedly opening and closing the same file.
 // ===
-#include "ipicfwd.h"
 #include "PSKOutput.h"
+#include "ipicfwd.h"
 #ifndef NO_HDF5
 #include "PSKhdf5adaptor.h"
 #endif
@@ -37,35 +38,31 @@ struct RestartParticleCellMetadata;
 
 using namespace PSK;
 
-class OutputWrapperFPP
-{
- private:
-  #ifndef NO_HDF5
-  PSK::OutputManager < PSK::OutputAdaptor > output_mgr; // Create an Output Manager
-  myOutputAgent < PSK::HDF5OutputAdaptor > hdf5_agent;  // Create an Output Agent for HDF5 output
-  #endif // NO_HDF5
+class OutputWrapperFPP {
+private:
+#ifndef NO_HDF5
+  PSK::OutputManager<PSK::OutputAdaptor> output_mgr; // Create an Output Manager
+  myOutputAgent<PSK::HDF5OutputAdaptor>
+      hdf5_agent; // Create an Output Agent for HDF5 output
+#endif            // NO_HDF5
   int cartesian_rank;
   const Collective* col_;
   string SaveDirName;
   string RestartDirName;
   string output_file;
   string restart_file;
- public:
-  void init_output_files(
-    Collective    *col,
-    VCtopology3D  *vct,
-    Grid3DCU      *grid,
-    EMfields3D    *EMf,
-    ParticleSoAHost   **part,
-    int 		  ns,
-    ParticleSoAHost   **testpart,
-    int 		  nstestpart);
+
+public:
+  void init_output_files(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
+                         EMfields3D* EMf, ParticleSoAHost** part, int ns,
+                         ParticleSoAHost** testpart, int nstestpart);
   void append_output(const char* tag, int cycle, int sample);
   void append_field_moment_output(const OutputTagConfig& cfg, int cycle);
-  void setRestartParticleCellMetadata(
-      const RestartParticleCellMetadata* metadata);
-  // `cycle` is the restart label: the loop cycle to execute first after restart.
+  void
+  setRestartParticleCellMetadata(const RestartParticleCellMetadata* metadata);
+  // `cycle` is the restart label: the loop cycle to execute first after
+  // restart.
   void append_restart(int cycle, const string& restartDir);
 };
 
-#endif // OutputWrapperFPP_h
+#endif // OUTPUT_WRAPPER_FPP_H

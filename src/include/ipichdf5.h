@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -18,10 +19,11 @@
  * limitations under the License.
  */
 
-#ifndef ipichdf5_h
-#define ipichdf5_h
+#ifndef IPIC_HDF5_H
+#define IPIC_HDF5_H
 #ifndef NO_HDF5
 #include "hdf5.h"
 #include "hdf5_hl.h"
 #endif
-#endif
+
+#endif // IPIC_HDF5_H

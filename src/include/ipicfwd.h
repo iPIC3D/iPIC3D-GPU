@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -18,8 +19,8 @@
  * limitations under the License.
  */
 
-#ifndef ipicfwd_h
-#define ipicfwd_h
+#ifndef IPIC_FWD_H
+#define IPIC_FWD_H
 // forward declarations for iPic3D
 class Collective;
 typedef Collective CollectiveIO;
@@ -32,4 +33,5 @@ typedef VCtopology3D VirtualTopology3D;
 class ParticleSoAHost;
 class ParticleCommInjection;
 typedef ParticleSoAHost Particles;
-#endif
+
+#endif // IPIC_FWD_H

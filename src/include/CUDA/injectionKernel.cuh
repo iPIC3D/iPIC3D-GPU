@@ -1,10 +1,10 @@
-#ifndef _INJECTIONKERNEL_CUH_
-#define _INJECTIONKERNEL_CUH_
+#ifndef INJECTION_KERNEL_CUH
+#define INJECTION_KERNEL_CUH
 
-#include "cudaTypeDef.cuh"
-#include "particleArrayCUDA.cuh"
-#include "gridCUDA.cuh"
 #include "ParticleIDGenerator.cuh"
+#include "cudaTypeDef.cuh"
+#include "gridCUDA.cuh"
+#include "particleArrayCUDA.cuh"
 
 /**
  * @brief Per-face injection cell range (pre-computed, constant across cycles).
@@ -13,12 +13,12 @@
  * with the same narrowing logic used on the CPU side.
  */
 struct InjectionFaceRange {
-    int ixBeg, ixEnd;
-    int iyBeg, iyEnd;
-    int izBeg, izEnd;
-    int nY, nZ;    // iyEnd-iyBeg+1, izEnd-izBeg+1
-    int nCells;    // (ixEnd-ixBeg+1) * nY * nZ
-    bool active;
+  int ixBeg, ixEnd;
+  int iyBeg, iyEnd;
+  int izBeg, izEnd;
+  int nY, nZ; // iyEnd-iyBeg+1, izEnd-izBeg+1
+  int nCells; // (ixEnd-ixBeg+1) * nY * nZ
+  bool active;
 };
 
 /**
@@ -29,34 +29,34 @@ struct InjectionFaceRange {
  */
 struct injectionParameter {
 
-    // --- Physics ---
-    cudaParticleType thermalVelX, thermalVelY, thermalVelZ;
-    cudaParticleType driftVelX, driftVelY, driftVelZ;
-    cudaParticleType chargePerParticle;
-    cudaParticleType speedOfLightSq;   // c², for velocity rejection test
+  // --- Physics ---
+  cudaParticleType thermalVelX, thermalVelY, thermalVelZ;
+  cudaParticleType driftVelX, driftVelY, driftVelZ;
+  cudaParticleType chargePerParticle;
+  cudaParticleType speedOfLightSq; // c², for velocity rejection test
 
-    // --- Subcell grid spacing ---
-    cudaParticleType dxPerPcl, dyPerPcl, dzPerPcl;
-    int numPclPerCellX, numPclPerCellY, numPclPerCellZ;
-    int numParticlesPerCell;           // = npcelx * npcely * npcelz
+  // --- Subcell grid spacing ---
+  cudaParticleType dxPerPcl, dyPerPcl, dzPerPcl;
+  int numPclPerCellX, numPclPerCellY, numPclPerCellZ;
+  int numParticlesPerCell; // = npcelx * npcely * npcelz
 
-    // --- Domain bounds (for position rejection) ---
-    cudaParticleType domainLengthX, domainLengthY, domainLengthZ;
+  // --- Domain bounds (for position rejection) ---
+  cudaParticleType domainLengthX, domainLengthY, domainLengthZ;
 
-    // --- Grid origin (for computing cell-corner coordinates) ---
-    // cellLowX = gridXstart + (ix - 1) * gridDx
-    cudaParticleType gridXstart, gridYstart, gridZstart;
-    cudaParticleType gridDx, gridDy, gridDz;
+  // --- Grid origin (for computing cell-corner coordinates) ---
+  // cellLowX = gridXstart + (ix - 1) * gridDx
+  cudaParticleType gridXstart, gridYstart, gridZstart;
+  cudaParticleType gridDx, gridDy, gridDz;
 
-    // --- 6 face ranges with cumulative particle offsets ---
-    // Order: Xleft(0), Xright(1), Yleft(2), Yright(3), Zleft(4), Zright(5)
-    InjectionFaceRange faces[6];
-    int pclOffset[6];   // pclOffset[f] = sum of faces[0..f-1].nCells * nppc
-    int totalInjected;  // total particles across all 6 faces
+  // --- 6 face ranges with cumulative particle offsets ---
+  // Order: Xleft(0), Xright(1), Yleft(2), Yright(3), Zleft(4), Zright(5)
+  InjectionFaceRange faces[6];
+  int pclOffset[6];  // pclOffset[f] = sum of faces[0..f-1].nCells * nppc
+  int totalInjected; // total particles across all 6 faces
 
-    ParticleIDGenerator particleIDGenerator;
+  ParticleIDGenerator particleIDGenerator;
 
-    bool enabled;       // master enable flag (false → kernel is a no-op)
+  bool enabled; // master enable flag (false → kernel is a no-op)
 };
 
 // ================================================================
@@ -78,10 +78,9 @@ struct injectionParameter {
  * @param soaWriteOffset First SoA index to write (= stayedParticle[i])
  * @param rngSeed        Per-cycle seed for Philox RNG
  */
-__global__ void injectionKernel(
-    particleArrayCUDA*         pclsArray,
-    const injectionParameter*  params,
-    uint32_t                   soaWriteOffset,
-    unsigned long long         rngSeed);
+__global__ void injectionKernel(particleArrayCUDA* pclsArray,
+                                const injectionParameter* params,
+                                uint32_t soaWriteOffset,
+                                unsigned long long rngSeed);
 
-#endif // _INJECTIONKERNEL_CUH_
+#endif // INJECTION_KERNEL_CUH

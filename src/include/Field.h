@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -24,10 +25,10 @@
 developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
  ********************************************************************************************/
 
-#ifndef Field_H
-#define Field_H
+#ifndef FIELD_H
+#define FIELD_H
 /**
- * 
+ *
  * Abstract class for fields
  * @date Fri Jun 4 2007
  * @author Stefano Markidis, Giovanni Lapenta, Enrico Camporeale, David Burgess
@@ -38,8 +39,8 @@ developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
 // public:
 // /** print field information */
 // virtual void print(void) const = 0;
-// 
-// 
+//
+//
 // /** get Potential array */
 // virtual double ***getPHI() = 0;
 // /** get Electric field X component array */
@@ -71,9 +72,11 @@ developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
 // /** get density on node(indexX,indexY,indexZ) */
 // virtual double &getRHOn(int indexX, int indexY, int indexZ) const = 0;
 // /** SPECIES: get density defined on center of cells*/
-// virtual double &getRHOcs(int indexX, int indexY, int indexZ, int ns) const = 0;
+// virtual double &getRHOcs(int indexX, int indexY, int indexZ, int ns) const =
+// 0;
 // /** SPECIES: get density defined on nodes */
-// virtual double &getRHOns(int indexX, int indexY, int indexZ, int ns) const = 0;
+// virtual double &getRHOns(int indexX, int indexY, int indexZ, int ns) const =
+// 0;
 // /** get current -Direction X */
 // virtual double &getJx(int indexX, int indexY, int indexZ) const = 0;
 // /** get current -Direction Y */
@@ -85,7 +88,7 @@ developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
 // virtual double &getJys(int indexX, int indexY, int indexZ, int is) const = 0;
 // /** get current -Direction Z */
 // virtual double &getJzs(int indexX, int indexY, int indexZ, int is) const = 0;
-// 
+//
 // /** get density array defined on centers cells */
 // virtual double ***getRHOc() = 0;
 // /** get density array defined on nodes*/
@@ -116,34 +119,43 @@ developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
 // virtual double ****getpYZsn() = 0;
 // /** SPECIES: get pressure tensor component ZZ defined on nodes */
 // virtual double ****getpZZsn() = 0;
-// 
-// 
-// 
-// 
-// 
+//
+//
+//
+//
+//
 // // //////////////////////// INTERPOLATION ///////////////////////////////
 // /** set to 0 all the densities fields */
 // virtual void setZeroDensities() = 0;
 // /** add an amount of charge density to charge density field at node X,Y,Z */
 // virtual void addRho(double weight[][2][2], int X, int Y, int Z, int ns) = 0;
-// /** add an amount of current density - direction X to current density field at node X,Y,Z */
-// virtual void addJx(double weight[][2][2], int X, int Y, int Z, int ns) = 0;
-// /** add an amount of current density - direction Y to current density field at node X,Y,Z */
-// virtual void addJy(double weight[][2][2], int X, int Y, int Z, int ns) = 0;
-// /** add an amount of current density - direction Z to current density field at node X,Y,Z */
-// virtual void addJz(double weight[][2][2], int X, int Y, int Z, int ns) = 0;
-// /** add an amount of pressure density - direction XX to current density field at node X,Y,Z */
-// virtual void addPxx(double weight[][2][2], int X, int Y, int Z, int ns) = 0;
-// /** add an amount of pressure density - direction XY to current density field at node X,Y,Z */
-// virtual void addPxy(double weight[][2][2], int X, int Y, int Z, int ns) = 0;
-// /** add an amount of pressure density - direction XZ to current density field at node X,Y,Z */
-// virtual void addPxz(double weight[][2][2], int X, int Y, int Z, int ns) = 0;
-// /** add an amount of pressure density - direction YY to current density field at node X,Y,Z */
-// virtual void addPyy(double weight[][2][2], int X, int Y, int Z, int ns) = 0;
-// /** add an amount of pressure density - direction YZ to current density field at node X,Y,Z */
-// virtual void addPyz(double weight[][2][2], int X, int Y, int Z, int ns) = 0;
-// /** add an amount of pressure density - direction ZZ to current density field at node X,Y,Z */
-// virtual void addPzz(double weight[][2][2], int X, int Y, int Z, int ns) = 0;
+// /** add an amount of current density - direction X to current density field
+// at node X,Y,Z */ virtual void addJx(double weight[][2][2], int X, int Y, int
+// Z, int ns) = 0;
+// /** add an amount of current density - direction Y to current density field
+// at node X,Y,Z */ virtual void addJy(double weight[][2][2], int X, int Y, int
+// Z, int ns) = 0;
+// /** add an amount of current density - direction Z to current density field
+// at node X,Y,Z */ virtual void addJz(double weight[][2][2], int X, int Y, int
+// Z, int ns) = 0;
+// /** add an amount of pressure density - direction XX to current density field
+// at node X,Y,Z */ virtual void addPxx(double weight[][2][2], int X, int Y, int
+// Z, int ns) = 0;
+// /** add an amount of pressure density - direction XY to current density field
+// at node X,Y,Z */ virtual void addPxy(double weight[][2][2], int X, int Y, int
+// Z, int ns) = 0;
+// /** add an amount of pressure density - direction XZ to current density field
+// at node X,Y,Z */ virtual void addPxz(double weight[][2][2], int X, int Y, int
+// Z, int ns) = 0;
+// /** add an amount of pressure density - direction YY to current density field
+// at node X,Y,Z */ virtual void addPyy(double weight[][2][2], int X, int Y, int
+// Z, int ns) = 0;
+// /** add an amount of pressure density - direction YZ to current density field
+// at node X,Y,Z */ virtual void addPyz(double weight[][2][2], int X, int Y, int
+// Z, int ns) = 0;
+// /** add an amount of pressure density - direction ZZ to current density field
+// at node X,Y,Z */ virtual void addPzz(double weight[][2][2], int X, int Y, int
+// Z, int ns) = 0;
 // /** communicate ghost for grid -> Particles interpolation */
 // virtual void communicateGhostP2G(int ns, VirtualTopology3D * vct) = 0;
 // /** Sum density over different species */
@@ -152,16 +164,20 @@ developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
 // virtual void sumOverSpeciesJ() = 0;
 // /** communicate ghost for densities and interp rho from node to center */
 // virtual void interpDensitiesN2C(VirtualTopology3D * vct, Grid * grid) = 0;
-// 
-// 
+//
+//
 // // //////////////// FIELD SOLUTION /////////////////////////////////////////
 // /** Image of Maxwell solver */
-// virtual void MaxwellImage(double *im, double *vector, Grid * grid, VirtualTopology3D * vct) = 0;
+// virtual void MaxwellImage(double *im, double *vector, Grid * grid,
+// VirtualTopology3D * vct) = 0;
 // /** maxwell Source */
-// virtual void MaxwellSource(double *bkrylov, Grid * grid, VirtualTopology3D * vct) = 0;
+// virtual void MaxwellSource(double *bkrylov, Grid * grid, VirtualTopology3D *
+// vct) = 0;
 // /** Image of Poisson Solver */
-// virtual void PoissonImage(double *image, double *vector, Grid * grid, VirtualTopology3D * vct) = 0;
-// 
+// virtual void PoissonImage(double *image, double *vector, Grid * grid,
+// VirtualTopology3D * vct) = 0;
+//
 // };
 #include "EMfields3D.h"
-#endif
+
+#endif // FIELD_H

@@ -9,11 +9,10 @@ constexpr int ComponentCount = 10;
 
 inline constexpr std::array<const char*, ComponentCount> ComponentNames = {
     "Qxxx", "Qxxy", "Qxxz", "Qxyy", "Qxyz",
-    "Qxzz", "Qyyy", "Qyyz", "Qyzz", "Qzzz"
-};
+    "Qxzz", "Qyyy", "Qyyz", "Qyzz", "Qzzz"};
 
 inline int componentIndex(int species, int component) {
-    return species * ComponentCount + component;
+  return species * ComponentCount + component;
 }
 
 } // namespace HeatFlux

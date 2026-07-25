@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -18,13 +19,13 @@
  * limitations under the License.
  */
 
-#include <mpi.h>
-#include "stdio.h"
 #include "Timing.h"
-#include "ipicdefs.h"
 #include "MPIdata.h"
+#include "ipicdefs.h"
+#include "stdio.h"
+#include <mpi.h>
 /**
- * 
+ *
  * series of methods for timing and profiling
  * @date Fri Jun 4 2007
  * @author Stefano Markidis, Giovanni Lapenta
@@ -33,8 +34,7 @@
  */
 
 /** default constructor */
-Timing::Timing() {
-}
+Timing::Timing() {}
 
 /** constructor with the initialization of the log file */
 Timing::Timing(int my_rank) {
@@ -52,14 +52,15 @@ Timing::Timing(int my_rank) {
   // event3b = MPE_Log_get_event_number();
   // described the events
   // if (my_rank==0){
-  // MPE_Describe_state(event1a,event1b,"Mover","red"); // the mover is red in the visualizer
-  // MPE_Describe_state(event2a,event2b,"Field","blue"); // the mover is blue in the visualizer
-  // MPE_Describe_state(event3a,event3b,"Interp P->G","yellow"); // the interpolation particle->Grid is yellow in the visualizer
+  // MPE_Describe_state(event1a,event1b,"Mover","red"); // the mover is red in
+  // the visualizer MPE_Describe_state(event2a,event2b,"Field","blue"); // the
+  // mover is blue in the visualizer MPE_Describe_state(event3a,event3b,"Interp
+  // P->G","yellow"); // the interpolation particle->Grid is yellow in the
+  // visualizer
   // }
-    former_MPI_Barrier(MPIdata::get_PicGlobalComm());
+  former_MPI_Barrier(MPIdata::get_PicGlobalComm());
   // start the log
   // MPE_Start_log();
-
 }
 
 /** start the timer */
@@ -75,15 +76,15 @@ void Timing::stopTiming() {
   texecution = tend - tstart;
   if (rank_id == 0) {
     // replace %g with %11.3e?
-    printf( "\n\n*** SIMULATION ENDED SUCESSFULLY ***\n"
-            " Simulation Time: %g sec (%g hours)\n***\n\n",
-            texecution, texecution / 3600);
-    //cout << endl;
-    //cout << endl;
-    //cout << "*** SIMULATION ENDED SUCESSFULLY ***" << endl;
-    //cout << " Simulation Time: " << texecution << " sec" << " (" << texecution / 3600 << " hours)" << endl;
-    //cout << "***" << endl;
-    //cout << endl;
+    printf("\n\n*** SIMULATION ENDED SUCESSFULLY ***\n"
+           " Simulation Time: %g sec (%g hours)\n***\n\n",
+           texecution, texecution / 3600);
+    // cout << endl;
+    // cout << endl;
+    // cout << "*** SIMULATION ENDED SUCESSFULLY ***" << endl;
+    // cout << " Simulation Time: " << texecution << " sec" << " (" <<
+    // texecution / 3600 << " hours)" << endl; cout << "***" << endl; cout <<
+    // endl;
   }
   // close the log file
   // MPE_Finish_log("iPIC3D_LOG");
@@ -114,17 +115,16 @@ void Timing::stop_interpP2G() {
   // MPE_Log_event(event3b,0,"stop interpolation");
 }
 /** get the elapsed time from start_timng and stop_timing */
-double Timing::getExecutionTime() {
-  return (texecution);
-}
+double Timing::getExecutionTime() { return (texecution); }
 /** print to screen the elapsed time */
 void Timing::Print() {
-  printf("Execution Time: %g sec (%g hours)\n",
-    texecution, texecution / 3600);
-  //cout << "Execution Time: " << texecution << " sec" << " (" << texecution / 3600 << " hours)" << endl;
+  printf("Execution Time: %g sec (%g hours)\n", texecution, texecution / 3600);
+  // cout << "Execution Time: " << texecution << " sec" << " (" << texecution /
+  // 3600 << " hours)" << endl;
 }
-/** print to screen the elapsed time from t_start to the call to print function*/
+/** print to screen the elapsed time from t_start to the call to print
+ * function*/
 void Timing::Print_OnAir() {
   printf("Execution Time: %g sec\n", MPI_Wtime() - tstart);
-  //cout << "Execution Time: " << MPI_Wtime() - tstart << " sec" << endl;
+  // cout << "Execution Time: " << MPI_Wtime() - tstart << " sec" << endl;
 }

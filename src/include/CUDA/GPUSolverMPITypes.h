@@ -6,13 +6,16 @@
  * Include this from any .cu or .cpp file that performs MPI operations
  * using cudaSolverType buffers.
  */
-#pragma once
-#include <mpi.h>
+#ifndef GPU_SOLVER_MPI_TYPES_H
+#define GPU_SOLVER_MPI_TYPES_H
 #include "cudaTypeDef.cuh"
+#include <mpi.h>
 
 /// Returns the MPI_Datatype corresponding to the template parameter T.
 /// Specialised for double and float; any other type yields a link error.
-template<typename T> inline MPI_Datatype mpiTypeOf() = delete;
+template <typename T> inline MPI_Datatype mpiTypeOf() = delete;
 
-template<> inline MPI_Datatype mpiTypeOf<double>() { return MPI_DOUBLE; }
-template<> inline MPI_Datatype mpiTypeOf<float>()  { return MPI_FLOAT; }
+template <> inline MPI_Datatype mpiTypeOf<double>() { return MPI_DOUBLE; }
+template <> inline MPI_Datatype mpiTypeOf<float>() { return MPI_FLOAT; }
+
+#endif // GPU_SOLVER_MPI_TYPES_H

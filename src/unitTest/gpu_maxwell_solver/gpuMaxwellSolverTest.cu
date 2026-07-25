@@ -40,10 +40,10 @@ using GpuFieldPtrs = std::array<GPUFieldArray3*, kComponentCount>;
 using ConstGpuFieldPtrs = std::array<const GPUFieldArray3*, kComponentCount>;
 
 constexpr FieldLabels kElectricLabels = {"Ex", "Ey", "Ez"};
-constexpr FieldLabels kLeftGhostLabels = {
-    "Ex left ghost", "Ey left ghost", "Ez left ghost"};
-constexpr FieldLabels kRightGhostLabels = {
-    "Ex right ghost", "Ey right ghost", "Ez right ghost"};
+constexpr FieldLabels kLeftGhostLabels = {"Ex left ghost", "Ey left ghost",
+                                          "Ez left ghost"};
+constexpr FieldLabels kRightGhostLabels = {"Ex right ghost", "Ey right ghost",
+                                           "Ez right ghost"};
 constexpr FieldLabels kManufacturedLabels = {
     "manufactured Ex", "manufactured Ey", "manufactured Ez"};
 
@@ -51,26 +51,22 @@ constexpr std::array<const char*, 4> kAlwaysPeriodicKeys = {
     "PERIODICY", "PERIODICZ", "PERIODICY_P", "PERIODICZ_P"};
 constexpr std::array<const char*, 8> kZeroSpeciesKeys = {
     "rhoINIT", "rhoINJECT", "uth", "vth", "wth", "u0", "v0", "w0"};
-constexpr std::array<const char*, 3> kUnitParticleKeys = {
-    "npcelx", "npcely", "npcelz"};
+constexpr std::array<const char*, 3> kUnitParticleKeys = {"npcelx", "npcely",
+                                                          "npcelz"};
 constexpr std::array<const char*, 6> kPhiBoundaryKeys = {
-    "bcPHIfaceXright", "bcPHIfaceXleft", "bcPHIfaceYright",
-    "bcPHIfaceYleft", "bcPHIfaceZright", "bcPHIfaceZleft"};
+    "bcPHIfaceXright", "bcPHIfaceXleft",  "bcPHIfaceYright",
+    "bcPHIfaceYleft",  "bcPHIfaceZright", "bcPHIfaceZleft"};
 constexpr std::array<const char*, 6> kEmBoundaryKeys = {
-    "bcEMfaceXright", "bcEMfaceXleft", "bcEMfaceYright",
-    "bcEMfaceYleft", "bcEMfaceZright", "bcEMfaceZleft"};
+    "bcEMfaceXright", "bcEMfaceXleft",  "bcEMfaceYright",
+    "bcEMfaceYleft",  "bcEMfaceZright", "bcEMfaceZleft"};
 constexpr std::array<const char*, 6> kParticleBoundaryKeys = {
-    "bcPfaceXright", "bcPfaceXleft", "bcPfaceYright",
-    "bcPfaceYleft", "bcPfaceZright", "bcPfaceZleft"};
+    "bcPfaceXright", "bcPfaceXleft",  "bcPfaceYright",
+    "bcPfaceYleft",  "bcPfaceZright", "bcPfaceZleft"};
 constexpr std::array<const char*, 4> kDisabledOutputCycleKeys = {
     "FieldOutputCycle", "ParticlesOutputCycle", "RestartOutputCycle",
     "DiagnosticsOutputCycle"};
 
-enum class TestCase {
-  Periodic,
-  Reflective,
-  Manufactured
-};
+enum class TestCase { Periodic, Reflective, Manufactured };
 
 constexpr std::array<TestCase, 3> kAllTestCases = {
     TestCase::Periodic, TestCase::Reflective, TestCase::Manufactured};
@@ -206,14 +202,15 @@ struct Check {
   int failures = 0;
   double tolerance = 0.0;
 
-  void near(const char* label, double actual, double expected,
-            size_t i, size_t j, size_t k) {
-    if (std::fabs(actual - expected) <= tolerance) return;
+  void near(const char* label, double actual, double expected, size_t i,
+            size_t j, size_t k) {
+    if (std::fabs(actual - expected) <= tolerance)
+      return;
     fail();
     if (failures <= 12) {
-      std::cerr << "[rank " << rank << "] " << label
-                << "(" << i << "," << j << "," << k << ") = "
-                << actual << ", expected " << expected << "\n";
+      std::cerr << "[rank " << rank << "] " << label << "(" << i << "," << j
+                << "," << k << ") = " << actual << ", expected " << expected
+                << "\n";
     }
   }
 
@@ -227,12 +224,12 @@ struct Check {
 
 const char* caseName(TestCase testCase) {
   switch (testCase) {
-    case TestCase::Periodic:
-      return "periodic";
-    case TestCase::Reflective:
-      return "reflective";
-    case TestCase::Manufactured:
-      return "manufactured";
+  case TestCase::Periodic:
+    return "periodic";
+  case TestCase::Reflective:
+    return "reflective";
+  case TestCase::Manufactured:
+    return "manufactured";
   }
   return "unknown";
 }
@@ -246,7 +243,8 @@ TestSelection parseSelection(int argc, char** argv) {
             "manufactured");
       }
       const char* value = argv[i + 1];
-      if (std::strcmp(value, "all") == 0) return {};
+      if (std::strcmp(value, "all") == 0)
+        return {};
       if (std::strcmp(value, "periodic") == 0) {
         return {false, TestCase::Periodic};
       }
@@ -275,8 +273,8 @@ void reportCaseResult(TestCase testCase, int failures) {
 
 bool selectDeviceForRank(int rank) {
   MPI_Comm sharedComm = MPI_COMM_NULL;
-  MPI_Comm_split_type(MPIdata::get_PicGlobalComm(), MPI_COMM_TYPE_SHARED,
-                      0, MPI_INFO_NULL, &sharedComm);
+  MPI_Comm_split_type(MPIdata::get_PicGlobalComm(), MPI_COMM_TYPE_SHARED, 0,
+                      MPI_INFO_NULL, &sharedComm);
 
   int sharedRank = 0;
   MPI_Comm_rank(sharedComm, &sharedRank);
@@ -285,7 +283,8 @@ bool selectDeviceForRank(int rank) {
   cudaError_t err = cudaGetDeviceCount(&deviceCount);
   if (err != cudaSuccess || deviceCount == 0) {
     if (rank == 0) {
-      std::cerr << "GPU Maxwell solver test requires a visible CUDA/HIP device.\n";
+      std::cerr
+          << "GPU Maxwell solver test requires a visible CUDA/HIP device.\n";
     }
     MPI_Comm_free(&sharedComm);
     return false;
@@ -305,13 +304,13 @@ void setAll(std::array<arr3_double, N> fields, double value) {
 
 void zeroFields(EMfields3D& fields) {
   fields.setZeroDensities();
-  setAll(std::array<arr3_double, 13>{
-             fields.getEx(), fields.getEy(), fields.getEz(),
-             fields.getBx(), fields.getBy(), fields.getBz(),
-             fields.getBxc(), fields.getByc(), fields.getBzc(),
-             fields.getBx_ext(), fields.getBy_ext(), fields.getBz_ext(),
-             fields.getPHI()},
-         0.0);
+  setAll(
+      std::array<arr3_double, 13>{
+          fields.getEx(), fields.getEy(), fields.getEz(), fields.getBx(),
+          fields.getBy(), fields.getBz(), fields.getBxc(), fields.getByc(),
+          fields.getBzc(), fields.getBx_ext(), fields.getBy_ext(),
+          fields.getBz_ext(), fields.getPHI()},
+      0.0);
 }
 
 FieldArray electricFields(EMfields3D& fields) {
@@ -414,14 +413,12 @@ Vec3 manufacturedE(const GridPoint& point, const WaveNumbers& wave) {
   const double x = wave.x * point.x;
   const double y = wave.y * point.y;
   const double z = wave.z * point.z;
-  return {
-      0.70 + 0.17 * std::sin(x) * std::cos(y) + 0.11 * std::cos(z)
-           + 0.07 * std::sin(x + y + z),
-     -0.35 + 0.13 * std::cos(x) * std::sin(y) + 0.09 * std::sin(z)
-           + 0.05 * std::cos(x - 2.0 * z),
-      0.22 + 0.15 * std::sin(z) * std::cos(x)
-           + 0.06 * std::sin(y + 2.0 * x)
-  };
+  return {0.70 + 0.17 * std::sin(x) * std::cos(y) + 0.11 * std::cos(z) +
+              0.07 * std::sin(x + y + z),
+          -0.35 + 0.13 * std::cos(x) * std::sin(y) + 0.09 * std::sin(z) +
+              0.05 * std::cos(x - 2.0 * z),
+          0.22 + 0.15 * std::sin(z) * std::cos(x) +
+              0.06 * std::sin(y + 2.0 * x)};
 }
 
 Vec3 manufacturedB(const GridPoint& point, const WaveNumbers& wave,
@@ -429,11 +426,9 @@ Vec3 manufacturedB(const GridPoint& point, const WaveNumbers& wave,
   const double x = wave.x * point.x;
   const double y = wave.y * point.y;
   const double z = wave.z * point.z;
-  return {
-      input.backgroundB[0] + 0.08 * std::cos(x) * std::sin(y) * std::sin(z),
-      input.backgroundB[1] + 0.06 * std::sin(x + y) * std::cos(z),
-      input.backgroundB[2] + 0.07 * std::sin(x) * std::cos(y - z)
-  };
+  return {input.backgroundB[0] + 0.08 * std::cos(x) * std::sin(y) * std::sin(z),
+          input.backgroundB[1] + 0.06 * std::sin(x + y) * std::cos(z),
+          input.backgroundB[2] + 0.07 * std::sin(x) * std::cos(y - z)};
 }
 
 double manufacturedDensity(const GridPoint& point, const WaveNumbers& wave,
@@ -446,19 +441,16 @@ double manufacturedDensity(const GridPoint& point, const WaveNumbers& wave,
 }
 
 WaveNumbers waveNumbers(const TestInput& input) {
-  return {2.0 * kPi / input.Lx, 2.0 * kPi / input.Ly,
-          2.0 * kPi / input.Lz};
+  return {2.0 * kPi / input.Lx, 2.0 * kPi / input.Ly, 2.0 * kPi / input.Lz};
 }
 
 GridPoint nodePoint(const Grid3DCU& grid, size_t i, size_t j, size_t k) {
-  return {grid.getXN(static_cast<int>(i)),
-          grid.getYN(static_cast<int>(j)),
+  return {grid.getXN(static_cast<int>(i)), grid.getYN(static_cast<int>(j)),
           grid.getZN(static_cast<int>(k))};
 }
 
 GridPoint centerPoint(const Grid3DCU& grid, size_t i, size_t j, size_t k) {
-  return {grid.getXC(static_cast<int>(i)),
-          grid.getYC(static_cast<int>(j)),
+  return {grid.getXC(static_cast<int>(i)), grid.getYC(static_cast<int>(j)),
           grid.getZC(static_cast<int>(k))};
 }
 
@@ -481,19 +473,20 @@ void initializeManufacturedFields(EMfields3D& fields, const Grid3DCU& grid,
   });
 
   FieldArray magneticCenter = magneticCenterFields(fields);
-  forEachIndex(fullBounds(magneticCenter[0]), [&](size_t i, size_t j, size_t k) {
-    setFieldPoint(magneticCenter, i, j, k,
-                  manufacturedB(centerPoint(grid, i, j, k), wave, input));
-  });
+  forEachIndex(
+      fullBounds(magneticCenter[0]), [&](size_t i, size_t j, size_t k) {
+        setFieldPoint(magneticCenter, i, j, k,
+                      manufacturedB(centerPoint(grid, i, j, k), wave, input));
+      });
 }
 
-void checkManufactured(EMfields3D& fields, Check& check,
-                       const Grid3DCU& grid, const TestInput& input) {
+void checkManufactured(EMfields3D& fields, Check& check, const Grid3DCU& grid,
+                       const TestInput& input) {
   const FieldArray electric = electricFields(fields);
   const WaveNumbers wave = waveNumbers(input);
 
-  checkElectric(electric, check, interiorBounds(electric[0]), kManufacturedLabels,
-                [&](size_t i, size_t j, size_t k) {
+  checkElectric(electric, check, interiorBounds(electric[0]),
+                kManufacturedLabels, [&](size_t i, size_t j, size_t k) {
                   return manufacturedE(nodePoint(grid, i, j, k), wave);
                 });
 }
@@ -541,11 +534,10 @@ void prepareManufacturedMoments(EMfields3D& fields) {
 }
 
 void communicateElectricBoundaries(EMfields3D& fields, Grid3DCU& grid) {
-  fields.gpuCommunicateNodeBC_3mixed(grid.getNXN(), grid.getNYN(),
-                                     grid.getNZN(),
-                                     fields.gpuEx(), fields.get_col().bcEx,
-                                     fields.gpuEy(), fields.get_col().bcEy,
-                                     fields.gpuEz(), fields.get_col().bcEz);
+  fields.gpuCommunicateNodeBC_3mixed(
+      grid.getNXN(), grid.getNYN(), grid.getNZN(), fields.gpuEx(),
+      fields.get_col().bcEx, fields.gpuEy(), fields.get_col().bcEy,
+      fields.gpuEz(), fields.get_col().bcEz);
 }
 
 void zeroGpuFields(GpuFieldPtrs fields, cudaStream_t stream) {
@@ -561,21 +553,19 @@ int maxwellVectorSize(const Grid3DCU& grid) {
 
 void electricToSolver(GPUKrylovVector& target, EMfields3D& fields,
                       const Grid3DCU& grid, cudaStream_t stream) {
-  gpuPhys2Solver3(target.devPtr(),
-                  fields.gpuEx().devPtr(), fields.gpuEy().devPtr(),
-                  fields.gpuEz().devPtr(),
+  gpuPhys2Solver3(target.devPtr(), fields.gpuEx().devPtr(),
+                  fields.gpuEy().devPtr(), fields.gpuEz().devPtr(),
                   grid.getNXN(), grid.getNYN(), grid.getNZN(), stream);
 }
 
 void solverToElectric(EMfields3D& fields, const GPUKrylovVector& source,
                       const Grid3DCU& grid, cudaStream_t stream) {
   gpuSolver2Phys3(fields.gpuEx().devPtr(), fields.gpuEy().devPtr(),
-                  fields.gpuEz().devPtr(), source.devPtr(),
-                  grid.getNXN(), grid.getNYN(), grid.getNZN(), stream);
+                  fields.gpuEz().devPtr(), source.devPtr(), grid.getNXN(),
+                  grid.getNYN(), grid.getNZN(), stream);
 }
 
-void runPeriodicCase(EMfields3D& fields, const TestInput& input,
-                     Check& check) {
+void runPeriodicCase(EMfields3D& fields, const TestInput& input, Check& check) {
   const cudaStream_t stream = fields.gpuSolverStream();
   setElectricFields(fields, input.periodicElectric());
   fields.gpuSolverSyncH2D(stream);
@@ -653,17 +643,17 @@ int runOnFields(TestCase testCase, EMfields3D& fields, Grid3DCU& grid,
   fields.gpuSolverAllocate();
 
   switch (testCase) {
-    case TestCase::Periodic:
-      runPeriodicCase(fields, input, check);
-      break;
+  case TestCase::Periodic:
+    runPeriodicCase(fields, input, check);
+    break;
 
-    case TestCase::Reflective:
-      runReflectiveCase(fields, grid, input, check);
-      break;
+  case TestCase::Reflective:
+    runReflectiveCase(fields, grid, input, check);
+    break;
 
-    case TestCase::Manufactured:
-      runManufacturedCase(fields, grid, input, rank, check);
-      break;
+  case TestCase::Manufactured:
+    runManufacturedCase(fields, grid, input, rank, check);
+    break;
   }
 
   return check.failures;
@@ -702,9 +692,8 @@ int main(int argc, char** argv) {
     if (nprocs != input.mpiRanks()) {
       if (rank == 0) {
         std::cerr << "GPU Maxwell solver test requires " << input.mpiRanks()
-                  << " MPI ranks for the configured "
-                  << input.xlen << "x" << input.ylen
-                  << "x" << input.zlen
+                  << " MPI ranks for the configured " << input.xlen << "x"
+                  << input.ylen << "x" << input.zlen
                   << " subdomains, but it was launched with " << nprocs
                   << ".\n";
       }

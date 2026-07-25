@@ -59,11 +59,10 @@ void gpuMaxwellLocalCenterOps(
     cudaSolverType* gExX, cudaSolverType* gExY, cudaSolverType* gExZ,
     cudaSolverType* gEyX, cudaSolverType* gEyY, cudaSolverType* gEyZ,
     cudaSolverType* gEzX, cudaSolverType* gEzY, cudaSolverType* gEzZ,
-    cudaSolverType* divD,
-    const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
-    const cudaSolverType* dX, const cudaSolverType* dY, const cudaSolverType* dZ,
-    int nxc, int nyc, int nzc,
-    cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
+    cudaSolverType* divD, const cudaSolverType* vX, const cudaSolverType* vY,
+    const cudaSolverType* vZ, const cudaSolverType* dX,
+    const cudaSolverType* dY, const cudaSolverType* dZ, int nxc, int nyc,
+    int nzc, cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
     cudaStream_t stream = 0);
 
 // =========================================================================
@@ -93,17 +92,18 @@ void gpuMaxwellLocalCenterOps(
  * @param stream      CUDA stream.
  */
 void gpuMaxwellLocalNodeFused(
-    cudaSolverType* d_im,
-    const cudaSolverType* gExX, const cudaSolverType* gExY, const cudaSolverType* gExZ,
-    const cudaSolverType* gEyX, const cudaSolverType* gEyY, const cudaSolverType* gEyZ,
-    const cudaSolverType* gEzX, const cudaSolverType* gEzY, const cudaSolverType* gEzZ,
-    const cudaSolverType* divD,
-    const cudaSolverType* vX, const cudaSolverType* vY, const cudaSolverType* vZ,
-    const cudaSolverType* dX, const cudaSolverType* dY, const cudaSolverType* dZ,
-    int nxn, int nyn, int nzn,
-    cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
-    cudaSolverType dt2,
+    cudaSolverType* d_im, const cudaSolverType* gExX,
+    const cudaSolverType* gExY, const cudaSolverType* gExZ,
+    const cudaSolverType* gEyX, const cudaSolverType* gEyY,
+    const cudaSolverType* gEyZ, const cudaSolverType* gEzX,
+    const cudaSolverType* gEzY, const cudaSolverType* gEzZ,
+    const cudaSolverType* divD, const cudaSolverType* vX,
+    const cudaSolverType* vY, const cudaSolverType* vZ,
+    const cudaSolverType* dX, const cudaSolverType* dY,
+    const cudaSolverType* dZ, int nxn, int nyn, int nzn, cudaSolverType invdx,
+    cudaSolverType invdy, cudaSolverType invdz, cudaSolverType dt2,
     cudaStream_t stream = 0);
 
 #endif // GPU_SOLVER
+
 #endif // GPU_MAXWELL_LOCAL_CUH

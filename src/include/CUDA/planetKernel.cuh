@@ -1,11 +1,10 @@
-#ifndef _PLANET_KERNEL_CUH_
-#define _PLANET_KERNEL_CUH_
+#ifndef PLANET_KERNEL_CUH
+#define PLANET_KERNEL_CUH
 
 #include "cudaTypeDef.cuh"
+#include "hashedSum.cuh"
 #include "particleArrayCUDA.cuh"
 #include "particleExchange.cuh"
-#include "hashedSum.cuh"
-
 
 /**
  * @brief Compact particles flagged PLANET into the planetArray (device-only).
@@ -14,11 +13,13 @@
  * @param pclsArray Device-side particle SoA container.
  * @param departureArray Device-side departure metadata array.
  * @param planetArr Device-side compact planet buffer.
- * @param hashedSumArray Device-side hashed-sum buckets used for scatter indices.
+ * @param hashedSumArray Device-side hashed-sum buckets used for scatter
+ * indices.
  */
 __global__ void planetExtractionKernel(particleArrayCUDA* pclsArray,
-    departureArrayType* departureArray, planetArray* planetArr,
-    hashedSum* hashedSumArray);
+                                       departureArrayType* departureArray,
+                                       planetArray* planetArr,
+                                       hashedSum* hashedSumArray);
 
 /**
  * @brief Reduce the total |q| of all particles in a species' planetArray.
@@ -29,23 +30,25 @@ __global__ void planetExtractionKernel(particleArrayCUDA* pclsArray,
  * @param chargeOut Device pointer to the accumulated absolute charge.
  */
 __global__ void planetChargeReductionKernel(planetArray* planetArr, int count,
-    cudaParticleType* chargeOut);
+                                            cudaParticleType* chargeOut);
 
 /**
  * @brief Compute kinetic energy for each electron planet particle.
- *        Writes energy and a global index (speciesOffset + localIndex) into buffers.
+ *        Writes energy and a global index (speciesOffset + localIndex) into
+ * buffers.
  *
  * @param planetArr Device-side planet buffer for one electron species.
  * @param count Number of valid planet particles in the buffer.
  * @param qom Charge-to-mass ratio of the species (negative for electrons).
  * @param energyBuf Output energy buffer shared across electron species.
- * @param globalIdxBuf Output global-index buffer shared across electron species.
+ * @param globalIdxBuf Output global-index buffer shared across electron
+ * species.
  * @param speciesOffset Offset into the merged energy/index buffers.
  */
 __global__ void planetEnergyKernel(planetArray* planetArr, int count,
-    cudaParticleType qom,
-    cudaParticleType* energyBuf, uint32_t* globalIdxBuf,
-    int speciesOffset);
+                                   cudaParticleType qom,
+                                   cudaParticleType* energyBuf,
+                                   uint32_t* globalIdxBuf, int speciesOffset);
 
 /**
  * @brief One step of bitonic sort for (key, value) pairs.
@@ -57,10 +60,9 @@ __global__ void planetEnergyKernel(planetArray* planetArr, int count,
  * @param k Bitonic stage size.
  * @param n Padded array length; must be a power of two.
  */
-__global__ void bitonicSortStepKernel(
-    cudaParticleType* __restrict__ keys,
-    uint32_t* __restrict__ values,
-    int j, int k, int n);
+__global__ void bitonicSortStepKernel(cudaParticleType* __restrict__ keys,
+                                      uint32_t* __restrict__ values, int j,
+                                      int k, int n);
 
 /**
  * @brief Pad tail of arrays with -inf/invalid for bitonic sort.
@@ -70,9 +72,8 @@ __global__ void bitonicSortStepKernel(
  * @param realN Number of valid entries before padding.
  * @param paddedN Padded power-of-two buffer length.
  */
-__global__ void bitonicPadKernel(
-    cudaParticleType* keys, uint32_t* values,
-    int realN, int paddedN);
+__global__ void bitonicPadKernel(cudaParticleType* keys, uint32_t* values,
+                                 int realN, int paddedN);
 
 /**
  * @brief Sequential prefix-sum of |q| in sorted order to find the cutoff index.
@@ -81,17 +82,19 @@ __global__ void bitonicPadKernel(
  *
  * @param planetArrs Device array of per-electron-species planetArray pointers.
  * @param nSpecies Number of electron species.
- * @param speciesOffsets Per-electron-species offsets into the merged sorted buffers.
- * @param sortedGlobalIdx Sorted global indices encoded as `speciesOffset + localIdx`.
+ * @param speciesOffsets Per-electron-species offsets into the merged sorted
+ * buffers.
+ * @param sortedGlobalIdx Sorted global indices encoded as `speciesOffset +
+ * localIdx`.
  * @param n Total number of electron planet particles.
  * @param ionChargeTarget Device pointer to total ion absolute charge to match.
  * @param cutoffIndex Output pointer to the first sorted index that survives.
  */
-__global__ void chargeCutoffKernel(
-    planetArray** planetArrs, int nSpecies, const int* speciesOffsets,
-    const uint32_t* sortedGlobalIdx, int n,
-    const cudaParticleType* ionChargeTarget,
-    int* cutoffIndex);
+__global__ void chargeCutoffKernel(planetArray** planetArrs, int nSpecies,
+                                   const int* speciesOffsets,
+                                   const uint32_t* sortedGlobalIdx, int n,
+                                   const cudaParticleType* ionChargeTarget,
+                                   int* cutoffIndex);
 
 /**
  * @brief Fused kernel: reflect surviving electrons and compact them into
@@ -104,26 +107,25 @@ __global__ void chargeCutoffKernel(
  *
  * @param planetArrs Device array of per-electron-species planetArray pointers.
  * @param nElecSpecies Number of electron species.
- * @param speciesOffsets Per-species offsets into the merged sorted buffers and output buffer.
+ * @param speciesOffsets Per-species offsets into the merged sorted buffers and
+ * output buffer.
  * @param sortedGlobalIdx Sorted global indices from bitonic sort.
  * @param cutoffDevice Device pointer written by chargeCutoffKernel.
  * @param totalElecPlanet Total number of electron planet particles.
  * @param outputBuf Compact output buffer laid out by species offset.
- * @param survivorCounters Per-species atomic counters; must be zeroed before launch.
+ * @param survivorCounters Per-species atomic counters; must be zeroed before
+ * launch.
  * @param originX X coordinate of the planet center.
  * @param originY Y coordinate of the planet center.
  * @param originZ Z coordinate of the planet center.
  * @param sphereRadius Planet radius.
- * @param doSphere Planet geometry selector: 1 for 3D sphere, 2 for 2D XZ-plane circle.
+ * @param doSphere Planet geometry selector: 1 for 3D sphere, 2 for 2D XZ-plane
+ * circle.
  */
 __global__ void planetReflectCompactKernel(
-    planetArray** planetArrs, int nElecSpecies,
-    const int* speciesOffsets,
-    const uint32_t* sortedGlobalIdx,
-    const int* cutoffDevice,
-    int totalElecPlanet,
-    SpeciesParticle* outputBuf,
-    int* survivorCounters,
+    planetArray** planetArrs, int nElecSpecies, const int* speciesOffsets,
+    const uint32_t* sortedGlobalIdx, const int* cutoffDevice,
+    int totalElecPlanet, SpeciesParticle* outputBuf, int* survivorCounters,
     cudaCommonType originX, cudaCommonType originY, cudaCommonType originZ,
     cudaCommonType sphereRadius, int doSphere);
 
@@ -135,30 +137,28 @@ __global__ void planetReflectCompactKernel(
  *
  * @param planetArrs Device array of per-electron-species planetArray pointers.
  * @param nElecSpecies Number of electron species.
- * @param speciesOffsets Per-species offsets into the merged sorted buffers and output buffer.
+ * @param speciesOffsets Per-species offsets into the merged sorted buffers and
+ * output buffer.
  * @param sortedGlobalIdx Sorted global indices from bitonic sort.
  * @param cutoffDevice Device pointer written by chargeCutoffKernel.
  * @param totalElecPlanet Total number of electron planet particles.
  * @param outputBuf Compact output buffer laid out by species offset.
- * @param survivorCounters Per-species atomic counters; must be zeroed before launch.
+ * @param survivorCounters Per-species atomic counters; must be zeroed before
+ * launch.
  * @param originX X coordinate of the planet center.
  * @param originY Y coordinate of the planet center.
  * @param originZ Z coordinate of the planet center.
  * @param sphereRadius Planet radius.
- * @param doSphere Planet geometry selector: 1 for 3D sphere, 2 for 2D XZ-plane circle.
- * @param rngSeedBase Base seed for the per-thread PRNG (for example the cycle number).
+ * @param doSphere Planet geometry selector: 1 for 3D sphere, 2 for 2D XZ-plane
+ * circle.
+ * @param rngSeedBase Base seed for the per-thread PRNG (for example the cycle
+ * number).
  */
 __global__ void planetDiffuseCompactKernel(
-    planetArray** planetArrs, int nElecSpecies,
-    const int* speciesOffsets,
-    const uint32_t* sortedGlobalIdx,
-    const int* cutoffDevice,
-    int totalElecPlanet,
-    SpeciesParticle* outputBuf,
-    int* survivorCounters,
+    planetArray** planetArrs, int nElecSpecies, const int* speciesOffsets,
+    const uint32_t* sortedGlobalIdx, const int* cutoffDevice,
+    int totalElecPlanet, SpeciesParticle* outputBuf, int* survivorCounters,
     cudaCommonType originX, cudaCommonType originY, cudaCommonType originZ,
-    cudaCommonType sphereRadius, int doSphere,
-    uint32_t rngSeedBase);
+    cudaCommonType sphereRadius, int doSphere, uint32_t rngSeedBase);
 
-
-#endif
+#endif // PLANET_KERNEL_CUH

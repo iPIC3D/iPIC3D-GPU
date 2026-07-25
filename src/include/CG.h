@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -31,15 +32,16 @@ developers: Stefano Markidis, Giovanni Lapenta
 
 // These declarations are currently needed because Field is not anymore a class
 // CG needs a pointer to the function that solves the fields.
-// 
-// To avoid changing all the code we typedef Field as of type EMfields3D (which is
-// not derived anymore from Field). This will be improved in future releases.
+//
+// To avoid changing all the code we typedef Field as of type EMfields3D (which
+// is not derived anymore from Field). This will be improved in future releases.
 
 class EMfields3D;
 typedef EMfields3D Field;
-typedef void (Field::*FIELD_IMAGE) (double *, double *);
-typedef void (*GENERIC_IMAGE) (double *, double *);
+typedef void (Field::*FIELD_IMAGE)(double*, double*);
+typedef void (*GENERIC_IMAGE)(double*, double*);
 
-bool CG(double *xkrylov, int xkrylovlen, double *b, int maxit, double tol, FIELD_IMAGE FunctionImage, Field * field);
+bool CG(double* xkrylov, int xkrylovlen, double* b, int maxit, double tol,
+        FIELD_IMAGE FunctionImage, Field* field);
 
-#endif
+#endif // CG_H

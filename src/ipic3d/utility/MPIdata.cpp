@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -19,27 +20,25 @@
  */
 
 #ifndef NO_MPI
-  #include <mpi.h>
+#include <mpi.h>
 #endif
-#include <assert.h>
 #include "MPIdata.h"
 #include "ompdefs.h" // for omp_get_max_threads
+#include <assert.h>
 
 // code to check that init() is called before instance()
 //
 // no need for this to have more than file scope
-int MPIdata::rank=-1;
-int MPIdata::nprocs=-1;
-MPI_Comm MPIdata::PIC_COMM=MPI_COMM_NULL;
-static bool MPIdata_is_initialized=false;
-bool MPIdata_assert_initialized()
-{
+int MPIdata::rank = -1;
+int MPIdata::nprocs = -1;
+MPI_Comm MPIdata::PIC_COMM = MPI_COMM_NULL;
+static bool MPIdata_is_initialized = false;
+bool MPIdata_assert_initialized() {
   assert(MPIdata_is_initialized);
   return true;
 }
 
-MPIdata& MPIdata::instance()
-{
+MPIdata& MPIdata::instance() {
   // This is executed on the first call to check that
   // MPIdata has first been initialized.
   static bool check = MPIdata_assert_initialized();
@@ -49,13 +48,13 @@ MPIdata& MPIdata::instance()
   return *instance;
 }
 
-void MPIdata::init(int *argc, char ***argv) {
+void MPIdata::init(int* argc, char*** argv) {
   assert(!MPIdata_is_initialized);
 
- #ifdef NO_MPI
+#ifdef NO_MPI
   rank = 0;
   nprocs = 1;
- #else // NO_MPI
+#else // NO_MPI
   /* Initialize the MPI API */
   MPI_Init(argc, argv);
 
@@ -63,7 +62,7 @@ void MPIdata::init(int *argc, char ***argv) {
   MPI_Comm_rank(PIC_COMM, &rank);
   MPI_Comm_size(PIC_COMM, &nprocs);
 
- #endif // NO_MPI
+#endif // NO_MPI
 
   MPIdata_is_initialized = true;
 }
@@ -74,20 +73,18 @@ void MPIdata::exit(int code) {
 }
 
 void MPIdata::finalize_mpi() {
- #ifndef NO_MPI
+#ifndef NO_MPI
   MPI_Finalize();
- #endif
+#endif
 }
 
 void MPIdata::Print(void) {
   printf("\n"
-    "Number of processes = %d\n"
-    "-------------------------\n"
-    "Number of threads = %d\n"
-    "-------------------------\n",
-     get_nprocs(),
-     omp_get_max_threads());
+         "Number of processes = %d\n"
+         "-------------------------\n"
+         "Number of threads = %d\n"
+         "-------------------------\n",
+         get_nprocs(), omp_get_max_threads());
 }
 
 // extern MPIdata *mpi; // instantiated in iPIC3D.cpp
-

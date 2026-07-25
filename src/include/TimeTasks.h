@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -18,8 +19,8 @@
  * limitations under the License.
  */
 
-#ifndef __TimeTasks_H__
-#define __TimeTasks_H__
+#ifndef TIME_TASKS_H
+#define TIME_TASKS_H
 #include "assert.h"
 #include "errors.h"
 
@@ -30,10 +31,8 @@
    remove performance penalty).
  */
 
-class TimeTasks
-{
- public:
-
+class TimeTasks {
+public:
   // legitimate active subcycle values
   //
   // timeTasks_set_task(0) is a no-op, so
@@ -84,20 +83,19 @@ class TimeTasks
     NUMBER_OF_TASKS // this line should be last
   };
 
- private:
-  //enum Modes // for exclusive tasks
+private:
+  // enum Modes // for exclusive tasks
   //{
-  //  COMPUTATION = 0,
-  //  COMMUNICATION,
-  //};
+  //   COMPUTATION = 0,
+  //   COMMUNICATION,
+  // };
 
- public: // methods
-
+public: // methods
   TimeTasks() {
     resetCycle();
 #ifdef LOG_TASKS_TOTAL_TIME
-    for(int e=0;e<NUMBER_OF_TASKS;e++)
-    tasksTotalTime[e] = 0;      
+    for (int e = 0; e < NUMBER_OF_TASKS; e++)
+      tasksTotalTime[e] = 0;
 #endif
   }
 
@@ -113,7 +111,7 @@ class TimeTasks
   //
   // provide start_time on ending call
   //
-  //void end_communicating(double start_time);
+  // void end_communicating(double start_time);
   void end_sendrecv(double start_time);
   void end_allreduce(double start_time);
   void start_main_task(TimeTasks::Tasks taskid);
@@ -128,62 +126,63 @@ class TimeTasks
 
   // accessors
   //
-  bool is_active(Tasks taskid){
+  bool is_active(Tasks taskid) {
     bool retval = active[taskid];
-    //if(retval&& stack_depth[taskid]==0)
+    // if(retval&& stack_depth[taskid]==0)
     //{
-    //  eprintf("active task %s has depth %d",
-    //    get_taskname(taskid), stack_depth[taskid]);
-    //}
+    //   eprintf("active task %s has depth %d",
+    //     get_taskname(taskid), stack_depth[taskid]);
+    // }
     return retval;
   }
-  //bool get_communicating() { return communicating; }
-  //void set_communicating(bool val) { communicating = val; }
+  // bool get_communicating() { return communicating; }
+  // void set_communicating(bool val) { communicating = val; }
   int get_stack_depth(TimeTasks::Tasks taskid) { return stack_depth[taskid]; }
 
   // reporting
   //
- private:
+private:
   void print_cycle_times(int cycle, double* task_duration,
-    const char* reduce_mode="avg");
+                         const char* reduce_mode = "avg");
   void print_cycle_times(int cycle, const char* reduce_mode);
- public:
+
+public:
   void print_cycle_times(int cycle);
 
- private:
-
+private:
   // is task exclusive?
   bool is_exclusive(Tasks taskid) { return (taskid < after_exclusive); }
 
   // reporting
   //
-  //double get_time(int arg) {
+  // double get_time(int arg) {
   //  return task_duration[arg];
   //}
-  //double get_communicate(int arg) {
+  // double get_communicate(int arg) {
   //  return communicate[arg];
   //}
-  //double get_compute(int arg) {
+  // double get_compute(int arg) {
   //  return get_time(arg) - get_communicate(arg);
   //}
   const char* get_taskname(int arg);
 
- private:
+private:
   int active_task;
   bool active[NUMBER_OF_TASKS];
-  //bool communicating;
+  // bool communicating;
   double task_duration[NUMBER_OF_TASKS];
-  //double communicate[NUMBER_OF_TASKS];
-  //double sendrecv[NUMBER_OF_TASKS];
-  //double allreduce[NUMBER_OF_TASKS];
+  // double communicate[NUMBER_OF_TASKS];
+  // double sendrecv[NUMBER_OF_TASKS];
+  // double allreduce[NUMBER_OF_TASKS];
   int stack_depth[NUMBER_OF_TASKS];
   double start_times[NUMBER_OF_TASKS];
 
 #ifdef LOG_TASKS_TOTAL_TIME
 public:
   void print_tasks_total_times();
+
 private:
-  double tasksTotalTime[NUMBER_OF_TASKS];      
+  double tasksTotalTime[NUMBER_OF_TASKS];
 
 #endif
 };
@@ -191,31 +190,31 @@ private:
 extern TimeTasks timeTasks;
 
 // construct an anonymous instance of TimeTasksCaller
-class TimeTasks_caller_to_set_main_task_for_scope
-{
+class TimeTasks_caller_to_set_main_task_for_scope {
   double start_time;
   TimeTasks::Tasks task;
- public:
+
+public:
   TimeTasks_caller_to_set_main_task_for_scope(TimeTasks::Tasks _task);
   ~TimeTasks_caller_to_set_main_task_for_scope();
 };
 
-class TimeTasks_caller_to_set_task_for_scope
-{
+class TimeTasks_caller_to_set_task_for_scope {
   bool already_active;
   double start_time;
   TimeTasks::Tasks task;
- public:
+
+public:
   TimeTasks_caller_to_set_task_for_scope(TimeTasks::Tasks task_);
   ~TimeTasks_caller_to_set_task_for_scope();
 };
 
-class TimeTasks_caller_to_set_communication_mode_for_scope
-{
- private:
+class TimeTasks_caller_to_set_communication_mode_for_scope {
+private:
   bool already_communicating;
   double start_time;
- public:
+
+public:
   TimeTasks_caller_to_set_communication_mode_for_scope();
   ~TimeTasks_caller_to_set_communication_mode_for_scope();
 };
@@ -226,21 +225,27 @@ class TimeTasks_caller_to_set_communication_mode_for_scope
 // will not be called until the end of the scope, so we use the preprocessor
 // to generate unique names of nonanonymous instances.
 //
-#define timeTasks_set_main_task(task) \
+#define timeTasks_set_main_task(task)                                          \
   TimeTasks_caller_to_set_main_task_for_scope myFunnyInstance(task);
 // unfortunately this just pastes __func__ and __LINE__ literally
-//#define timeTasks_set_task(task) \
-//TimeTasks_caller_to_set_task_for_scope myFunnyName##__func__##__LINE__(task);
-#define timeTasks_set_task(task) \
+// #define timeTasks_set_task(task) \
+// TimeTasks_caller_to_set_task_for_scope myFunnyName##__func__##__LINE__(task);
+#define timeTasks_set_task(task)                                               \
   TimeTasks_caller_to_set_task_for_scope myFunnyName(task);
-#define timeTasks_set_communicating() timeTasks_set_task(TimeTasks::COMMUNICATING);
-//#define timeTasks_set_communicating() \
-//  TimeTasks_caller_to_set_communication_mode_for_scope myFunnyCommunicationInstance;
+#define timeTasks_set_communicating()                                          \
+  timeTasks_set_task(TimeTasks::COMMUNICATING);
+// #define timeTasks_set_communicating() \
+//   TimeTasks_caller_to_set_communication_mode_for_scope
+//   myFunnyCommunicationInstance;
 //
-// The scoping trick does not work if the timeTasks call needs to be conditional,
-// so we also provide the ability to explicitly begin and end.
-#define timeTasks_begin_task(task) if(task) timeTasks.start_task(task, MPI_Wtime());
-#define timeTasks_end_task(task) if(task) timeTasks.end_task(task);
+//  The scoping trick does not work if the timeTasks call needs to be
+//  conditional, so we also provide the ability to explicitly begin and end.
+#define timeTasks_begin_task(task)                                             \
+  if (task)                                                                    \
+    timeTasks.start_task(task, MPI_Wtime());
+#define timeTasks_end_task(task)                                               \
+  if (task)                                                                    \
+    timeTasks.end_task(task);
 //
 
-#endif
+#endif // TIME_TASKS_H

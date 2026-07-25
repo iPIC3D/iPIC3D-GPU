@@ -1,63 +1,48 @@
-#ifndef _DATA_ANALYSIS_CUH_
-#define _DATA_ANALYSIS_CUH_
+#ifndef DATA_ANALYSIS_CUH
+#define DATA_ANALYSIS_CUH
 
-#include <thread>
 #include <memory>
+#include <thread>
 
-#include "iPic3D.h"
 #include "VCtopology3D.h"
 #include "dataAnalysisConfig.cuh"
+#include "iPic3D.h"
 
-
-
-namespace dataAnalysis
-{
+namespace dataAnalysis {
 class dataAnalysisPipelineImpl;
 
 class dataAnalysisPipeline {
 
 private:
-    std::unique_ptr<dataAnalysisPipelineImpl> impl;
+  std::unique_ptr<dataAnalysisPipelineImpl> impl;
 
 public:
+  dataAnalysisPipeline(iPic3D::c_Solver& KCode);
 
-    dataAnalysisPipeline(iPic3D::c_Solver& KCode);
+  // returns true if this cycle triggers data analysis
+  static bool isAnalysisCycle(int cycle) {
+    return DAConfig::DATA_ANALYSIS_ENABLED &&
+           DAConfig::DATA_ANALYSIS_EVERY_CYCLE > 0 &&
+           (cycle % DAConfig::DATA_ANALYSIS_EVERY_CYCLE == 0);
+  }
 
-    // returns true if this cycle triggers data analysis
-    static bool isAnalysisCycle(int cycle) {
-        return DAConfig::DATA_ANALYSIS_ENABLED
-            && DAConfig::DATA_ANALYSIS_EVERY_CYCLE > 0
-            && (cycle % DAConfig::DATA_ANALYSIS_EVERY_CYCLE == 0);
-    }
+  // create the output directory
+  static void createOutputDirectory(int myrank, int ns, VirtualTopology3D* vct,
+                                    bool isRestart,
+                                    bool velocitySpectraEnabled = false);
 
-    // create the output directory
-    static void createOutputDirectory(int myrank, int ns, VirtualTopology3D* vct,
-                                      bool isRestart, bool velocitySpectraEnabled = false);
+  // called in the main loop
+  void startAnalysis(int cycle);
 
-    // called in the main loop
-    void startAnalysis(int cycle);
+  // non-blocking check if the analysis is done
+  int checkAnalysis();
 
-    // non-blocking check if the analysis is done
-    int checkAnalysis();
+  // blocking wait for the analysis to finish
+  int waitForAnalysis();
 
-    // blocking wait for the analysis to finish
-    int waitForAnalysis();
-
-    ~dataAnalysisPipeline();
-
+  ~dataAnalysisPipeline();
 };
 
-
-    
 } // namespace dataAnalysis
 
-
-
-
-
-
-#endif
-
-
-
-
+#endif // DATA_ANALYSIS_CUH

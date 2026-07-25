@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -19,7 +20,7 @@
  */
 
 /*******************************************************************************************
-  Timing.h  -  series of methods for timing and profiling PARSEK 
+  Timing.h  -  series of methods for timing and profiling PARSEK
   -------------------
 developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
  ********************************************************************************************/
@@ -27,15 +28,15 @@ developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
 #ifndef TIMING_H
 #define TIMING_H
 
-//#include "MPIdata.h"
+// #include "MPIdata.h"
 
-//#include <iostream>
+// #include <iostream>
 
-//using std::cout;
-//using std::endl;
+// using std::cout;
+// using std::endl;
 /**
- * 
- * series of methods for timing and profiling PARSEK 
+ *
+ * series of methods for timing and profiling PARSEK
  * @date Fri Jun 4 2007
  * @author Stefano Markidis, Giovanni Lapenta
  * @version 2.0
@@ -81,9 +82,9 @@ private:
   double texecution;
   /** time precision */
   double ttick;
-  /** events to write the logging: particle mover, field solver. it can be extended with other events */
+  /** events to write the logging: particle mover, field solver. it can be
+   * extended with other events */
   int event1a, event1b, event2a, event2b, event3a, event3b, event4a, event4b;
-
 };
 
-#endif
+#endif // TIMING_H

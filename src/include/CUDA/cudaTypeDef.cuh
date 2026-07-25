@@ -1,17 +1,17 @@
-#ifndef _CUDA_TYPE_DEF_H_
-#define _CUDA_TYPE_DEF_H_
+#ifndef CUDA_TYPE_DEF_CUH
+#define CUDA_TYPE_DEF_CUH
 
 #ifndef HIPIFLY
+#include "cuda_fp16.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include "cuda_fp16.h"
 #define WARP_SIZE (32)
 inline constexpr uint32_t WARP_FULL_MASK = 0xFFFFFFFF;
 using warp_mask_t = uint32_t;
 #else
-#include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
 #include "hipifly.hpp"
+#include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
 #define WARP_SIZE (64)
 inline constexpr uint64_t WARP_FULL_MASK = 0xFFFFFFFFFFFFFFFF;
 using warp_mask_t = uint64_t;
@@ -28,11 +28,10 @@ using warp_mask_t = uint64_t;
 #if defined(__CUDACC__) || defined(__HIPCC__)
 
 // Portable warp-wide sum reduction (works for any WARP_SIZE)
-template <typename T>
-__device__ __forceinline__ T warp_reduce_sum(T val) {
-    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2)
-        val += __shfl_down_sync(WARP_FULL_MASK, val, offset);
-    return val;
+template <typename T> __device__ __forceinline__ T warp_reduce_sum(T val) {
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2)
+    val += __shfl_down_sync(WARP_FULL_MASK, val, offset);
+  return val;
 }
 
 #endif // __CUDACC__ || __HIPCC__
@@ -44,33 +43,38 @@ using cudaTypeHalf = __half;
 
 using cudaCommonType = cudaTypeDouble;
 using cudaParticleType = cudaTypeDouble;
-using cudaFieldType = cudaTypeDouble; // type for the field array from host to device
-using cudaMomentType = cudaTypeDouble; // MUST be DOUBLE now, type for the moment array from device to host
+using cudaFieldType =
+    cudaTypeDouble; // type for the field array from host to device
+using cudaMomentType = cudaTypeDouble; // MUST be DOUBLE now, type for the
+                                       // moment array from device to host
 
 // ── Semantic alias for the EM field solver (arrays, Krylov vectors, scalars).
-// Changing this to float requires migrating GPUFieldArray, all GPU solver kernel
-// APIs (GPUBlas, GPUStencils, GPUPhysicsKernels, GPUMaxwellLocal, GPUHaloComm),
-// MPI halo/reduction paths, and host↔device sync conversion kernels.
+// Changing this to float requires migrating GPUFieldArray, all GPU solver
+// kernel APIs (GPUBlas, GPUStencils, GPUPhysicsKernels, GPUMaxwellLocal,
+// GPUHaloComm), MPI halo/reduction paths, and host↔device sync conversion
+// kernels.
 using cudaSolverType = cudaCommonType;
 
 // ── Compile-time guards: prevent silent type corruption when changing the
 //    common or moment type before all paths are fully migrated.
-static_assert(std::is_same<cudaCommonType, double>::value,
+static_assert(
+    std::is_same<cudaCommonType, double>::value,
     "GPU field solver (stencils, MPI halos, host sync) still assumes "
     "cudaCommonType == double. Migrate all GPU solver APIs before relaxing.");
 static_assert(std::is_same<cudaMomentType, double>::value,
-    "gpuScatterMomentsD2D still assumes cudaMomentType == double. "
-    "Add a type-conversion kernel before changing cudaMomentType.");
+              "gpuScatterMomentsD2D still assumes cudaMomentType == double. "
+              "Add a type-conversion kernel before changing cudaMomentType.");
 
-// ── Per-field particle types; phase-space fields are floating point, IDs are integers. ──
-using cudaPclType_U = cudaTypeDouble;  // velocity x
-using cudaPclType_V = cudaTypeDouble;  // velocity y
-using cudaPclType_W = cudaTypeDouble;  // velocity z
-using cudaPclType_Q = cudaTypeDouble;  // charge
-using cudaPclType_X = cudaTypeDouble;  // position x
-using cudaPclType_Y = cudaTypeDouble;  // position y
-using cudaPclType_Z = cudaTypeDouble;  // position z
-using cudaPclType_ID = std::uint64_t;  // particle ID
+// ── Per-field particle types; phase-space fields are floating point, IDs are
+// integers. ──
+using cudaPclType_U = cudaTypeDouble; // velocity x
+using cudaPclType_V = cudaTypeDouble; // velocity y
+using cudaPclType_W = cudaTypeDouble; // velocity z
+using cudaPclType_Q = cudaTypeDouble; // charge
+using cudaPclType_X = cudaTypeDouble; // position x
+using cudaPclType_Y = cudaTypeDouble; // position y
+using cudaPclType_Z = cudaTypeDouble; // position z
+using cudaPclType_ID = std::uint64_t; // particle ID
 
 inline constexpr cudaPclType_ID PARTICLE_ID_INVALID =
     std::numeric_limits<cudaPclType_ID>::max();
@@ -78,35 +82,31 @@ inline constexpr cudaPclType_ID PARTICLE_ID_INVALID =
 template <class T, int dim2, int dim3, int dim4>
 using cudaTypeArray4 = T (*)[dim2][dim3][dim4];
 
-template <class T, int dim2, int dim3>
-using cudaTypeArray3 = T (*)[dim2][dim3];
+template <class T, int dim2, int dim3> using cudaTypeArray3 = T (*)[dim2][dim3];
 
-template <class T,  int dim2>
-using cudaTypeArray2 = T (*)[dim2];
+template <class T, int dim2> using cudaTypeArray2 = T (*)[dim2];
 
-template <class T>
-using cudaTypeArray1 = T *;
+template <class T> using cudaTypeArray1 = T*;
 
 /////////////////////////////////// CUDA API HOST call wrapper
 
 #define ERROR_CHECK_C_LIKE false
 
-
 #define cudaErrChk(call) cudaCheck((call), __FILE__, __LINE__)
 
-__host__ inline void cudaCheck(cudaError_t code, const char *file, int line)
-{
-    if (code != cudaSuccess)
-    {
+__host__ inline void cudaCheck(cudaError_t code, const char* file, int line) {
+  if (code != cudaSuccess) {
 #if ERROR_CHECK_C_LIKE == true
-        std::cerr << "CUDA Check: " << cudaGetErrorString(code) << " File: " << file << " Line: " << line << std::endl;
-        abort();
+    std::cerr << "CUDA Check: " << cudaGetErrorString(code) << " File: " << file
+              << " Line: " << line << std::endl;
+    abort();
 #else
-        std::ostringstream oss;
-        oss << "CUDA Check: " << cudaGetErrorString(code) << " File: " << file << " Line: " << line;
-        throw std::runtime_error(oss.str());
+    std::ostringstream oss;
+    oss << "CUDA Check: " << cudaGetErrorString(code) << " File: " << file
+        << " Line: " << line;
+    throw std::runtime_error(oss.str());
 #endif
-    }
+  }
 }
 #undef ERROR_CHECK_C_LIKE
 
@@ -115,44 +115,48 @@ __host__ inline void cudaCheck(cudaError_t code, const char *file, int line)
 #ifndef HIPIFLY
 
 #if defined(__CUDACC__) // NVCC
-    #define CUDA_ALIGN(n) __align__(n)
+#define CUDA_ALIGN(n) __align__(n)
 #else
-    #define CUDA_ALIGN(n) 
+#define CUDA_ALIGN(n)
 #endif
 
 #else
 
 #if defined(__HIPCC__) // HIPCC
-    #define CUDA_ALIGN(n) __align__(n)
+#define CUDA_ALIGN(n) __align__(n)
 #else
-    #define CUDA_ALIGN(n)
+#define CUDA_ALIGN(n)
 #endif
 
 #endif
-
 
 /////////////////////////////////// CUDA type copy to device
 
 template <typename T>
-__host__ inline T* copyToDevice(T* objectOnHost, cudaStream_t stream = 0){
-    if(objectOnHost == nullptr)throw std::runtime_error("CopyToDevice: can not copy a nullptr to device.");
-    T* ptr = nullptr;
-    cudaErrChk(cudaMalloc(&ptr, sizeof(T)));
-    cudaErrChk(cudaMemcpyAsync(ptr, objectOnHost, sizeof(T), cudaMemcpyDefault, stream));
+__host__ inline T* copyToDevice(T* objectOnHost, cudaStream_t stream = 0) {
+  if (objectOnHost == nullptr)
+    throw std::runtime_error("CopyToDevice: can not copy a nullptr to device.");
+  T* ptr = nullptr;
+  cudaErrChk(cudaMalloc(&ptr, sizeof(T)));
+  cudaErrChk(
+      cudaMemcpyAsync(ptr, objectOnHost, sizeof(T), cudaMemcpyDefault, stream));
 
-    cudaErrChk(cudaStreamSynchronize(stream));
-    return ptr;
+  cudaErrChk(cudaStreamSynchronize(stream));
+  return ptr;
 }
 
 template <typename T>
-__host__ inline T* copyArrayToDevice(T* objectOnHost, int numberOfElement, cudaStream_t stream = 0){
-    if(objectOnHost == nullptr)throw std::runtime_error("CopyToDevice: can not copy a nullptr to device.");
-    T* ptr = nullptr;
-    cudaErrChk(cudaMalloc(&ptr, numberOfElement * sizeof(T)));
-    cudaErrChk(cudaMemcpyAsync(ptr, objectOnHost, numberOfElement * sizeof(T), cudaMemcpyDefault, stream));
+__host__ inline T* copyArrayToDevice(T* objectOnHost, int numberOfElement,
+                                     cudaStream_t stream = 0) {
+  if (objectOnHost == nullptr)
+    throw std::runtime_error("CopyToDevice: can not copy a nullptr to device.");
+  T* ptr = nullptr;
+  cudaErrChk(cudaMalloc(&ptr, numberOfElement * sizeof(T)));
+  cudaErrChk(cudaMemcpyAsync(ptr, objectOnHost, numberOfElement * sizeof(T),
+                             cudaMemcpyDefault, stream));
 
-    cudaErrChk(cudaStreamSynchronize(stream));
-    return ptr;
+  cudaErrChk(cudaStreamSynchronize(stream));
+  return ptr;
 }
 
 ////////////////////////////////// One dimenstion to high dim index
@@ -167,9 +171,10 @@ __host__ inline T* copyArrayToDevice(T* objectOnHost, int numberOfElement, cudaS
  * @param index3 Index along the third dimension.
  * @return Flattened row-major index.
  */
-__host__ __device__ inline uint32_t toOneDimIndex(uint32_t dim1, uint32_t dim2, uint32_t dim3,
-                                     uint32_t index1, uint32_t index2, uint32_t index3){
-    return (index1*dim2*dim3 + index2*dim3 + index3);
+__host__ __device__ inline uint32_t
+toOneDimIndex(uint32_t dim1, uint32_t dim2, uint32_t dim3, uint32_t index1,
+              uint32_t index2, uint32_t index3) {
+  return (index1 * dim2 * dim3 + index2 * dim3 + index3);
 }
 
 /**
@@ -184,52 +189,52 @@ __host__ __device__ inline uint32_t toOneDimIndex(uint32_t dim1, uint32_t dim2, 
  * @param index4 Index along the fourth dimension.
  * @return Flattened row-major index.
  */
-__host__ __device__ inline uint32_t toOneDimIndex(uint32_t dim1, uint32_t dim2, uint32_t dim3, uint32_t dim4,
-                                         uint32_t index1, uint32_t index2, uint32_t index3, uint32_t index4){
-    return (index1*dim2*dim3*dim4 + index2*dim3*dim4 + index3*dim4 + index4);
+__host__ __device__ inline uint32_t
+toOneDimIndex(uint32_t dim1, uint32_t dim2, uint32_t dim3, uint32_t dim4,
+              uint32_t index1, uint32_t index2, uint32_t index3,
+              uint32_t index4) {
+  return (index1 * dim2 * dim3 * dim4 + index2 * dim3 * dim4 + index3 * dim4 +
+          index4);
 }
 
 ////////////////////////////////// Pinned memory allocation
 
-__host__ inline void* allocateHostPinnedMem(size_t typeSize, size_t num){
-    void* ptr = nullptr;
-    cudaErrChk(cudaHostAlloc(&ptr, typeSize*num, cudaHostAllocDefault));
-    return ptr;
+__host__ inline void* allocateHostPinnedMem(size_t typeSize, size_t num) {
+  void* ptr = nullptr;
+  cudaErrChk(cudaHostAlloc(&ptr, typeSize * num, cudaHostAllocDefault));
+  return ptr;
+}
+
+template <typename T, typename... Args> T* newHostPinnedObject(Args... args) {
+  T* ptr = (T*)allocateHostPinnedMem(sizeof(T), 1);
+  return new (ptr) T(std::forward<Args>(args)...);
 }
 
 template <typename T, typename... Args>
-T* newHostPinnedObject(Args... args){
-    T* ptr = (T*)allocateHostPinnedMem(sizeof(T), 1);
-    return new(ptr) T(std::forward<Args>(args)...);
+T* newHostPinnedObjectArray(size_t num, Args... args) {
+  T* ptr = (T*)allocateHostPinnedMem(sizeof(T), num);
+  for (size_t i = 0; i < num; i++) {
+    new (ptr + i) T(std::forward<Args>(args)...);
+  }
+  return ptr;
 }
 
-template <typename T, typename... Args>
-T* newHostPinnedObjectArray(size_t num, Args... args){
-    T* ptr = (T*)allocateHostPinnedMem(sizeof(T), num);
-    for(size_t i = 0; i < num; i++){
-        new(ptr + i) T(std::forward<Args>(args)...);
-    }
-    return ptr;
+template <typename T> void deleteHostPinnedObject(T* ptr) {
+  ptr->~T();
+  cudaErrChk(cudaFreeHost(ptr));
 }
 
-template <typename T>
-void deleteHostPinnedObject(T* ptr){
-    ptr->~T();
-    cudaErrChk(cudaFreeHost(ptr));
-}
-
-template <typename T>
-void deleteHostPinnedObjectArray(T* ptr, size_t num){
-    for(size_t i = 0; i < num; i++){
-        (ptr + i)->~T();
-    }
-    cudaErrChk(cudaFreeHost(ptr));
+template <typename T> void deleteHostPinnedObjectArray(T* ptr, size_t num) {
+  for (size_t i = 0; i < num; i++) {
+    (ptr + i)->~T();
+  }
+  cudaErrChk(cudaFreeHost(ptr));
 }
 
 ////////////////////////////////// Round up to
 template <typename T>
 __host__ __device__ inline T getGridSize(T threadNum, T blockSize) {
-    return ((threadNum + blockSize - 1) / blockSize);
+  return ((threadNum + blockSize - 1) / blockSize);
 }
 
-#endif
+#endif // CUDA_TYPE_DEF_CUH

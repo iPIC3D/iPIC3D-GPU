@@ -1,6 +1,5 @@
-#ifndef _HIPIFLY_HPP_
-#define _HIPIFLY_HPP_
-
+#ifndef HIPIFLY_HPP
+#define HIPIFLY_HPP
 
 // Error Handling
 #define cudaError_t hipError_t
@@ -33,7 +32,9 @@
 #define cudaHostUnregister hipHostUnregister
 #define cudaMemsetAsync hipMemsetAsync
 #define cudaFreeAsync hipFreeAsync
-#define cudaMallocHost hipHostMalloc // hipMallocHost is deprecated, and there is no cudaHostMalloc but cudaHostAlloc
+#define cudaMallocHost                                                         \
+  hipHostMalloc // hipMallocHost is deprecated, and there is no cudaHostMalloc
+                // but cudaHostAlloc
 
 // Memory Query
 #define cudaMemGetInfo hipMemGetInfo
@@ -83,7 +84,6 @@
 // hipLaunchKernelGGL is a different HIP-specific API — do NOT use it here.
 #define cudaLaunchKernel hipLaunchKernel
 
-
 // Memory Info
 #define cudaMemGetInfo hipMemGetInfo
 
@@ -98,12 +98,10 @@
 
 // cuRAND → hipRAND
 #define curandStatePhilox4_32_10_t hiprandStatePhilox4_32_10_t
-#define curand_init              hiprand_init
-#define curand_normal_double     hiprand_normal_double
-#define curand_uniform_double    hiprand_uniform_double
-#define curand_normal            hiprand_normal
-#define curand_uniform           hiprand_uniform
+#define curand_init hiprand_init
+#define curand_normal_double hiprand_normal_double
+#define curand_uniform_double hiprand_uniform_double
+#define curand_normal hiprand_normal
+#define curand_uniform hiprand_uniform
 
-
-
-#endif
+#endif // HIPIFLY_HPP

@@ -13,9 +13,9 @@
 #ifndef RESTART_READER_H
 #define RESTART_READER_H
 
-#include "arraysfwd.h"        // arr3_double, array4_double
-#include "aligned_vector.h"   // vector_double, vector_cudaPclType_ID
 #include "RestartSlotManager.h"
+#include "aligned_vector.h" // vector_double, vector_cudaPclType_ID
+#include "arraysfwd.h"      // arr3_double, array4_double
 #include <string>
 
 // Forward declarations
@@ -25,88 +25,83 @@ typedef Grid3DCU Grid;
 
 class RestartReader {
 public:
+  // ---------------------------------------------------------------
+  // Static helpers (usable before IOManager / RestartReader exist)
+  // ---------------------------------------------------------------
 
-    // ---------------------------------------------------------------
-    // Static helpers (usable before IOManager / RestartReader exist)
-    // ---------------------------------------------------------------
+  /**
+   * @brief Resolve the checkpoint directory and cycle label to read.
+   *
+   * Restart layouts use RestartDirName/restart_A or restart_B plus
+   * latest_restart.json metadata. Older flat restart layouts are not
+   * supported.
+   *
+   * @param restartDir  User-provided restart root directory.
+   * @return            Checkpoint metadata, including the directory that
+   *                    contains rank-local restart files.
+   */
+  static RestartCheckpoint
+  resolveLatestCheckpoint(const std::string& restartDir);
 
-    /**
-     * @brief Resolve the checkpoint directory and cycle label to read.
-     *
-     * Restart layouts use RestartDirName/restart_A or restart_B plus
-     * latest_restart.json metadata. Older flat restart layouts are not
-     * supported.
-     *
-     * @param restartDir  User-provided restart root directory.
-     * @return            Checkpoint metadata, including the directory that
-     *                    contains rank-local restart files.
-     */
-    static RestartCheckpoint resolveLatestCheckpoint(
-        const std::string& restartDir);
+  // ---------------------------------------------------------------
+  // Field restart
+  // ---------------------------------------------------------------
 
-    // ---------------------------------------------------------------
-    // Field restart
-    // ---------------------------------------------------------------
+  /**
+   * @brief Read EM fields (B, E) and species densities from a restart file.
+   *
+   * ADIOS2 and HDF5 backends both store active-node data only and place it
+   * into the guarded node arrays at offset [1][1][1]. Ghost nodes are
+   * rebuilt by the field communication step after restart loading.
+   *
+   * @param vct         Cartesian topology (provides rank).
+   * @param grid        Local grid (provides NXN, NYN, NZN).
+   * @param Bxn,Byn,Bzn Magnetic field node arrays (output).
+   * @param Ex,Ey,Ez    Electric field node arrays (output).
+   * @param rhons       Species density array (output).
+   * @param ns          Number of species.
+   * @param restartDir  Path to the selected restart slot directory.
+   * @param last_cycle  Expected restart cycle label (validated against file).
+   */
+  static void readFields(const VCtopology3D* vct, const Grid* grid,
+                         arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
+                         arr3_double Ex, arr3_double Ey, arr3_double Ez,
+                         array4_double* rhons, int ns,
+                         const std::string& restartDir, int last_cycle);
 
-    /**
-     * @brief Read EM fields (B, E) and species densities from a restart file.
-     *
-     * ADIOS2 and HDF5 backends both store active-node data only and place it
-     * into the guarded node arrays at offset [1][1][1]. Ghost nodes are
-     * rebuilt by the field communication step after restart loading.
-     *
-     * @param vct         Cartesian topology (provides rank).
-     * @param grid        Local grid (provides NXN, NYN, NZN).
-     * @param Bxn,Byn,Bzn Magnetic field node arrays (output).
-     * @param Ex,Ey,Ez    Electric field node arrays (output).
-     * @param rhons       Species density array (output).
-     * @param ns          Number of species.
-     * @param restartDir  Path to the selected restart slot directory.
-     * @param last_cycle  Expected restart cycle label (validated against file).
-     */
-    static void readFields(
-        const VCtopology3D* vct,
-        const Grid* grid,
-        arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
-        arr3_double Ex,  arr3_double Ey,  arr3_double Ez,
-        array4_double* rhons, int ns,
-        const std::string& restartDir, int last_cycle);
+  // ---------------------------------------------------------------
+  // Particle restart
+  // ---------------------------------------------------------------
 
-    // ---------------------------------------------------------------
-    // Particle restart
-    // ---------------------------------------------------------------
-
-    /**
-     * @brief Read particle data (position, velocity, charge, optional ID) from
-     *        a restart file.
-     *
-     * ADIOS2 backend: reads from restart_<rank>.bp (variables named
-     *   part<i>PositionX, etc.).
-     * HDF5 backend: reads from restart<rank>.hdf (datasets under
-     *   /particles/species_<i>/{x,y,z,u,v,w,q[,ID]}/cycle_N).
-     *
-     * Vectors are resized to the particle count found in the file,
-     * with capacity rounded up to DVECWIDTH.
-     *
-     * @param vct             Cartesian topology (provides rank).
-     * @param species_number  Species index.
-     * @param u,v,w           Velocity components (output).
-     * @param q               Charge per particle (output).
-     * @param x,y,z           Position components (output).
-     * @param id              Particle ID field (output when trackParticleID).
-     * @param trackParticleID Read particle IDs from the checkpoint.
-     * @param restartDir      Path to the selected restart slot directory.
-     * @param last_cycle      Expected restart cycle label.
-     */
-    static void readParticles(
-        const VCtopology3D* vct,
-        int species_number,
-        vector_double& u, vector_double& v, vector_double& w,
-        vector_double& q,
-        vector_double& x, vector_double& y, vector_double& z,
-        vector_cudaPclType_ID& id,
-        bool trackParticleID,
-        const std::string& restartDir, int last_cycle);
+  /**
+   * @brief Read particle data (position, velocity, charge, optional ID) from
+   *        a restart file.
+   *
+   * ADIOS2 backend: reads from restart_<rank>.bp (variables named
+   *   part<i>PositionX, etc.).
+   * HDF5 backend: reads from restart<rank>.hdf (datasets under
+   *   /particles/species_<i>/{x,y,z,u,v,w,q[,ID]}/cycle_N).
+   *
+   * Vectors are resized to the particle count found in the file,
+   * with capacity rounded up to DVECWIDTH.
+   *
+   * @param vct             Cartesian topology (provides rank).
+   * @param species_number  Species index.
+   * @param u,v,w           Velocity components (output).
+   * @param q               Charge per particle (output).
+   * @param x,y,z           Position components (output).
+   * @param id              Particle ID field (output when trackParticleID).
+   * @param trackParticleID Read particle IDs from the checkpoint.
+   * @param restartDir      Path to the selected restart slot directory.
+   * @param last_cycle      Expected restart cycle label.
+   */
+  static void readParticles(const VCtopology3D* vct, int species_number,
+                            vector_double& u, vector_double& v,
+                            vector_double& w, vector_double& q,
+                            vector_double& x, vector_double& y,
+                            vector_double& z, vector_cudaPclType_ID& id,
+                            bool trackParticleID, const std::string& restartDir,
+                            int last_cycle);
 };
 
 #endif // RESTART_READER_H

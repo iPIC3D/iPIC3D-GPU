@@ -1,43 +1,41 @@
-// taken from https://fs.hlrs.de/projects/craydoc/docs/books/S-2490-40/html-S-2490-40/chapter-sc4rx058-brbethke-paralleliowithmpi.html
+// taken from
+// https://fs.hlrs.de/projects/craydoc/docs/books/S-2490-40/html-S-2490-40/chapter-sc4rx058-brbethke-paralleliowithmpi.html
 /* Include Files */
-#include <unistd.h>
-#include <stdlib.h>
-#include <stdio.h>
 #include "mpi.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 /* For this self-contained example, the following macros are defined.
  * They can be defined with different values here. Or the example could
  * be expanded to take any of these as command line arguments. Of course
  * a real application would have its own set of variables and values. */
-#define MY_INPUT_FILE "my_input"   /* name of input datafile */
-#define MY_RESULTS_FILE "my_results" /* name of output results file */
+#define MY_INPUT_FILE "my_input"           /* name of input datafile */
+#define MY_RESULTS_FILE "my_results"       /* name of output results file */
 #define MY_CHECKPOINT_FILE "my_checkpoint" /* name of checkpoint file */
-#define LOCAL_SIZE 1000000L     /* size of local array in ints */
-#define STRIPE_COUNT "8"       /* must be an ascii string */
-#define STRIPE_SIZE "1048576"    /* must be an ascii string */
-#define X_DIM 30000         /* size of 1st dimension */
-#define Y_DIM 20000         /* size of 2nd dimension, if any */
-#define Z_DIM 10000         /* size of 3rd dimension, if any */
+#define LOCAL_SIZE 1000000L                /* size of local array in ints */
+#define STRIPE_COUNT "8"                   /* must be an ascii string */
+#define STRIPE_SIZE "1048576"              /* must be an ascii string */
+#define X_DIM 30000                        /* size of 1st dimension */
+#define Y_DIM 20000                        /* size of 2nd dimension, if any */
+#define Z_DIM 10000                        /* size of 3rd dimension, if any */
 
-
-int
-create_my_input_file(char *file_name, int local_size, int init_value,
-    int my_rank, int comm_size)
-{
+int create_my_input_file(char* file_name, int local_size, int init_value,
+                         int my_rank, int comm_size) {
   MPI_File fh;
   MPI_Info info;
 
-  int *local_array;
+  int* local_array;
   int size;
   int rc;
   int i;
-  double t0,t1;
+  double t0, t1;
 
   /* Delete any existing file so striping can be set. Striping cannot
    * be changed on an existing file. */
   rc = MPI_File_delete(file_name, MPI_INFO_NULL);
 
-  /* Create a local array that will contain this process's data. 
+  /* Create a local array that will contain this process's data.
    * In this case, every local array is the same size, though that
    * is not necessary for collective I/O to work. */
   local_array = (int*)malloc((size_t)(local_size * sizeof(int)));
@@ -56,17 +54,17 @@ create_my_input_file(char *file_name, int local_size, int init_value,
   MPI_Info_create(&info);
   MPI_Info_set(info, "striping_factor", STRIPE_COUNT);
   MPI_Info_set(info, "striping_unit", STRIPE_SIZE);
-// MPI_Info_set(info, "romio_cb_write", "disable");
+  // MPI_Info_set(info, "romio_cb_write", "disable");
 
   /* All processes in the application open the file. The info object
    * sets the striping information for the file. */
   MPI_Barrier(MPI_COMM_WORLD);
   t0 = MPI_Wtime();
-  rc = MPI_File_open(MPI_COMM_WORLD, file_name,
-      MPI_MODE_CREATE | MPI_MODE_RDWR, info, &fh);
+  rc = MPI_File_open(MPI_COMM_WORLD, file_name, MPI_MODE_CREATE | MPI_MODE_RDWR,
+                     info, &fh);
 
   /* The return code will be MPI_SUCCESS if the open was successful.
-   * There are a number of options for handling unsuccessful calls. 
+   * There are a number of options for handling unsuccessful calls.
    * We will return a negative status for the caller to handle. */
   if (rc != MPI_SUCCESS) {
     return -1;
@@ -75,9 +73,9 @@ create_my_input_file(char *file_name, int local_size, int init_value,
   /* Write the file as a collective call, with every process writing
    * a part of the file. */
   rc = MPI_File_set_view(fh, my_rank * (MPI_Offset)local_size * sizeof(int),
-      MPI_INT, MPI_INT, "native", info);
+                         MPI_INT, MPI_INT, "native", info);
   rc = MPI_File_write_all(fh, local_array, local_size, MPI_INT,
-      MPI_STATUS_IGNORE);
+                          MPI_STATUS_IGNORE);
   if (rc != MPI_SUCCESS) {
     return -1;
   }
@@ -91,19 +89,17 @@ create_my_input_file(char *file_name, int local_size, int init_value,
   /* Print file creation information. */
   if (my_rank == 0) {
     MPI_Offset size = comm_size * (MPI_Offset)LOCAL_SIZE * sizeof(int);
-    double time = t1-t0;
-    double mibps = (size/time)/1048576.0;
+    double time = t1 - t0;
+    double mibps = (size / time) / 1048576.0;
     printf("input data file '%s' created;\n"
-        " file_size=%ld create_time=%f6.2 MiB/sec=%f\n",
-        MY_INPUT_FILE, size, time, mibps);
+           " file_size=%ld create_time=%f6.2 MiB/sec=%f\n",
+           MY_INPUT_FILE, size, time, mibps);
   }
 
   return 0;
 }
 
-
-int main(int argc, char **argv)
-{
+int main(int argc, char** argv) {
   MPI_Aint lb, extent;
   MPI_Datatype etype, memtype, filetype, contig;
   MPI_Offset disp;
@@ -113,12 +109,12 @@ int main(int argc, char **argv)
   int buf[LOCAL_SIZE];
   int my_rank;
   int comm_size;
-  double t0,t1;
+  double t0, t1;
   int stripe_count;
   int init_value;
   int rc;
 
-  /* MPI Initialization */  
+  /* MPI Initialization */
   MPI_Init(&argc, &argv);
   MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
   MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
@@ -126,8 +122,8 @@ int main(int argc, char **argv)
   /* A real application would likely already have an input data file
    * but for a self-contained example, we will create one and close it. */
   init_value = my_rank * LOCAL_SIZE;
-  rc = create_my_input_file(MY_INPUT_FILE, LOCAL_SIZE, init_value,
-      my_rank, comm_size);
+  rc = create_my_input_file(MY_INPUT_FILE, LOCAL_SIZE, init_value, my_rank,
+                            comm_size);
   if (rc != 0) {
     fprintf(stderr, "could not create input file\n");
     MPI_Abort(MPI_COMM_WORLD, 1);
@@ -140,8 +136,8 @@ int main(int argc, char **argv)
 
   /* Open the input data file. */
 
-  rc = MPI_File_open(MPI_COMM_WORLD, MY_INPUT_FILE, MPI_MODE_RDONLY, 
-      info, &in_fh);
+  rc = MPI_File_open(MPI_COMM_WORLD, MY_INPUT_FILE, MPI_MODE_RDONLY, info,
+                     &in_fh);
   if (rc != MPI_SUCCESS) {
     fprintf(stderr, "could not open input file\n");
     MPI_Abort(MPI_COMM_WORLD, 2);
@@ -170,7 +166,7 @@ int main(int argc, char **argv)
   }
   MPI_File_close(&in_fh);
 
-  /* Compute. This is where you do your science. In this simple 
+  /* Compute. This is where you do your science. In this simple
    * example, we will just check that the input was read correctly and
    * then multiply by 2. */
 
@@ -195,8 +191,8 @@ int main(int argc, char **argv)
   rc = MPI_File_open(MPI_COMM_WORLD, MY_RESULTS_FILE, MPI_MODE_WRONLY |
       MPI_MODE_CREATE, MPI_INFO_NULL, &out_fh);
   */
-  rc = MPI_File_open(MPI_COMM_WORLD, MY_RESULTS_FILE, MPI_MODE_WRONLY |
-      MPI_MODE_CREATE, results_info, &out_fh);
+  rc = MPI_File_open(MPI_COMM_WORLD, MY_RESULTS_FILE,
+                     MPI_MODE_WRONLY | MPI_MODE_CREATE, results_info, &out_fh);
   if (rc != MPI_SUCCESS) {
     fprintf(stderr, "could not open results file\n");
     MPI_Abort(MPI_COMM_WORLD, 3);
@@ -222,7 +218,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "error writing results file\n");
     MPI_Abort(MPI_COMM_WORLD, 5);
   }
-  
+
   /* Close Files */
   MPI_File_close(&out_fh);
   t1 = MPI_Wtime();
@@ -230,11 +226,11 @@ int main(int argc, char **argv)
   /* Print time info. */
   if (my_rank == 0) {
     MPI_Offset size = comm_size * (MPI_Offset)LOCAL_SIZE * sizeof(int);
-    double time = t1-t0;
-    double mibps = (size/time)/1048576.0;
+    double time = t1 - t0;
+    double mibps = (size / time) / 1048576.0;
     printf("results file '%s' written;\n"
-        " file_size=%ld write_time=%f6.2 MiB/sec=%f\n",
-        MY_RESULTS_FILE, size, time, mibps);
+           " file_size=%ld write_time=%f6.2 MiB/sec=%f\n",
+           MY_RESULTS_FILE, size, time, mibps);
   }
 
   /* MPI Finalize */

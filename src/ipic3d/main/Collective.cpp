@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -18,57 +19,48 @@
  * limitations under the License.
  */
 
-
-#include <mpi.h>
-#include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <cctype>
-#include <sstream>
-#include <vector>
-#include "input_array.h"
 #include "Collective.h"
 #include "ConfigFile.h"
-#include "limits.h" // for INT_MAX
 #include "MPIdata.h"
-#include "debug.h"
-#include "asserts.h" // for assert_ge
-#include "string.h"
 #include "RestartReader.h"
+#include "asserts.h" // for assert_ge
+#include "debug.h"
+#include "input_array.h"
+#include "limits.h" // for INT_MAX
+#include "string.h"
+#include <cctype>
+#include <math.h>
+#include <mpi.h>
+#include <sstream>
+#include <stdio.h>
+#include <stdlib.h>
+#include <vector>
 
 // order must agree with Enum in Collective.h
-static const char *enumNames[] =
-{
-  "default",
-  "initial",
-  "final",
-  // used by ImplSusceptMode
-  "explPredict",
-  "implPredict",
-  // marker for last enumerated symbol of this class
-  "NUMBER_OF_ENUMS",
-  "INVALID_ENUM"
-};
+static const char* enumNames[] = {
+    "default", "initial", "final",
+    // used by ImplSusceptMode
+    "explPredict", "implPredict",
+    // marker for last enumerated symbol of this class
+    "NUMBER_OF_ENUMS", "INVALID_ENUM"};
 
 namespace {
 
-bool parseTrackParticleIDToken(const std::string& token)
-{
+bool parseTrackParticleIDToken(const std::string& token) {
   std::string lower;
   lower.reserve(token.size());
   for (char ch : token)
-    lower.push_back(static_cast<char>(
-        std::tolower(static_cast<unsigned char>(ch))));
+    lower.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
 
-  if (lower == "0" || lower == "false" || lower == "f" ||
-      lower == "no" || lower == "n" || lower == "none")
+  if (lower == "0" || lower == "false" || lower == "f" || lower == "no" ||
+      lower == "n" || lower == "none")
     return false;
   return true;
 }
 
-std::vector<unsigned char> parseTrackParticleIDMask(
-    const ConfigFile& config, int count)
-{
+std::vector<unsigned char> parseTrackParticleIDMask(const ConfigFile& config,
+                                                    int count) {
   std::vector<unsigned char> mask(static_cast<size_t>(count), 0);
   const std::string raw =
       config.read<std::string>("TrackParticleID", std::string());
@@ -92,36 +84,35 @@ std::vector<unsigned char> parseTrackParticleIDMask(
 
 } // namespace
 
-int Collective::read_enum_parameter(const char* option_name, const char* default_value,
-  const ConfigFile& config)
-{
-  string enum_name = config.read < string >(option_name,default_value);
+int Collective::read_enum_parameter(const char* option_name,
+                                    const char* default_value,
+                                    const ConfigFile& config) {
+  string enum_name = config.read<string>(option_name, default_value);
   // search the list (could use std::map)
   //
-  for(int i=0;i<NUMBER_OF_ENUMS;i++)
-  {
-    if(!strcmp(enum_name.c_str(),enumNames[i]))
+  for (int i = 0; i < NUMBER_OF_ENUMS; i++) {
+    if (!strcmp(enum_name.c_str(), enumNames[i]))
       return i;
   }
   // could not find enum, so issue error and quit.
-  if(!MPIdata::get_rank())
-  {
+  if (!MPIdata::get_rank()) {
     eprintf("in input file %s there is an invalid option %s\n",
-      inputfile.c_str(), enum_name.c_str());
+            inputfile.c_str(), enum_name.c_str());
   }
   MPIdata::exit(1);
   // this is a better way
   return INVALID_ENUM;
 }
 
-const char* Collective::get_name_of_enum(int in)
-{
+const char* Collective::get_name_of_enum(int in) {
   assert_ge(in, 0);
   assert_lt(in, NUMBER_OF_ENUMS);
   return enumNames[in];
 }
 
-/*! Read the input file from text file and put the data in a collective wrapper: if it's a restart read from input file basic sim data and load particles and EM field from restart file */
+/*! Read the input file from text file and put the data in a collective wrapper:
+ * if it's a restart read from input file basic sim data and load particles and
+ * EM field from restart file */
 void Collective::ReadInput(string inputfile) {
   ConfigFile config(inputfile);
   ReadInput(config);
@@ -130,105 +121,105 @@ void Collective::ReadInput(string inputfile) {
 void Collective::ReadInput(const ConfigFile& config) {
   using namespace std;
   int test_verbose;
-  // the following variables are ALWAYS taken from inputfile, even if restarting 
+  // the following variables are ALWAYS taken from inputfile, even if restarting
   {
 
 #ifdef BATSRUS
-    if(RESTART1)
-    {
-      cout<<" The fluid interface can not handle RESTART yet, aborting!\n"<<flush;
+    if (RESTART1) {
+      cout << " The fluid interface can not handle RESTART yet, aborting!\n"
+           << flush;
       abort();
     }
 #endif
 
-    dt = config.read < double >("dt");
-    ncycles = config.read < int >("ncycles");
-    th = config.read < double >("th",1.0);
+    dt = config.read<double>("dt");
+    ncycles = config.read<int>("ncycles");
+    th = config.read<double>("th", 1.0);
 
     // Macrocell sizes for (v_par, v_perp) spectra data analysis.
     // Default 0 disables the feature at runtime.
-    MacrocellNx = config.read < int >("MacrocellNx", 0);
-    MacrocellNy = config.read < int >("MacrocellNy", 0);
-    MacrocellNz = config.read < int >("MacrocellNz", 0);
+    MacrocellNx = config.read<int>("MacrocellNx", 0);
+    MacrocellNy = config.read<int>("MacrocellNy", 0);
+    MacrocellNz = config.read<int>("MacrocellNz", 0);
     // Top-level on/off switch for the (v_par,v_perp) spectra pipeline.
     // Default 0 = disabled; set to 1 in the input file to enable.
-    velocitySpectra = config.read < int >("VelocitySpectra", 0);
+    velocitySpectra = config.read<int>("VelocitySpectra", 0);
 
-    Smooth = config.read < double >("Smooth",1.0);
-    SmoothNiter = config.read < int >("SmoothNiter",6);
+    Smooth = config.read<double>("Smooth", 1.0);
+    SmoothNiter = config.read<int>("SmoothNiter", 6);
 
-    SaveDirName = config.read < string > ("SaveDirName","data");
-    RestartDirName = config.read < string > ("RestartDirName","data");
+    SaveDirName = config.read<string>("SaveDirName", "data");
+    RestartDirName = config.read<string>("RestartDirName", "data");
     RestartReadDirName = RestartDirName;
-    ns = config.read < int >("ns");
-    nstestpart = config.read < int >("nsTestPart", 0);
+    ns = config.read<int>("ns");
+    nstestpart = config.read<int>("nsTestPart", 0);
     TrackParticleID = parseTrackParticleIDMask(config, ns + nstestpart);
 
     // Per-species enable mask for the (v_par,v_perp) macrocell spectra.
     // Read as a free-form list ("1 0 1 ..."); missing trailing entries
     // default to 0, extra entries are silently ignored. Default: all off.
     {
-        VelocitySpectraSpecies.assign(ns, 0);
-        const std::string raw = config.read<std::string>("VelocitySpectraSpecies", std::string());
-        std::istringstream iss(raw);
-        for (int s = 0; s < ns; ++s) {
-            int v = 0;
-            if (!(iss >> v)) break;            // run out of tokens -> remaining stay 0
-            VelocitySpectraSpecies[s] = v ? 1 : 0;
-        }
+      VelocitySpectraSpecies.assign(ns, 0);
+      const std::string raw =
+          config.read<std::string>("VelocitySpectraSpecies", std::string());
+      std::istringstream iss(raw);
+      for (int s = 0; s < ns; ++s) {
+        int v = 0;
+        if (!(iss >> v))
+          break; // run out of tokens -> remaining stay 0
+        VelocitySpectraSpecies[s] = v ? 1 : 0;
+      }
     }
-    NpMaxNpRatio = config.read < double >("NpMaxNpRatio",1.5);
+    NpMaxNpRatio = config.read<double>("NpMaxNpRatio", 1.5);
     assert_ge(NpMaxNpRatio, 1.);
     // mode parameters for second order in time
-    PushWithBatTime = config.read < double >("PushWithBatTime",0);
-    PushWithEatTime = config.read < double >("PushWithEatTime",1);
-    ImplSusceptTime = config.read < double >("ImplSusceptTime",0);
-    ImplSusceptMode = read_enum_parameter("ImplSusceptMode", "initial",config);
-    switch(ImplSusceptMode)
-    {
-      // values not yet supported:
-      case explPredict:
-      case implPredict:
-      default:
-        unsupported_value_error(ImplSusceptMode);
-      // supported values:
-      case initial:
-        ;
+    PushWithBatTime = config.read<double>("PushWithBatTime", 0);
+    PushWithEatTime = config.read<double>("PushWithEatTime", 1);
+    ImplSusceptTime = config.read<double>("ImplSusceptTime", 0);
+    ImplSusceptMode = read_enum_parameter("ImplSusceptMode", "initial", config);
+    switch (ImplSusceptMode) {
+    // values not yet supported:
+    case explPredict:
+    case implPredict:
+    default:
+      unsupported_value_error(ImplSusceptMode);
+    // supported values:
+    case initial:;
     }
-    // GEM Challenge 
-    B0x = config.read <double>("B0x",0.0);
-    B0y = config.read <double>("B0y",0.0);
-    B0z = config.read <double>("B0z",0.0);
+    // GEM Challenge
+    B0x = config.read<double>("B0x", 0.0);
+    B0y = config.read<double>("B0y", 0.0);
+    B0z = config.read<double>("B0z", 0.0);
 
     // Earth parameters
     B1x = 0.0;
     B1y = 0.0;
     B1z = 0.0;
-    B1x = config.read <double>("B1x",0.0);
-    B1y = config.read <double>("B1y",0.0);
-    B1z = config.read <double>("B1z",0.0);
+    B1x = config.read<double>("B1x", 0.0);
+    B1y = config.read<double>("B1y", 0.0);
+    B1z = config.read<double>("B1z", 0.0);
 
-    delta = config.read < double >("delta",0.5);
+    delta = config.read<double>("delta", 0.5);
 
-    pertGEM           = config.read<double>("pertGEM",    0.0);
-    pertHump          = config.read<double>("pertHump",   0.0);
-    deltaxHump        = config.read<double>("deltaxHump", 8.0);
-    deltayHump        = config.read<double>("deltayHump", 4.0);
-    kxHump            = config.read<double>("kxHump",     -1.0);
-    kyHump            = config.read<double>("kyHump",     -1.0);
+    pertGEM = config.read<double>("pertGEM", 0.0);
+    pertHump = config.read<double>("pertHump", 0.0);
+    deltaxHump = config.read<double>("deltaxHump", 8.0);
+    deltayHump = config.read<double>("deltayHump", 4.0);
+    kxHump = config.read<double>("kxHump", -1.0);
+    kyHump = config.read<double>("kyHump", -1.0);
     currentFromAmpere = config.read<int>("currentFromAmpere", 0);
     spatiallyVaryingThermal = config.read<int>("spatiallyVaryingThermal", 0);
 
-    Case              = config.read<string>("Case");
-    wmethod           = config.read<string>("WriteMethod");
-    SimName           = config.read<string>("SimulationName");
-    PoissonCorrection = config.read<string>("PoissonCorrection","no");
-    PoissonCorrectionCycle = config.read<int>("PoissonCorrectionCycle",10);
-    divBCorrection = config.read<string>("divBCorrection","no");
-    divBCorrectionCycle = config.read<int>("divBCorrectionCycle",10);
+    Case = config.read<string>("Case");
+    wmethod = config.read<string>("WriteMethod");
+    SimName = config.read<string>("SimulationName");
+    PoissonCorrection = config.read<string>("PoissonCorrection", "no");
+    PoissonCorrectionCycle = config.read<int>("PoissonCorrectionCycle", 10);
+    divBCorrection = config.read<string>("divBCorrection", "no");
+    divBCorrectionCycle = config.read<int>("divBCorrectionCycle", 10);
 
     rhoINIT = std::make_unique<double[]>(ns);
-    array_double rhoINIT0 = config.read < array_double > ("rhoINIT");
+    array_double rhoINIT0 = config.read<array_double>("rhoINIT");
     rhoINIT[0] = rhoINIT0.a;
     if (ns > 1)
       rhoINIT[1] = rhoINIT0.b;
@@ -241,94 +232,98 @@ void Collective::ReadInput(const ConfigFile& config) {
     if (ns > 5)
       rhoINIT[5] = rhoINIT0.f;
 
-    rhoINJECT =std::make_unique<double[]>(ns);
-    array_double rhoINJECT0 = config.read<array_double>( "rhoINJECT" );
-    rhoINJECT[0]=rhoINJECT0.a;
+    rhoINJECT = std::make_unique<double[]>(ns);
+    array_double rhoINJECT0 = config.read<array_double>("rhoINJECT");
+    rhoINJECT[0] = rhoINJECT0.a;
     if (ns > 1)
-      rhoINJECT[1]=rhoINJECT0.b;
+      rhoINJECT[1] = rhoINJECT0.b;
     if (ns > 2)
-      rhoINJECT[2]=rhoINJECT0.c;
+      rhoINJECT[2] = rhoINJECT0.c;
     if (ns > 3)
-      rhoINJECT[3]=rhoINJECT0.d;
+      rhoINJECT[3] = rhoINJECT0.d;
     if (ns > 4)
-      rhoINJECT[4]=rhoINJECT0.e;
+      rhoINJECT[4] = rhoINJECT0.e;
     if (ns > 5)
-      rhoINJECT[5]=rhoINJECT0.f;
+      rhoINJECT[5] = rhoINJECT0.f;
 
     // take the tolerance of the solvers
-    CGtol = config.read < double >("CGtol",1e-3);
-    GMREStol = config.read < double >("GMREStol",1e-3);
-    NiterMover = config.read < int >("NiterMover",3);
+    CGtol = config.read<double>("CGtol", 1e-3);
+    GMREStol = config.read<double>("GMREStol", 1e-3);
+    NiterMover = config.read<int>("NiterMover", 3);
     // solver selection: "GMRES" (default) or "Chebyshev"
-    SolverType = config.read < string >("SolverType","GMRES");
-    ChebyshevMaxIter = config.read < int >("ChebyshevMaxIter",20);
-    ChebyshevEigMin = config.read < double >("ChebyshevEigMin",0.0);
-    ChebyshevEigMax = config.read < double >("ChebyshevEigMax",0.0);
+    SolverType = config.read<string>("SolverType", "GMRES");
+    ChebyshevMaxIter = config.read<int>("ChebyshevMaxIter", 20);
+    ChebyshevEigMin = config.read<double>("ChebyshevEigMin", 0.0);
+    ChebyshevEigMax = config.read<double>("ChebyshevEigMax", 0.0);
     // Block-Jacobi preconditioner parameters
-    BlockJacobiSweeps = config.read < int >("BlockJacobiSweeps",1);
-    BlockJacobiOmega = config.read < double >("BlockJacobiOmega",1.0);
+    BlockJacobiSweeps = config.read<int>("BlockJacobiSweeps", 1);
+    BlockJacobiOmega = config.read<double>("BlockJacobiOmega", 1.0);
     // Poisson Chebyshev preconditioner parameters (divergence cleaning)
-    PoissonChebMaxIter = config.read < int >("PoissonChebMaxIter",10);
-    PoissonChebRescaleEigMin = config.read < double >("PoissonChebRescaleEigMin",1.0);
-    PoissonChebRescaleEigMax = config.read < double >("PoissonChebRescaleEigMax",1.0);
+    PoissonChebMaxIter = config.read<int>("PoissonChebMaxIter", 10);
+    PoissonChebRescaleEigMin =
+        config.read<double>("PoissonChebRescaleEigMin", 1.0);
+    PoissonChebRescaleEigMax =
+        config.read<double>("PoissonChebRescaleEigMax", 1.0);
     // take the injection of the particless
-    Vinj = config.read < double >("Vinj",0.0);
+    Vinj = config.read<double>("Vinj", 0.0);
 
     // take the output cycles
-    FieldOutputCycle = config.read < int >("FieldOutputCycle",100);
-    ParticlesOutputCycle = config.read < int >("ParticlesOutputCycle",0);
-    FieldOutputTag     =   config.read <string>("FieldOutputTag","");
-    ParticlesOutputTag =   config.read <string>("ParticlesOutputTag","");
-    MomentsOutputTag   =   config.read <string>("MomentsOutputTag","");
+    FieldOutputCycle = config.read<int>("FieldOutputCycle", 100);
+    ParticlesOutputCycle = config.read<int>("ParticlesOutputCycle", 0);
+    FieldOutputTag = config.read<string>("FieldOutputTag", "");
+    ParticlesOutputTag = config.read<string>("ParticlesOutputTag", "");
+    MomentsOutputTag = config.read<string>("MomentsOutputTag", "");
     outputConfig_ = parseOutputTags(FieldOutputTag, MomentsOutputTag, ns);
-    TestParticlesOutputCycle = config.read < int >("TestPartOutputCycle",0);
-    testPartFlushCycle = config.read < int >("TestParticlesOutputCycle",10);
-    RestartOutputCycle = config.read < int >("RestartOutputCycle",5000);
-    DiagnosticsOutputCycle = config.read < int >("DiagnosticsOutputCycle", FieldOutputCycle);
-    SortingCycle = config.read < int >("SortingCycle", 0);
-    ParaviewScriptPath     =   config.read <string>("ParaviewScriptPath", "");
-    CallFinalize = config.read < bool >("CallFinalize", true);
+    TestParticlesOutputCycle = config.read<int>("TestPartOutputCycle", 0);
+    testPartFlushCycle = config.read<int>("TestParticlesOutputCycle", 10);
+    RestartOutputCycle = config.read<int>("RestartOutputCycle", 5000);
+    DiagnosticsOutputCycle =
+        config.read<int>("DiagnosticsOutputCycle", FieldOutputCycle);
+    SortingCycle = config.read<int>("SortingCycle", 0);
+    ParaviewScriptPath = config.read<string>("ParaviewScriptPath", "");
+    CallFinalize = config.read<bool>("CallFinalize", true);
   }
 
-  //read everything from input file, if restart is true, overwrite the setting - bug fixing
+  // read everything from input file, if restart is true, overwrite the setting
+  // - bug fixing
 
   restart_status = 0;
   last_cycle = -1;
-  c = config.read < double >("c",1.0);
+  c = config.read<double>("c", 1.0);
 
 #ifdef BATSRUS
   // set grid size and resolution based on the initial file from fluid code
-  Lx =  getFluidLx();
-  Ly =  getFluidLy();
-  Lz =  getFluidLz();
+  Lx = getFluidLx();
+  Ly = getFluidLy();
+  Lz = getFluidLz();
   nxc = getFluidNxc();
   nyc = getFluidNyc();
   nzc = getFluidNzc();
 #else
-  Lx = config.read < double >("Lx",10.0);
-  Ly = config.read < double >("Ly",10.0);
-  Lz = config.read < double >("Lz",10.0);
-  nxc = config.read < int >("nxc",64);
-  nyc = config.read < int >("nyc",64);
-  nzc = config.read < int >("nzc",64);
+  Lx = config.read<double>("Lx", 10.0);
+  Ly = config.read<double>("Ly", 10.0);
+  Lz = config.read<double>("Lz", 10.0);
+  nxc = config.read<int>("nxc", 64);
+  nyc = config.read<int>("nyc", 64);
+  nzc = config.read<int>("nzc", 64);
 #endif
-  XLEN = config.read < int >("XLEN",1);
-  YLEN = config.read < int >("YLEN",1);
-  ZLEN = config.read < int >("ZLEN",1);
-  PERIODICX = config.read < bool >("PERIODICX",true);
-  PERIODICY = config.read < bool >("PERIODICY",true);
-  PERIODICZ = config.read < bool >("PERIODICZ",true);
+  XLEN = config.read<int>("XLEN", 1);
+  YLEN = config.read<int>("YLEN", 1);
+  ZLEN = config.read<int>("ZLEN", 1);
+  PERIODICX = config.read<bool>("PERIODICX", true);
+  PERIODICY = config.read<bool>("PERIODICY", true);
+  PERIODICZ = config.read<bool>("PERIODICZ", true);
 
-  PERIODICX_P = config.read < bool >("PERIODICX_P",PERIODICX);
-  PERIODICY_P = config.read < bool >("PERIODICY_P",PERIODICY);
-  PERIODICZ_P = config.read < bool >("PERIODICZ_P",PERIODICZ);
+  PERIODICX_P = config.read<bool>("PERIODICX_P", PERIODICX);
+  PERIODICY_P = config.read<bool>("PERIODICY_P", PERIODICY);
+  PERIODICZ_P = config.read<bool>("PERIODICZ_P", PERIODICZ);
 
-  x_center_dipole = config.read < double >("x_center_dipole",5.0);
-  y_center_dipole = config.read < double >("y_center_dipole",5.0);
-  z_center_dipole = config.read < double >("z_center_dipole",5.0);
-  x_center_planet = config.read < double >("x_center_planet",5.0);
-  y_center_planet = config.read < double >("y_center_planet",5.0);
-  z_center_planet = config.read < double >("z_center_planet",5.0);
+  x_center_dipole = config.read<double>("x_center_dipole", 5.0);
+  y_center_dipole = config.read<double>("y_center_dipole", 5.0);
+  z_center_dipole = config.read<double>("z_center_dipole", 5.0);
+  x_center_planet = config.read<double>("x_center_planet", 5.0);
+  y_center_planet = config.read<double>("y_center_planet", 5.0);
+  z_center_planet = config.read<double>("z_center_planet", 5.0);
   Planet_radius = config.read<double>("Planet_radius", 5.0);
   if (config.keyExists("L_square")) {
     const bool hasPlanetRadius = config.keyExists("Planet_radius");
@@ -348,40 +343,76 @@ void Collective::ReadInput(const ConfigFile& config) {
   planetReflectionType = config.read<int>("planetReflectionType", 0);
 
   // ── Exosphere / planet species parameters ──
-  numSolarWindSpecies       = config.read<int>("ns_solar_wind", ns);       // default: all species are SW
-  numPlanetarySpecies       = config.read<int>("ns_planetary", 0);        // default: no planetary species
-  enableExosphereInjection  = config.read<int>("AddExosphereInjection", 0); // 0=off, 1=on
-  maxInjectionRadius        = config.read<double>("RmaxExosphereInjection", 3.0);
-  maxExosphereParticlesPerSpecies = config.read<int>("MaxExosphereParticlesPerSpecies", 0); // 0 = unlimited
+  numSolarWindSpecies =
+      config.read<int>("ns_solar_wind", ns); // default: all species are SW
+  numPlanetarySpecies =
+      config.read<int>("ns_planetary", 0); // default: no planetary species
+  enableExosphereInjection =
+      config.read<int>("AddExosphereInjection", 0); // 0=off, 1=on
+  maxInjectionRadius = config.read<double>("RmaxExosphereInjection", 3.0);
+  maxExosphereParticlesPerSpecies =
+      config.read<int>("MaxExosphereParticlesPerSpecies", 0); // 0 = unlimited
 
-  // Allocate arrays for planetary neutral species parameters (at least 1 to avoid null)
+  // Allocate arrays for planetary neutral species parameters (at least 1 to
+  // avoid null)
   const int numNeutralSpecies = std::max(numPlanetarySpecies, 1);
-  neutralSurfaceDensity     = std::make_unique<double[]>(numNeutralSpecies);
-  exosphericScaleHeight     = std::make_unique<double[]>(numNeutralSpecies);
-  photoionizationFrequency  = std::make_unique<double[]>(numNeutralSpecies);
-  macroParticleWeightRatio  = std::make_unique<double[]>(numNeutralSpecies);
+  neutralSurfaceDensity = std::make_unique<double[]>(numNeutralSpecies);
+  exosphericScaleHeight = std::make_unique<double[]>(numNeutralSpecies);
+  photoionizationFrequency = std::make_unique<double[]>(numNeutralSpecies);
+  macroParticleWeightRatio = std::make_unique<double[]>(numNeutralSpecies);
 
   // Initialize to safe defaults
   for (int i = 0; i < numNeutralSpecies; i++) {
-    neutralSurfaceDensity[i]    = 0.0;
-    exosphericScaleHeight[i]    = 1.0;
+    neutralSurfaceDensity[i] = 0.0;
+    exosphericScaleHeight[i] = 1.0;
     photoionizationFrequency[i] = 0.0;
     macroParticleWeightRatio[i] = 1.0;
   }
 
   if (numPlanetarySpecies > 0) {
-    array_double NeutralSurfaceDensity0    = config.read<array_double>("NeutralSurfaceDensity");
-    array_double ExosphericScaleHeight0    = config.read<array_double>("ExosphericScaleHeight");
-    array_double PhotoionizationFrequency0 = config.read<array_double>("PhotoionizationFrequency");
-    array_double MacroParticleWeightRatio0 = config.read<array_double>("MacroParticleWeightRatio");
-    neutralSurfaceDensity[0] = NeutralSurfaceDensity0.a;  exosphericScaleHeight[0] = ExosphericScaleHeight0.a;  photoionizationFrequency[0] = PhotoionizationFrequency0.a;  macroParticleWeightRatio[0] = MacroParticleWeightRatio0.a;
-    if (numPlanetarySpecies > 1) { neutralSurfaceDensity[1] = NeutralSurfaceDensity0.b; exosphericScaleHeight[1] = ExosphericScaleHeight0.b; photoionizationFrequency[1] = PhotoionizationFrequency0.b; macroParticleWeightRatio[1] = MacroParticleWeightRatio0.b; }
-    if (numPlanetarySpecies > 2) { neutralSurfaceDensity[2] = NeutralSurfaceDensity0.c; exosphericScaleHeight[2] = ExosphericScaleHeight0.c; photoionizationFrequency[2] = PhotoionizationFrequency0.c; macroParticleWeightRatio[2] = MacroParticleWeightRatio0.c; }
-    if (numPlanetarySpecies > 3) { neutralSurfaceDensity[3] = NeutralSurfaceDensity0.d; exosphericScaleHeight[3] = ExosphericScaleHeight0.d; photoionizationFrequency[3] = PhotoionizationFrequency0.d; macroParticleWeightRatio[3] = MacroParticleWeightRatio0.d; }
-    if (numPlanetarySpecies > 4) { neutralSurfaceDensity[4] = NeutralSurfaceDensity0.e; exosphericScaleHeight[4] = ExosphericScaleHeight0.e; photoionizationFrequency[4] = PhotoionizationFrequency0.e; macroParticleWeightRatio[4] = MacroParticleWeightRatio0.e; }
-    if (numPlanetarySpecies > 5) { neutralSurfaceDensity[5] = NeutralSurfaceDensity0.f; exosphericScaleHeight[5] = ExosphericScaleHeight0.f; photoionizationFrequency[5] = PhotoionizationFrequency0.f; macroParticleWeightRatio[5] = MacroParticleWeightRatio0.f; }
+    array_double NeutralSurfaceDensity0 =
+        config.read<array_double>("NeutralSurfaceDensity");
+    array_double ExosphericScaleHeight0 =
+        config.read<array_double>("ExosphericScaleHeight");
+    array_double PhotoionizationFrequency0 =
+        config.read<array_double>("PhotoionizationFrequency");
+    array_double MacroParticleWeightRatio0 =
+        config.read<array_double>("MacroParticleWeightRatio");
+    neutralSurfaceDensity[0] = NeutralSurfaceDensity0.a;
+    exosphericScaleHeight[0] = ExosphericScaleHeight0.a;
+    photoionizationFrequency[0] = PhotoionizationFrequency0.a;
+    macroParticleWeightRatio[0] = MacroParticleWeightRatio0.a;
+    if (numPlanetarySpecies > 1) {
+      neutralSurfaceDensity[1] = NeutralSurfaceDensity0.b;
+      exosphericScaleHeight[1] = ExosphericScaleHeight0.b;
+      photoionizationFrequency[1] = PhotoionizationFrequency0.b;
+      macroParticleWeightRatio[1] = MacroParticleWeightRatio0.b;
+    }
+    if (numPlanetarySpecies > 2) {
+      neutralSurfaceDensity[2] = NeutralSurfaceDensity0.c;
+      exosphericScaleHeight[2] = ExosphericScaleHeight0.c;
+      photoionizationFrequency[2] = PhotoionizationFrequency0.c;
+      macroParticleWeightRatio[2] = MacroParticleWeightRatio0.c;
+    }
+    if (numPlanetarySpecies > 3) {
+      neutralSurfaceDensity[3] = NeutralSurfaceDensity0.d;
+      exosphericScaleHeight[3] = ExosphericScaleHeight0.d;
+      photoionizationFrequency[3] = PhotoionizationFrequency0.d;
+      macroParticleWeightRatio[3] = MacroParticleWeightRatio0.d;
+    }
+    if (numPlanetarySpecies > 4) {
+      neutralSurfaceDensity[4] = NeutralSurfaceDensity0.e;
+      exosphericScaleHeight[4] = ExosphericScaleHeight0.e;
+      photoionizationFrequency[4] = PhotoionizationFrequency0.e;
+      macroParticleWeightRatio[4] = MacroParticleWeightRatio0.e;
+    }
+    if (numPlanetarySpecies > 5) {
+      neutralSurfaceDensity[5] = NeutralSurfaceDensity0.f;
+      exosphericScaleHeight[5] = ExosphericScaleHeight0.f;
+      photoionizationFrequency[5] = PhotoionizationFrequency0.f;
+      macroParticleWeightRatio[5] = MacroParticleWeightRatio0.f;
+    }
   }
-
 
   uth = std::make_unique<double[]>(ns);
   vth = std::make_unique<double[]>(ns);
@@ -390,12 +421,12 @@ void Collective::ReadInput(const ConfigFile& config) {
   v0 = std::make_unique<double[]>(ns);
   w0 = std::make_unique<double[]>(ns);
 
-  array_double uth0 = config.read < array_double > ("uth");
-  array_double vth0 = config.read < array_double > ("vth");
-  array_double wth0 = config.read < array_double > ("wth");
-  array_double u00 = config.read < array_double > ("u0");
-  array_double v00 = config.read < array_double > ("v0");
-  array_double w00 = config.read < array_double > ("w0");
+  array_double uth0 = config.read<array_double>("uth");
+  array_double vth0 = config.read<array_double>("vth");
+  array_double wth0 = config.read<array_double>("wth");
+  array_double u00 = config.read<array_double>("u0");
+  array_double v00 = config.read<array_double>("v0");
+  array_double w00 = config.read<array_double>("w0");
 
   uth[0] = uth0.a;
   vth[0] = vth0.a;
@@ -445,149 +476,145 @@ void Collective::ReadInput(const ConfigFile& config) {
   }
 
   if (nstestpart > 0) {
-		array_double pitch_angle0 = config.read < array_double > ("pitch_angle");
-		array_double energy0 	  = config.read < array_double > ("energy");
-		pitch_angle = std::make_unique<double[]>(nstestpart);
-		energy      = std::make_unique<double[]>(nstestpart);
-		if (nstestpart > 0) {
-			pitch_angle[0] = pitch_angle0.a;
-			energy[0] 	   = energy0.a;
-		}
-		if (nstestpart > 1) {
-			pitch_angle[1] = pitch_angle0.b;
-			energy[1] 	   = energy0.b;
-		}
-		if (nstestpart > 2) {
-			pitch_angle[2] = pitch_angle0.c;
-			energy[2] 	   = energy0.c;
-		}
-		if (nstestpart > 3) {
-			pitch_angle[3] = pitch_angle0.d;
-			energy[3] 	   = energy0.d;
-		}
-		if (nstestpart > 4) {
-			pitch_angle[4] = pitch_angle0.e;
-			energy[4] 	   = energy0.e;
-		}
-		if (nstestpart > 5) {
-			pitch_angle[5] = pitch_angle0.f;
-			energy[5] 	   = energy0.f;
-		}
-		if (nstestpart > 6) {
-			pitch_angle[6] = pitch_angle0.g;
-			energy[6] 	   = energy0.g;
-		}
-		if (nstestpart > 7) {
-			pitch_angle[7] = pitch_angle0.h;
-			energy[7] 	   = energy0.h;
-		}
+    array_double pitch_angle0 = config.read<array_double>("pitch_angle");
+    array_double energy0 = config.read<array_double>("energy");
+    pitch_angle = std::make_unique<double[]>(nstestpart);
+    energy = std::make_unique<double[]>(nstestpart);
+    if (nstestpart > 0) {
+      pitch_angle[0] = pitch_angle0.a;
+      energy[0] = energy0.a;
+    }
+    if (nstestpart > 1) {
+      pitch_angle[1] = pitch_angle0.b;
+      energy[1] = energy0.b;
+    }
+    if (nstestpart > 2) {
+      pitch_angle[2] = pitch_angle0.c;
+      energy[2] = energy0.c;
+    }
+    if (nstestpart > 3) {
+      pitch_angle[3] = pitch_angle0.d;
+      energy[3] = energy0.d;
+    }
+    if (nstestpart > 4) {
+      pitch_angle[4] = pitch_angle0.e;
+      energy[4] = energy0.e;
+    }
+    if (nstestpart > 5) {
+      pitch_angle[5] = pitch_angle0.f;
+      energy[5] = energy0.f;
+    }
+    if (nstestpart > 6) {
+      pitch_angle[6] = pitch_angle0.g;
+      energy[6] = energy0.g;
+    }
+    if (nstestpart > 7) {
+      pitch_angle[7] = pitch_angle0.h;
+      energy[7] = energy0.h;
+    }
   }
 
-
-  npcelx = std::make_unique<int[]>(ns+nstestpart);
-  npcely = std::make_unique<int[]>(ns+nstestpart);
-  npcelz = std::make_unique<int[]>(ns+nstestpart);
-  qom = std::make_unique<double[]>(ns+nstestpart);
-  array_int npcelx0 = config.read < array_int > ("npcelx");
-  array_int npcely0 = config.read < array_int > ("npcely");
-  array_int npcelz0 = config.read < array_int > ("npcelz");
-  array_double qom0 = config.read < array_double > ("qom");
+  npcelx = std::make_unique<int[]>(ns + nstestpart);
+  npcely = std::make_unique<int[]>(ns + nstestpart);
+  npcelz = std::make_unique<int[]>(ns + nstestpart);
+  qom = std::make_unique<double[]>(ns + nstestpart);
+  array_int npcelx0 = config.read<array_int>("npcelx");
+  array_int npcely0 = config.read<array_int>("npcely");
+  array_int npcelz0 = config.read<array_int>("npcelz");
+  array_double qom0 = config.read<array_double>("qom");
   npcelx[0] = npcelx0.a;
   npcely[0] = npcely0.a;
   npcelz[0] = npcelz0.a;
-  qom[0]	  = qom0.a;
-  int ns_tot =ns+nstestpart;
+  qom[0] = qom0.a;
+  int ns_tot = ns + nstestpart;
   if (ns_tot > 1) {
     npcelx[1] = npcelx0.b;
     npcely[1] = npcely0.b;
     npcelz[1] = npcelz0.b;
-    qom[1]	= qom0.b;
+    qom[1] = qom0.b;
   }
   if (ns_tot > 2) {
     npcelx[2] = npcelx0.c;
     npcely[2] = npcely0.c;
     npcelz[2] = npcelz0.c;
-    qom[2] 	= qom0.c;
+    qom[2] = qom0.c;
   }
   if (ns_tot > 3) {
     npcelx[3] = npcelx0.d;
     npcely[3] = npcely0.d;
     npcelz[3] = npcelz0.d;
-    qom[3] 	= qom0.d;
+    qom[3] = qom0.d;
   }
   if (ns_tot > 4) {
     npcelx[4] = npcelx0.e;
     npcely[4] = npcely0.e;
     npcelz[4] = npcelz0.e;
-    qom[4] 	= qom0.e;
+    qom[4] = qom0.e;
   }
   if (ns_tot > 5) {
     npcelx[5] = npcelx0.f;
     npcely[5] = npcely0.f;
     npcelz[5] = npcelz0.f;
-    qom[5] 	= qom0.f;
+    qom[5] = qom0.f;
   }
   if (ns_tot > 6) {
     npcelx[6] = npcelx0.g;
     npcely[6] = npcely0.g;
     npcelz[6] = npcelz0.g;
-    qom[6] 	= qom0.g;
+    qom[6] = qom0.g;
   }
   if (ns_tot > 7) {
     npcelx[7] = npcelx0.h;
     npcely[7] = npcely0.h;
     npcelz[7] = npcelz0.h;
-    qom[7] 	= qom0.h;
+    qom[7] = qom0.h;
   }
   if (ns_tot > 8) {
     npcelx[8] = npcelx0.i;
     npcely[8] = npcely0.i;
     npcelz[8] = npcelz0.i;
-    qom[8] 	= qom0.i;
+    qom[8] = qom0.i;
   }
   if (ns_tot > 9) {
     npcelx[9] = npcelx0.j;
     npcely[9] = npcely0.j;
     npcelz[9] = npcelz0.j;
-    qom[9] 	= qom0.j;
+    qom[9] = qom0.j;
   }
   if (ns_tot > 10) {
     npcelx[10] = npcelx0.k;
     npcely[10] = npcely0.k;
     npcelz[10] = npcelz0.k;
-    qom[10] 	 = qom0.k;
+    qom[10] = qom0.k;
   }
   if (ns_tot > 11) {
     npcelx[11] = npcelx0.l;
     npcely[11] = npcely0.l;
     npcelz[11] = npcelz0.l;
-    qom[11] 	 = qom0.l;
+    qom[11] = qom0.l;
   }
 
-
-
-  //verbose = config.read < bool > ("verbose",false);
+  // verbose = config.read < bool > ("verbose",false);
 
   // PHI Electrostatic Potential
-  bcPHIfaceXright = config.read < int >("bcPHIfaceXright",1);
-  bcPHIfaceXleft  = config.read < int >("bcPHIfaceXleft",1);
-  bcPHIfaceYright = config.read < int >("bcPHIfaceYright",1);
-  bcPHIfaceYleft  = config.read < int >("bcPHIfaceYleft",1);
-  bcPHIfaceZright = config.read < int >("bcPHIfaceZright",1);
-  bcPHIfaceZleft  = config.read < int >("bcPHIfaceZleft",1);
+  bcPHIfaceXright = config.read<int>("bcPHIfaceXright", 1);
+  bcPHIfaceXleft = config.read<int>("bcPHIfaceXleft", 1);
+  bcPHIfaceYright = config.read<int>("bcPHIfaceYright", 1);
+  bcPHIfaceYleft = config.read<int>("bcPHIfaceYleft", 1);
+  bcPHIfaceZright = config.read<int>("bcPHIfaceZright", 1);
+  bcPHIfaceZleft = config.read<int>("bcPHIfaceZleft", 1);
 
   // EM field boundary condition
-  bcEMfaceXright = config.read < int >("bcEMfaceXright");
-  bcEMfaceXleft  = config.read < int >("bcEMfaceXleft");
-  bcEMfaceYright = config.read < int >("bcEMfaceYright");
-  bcEMfaceYleft  = config.read < int >("bcEMfaceYleft");
-  bcEMfaceZright = config.read < int >("bcEMfaceZright");
-  bcEMfaceZleft  = config.read < int >("bcEMfaceZleft");
+  bcEMfaceXright = config.read<int>("bcEMfaceXright");
+  bcEMfaceXleft = config.read<int>("bcEMfaceXleft");
+  bcEMfaceYright = config.read<int>("bcEMfaceYright");
+  bcEMfaceYleft = config.read<int>("bcEMfaceYleft");
+  bcEMfaceZright = config.read<int>("bcEMfaceZright");
+  bcEMfaceZleft = config.read<int>("bcEMfaceZleft");
 
   // EM field absorbing boundary condition parameters
-  yes_sal  = config.read < int >("yes_sal",0);
-  n_layers_sal  = config.read < int >("n_layers_sal",3);
-
+  yes_sal = config.read<int>("yes_sal", 0);
+  n_layers_sal = config.read<int>("n_layers_sal", 3);
 
   /*  ------------------------------------------------------------------- */
   /*  Electric and Magnetic field boundary conditions for BCface          */
@@ -610,41 +637,62 @@ void Collective::ReadInput(const ConfigFile& config) {
   /*  Face indices: 0=Xright, 1=Xleft, 2=Yright, 3=Yleft, 4=Zright, 5=Zleft */
   /*  ------------------------------------------------------------------- */
 
-  /* Ex Bx component: normal on X-faces (bc=2 for PEC), tangential on Y/Z-faces (bc=1 for PEC) */
-  bcEx[0] = bcEMfaceXright == 0 ? 2 : 1;   bcBx[0] = bcEMfaceXright == 0 ? 1 : 2;
-  bcEx[1] = bcEMfaceXleft  == 0 ? 2 : 1;   bcBx[1] = bcEMfaceXleft  == 0 ? 1 : 2;
-  bcEx[2] = bcEMfaceYright == 0 ? 1 : 2;   bcBx[2] = bcEMfaceYright == 0 ? 2 : 1;
-  bcEx[3] = bcEMfaceYleft  == 0 ? 1 : 2;   bcBx[3] = bcEMfaceYleft  == 0 ? 2 : 1;
-  bcEx[4] = bcEMfaceZright == 0 ? 1 : 2;   bcBx[4] = bcEMfaceZright == 0 ? 2 : 1;
-  bcEx[5] = bcEMfaceZleft  == 0 ? 1 : 2;   bcBx[5] = bcEMfaceZleft  == 0 ? 2 : 1;
-  /* Ey By component: tangential on X-faces (bc=1 for PEC), normal on Y-faces (bc=2 for PEC), tangential on Z-faces */
-  bcEy[0] = bcEMfaceXright == 0 ? 1 : 2;   bcBy[0] = bcEMfaceXright == 0 ? 2 : 1;
-  bcEy[1] = bcEMfaceXleft  == 0 ? 1 : 2;   bcBy[1] = bcEMfaceXleft  == 0 ? 2 : 1;
-  bcEy[2] = bcEMfaceYright == 0 ? 2 : 1;   bcBy[2] = bcEMfaceYright == 0 ? 1 : 2;
-  bcEy[3] = bcEMfaceYleft  == 0 ? 2 : 1;   bcBy[3] = bcEMfaceYleft  == 0 ? 1 : 2;
-  bcEy[4] = bcEMfaceZright == 0 ? 1 : 2;   bcBy[4] = bcEMfaceZright == 0 ? 2 : 1;
-  bcEy[5] = bcEMfaceZleft  == 0 ? 1 : 2;   bcBy[5] = bcEMfaceZleft  == 0 ? 2 : 1;
-  /* Ez Bz component: tangential on X/Y-faces (bc=1 for PEC), normal on Z-faces (bc=2 for PEC) */
-  bcEz[0] = bcEMfaceXright == 0 ? 1 : 2;   bcBz[0] = bcEMfaceXright == 0 ? 2 : 1;
-  bcEz[1] = bcEMfaceXleft  == 0 ? 1 : 2;   bcBz[1] = bcEMfaceXleft  == 0 ? 2 : 1;
-  bcEz[2] = bcEMfaceYright == 0 ? 1 : 2;   bcBz[2] = bcEMfaceYright == 0 ? 2 : 1;
-  bcEz[3] = bcEMfaceYleft  == 0 ? 1 : 2;   bcBz[3] = bcEMfaceYleft  == 0 ? 2 : 1;
-  bcEz[4] = bcEMfaceZright == 0 ? 2 : 1;   bcBz[4] = bcEMfaceZright == 0 ? 1 : 2;
-  bcEz[5] = bcEMfaceZleft  == 0 ? 2 : 1;   bcBz[5] = bcEMfaceZleft  == 0 ? 1 : 2;
+  /* Ex Bx component: normal on X-faces (bc=2 for PEC), tangential on Y/Z-faces
+   * (bc=1 for PEC) */
+  bcEx[0] = bcEMfaceXright == 0 ? 2 : 1;
+  bcBx[0] = bcEMfaceXright == 0 ? 1 : 2;
+  bcEx[1] = bcEMfaceXleft == 0 ? 2 : 1;
+  bcBx[1] = bcEMfaceXleft == 0 ? 1 : 2;
+  bcEx[2] = bcEMfaceYright == 0 ? 1 : 2;
+  bcBx[2] = bcEMfaceYright == 0 ? 2 : 1;
+  bcEx[3] = bcEMfaceYleft == 0 ? 1 : 2;
+  bcBx[3] = bcEMfaceYleft == 0 ? 2 : 1;
+  bcEx[4] = bcEMfaceZright == 0 ? 1 : 2;
+  bcBx[4] = bcEMfaceZright == 0 ? 2 : 1;
+  bcEx[5] = bcEMfaceZleft == 0 ? 1 : 2;
+  bcBx[5] = bcEMfaceZleft == 0 ? 2 : 1;
+  /* Ey By component: tangential on X-faces (bc=1 for PEC), normal on Y-faces
+   * (bc=2 for PEC), tangential on Z-faces */
+  bcEy[0] = bcEMfaceXright == 0 ? 1 : 2;
+  bcBy[0] = bcEMfaceXright == 0 ? 2 : 1;
+  bcEy[1] = bcEMfaceXleft == 0 ? 1 : 2;
+  bcBy[1] = bcEMfaceXleft == 0 ? 2 : 1;
+  bcEy[2] = bcEMfaceYright == 0 ? 2 : 1;
+  bcBy[2] = bcEMfaceYright == 0 ? 1 : 2;
+  bcEy[3] = bcEMfaceYleft == 0 ? 2 : 1;
+  bcBy[3] = bcEMfaceYleft == 0 ? 1 : 2;
+  bcEy[4] = bcEMfaceZright == 0 ? 1 : 2;
+  bcBy[4] = bcEMfaceZright == 0 ? 2 : 1;
+  bcEy[5] = bcEMfaceZleft == 0 ? 1 : 2;
+  bcBy[5] = bcEMfaceZleft == 0 ? 2 : 1;
+  /* Ez Bz component: tangential on X/Y-faces (bc=1 for PEC), normal on Z-faces
+   * (bc=2 for PEC) */
+  bcEz[0] = bcEMfaceXright == 0 ? 1 : 2;
+  bcBz[0] = bcEMfaceXright == 0 ? 2 : 1;
+  bcEz[1] = bcEMfaceXleft == 0 ? 1 : 2;
+  bcBz[1] = bcEMfaceXleft == 0 ? 2 : 1;
+  bcEz[2] = bcEMfaceYright == 0 ? 1 : 2;
+  bcBz[2] = bcEMfaceYright == 0 ? 2 : 1;
+  bcEz[3] = bcEMfaceYleft == 0 ? 1 : 2;
+  bcBz[3] = bcEMfaceYleft == 0 ? 2 : 1;
+  bcEz[4] = bcEMfaceZright == 0 ? 2 : 1;
+  bcBz[4] = bcEMfaceZright == 0 ? 1 : 2;
+  bcEz[5] = bcEMfaceZleft == 0 ? 2 : 1;
+  bcBz[5] = bcEMfaceZleft == 0 ? 1 : 2;
 
   // Particles Boundary condition
-  bcPfaceXright = config.read < int >("bcPfaceXright",1);
-  bcPfaceXleft  = config.read < int >("bcPfaceXleft",1);
-  bcPfaceYright = config.read < int >("bcPfaceYright",1);
-  bcPfaceYleft  = config.read < int >("bcPfaceYleft",1);
-  bcPfaceZright = config.read < int >("bcPfaceZright",1);
-  bcPfaceZleft  = config.read < int >("bcPfaceZleft",1);
+  bcPfaceXright = config.read<int>("bcPfaceXright", 1);
+  bcPfaceXleft = config.read<int>("bcPfaceXleft", 1);
+  bcPfaceYright = config.read<int>("bcPfaceYright", 1);
+  bcPfaceYleft = config.read<int>("bcPfaceYleft", 1);
+  bcPfaceZright = config.read<int>("bcPfaceZright", 1);
+  bcPfaceZleft = config.read<int>("bcPfaceZleft", 1);
 
   // E field inflow BC: master switch for applying inflow BCs in GMRes image
   applyInflowBcsEImage = config.read<int>("ApplyInflowBcsEImage", 1);
 
-  if (RESTART1) {               // you are restarting 
-    RestartDirName = config.read < string > ("RestartDirName","data");
+  if (RESTART1) { // you are restarting
+    RestartDirName = config.read<string>("RestartDirName", "data");
     RestartReadDirName = RestartDirName;
     restart_status = 1;
 
@@ -654,156 +702,141 @@ void Collective::ReadInput(const ConfigFile& config) {
     RestartReadDirName = checkpoint.dataDir;
     last_cycle = checkpoint.cycle;
   }
-
 }
 
-bool Collective::field_output_is_off()const
-{
-  return (FieldOutputCycle <= 0);
-}
+bool Collective::field_output_is_off() const { return (FieldOutputCycle <= 0); }
 
-bool Collective::particle_output_is_off()const
-{
+bool Collective::particle_output_is_off() const {
   return getParticlesOutputCycle() <= 0;
 }
-bool Collective::testparticle_output_is_off()const
-{
+bool Collective::testparticle_output_is_off() const {
   return getTestParticlesOutputCycle() <= 0;
 }
 
-
-
-void Collective::read_field_restart(
-    const VCtopology3D* vct,
-    const Grid* grid,
-    arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
-    arr3_double Ex, arr3_double Ey, arr3_double Ez,
-    array4_double* rhons_, int ns)const
-{
-    // Delegate to RestartReader (implementation in inputoutput/RestartReader.cpp)
-    RestartReader::readFields(vct, grid, Bxn, Byn, Bzn, Ex, Ey, Ez,
-                              rhons_, ns, getRestartReadDirName(), last_cycle);
+void Collective::read_field_restart(const VCtopology3D* vct, const Grid* grid,
+                                    arr3_double Bxn, arr3_double Byn,
+                                    arr3_double Bzn, arr3_double Ex,
+                                    arr3_double Ey, arr3_double Ez,
+                                    array4_double* rhons_, int ns) const {
+  // Delegate to RestartReader (implementation in inputoutput/RestartReader.cpp)
+  RestartReader::readFields(vct, grid, Bxn, Byn, Bzn, Ex, Ey, Ez, rhons_, ns,
+                            getRestartReadDirName(), last_cycle);
 }
 
-void Collective::read_particles_restart(
-    const VCtopology3D* vct,
-    int species_number,
-    vector_double& u,
-    vector_double& v,
-    vector_double& w,
-    vector_double& q,
-    vector_double& x,
-    vector_double& y,
-    vector_double& z,
-    vector_cudaPclType_ID& id)const
-{
-    // Delegate to RestartReader (implementation in inputoutput/RestartReader.cpp)
-    RestartReader::readParticles(vct, species_number, u, v, w, q, x, y, z, id,
-                                 getTrackParticleID(species_number),
-                                 getRestartReadDirName(), last_cycle);
+void Collective::read_particles_restart(const VCtopology3D* vct,
+                                        int species_number, vector_double& u,
+                                        vector_double& v, vector_double& w,
+                                        vector_double& q, vector_double& x,
+                                        vector_double& y, vector_double& z,
+                                        vector_cudaPclType_ID& id) const {
+  // Delegate to RestartReader (implementation in inputoutput/RestartReader.cpp)
+  RestartReader::readParticles(vct, species_number, u, v, w, q, x, y, z, id,
+                               getTrackParticleID(species_number),
+                               getRestartReadDirName(), last_cycle);
 }
-
-
 
 /*! constructor */
-Collective::Collective(int argc, char **argv) {
+Collective::Collective(int argc, char** argv) {
   if (argc < 2) {
     inputfile = "inputfile";
     RESTART1 = false;
-  }
-  else if (argc < 3) {
+  } else if (argc < 3) {
     inputfile = argv[1];
     RESTART1 = false;
-  }
-  else {
+  } else {
     if (strcmp(argv[1], "restart") == 0) {
       inputfile = argv[2];
       RESTART1 = true;
-    }
-    else if (strcmp(argv[2], "restart") == 0) {
+    } else if (strcmp(argv[2], "restart") == 0) {
       inputfile = argv[1];
       RESTART1 = true;
-    }
-    else {
-      cout << "Error: syntax error in mpirun arguments. Did you mean to 'restart' ?" << endl;
+    } else {
+      cout << "Error: syntax error in mpirun arguments. Did you mean to "
+              "'restart' ?"
+           << endl;
       return;
     }
 
-    if(MPIdata::get_rank() == 0)std::cout << "Restarting..." << endl;
+    if (MPIdata::get_rank() == 0)
+      std::cout << "Restarting..." << endl;
   }
   ReadInput(inputfile);
   init_derived_parameters();
 }
 
-Collective::Collective(const ConfigFile& config, const std::string& input_name, bool restart) {
+Collective::Collective(const ConfigFile& config, const std::string& input_name,
+                       bool restart) {
   inputfile = input_name;
   RESTART1 = restart;
   ReadInput(config);
   init_derived_parameters();
 }
 
-void Collective::init_derived_parameters()
-{
+void Collective::init_derived_parameters() {
   /*! fourpi = 4 greek pi */
   fourpi = 16.0 * atan(1.0);
   /*! dx = space step - X direction */
-  dx = Lx / (double) nxc;
+  dx = Lx / (double)nxc;
   /*! dy = space step - Y direction */
-  dy = Ly / (double) nyc;
+  dy = Ly / (double)nyc;
   /*! dz = space step - Z direction */
-  dz = Lz / (double) nzc;
+  dz = Lz / (double)nzc;
   /*! npcel = number of particles per cell */
-  npcel = std::make_unique<int[]>(ns+nstestpart);
+  npcel = std::make_unique<int[]>(ns + nstestpart);
   /*! np = number of particles of different species */
-  //np = new int[ns];
+  // np = new int[ns];
   /*! npMax = maximum number of particles of different species */
-  //npMax = new int[ns];
+  // npMax = new int[ns];
 
   /* quantities per process */
 
   // check that procs divides grid
   // (this restriction should be removed).
   //
-  if(0==MPIdata::get_rank())
-  {
+  if (0 == MPIdata::get_rank()) {
     fflush(stdout);
     bool xerror = false;
     bool yerror = false;
     bool zerror = false;
-    if(nxc % XLEN) xerror=true;
-    if(nyc % YLEN) yerror=true;
-    if(nzc % ZLEN) zerror=true;
-    if(xerror) warning_printf("XLEN=%d does not divide nxc=%d\n", XLEN,nxc);
-    if(yerror) warning_printf("YLEN=%d does not divide nyc=%d\n", YLEN,nyc);
-    if(zerror) warning_printf("ZLEN=%d does not divide nzc=%d\n", ZLEN,nzc);
+    if (nxc % XLEN)
+      xerror = true;
+    if (nyc % YLEN)
+      yerror = true;
+    if (nzc % ZLEN)
+      zerror = true;
+    if (xerror)
+      warning_printf("XLEN=%d does not divide nxc=%d\n", XLEN, nxc);
+    if (yerror)
+      warning_printf("YLEN=%d does not divide nyc=%d\n", YLEN, nyc);
+    if (zerror)
+      warning_printf("ZLEN=%d does not divide nzc=%d\n", ZLEN, nzc);
     fflush(stdout);
-    bool error = (xerror||yerror||zerror);
+    bool error = (xerror || yerror || zerror);
     // Comment out this check if your postprocessing code does not
     // require the field output subarrays to be the same size.
     // Alternatively, you could modify the output routine to pad
     // with zeros...
-    //if(error)
+    // if(error)
     //{
     //  eprintf("For WriteMethod=default processor dimensions "
     //          "must divide mesh cell dimensions");
     //}
   }
 
-  int num_cells_r = nxc*nyc*nzc;
-  //num_procs = XLEN*YLEN*ZLEN;
-  //ncells_rs = nxc_rs*nyc_rs*nzc_rs;
+  int num_cells_r = nxc * nyc * nzc;
+  // num_procs = XLEN*YLEN*ZLEN;
+  // ncells_rs = nxc_rs*nyc_rs*nzc_rs;
 
-  for (int i = 0; i < (ns+nstestpart); i++)
-  {
+  for (int i = 0; i < (ns + nstestpart); i++) {
     npcel[i] = npcelx[i] * npcely[i] * npcelz[i];
-    //np[i] = npcel[i] * num_cells;
-    //nop_rs[i] = npcel[i] * ncells_rs;
-    //maxnop_rs[i] = NpMaxNpRatio * nop_rs[i];
-    // INT_MAX is about 2 billion, surely enough
-    // to index the particles in a single MPI process:
-    //assert_le(NpMaxNpRatio * npcel[i] * ncells_proper_per_proc , double(INT_MAX));
-    //double npMaxi = (NpMaxNpRatio * np[i]);
-    //npMax[i] = (int) npMaxi;
+    // np[i] = npcel[i] * num_cells;
+    // nop_rs[i] = npcel[i] * ncells_rs;
+    // maxnop_rs[i] = NpMaxNpRatio * nop_rs[i];
+    //  INT_MAX is about 2 billion, surely enough
+    //  to index the particles in a single MPI process:
+    // assert_le(NpMaxNpRatio * npcel[i] * ncells_proper_per_proc ,
+    // double(INT_MAX)); double npMaxi = (NpMaxNpRatio * np[i]); npMax[i] =
+    // (int) npMaxi;
   }
 }
 
@@ -826,81 +859,117 @@ void Collective::Print() {
   cout << "Results saved in  : " << SaveDirName << endl;
   cout << "Case type         : " << Case << endl;
   cout << "Simulation name   : " << SimName << endl;
-  cout << "Smoothing         : " << (Smooth == 1.0 ? "off" : "on") << " (alpha=" << Smooth << ", Niter=" << SmoothNiter << ")" << endl;
+  cout << "Smoothing         : " << (Smooth == 1.0 ? "off" : "on")
+       << " (alpha=" << Smooth << ", Niter=" << SmoothNiter << ")" << endl;
   cout << "---------------------" << endl;
   cout << "EM Field Boundary Conditions" << endl;
   cout << "---------------------" << endl;
   // helper lambda to decode bcEMface codes: 0=perfect conductor, 2=open/inflow
   auto bcName = [](int code) -> const char* {
-    switch(code) {
-      case 0: return "perfect conductor";
-      case 1: return "Dirichlet (first order)";
-      case 2: return "open/inflow (Neumann)";
-      default: return "unknown";
+    switch (code) {
+    case 0:
+      return "perfect conductor";
+    case 1:
+      return "Dirichlet (first order)";
+    case 2:
+      return "open/inflow (Neumann)";
+    default:
+      return "unknown";
     }
   };
-  cout << "Xleft  : " << bcEMfaceXleft  << " (" << bcName(bcEMfaceXleft)  << ")" << endl;
-  cout << "Xright : " << bcEMfaceXright << " (" << bcName(bcEMfaceXright) << ")" << endl;
-  cout << "Yleft  : " << bcEMfaceYleft  << " (" << bcName(bcEMfaceYleft)  << ")" << endl;
-  cout << "Yright : " << bcEMfaceYright << " (" << bcName(bcEMfaceYright) << ")" << endl;
-  cout << "Zleft  : " << bcEMfaceZleft  << " (" << bcName(bcEMfaceZleft)  << ")" << endl;
-  cout << "Zright : " << bcEMfaceZright << " (" << bcName(bcEMfaceZright) << ")" << endl;
+  cout << "Xleft  : " << bcEMfaceXleft << " (" << bcName(bcEMfaceXleft) << ")"
+       << endl;
+  cout << "Xright : " << bcEMfaceXright << " (" << bcName(bcEMfaceXright) << ")"
+       << endl;
+  cout << "Yleft  : " << bcEMfaceYleft << " (" << bcName(bcEMfaceYleft) << ")"
+       << endl;
+  cout << "Yright : " << bcEMfaceYright << " (" << bcName(bcEMfaceYright) << ")"
+       << endl;
+  cout << "Zleft  : " << bcEMfaceZleft << " (" << bcName(bcEMfaceZleft) << ")"
+       << endl;
+  cout << "Zright : " << bcEMfaceZright << " (" << bcName(bcEMfaceZright) << ")"
+       << endl;
   cout << "SAL (absorbing layer): " << (yes_sal ? "yes" : "no");
-  if (yes_sal) cout << ", n_layers=" << n_layers_sal;
+  if (yes_sal)
+    cout << ", n_layers=" << n_layers_sal;
   cout << endl;
   cout << "---------------------" << endl;
   cout << "Particle Boundary Conditions" << endl;
   cout << "---------------------" << endl;
   auto bcPName = [](int code) -> const char* {
-    switch(code) {
-      case 0: return "exit";
-      case 1: return "perfect mirror";
-      case 2: return "reemission";
-      case 3: return "open BC outflow";
-      case 4: return "open BC inflow";
-      default: return "unknown";
+    switch (code) {
+    case 0:
+      return "exit";
+    case 1:
+      return "perfect mirror";
+    case 2:
+      return "reemission";
+    case 3:
+      return "open BC outflow";
+    case 4:
+      return "open BC inflow";
+    default:
+      return "unknown";
     }
   };
-  cout << "Xleft  : " << bcPfaceXleft  << " (" << bcPName(bcPfaceXleft)  << ")" << endl;
-  cout << "Xright : " << bcPfaceXright << " (" << bcPName(bcPfaceXright) << ")" << endl;
-  cout << "Yleft  : " << bcPfaceYleft  << " (" << bcPName(bcPfaceYleft)  << ")" << endl;
-  cout << "Yright : " << bcPfaceYright << " (" << bcPName(bcPfaceYright) << ")" << endl;
-  cout << "Zleft  : " << bcPfaceZleft  << " (" << bcPName(bcPfaceZleft)  << ")" << endl;
-  cout << "Zright : " << bcPfaceZright << " (" << bcPName(bcPfaceZright) << ")" << endl;
+  cout << "Xleft  : " << bcPfaceXleft << " (" << bcPName(bcPfaceXleft) << ")"
+       << endl;
+  cout << "Xright : " << bcPfaceXright << " (" << bcPName(bcPfaceXright) << ")"
+       << endl;
+  cout << "Yleft  : " << bcPfaceYleft << " (" << bcPName(bcPfaceYleft) << ")"
+       << endl;
+  cout << "Yright : " << bcPfaceYright << " (" << bcPName(bcPfaceYright) << ")"
+       << endl;
+  cout << "Zleft  : " << bcPfaceZleft << " (" << bcPName(bcPfaceZleft) << ")"
+       << endl;
+  cout << "Zright : " << bcPfaceZright << " (" << bcPName(bcPfaceZright) << ")"
+       << endl;
   cout << "E inflow BCs in GMRes : " << (applyInflowBcsEImage ? "yes" : "no")
        << " (applied per-face where bcPface == 2)" << endl;
   cout << "---------------------" << endl;
   cout << "Field Corrections" << endl;
   cout << "---------------------" << endl;
   cout << "Poisson div(E) correction  : " << PoissonCorrection;
-  if (PoissonCorrection == "yes") cout << ", every " << PoissonCorrectionCycle << " cycles (in calculateE)";
+  if (PoissonCorrection == "yes")
+    cout << ", every " << PoissonCorrectionCycle << " cycles (in calculateE)";
   cout << endl;
   cout << "div(B) cleaning            : " << divBCorrection;
-  if (divBCorrection == "yes") cout << ", every " << divBCorrectionCycle << " cycles (in calculateB)";
+  if (divBCorrection == "yes")
+    cout << ", every " << divBCorrectionCycle << " cycles (in calculateB)";
   cout << endl;
   cout << "---------------------" << endl;
   cout << "Planet Boundary" << endl;
   cout << "---------------------" << endl;
   cout << "Reflection type            : " << planetReflectionType
-       << (planetReflectionType == 0 ? " (specular)" : " (diffuse/isotropic)") << endl;
+       << (planetReflectionType == 0 ? " (specular)" : " (diffuse/isotropic)")
+       << endl;
   cout << "---------------------" << endl;
   cout << "Exosphere Ionization" << endl;
   cout << "---------------------" << endl;
   if (enableExosphereInjection && numPlanetarySpecies > 0) {
     cout << "Status                     : enabled" << endl;
-    cout << "Solar wind species         : " << numSolarWindSpecies << " (indices 0.." << numSolarWindSpecies-1 << ")" << endl;
-    cout << "Planetary species          : " << numPlanetarySpecies << " (indices " << numSolarWindSpecies << ".." << ns-1 << ")" << endl;
-    cout << "Max injection radius       : " << maxInjectionRadius << " d_i" << endl;
+    cout << "Solar wind species         : " << numSolarWindSpecies
+         << " (indices 0.." << numSolarWindSpecies - 1 << ")" << endl;
+    cout << "Planetary species          : " << numPlanetarySpecies
+         << " (indices " << numSolarWindSpecies << ".." << ns - 1 << ")"
+         << endl;
+    cout << "Max injection radius       : " << maxInjectionRadius << " d_i"
+         << endl;
     cout << "Planet radius              : " << Planet_radius << " d_i" << endl;
     for (int i = 0; i < numPlanetarySpecies; i++) {
       int globalIdx = numSolarWindSpecies + i;
       cout << "  Species " << globalIdx << " (neutral " << i << "):" << endl;
-      cout << "    NeutralSurfaceDensity    = " << neutralSurfaceDensity[i] << " n_sw" << endl;
-      cout << "    ExosphericScaleHeight    = " << exosphericScaleHeight[i] << " d_i" << endl;
-      cout << "    PhotoionizationFrequency = " << photoionizationFrequency[i] << " wci" << endl;
-      cout << "    MacroParticleWeightRatio = " << macroParticleWeightRatio[i] << endl;
+      cout << "    NeutralSurfaceDensity    = " << neutralSurfaceDensity[i]
+           << " n_sw" << endl;
+      cout << "    ExosphericScaleHeight    = " << exosphericScaleHeight[i]
+           << " d_i" << endl;
+      cout << "    PhotoionizationFrequency = " << photoionizationFrequency[i]
+           << " wci" << endl;
+      cout << "    MacroParticleWeightRatio = " << macroParticleWeightRatio[i]
+           << endl;
       cout << "    qom                      = " << qom[globalIdx] << endl;
-      cout << "    uth/vth/wth              = " << uth[globalIdx] << " / " << vth[globalIdx] << " / " << wth[globalIdx] << endl;
+      cout << "    uth/vth/wth              = " << uth[globalIdx] << " / "
+           << vth[globalIdx] << " / " << wth[globalIdx] << endl;
     }
   } else {
     cout << "Status                     : disabled" << endl;
@@ -927,15 +996,18 @@ void Collective::Print() {
   cout << endl;
   for (int is = 0; is < ns; is++) {
     if (uth[is] * dt / dx > .1)
-      cout << "OK u_th*dt/dx (species " << is << ") = " << uth[is] * dt / dx << " > .1" << endl;
+      cout << "OK u_th*dt/dx (species " << is << ") = " << uth[is] * dt / dx
+           << " > .1" << endl;
     else
-      cout << "WARNING. u_th*dt/dx (species " << is << ") = " << uth[is] * dt / dx << " < .1" << endl;
+      cout << "WARNING. u_th*dt/dx (species " << is
+           << ") = " << uth[is] * dt / dx << " < .1" << endl;
 
     if (vth[is] * dt / dy > .1)
-      cout << "OK v_th*dt/dy (species " << is << ") = " << vth[is] * dt / dy << " > .1" << endl;
+      cout << "OK v_th*dt/dy (species " << is << ") = " << vth[is] * dt / dy
+           << " > .1" << endl;
     else
-      cout << "WARNING. v_th*dt/dy (species " << is << ") = " << vth[is] * dt / dy << " < .1"  << endl;
-
+      cout << "WARNING. v_th*dt/dy (species " << is
+           << ") = " << vth[is] * dt / dy << " < .1" << endl;
   }
 
   cout << endl;
@@ -950,33 +1022,51 @@ void Collective::Print() {
   double cfl_y = c * dt / dy;
   double cfl_z = c * dt / dz;
   double cfl_max = cfl_x;
-  if (cfl_y > cfl_max) cfl_max = cfl_y;
-  if (nzc > 1 && cfl_z > cfl_max) cfl_max = cfl_z;
+  if (cfl_y > cfl_max)
+    cfl_max = cfl_y;
+  if (nzc > 1 && cfl_z > cfl_max)
+    cfl_max = cfl_z;
   cout << "c*dt/dx              = " << cfl_x;
-  if (cfl_x < 1.0) cout << "  OK" << endl; else cout << "  WARNING: CFL VIOLATED!" << endl;
+  if (cfl_x < 1.0)
+    cout << "  OK" << endl;
+  else
+    cout << "  WARNING: CFL VIOLATED!" << endl;
   cout << "c*dt/dy              = " << cfl_y;
-  if (cfl_y < 1.0) cout << "  OK" << endl; else cout << "  WARNING: CFL VIOLATED!" << endl;
+  if (cfl_y < 1.0)
+    cout << "  OK" << endl;
+  else
+    cout << "  WARNING: CFL VIOLATED!" << endl;
   if (nzc > 1) {
     cout << "c*dt/dz              = " << cfl_z;
-    if (cfl_z < 1.0) cout << "  OK" << endl; else cout << "  WARNING: CFL VIOLATED!" << endl;
+    if (cfl_z < 1.0)
+      cout << "  OK" << endl;
+    else
+      cout << "  WARNING: CFL VIOLATED!" << endl;
   }
   // Multi-dimensional CFL: c*dt * sqrt(1/dx^2 + 1/dy^2 + 1/dz^2) < 1
-  double cfl_multi = c * dt * sqrt(1.0/(dx*dx) + 1.0/(dy*dy) + (nzc > 1 ? 1.0/(dz*dz) : 0.0));
+  double cfl_multi = c * dt *
+                     sqrt(1.0 / (dx * dx) + 1.0 / (dy * dy) +
+                          (nzc > 1 ? 1.0 / (dz * dz) : 0.0));
   cout << "c*dt*|1/dx|          = " << cfl_multi;
-  if (cfl_multi < 1.0) cout << "  OK" << endl; else cout << "  WARNING: multi-dim CFL VIOLATED!" << endl;
+  if (cfl_multi < 1.0)
+    cout << "  OK" << endl;
+  else
+    cout << "  WARNING: multi-dim CFL VIOLATED!" << endl;
 
   cout << endl;
   cout << "Numerical Resolution Parameters:  " << endl;
   cout << "---------------------" << endl;
   // Larmor radius / grid spacing (using thermal velocity and B0)
-  // In Gaussian CGS: Omega_s = |q/m|_s * B0 / c, so r_L = v_th * c / (|q/m| * B0)
-  double B0 = sqrt(B0x*B0x + B0y*B0y + B0z*B0z);
+  // In Gaussian CGS: Omega_s = |q/m|_s * B0 / c, so r_L = v_th * c / (|q/m| *
+  // B0)
+  double B0 = sqrt(B0x * B0x + B0y * B0y + B0z * B0z);
   if (B0 > 0.0) {
     for (int is = 0; is < ns; is++) {
       // Use single-component thermal speed as proxy for perpendicular v_th
       double rL = uth[is] * c / (fabs(qom[is]) * B0);
       cout << "Larmor radius / dx (species " << is << ") = " << rL / dx
-           << "  (rL = " << rL << ", Omega_c*dt = " << fabs(qom[is]) * B0 / c * dt << ")" << endl;
+           << "  (rL = " << rL
+           << ", Omega_c*dt = " << fabs(qom[is]) * B0 / c * dt << ")" << endl;
     }
   }
   // Plasma frequency: omega_ps^2 = 4*pi * n_s * |q/m|_s  (CGS)
@@ -985,10 +1075,13 @@ void Collective::Print() {
     double omega_p = sqrt(fabs(qom[is]) * rhoINIT[is]);
     double skin_depth = c / omega_p;
     double omega_p_dt = omega_p * dt;
-    cout << "Species " << is << " (qom=" << qom[is] << "): omega_p = " << omega_p
-         << ", d_s/dx = " << skin_depth / dx
+    cout << "Species " << is << " (qom=" << qom[is]
+         << "): omega_p = " << omega_p << ", d_s/dx = " << skin_depth / dx
          << ", omega_p*dt = " << omega_p_dt;
-    if (omega_p_dt < 2.0) cout << "  OK" << endl; else cout << "  WARNING: plasma oscillations under-resolved!" << endl;
+    if (omega_p_dt < 2.0)
+      cout << "  OK" << endl;
+    else
+      cout << "  WARNING: plasma oscillations under-resolved!" << endl;
   }
 
   // ======= Estimated Memory Usage Per Rank =======
@@ -997,7 +1090,7 @@ void Collective::Print() {
   cout << "---------------------" << endl;
 
   auto ceilDiv = [](int a, int b) { return (a + b - 1) / b; };
-  const int nxc_loc = ceilDiv(nxc, XLEN) + 2;  // +2 ghost cells
+  const int nxc_loc = ceilDiv(nxc, XLEN) + 2; // +2 ghost cells
   const int nyc_loc = ceilDiv(nyc, YLEN) + 2;
   const int nzc_loc = ceilDiv(nzc, ZLEN) + 2;
   const int nxn_loc = nxc_loc + 1;
@@ -1005,27 +1098,30 @@ void Collective::Print() {
   const int nzn_loc = nzc_loc + 1;
   const long long gridN = (long long)nxn_loc * nyn_loc * nzn_loc;
   const long long gridC = (long long)nxc_loc * nyc_loc * nzc_loc;
-  const long long fieldSize = (long long)nzn_loc * (nyn_loc - 1) * (nxn_loc - 1);
+  const long long fieldSize =
+      (long long)nzn_loc * (nyn_loc - 1) * (nxn_loc - 1);
   const double MB = 1024.0 * 1024.0;
 
-  cout << "Local grid (with ghosts): "
-       << nxc_loc << "x" << nyc_loc << "x" << nzc_loc << " cells, "
-       << nxn_loc << "x" << nyn_loc << "x" << nzn_loc << " nodes" << endl;
+  cout << "Local grid (with ghosts): " << nxc_loc << "x" << nyc_loc << "x"
+       << nzc_loc << " cells, " << nxn_loc << "x" << nyn_loc << "x" << nzn_loc
+       << " nodes" << endl;
 
   // Interior cell counts (no ghost layers) — used for particle estimates
   const int nxc_r = nxc_loc - 2, nyc_r = nyc_loc - 2, nzc_r = nzc_loc - 2;
 
   // --- HOST ---
-  // EMfields3D: 50 node-3D + 15 cell-3D + 10*ns node-4D + ns cell-4D + fieldForPcls + Krylov
-  double hostEMf = (50.0 * gridN + 15.0 * gridC
-                    + (10.0 * ns) * gridN + ns * gridC
-                    + gridN * 8.0 + 6.0 * 3 * gridN) * 8;
-  double hostFieldBuf = fieldSize * 24.0 * 8;       // pinned field buffer
+  // EMfields3D: 50 node-3D + 15 cell-3D + 10*ns node-4D + ns cell-4D +
+  // fieldForPcls + Krylov
+  double hostEMf = (50.0 * gridN + 15.0 * gridC + (10.0 * ns) * gridN +
+                    ns * gridC + gridN * 8.0 + 6.0 * 3 * gridN) *
+                   8;
+  double hostFieldBuf = fieldSize * 24.0 * 8; // pinned field buffer
   double hostPcl = 0, hostComm = 0;
   for (int i = 0; i < ns; i++) {
-    long long nop_i = (long long)npcel[i] * nxc_r * nyc_r * nzc_r;  // interior cells (same as device)
-    hostPcl  += nop_i * 8.0 * 8;        // 8 SoA arrays * 8 bytes
-    hostComm += 0.1 * nop_i * 64.0;     // MPI comm buffer (AoS)
+    long long nop_i = (long long)npcel[i] * nxc_r * nyc_r *
+                      nzc_r;        // interior cells (same as device)
+    hostPcl += nop_i * 8.0 * 8;     // 8 SoA arrays * 8 bytes
+    hostComm += 0.1 * nop_i * 64.0; // MPI comm buffer (AoS)
   }
   double hostTotal = (hostEMf + hostFieldBuf + hostPcl + hostComm) / MB;
 
@@ -1033,39 +1129,47 @@ void Collective::Print() {
        << ", particles = " << hostPcl / MB << " MB"
        << ", comm = " << hostComm / MB << " MB"
        << ", field buf = " << hostFieldBuf / MB << " MB" << endl;
-  cout << "        TOTAL = " << hostTotal << " MB (" << hostTotal / 1024 << " GB)" << endl;
+  cout << "        TOTAL = " << hostTotal << " MB (" << hostTotal / 1024
+       << " GB)" << endl;
 
   // --- DEVICE ---
-  // GPU allocations use actual NOP from maxwellian (interior cells only, no ghosts)
+  // GPU allocations use actual NOP from maxwellian (interior cells only, no
+  // ghosts)
   const double CAP_FACTOR = 1.4, AUX_FRAC = 0.1, PLANET_FRAC = 0.05;
   bool isDipole = (Case == "Dipole" || Case == "Dipole2D");
 
   double devFieldBuf = fieldSize * 24.0 * 8;
-  double devMoments  = ns * gridN * 10.0 * 8;
+  double devMoments = ns * gridN * 10.0 * 8;
   double devPcl = 0, devBuf = 0, devSort = 0, devPlanet = 0;
 
   for (int i = 0; i < ns; i++) {
-    long long nop_i = (long long)npcel[i] * nxc_r * nyc_r * nzc_r;  // actual NOP (interior cells)
+    long long nop_i = (long long)npcel[i] * nxc_r * nyc_r *
+                      nzc_r; // actual NOP (interior cells)
     long long cap_i = (long long)(nop_i * CAP_FACTOR);
 
-    devPcl += cap_i * 8.0 * 8;                                    // SoA arrays
-    devBuf += cap_i * 8.0                                          // departure
-            + AUX_FRAC * nop_i * (64.0 + 4.0 + 64.0);            // exiting + filler + staging
+    devPcl += cap_i * 8.0 * 8; // SoA arrays
+    devBuf +=
+        cap_i * 8.0                               // departure
+        + AUX_FRAC * nop_i * (64.0 + 4.0 + 64.0); // exiting + filler + staging
 
     if (SortingCycle > 0)
-      devSort += 3.0 * gridC * 4 + cap_i * (4.0 + 8.0);          // histograms + indices + scratch
+      devSort += 3.0 * gridC * 4 +
+                 cap_i * (4.0 + 8.0); // histograms + indices + scratch
 
     if (isDipole)
       devPlanet += PLANET_FRAC * nop_i * 64.0;
   }
-  double devTotal = (devFieldBuf + devMoments + devPcl + devBuf + devSort + devPlanet) / MB;
+  double devTotal =
+      (devFieldBuf + devMoments + devPcl + devBuf + devSort + devPlanet) / MB;
 
   cout << "DEVICE: particles = " << devPcl / MB << " MB"
        << ", buffers = " << devBuf / MB << " MB"
        << ", moments = " << devMoments / MB << " MB"
        << ", field = " << devFieldBuf / MB << " MB";
-  if (devSort > 0)   cout << ", sort = " << devSort / MB << " MB";
-  if (devPlanet > 0) cout << ", planet = " << devPlanet / MB << " MB";
+  if (devSort > 0)
+    cout << ", sort = " << devSort / MB << " MB";
+  if (devPlanet > 0)
+    cout << ", planet = " << devPlanet / MB << " MB";
   cout << endl;
   cout << "        TOTAL = " << devTotal << " MB (" << devTotal / 1024 << " GB)"
        << "  (+ 500 MB CUDA context)" << endl;
@@ -1073,7 +1177,6 @@ void Collective::Print() {
   cout << "COMBINED = " << (hostTotal + devTotal) << " MB ("
        << (hostTotal + devTotal) / 1024 << " GB)" << endl;
   cout << "---------------------" << endl;
-
 }
 /*! Print Simulation Parameters */
 void Collective::save() {
@@ -1098,9 +1201,9 @@ void Collective::save() {
   my_file << "Time step                = " << dt << endl;
   my_file << "Number of cycles         = " << ncycles << endl;
   my_file << "---------------------------" << endl;
-  for (int is = 0; is < ns; is++){
+  for (int is = 0; is < ns; is++) {
     my_file << "rho init species   " << is << " = " << rhoINIT[is] << endl;
-    my_file << "rho inject species " << is << " = " << rhoINJECT[is]  << endl;
+    my_file << "rho inject species " << is << " = " << rhoINJECT[is] << endl;
   }
   my_file << "current sheet thickness  = " << delta << endl;
   my_file << "B0x                      = " << B0x << endl;
@@ -1108,7 +1211,7 @@ void Collective::save() {
   my_file << "B0z                      = " << B0z << endl;
   my_file << "---------------------------" << endl;
   my_file << "Smooth                   = " << Smooth << endl;
-  my_file << "SmoothNiter              = " << SmoothNiter<< endl;
+  my_file << "SmoothNiter              = " << SmoothNiter << endl;
   my_file << "GMRES error tolerance    = " << GMREStol << endl;
   my_file << "CG error tolerance       = " << CGtol << endl;
   my_file << "Mover error tolerance    = " << NiterMover << endl;
@@ -1117,5 +1220,4 @@ void Collective::save() {
   my_file << "Restart saved in: " << RestartDirName << endl;
   my_file << "---------------------" << endl;
   my_file.close();
-
 }

@@ -1,5 +1,5 @@
-#ifndef _PARTICLE_ID_GENERATOR_CUH_
-#define _PARTICLE_ID_GENERATOR_CUH_
+#ifndef PARTICLE_ID_GENERATOR_CUH
+#define PARTICLE_ID_GENERATOR_CUH
 
 #include <algorithm>
 #include <cstdint>
@@ -28,16 +28,18 @@ struct ParticleIDGenerator {
   int speciesIndex = 0;
   int speciesCount = 1;
 
-  __host__ __device__ cudaPclType_ID idFromSequence(counter_type sequence) const {
+  __host__ __device__ cudaPclType_ID
+  idFromSequence(counter_type sequence) const {
     return static_cast<cudaPclType_ID>(
         (sequence * static_cast<counter_type>(mpiSize) +
          static_cast<counter_type>(mpiRank)) *
-        static_cast<counter_type>(speciesCount) +
+            static_cast<counter_type>(speciesCount) +
         static_cast<counter_type>(speciesIndex));
   }
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
-  __device__ __forceinline__ counter_type reserveSequenceBlock(counter_type count) const {
+  __device__ __forceinline__ counter_type
+  reserveSequenceBlock(counter_type count) const {
     return atomicAdd(nextSequence, count);
   }
 
@@ -63,7 +65,8 @@ public:
     moveFrom(other);
   }
 
-  ParticleIDGeneratorState& operator=(ParticleIDGeneratorState&& other) noexcept {
+  ParticleIDGeneratorState&
+  operator=(ParticleIDGeneratorState&& other) noexcept {
     if (this != &other) {
       release();
       moveFrom(other);
@@ -71,16 +74,16 @@ public:
     return *this;
   }
 
-  ~ParticleIDGeneratorState() {
-    release();
-  }
+  ~ParticleIDGeneratorState() { release(); }
 
-  void initialize(int mpiRank, int mpiSize, int speciesIndex, int speciesCount) {
+  void initialize(int mpiRank, int mpiSize, int speciesIndex,
+                  int speciesCount) {
     mpiRank_ = mpiRank;
     mpiSize_ = mpiSize > 0 ? mpiSize : 1;
     speciesCount_ = speciesCount > 0 ? speciesCount : 1;
     if (speciesIndex < 0 || speciesIndex >= speciesCount_)
-      throw std::runtime_error("Particle ID generator received invalid species index");
+      throw std::runtime_error(
+          "Particle ID generator received invalid species index");
     speciesIndex_ = speciesIndex;
     hostNextSequence_ = 0;
   }
@@ -115,9 +118,11 @@ public:
           (globalMax - static_cast<cudaPclType_ID>(speciesIndex_)) /
           static_cast<cudaPclType_ID>(speciesCount_);
       nextSequence = static_cast<counter_type>(
-          rankSequence / static_cast<cudaPclType_ID>(mpiSize_)) + 1;
+                         rankSequence / static_cast<cudaPclType_ID>(mpiSize_)) +
+                     1;
       if (nextSequence > sequenceCapacity())
-        throw std::runtime_error("Particle ID generator exceeded uint64 ID range");
+        throw std::runtime_error(
+            "Particle ID generator exceeded uint64 ID range");
     }
 
     hostNextSequence_ = std::max(hostNextSequence_, nextSequence);
@@ -125,11 +130,13 @@ public:
       syncDeviceCounter(stream);
   }
 
-  counter_type reserveHostSequenceBlock(counter_type count, cudaStream_t stream = 0) {
+  counter_type reserveHostSequenceBlock(counter_type count,
+                                        cudaStream_t stream = 0) {
     const counter_type base = hostNextSequence_;
     const counter_type capacity = sequenceCapacity();
     if (hostNextSequence_ > capacity || count > capacity - hostNextSequence_)
-      throw std::runtime_error("Particle ID generator exhausted uint64 ID range");
+      throw std::runtime_error(
+          "Particle ID generator exhausted uint64 ID range");
     hostNextSequence_ += count;
     if (deviceNextSequence_ != nullptr)
       syncDeviceCounter(stream);
@@ -161,13 +168,16 @@ private:
 
   counter_type sequenceCapacity() const {
     const cudaPclType_ID species = static_cast<cudaPclType_ID>(speciesIndex_);
-    if (species > maxValidID()) return 0;
+    if (species > maxValidID())
+      return 0;
     const cudaPclType_ID maxRankSequence =
         (maxValidID() - species) / static_cast<cudaPclType_ID>(speciesCount_);
     const cudaPclType_ID rank = static_cast<cudaPclType_ID>(mpiRank_);
-    if (rank > maxRankSequence) return 0;
-    return static_cast<counter_type>(
-        (maxRankSequence - rank) / static_cast<cudaPclType_ID>(mpiSize_)) + 1;
+    if (rank > maxRankSequence)
+      return 0;
+    return static_cast<counter_type>((maxRankSequence - rank) /
+                                     static_cast<cudaPclType_ID>(mpiSize_)) +
+           1;
   }
 
   void syncDeviceCounter(cudaStream_t stream) {
@@ -207,4 +217,4 @@ private:
   int speciesCount_ = 1;
 };
 
-#endif // _PARTICLE_ID_GENERATOR_CUH_
+#endif // PARTICLE_ID_GENERATOR_CUH

@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -18,128 +19,118 @@
  * limitations under the License.
  */
 
-
-#include "mpi.h"
 #include "OutputWrapperFPP.h"
-#include "OutputTagConfig.h"
-#include "VCtopology3D.h"
-#include "Grid3DCU.h"
 #include "EMfields3D.h"
+#include "Grid3DCU.h"
+#include "OutputTagConfig.h"
 #include "ParticleSoAHost.h"
 #include "RestartParticleCellMetadata.h"
+#include "VCtopology3D.h"
+#include "mpi.h"
 
-void OutputWrapperFPP::init_output_files(
-	    Collective    *col,
-	    VCtopology3D  *vct,
-	    Grid3DCU      *grid,
-	    EMfields3D    *EMf,
-	    ParticleSoAHost   **part,
-	    int 		  ns,
-	    ParticleSoAHost   **testpart,
-	    int 		  nstestpart)
-{
+void OutputWrapperFPP::init_output_files(Collective* col, VCtopology3D* vct,
+                                         Grid3DCU* grid, EMfields3D* EMf,
+                                         ParticleSoAHost** part, int ns,
+                                         ParticleSoAHost** testpart,
+                                         int nstestpart) {
 #ifndef NO_HDF5
-    col_ = col;
-    cartesian_rank = vct->getCartesian_rank();
-    stringstream num_proc_ss;
-    num_proc_ss << cartesian_rank;
-    string num_proc_str = num_proc_ss.str();
-    SaveDirName = col->getSaveDirName();
-    RestartDirName = col->getRestartDirName();
-    int restart_status = col->getRestart_status();
-    output_file = SaveDirName + "/proc"   + num_proc_str + ".hdf";
+  col_ = col;
+  cartesian_rank = vct->getCartesian_rank();
+  stringstream num_proc_ss;
+  num_proc_ss << cartesian_rank;
+  string num_proc_str = num_proc_ss.str();
+  SaveDirName = col->getSaveDirName();
+  RestartDirName = col->getRestartDirName();
+  int restart_status = col->getRestart_status();
+  output_file = SaveDirName + "/proc" + num_proc_str + ".hdf";
 
-    // Initialize the output (simulation results and restart file)
-    hdf5_agent.set_simulation_pointers(EMf, grid, vct, col);
+  // Initialize the output (simulation results and restart file)
+  hdf5_agent.set_simulation_pointers(EMf, grid, vct, col);
 
-    for (int i = 0; i < ns; ++i){
-      hdf5_agent.set_simulation_pointers_part(part[i]);
-    }
-    for (int i = 0; i < nstestpart; ++i){
-      hdf5_agent.set_simulation_pointers_part(testpart[i]);
-    }
+  for (int i = 0; i < ns; ++i) {
+    hdf5_agent.set_simulation_pointers_part(part[i]);
+  }
+  for (int i = 0; i < nstestpart; ++i) {
+    hdf5_agent.set_simulation_pointers_part(testpart[i]);
+  }
 
-    // Add the HDF5 output agent to the Output Manager's list
-    output_mgr.push_back(&hdf5_agent);
+  // Add the HDF5 output agent to the Output Manager's list
+  output_mgr.push_back(&hdf5_agent);
 
-    if(col->getWriteMethod() == "shdf5"||(col->getWriteMethod()=="pvtk"&&!col->particle_output_is_off()) ){
-        if (cartesian_rank == 0 && restart_status < 2) {
-          hdf5_agent.open(SaveDirName + "/settings.hdf");
-          output_mgr.output("collective + total_topology + proc_topology", 0);
-          hdf5_agent.close();
-        }
-
-    	if (restart_status == 0) {
-    	      hdf5_agent.open(output_file);
-    	}else {
-    	      hdf5_agent.open_append(output_file);
-    	    }
-		output_mgr.output("proc_topology ", 0);
-		hdf5_agent.close();
+  if (col->getWriteMethod() == "shdf5" ||
+      (col->getWriteMethod() == "pvtk" && !col->particle_output_is_off())) {
+    if (cartesian_rank == 0 && restart_status < 2) {
+      hdf5_agent.open(SaveDirName + "/settings.hdf");
+      output_mgr.output("collective + total_topology + proc_topology", 0);
+      hdf5_agent.close();
     }
 
-    if(col->getCallFinalize() || col->getRestartOutputCycle()>0){
-
-        if (cartesian_rank == 0 && restart_status < 2) {
-  		  hdf5_agent.open(RestartDirName + "/settings.hdf");
-  		  output_mgr.output("collective + total_topology + proc_topology", 0);
-  		  hdf5_agent.close();
-        }
-
+    if (restart_status == 0) {
+      hdf5_agent.open(output_file);
+    } else {
+      hdf5_agent.open_append(output_file);
     }
+    output_mgr.output("proc_topology ", 0);
+    hdf5_agent.close();
+  }
 
+  if (col->getCallFinalize() || col->getRestartOutputCycle() > 0) {
+
+    if (cartesian_rank == 0 && restart_status < 2) {
+      hdf5_agent.open(RestartDirName + "/settings.hdf");
+      output_mgr.output("collective + total_topology + proc_topology", 0);
+      hdf5_agent.close();
+    }
+  }
 
 #endif
 }
 
-void OutputWrapperFPP::append_output(const char* tag, int cycle, int sample)
-{
+void OutputWrapperFPP::append_output(const char* tag, int cycle, int sample) {
 #ifndef NO_HDF5
-    hdf5_agent.open_append(output_file);
-    output_mgr.output(tag, cycle, sample);
-    hdf5_agent.close();
+  hdf5_agent.open_append(output_file);
+  output_mgr.output(tag, cycle, sample);
+  hdf5_agent.close();
 #endif
 }
 
-void OutputWrapperFPP::append_field_moment_output(const OutputTagConfig& cfg, int cycle)
-{
+void OutputWrapperFPP::append_field_moment_output(const OutputTagConfig& cfg,
+                                                  int cycle) {
 #ifndef NO_HDF5
-    hdf5_agent.open_append(output_file);
-    hdf5_agent.outputFieldsMoments(cfg, cycle);
-    hdf5_agent.close();
+  hdf5_agent.open_append(output_file);
+  hdf5_agent.outputFieldsMoments(cfg, cycle);
+  hdf5_agent.close();
 #endif
 }
 
 void OutputWrapperFPP::setRestartParticleCellMetadata(
-    const RestartParticleCellMetadata* metadata)
-{
+    const RestartParticleCellMetadata* metadata) {
 #ifndef NO_HDF5
-    hdf5_agent.set_restart_particle_cell_metadata(metadata);
+  hdf5_agent.set_restart_particle_cell_metadata(metadata);
 #endif
 }
 
-void OutputWrapperFPP::append_restart(int cycle, const string& restartDir)
-{
+void OutputWrapperFPP::append_restart(int cycle, const string& restartDir) {
 #ifndef NO_HDF5
-		stringstream num_proc_ss;
-		num_proc_ss << cartesian_rank;
-		restart_file = restartDir + "/restart" + num_proc_ss.str() + ".hdf";
+  stringstream num_proc_ss;
+  num_proc_ss << cartesian_rank;
+  restart_file = restartDir + "/restart" + num_proc_ss.str() + ".hdf";
 
-		hdf5_agent.open(restart_file);
-		output_mgr.output("proc_topology ", cycle);
-		output_mgr.output("Eall + Ball + rhos + Js + pressure", cycle);
-		string particleTag = "position + velocity + q";
-		if (col_->anyRegularParticleID()) {
-			particleTag += " + ID";
-		}
-		output_mgr.output(particleTag, cycle, 0);
-		output_mgr.output("particle_cell_metadata", cycle);
-		string testParticleTag = "testpartpos + testpartvel + testpartcharge";
-		if (col_->anyTestParticleID()) {
-			testParticleTag += " + testparttag";
-		}
-		output_mgr.output(testParticleTag, cycle, 0);
-		output_mgr.output("last_cycle", cycle);
-		hdf5_agent.close();
+  hdf5_agent.open(restart_file);
+  output_mgr.output("proc_topology ", cycle);
+  output_mgr.output("Eall + Ball + rhos + Js + pressure", cycle);
+  string particleTag = "position + velocity + q";
+  if (col_->anyRegularParticleID()) {
+    particleTag += " + ID";
+  }
+  output_mgr.output(particleTag, cycle, 0);
+  output_mgr.output("particle_cell_metadata", cycle);
+  string testParticleTag = "testpartpos + testpartvel + testpartcharge";
+  if (col_->anyTestParticleID()) {
+    testParticleTag += " + testparttag";
+  }
+  output_mgr.output(testParticleTag, cycle, 0);
+  output_mgr.output("last_cycle", cycle);
+  hdf5_agent.close();
 #endif
 }

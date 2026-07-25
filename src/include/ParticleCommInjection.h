@@ -4,11 +4,13 @@
  * Owns:
  *  - 12 BlockCommunicators (6 send + 6 recv) for MPI AoS block exchange
  *  - AoS comm buffer (expandable pinned vector of SpeciesParticle) for
- *    particles that arrive from neighbour processes or are injected at boundaries
+ *    particles that arrive from neighbour processes or are injected at
+ * boundaries
  *
  * Data flow each cycle:
  *  1. GPU compacts exiting particles into AoS → single D→H memcpy into commPcls
- *  2. separateAndSendParticles(): iterates AoS comm buffer, sends via BlockCommunicator
+ *  2. separateAndSendParticles(): iterates AoS comm buffer, sends via
+ * BlockCommunicator
  *  3. recommunicateParticlesUntilDone(): iterative flush/recv/Allreduce loop
  *  4. handleReceivedParticles(): receives AoS blocks, applies BCs, appends
  *     surviving particles to AoS comm buffer
@@ -22,15 +24,15 @@
 #ifndef PARTICLE_COMM_INJECTION_H
 #define PARTICLE_COMM_INJECTION_H
 
-#include "ipicfwd.h"
-#include "Particle.h"
 #include "BlockCommunicator.h"
+#include "Particle.h"
+#include "ParticleSoAHost.h"
 #include "aligned_vector.h"
 #include "cudaTypeDef.cuh"
-#include "ipicdefs.h"
-#include "ipicmath.h"
-#include "ParticleSoAHost.h"
 #include "injectionKernel.cuh"
+#include "ipicdefs.h"
+#include "ipicfwd.h"
+#include "ipicmath.h"
 
 /**
  * @brief MPI particle exchange engine with expandable AoS comm buffer.
@@ -39,10 +41,8 @@
  * AoS buffer for particles entering/leaving the subdomain and the
  * BlockCommunicators that handle MPI messaging.
  */
-class ParticleCommInjection
-{
+class ParticleCommInjection {
 public:
-
   // ===== Construction / Destruction =====
 
   /**
@@ -67,17 +67,15 @@ public:
    *  (avoids expensive pinned-memory realloc every cycle). */
   void prepareCommBufferForNOP(int numParticles) {
     if (numParticles > commPcls.capacity()) {
-      const int padded = roundup_to_multiple(
-          static_cast<int>(numParticles * 1.5), DVECWIDTH);
+      const int padded =
+          roundup_to_multiple(static_cast<int>(numParticles * 1.5), DVECWIDTH);
       commPcls.reserve(padded);
     }
     commPcls.setSize(numParticles);
   }
 
   /** Clear the comm buffer (before a new cycle). Capacity is retained. */
-  void clearCommBuffer() {
-    commPcls.resize(0);
-  }
+  void clearCommBuffer() { commPcls.resize(0); }
 
   /** Reserve space in the comm buffer (grow-only). */
   void reserveCommBuffer(int capacity) {
@@ -88,13 +86,17 @@ public:
   // ===== AoS comm buffer pointers (for H↔D transfer) =====
 
   /** Read-only AoS data pointer (for H→D upload). */
-  const SpeciesParticle* getCommPclsData() const { return const_cast<vector_SpeciesParticle_registered&>(commPcls).getList(); }
+  const SpeciesParticle* getCommPclsData() const {
+    return const_cast<vector_SpeciesParticle_registered&>(commPcls).getList();
+  }
 
   /** Mutable AoS data pointer (for D→H download of exiting particles). */
   SpeciesParticle* getCommPclsDataMut() { return commPcls.getList(); }
 
   /** Direct access to the AoS comm buffer vector. */
-  const vector_SpeciesParticle_registered& getCommPclsVec() const { return commPcls; }
+  const vector_SpeciesParticle_registered& getCommPclsVec() const {
+    return commPcls;
+  }
   vector_SpeciesParticle_registered& getCommPclsVec() { return commPcls; }
 
   // ===== MPI exchange engine =====
@@ -135,7 +137,8 @@ public:
    */
   void appendFromAoS(const SpeciesParticle* buffer, int count);
 
-  // ===== AoS comm buffer (pinned host memory) — public for direct D→H memcpy =====
+  // ===== AoS comm buffer (pinned host memory) — public for direct D→H memcpy
+  // =====
 
   vector_SpeciesParticle_registered commPcls;
 
@@ -184,29 +187,41 @@ public: // BC methods (virtual for user override)
   virtual void apply_Zrght_BC(vector_SpeciesParticle& pcls, int start = 0);
 
 private:
-
   // --- Internal helpers ---
   void flushSend();
   bool sendParticleToAppropriateBuffer(SpeciesParticle& pcl, int count[6]);
   int handleReceivedParticles(int pclCommMode = 0);
 
   void applyPeriodicBCGlobal(vector_SpeciesParticle& pclList, int startIndex);
-  void applyNonperiodicBCsGlobal(vector_SpeciesParticle& pclList, int startIndex);
+  void applyNonperiodicBCsGlobal(vector_SpeciesParticle& pclList,
+                                 int startIndex);
   void applyBCsGlobally(vector_SpeciesParticle& pclList);
-  void applyBCsLocally(vector_SpeciesParticle& pclList,
-                        int direction, bool applyShift, bool doApplyBCs);
+  void applyBCsLocally(vector_SpeciesParticle& pclList, int direction,
+                       bool applyShift, bool doApplyBCs);
 
   bool testOutsideDomain(const SpeciesParticle& pcl) const;
   bool testOutsideNonperiodicDomain(const SpeciesParticle& pcl) const;
   bool testPclsAreInDomain(const vector_SpeciesParticle& pcls) const;
   bool testPclsAreInNonperiodicDomain(const vector_SpeciesParticle& pcls) const;
 
-  bool testXleftOfDomain(const SpeciesParticle& pcl) const { return pcl.get_x() < 0.; }
-  bool testXrghtOfDomain(const SpeciesParticle& pcl) const { return pcl.get_x() > domainLengthX_; }
-  bool testYleftOfDomain(const SpeciesParticle& pcl) const { return pcl.get_y() < 0.; }
-  bool testYrghtOfDomain(const SpeciesParticle& pcl) const { return pcl.get_y() > domainLengthY_; }
-  bool testZleftOfDomain(const SpeciesParticle& pcl) const { return pcl.get_z() < 0.; }
-  bool testZrghtOfDomain(const SpeciesParticle& pcl) const { return pcl.get_z() > domainLengthZ_; }
+  bool testXleftOfDomain(const SpeciesParticle& pcl) const {
+    return pcl.get_x() < 0.;
+  }
+  bool testXrghtOfDomain(const SpeciesParticle& pcl) const {
+    return pcl.get_x() > domainLengthX_;
+  }
+  bool testYleftOfDomain(const SpeciesParticle& pcl) const {
+    return pcl.get_y() < 0.;
+  }
+  bool testYrghtOfDomain(const SpeciesParticle& pcl) const {
+    return pcl.get_y() > domainLengthY_;
+  }
+  bool testZleftOfDomain(const SpeciesParticle& pcl) const {
+    return pcl.get_z() < 0.;
+  }
+  bool testZrghtOfDomain(const SpeciesParticle& pcl) const {
+    return pcl.get_z() > domainLengthZ_;
+  }
 
   /** Helper: push a single AoS particle into the AoS comm buffer. */
   void appendSingleParticleToComm(const SpeciesParticle& pcl) {
@@ -227,13 +242,13 @@ private:
 
   // --- Borrowed references from ParticleSoAHost ---
   ParticleSoAHost& hostParticles_;
-  const CollectiveIO*      col_;
+  const CollectiveIO* col_;
   const VirtualTopology3D* vct_;
-  const Grid*              grid_;
+  const Grid* grid_;
 
   // --- Species params (copied from hostParticles_ for fast access) ---
-  int    speciesNumber_;
-  double chargeOverMass_;  // qom
+  int speciesNumber_;
+  double chargeOverMass_; // qom
   double thermalVelocityX_, thermalVelocityY_, thermalVelocityZ_;
   double driftVelocityX_, driftVelocityY_, driftVelocityZ_;
 
@@ -243,11 +258,11 @@ private:
   double subdomainXstart_, subdomainXend_;
   double subdomainYstart_, subdomainYend_;
   double subdomainZstart_, subdomainZend_;
-  int    numCellsX_, numCellsY_, numCellsZ_;
+  int numCellsX_, numCellsY_, numCellsZ_;
   double speedOfLight_;
   double injectionDensity_;
-  int    numPclPerCellX_, numPclPerCellY_, numPclPerCellZ_;
-  int    numParticlesPerCell_;
+  int numPclPerCellX_, numPclPerCellY_, numPclPerCellZ_;
+  int numParticlesPerCell_;
 
   // --- BC face types ---
   int bcPfaceXleft_, bcPfaceXright_;

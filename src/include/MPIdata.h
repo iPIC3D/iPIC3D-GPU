@@ -1,13 +1,14 @@
-/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta. 
+/* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
- * Publications that use results from iPIC3D need to properly cite  
- * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of 
- * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+ * Publications that use results from iPIC3D need to properly cite
+ * 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+ * plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010):
+ * 1509-1519.'
  *
  *        Copyright 2015 KTH Royal Institute of Technology
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at 
+ * You may obtain a copy of the License at
  *
  *         http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -27,8 +28,8 @@ developers           : Stefano Markidis, Giovanni Lapenta
 email                : markidis@lanl.gov, lapenta@lanl.gov
  ***************************************************************************/
 
-#ifndef MPIDATA_H
-#define MPIDATA_H
+#ifndef MPI_DATA_H
+#define MPI_DATA_H
 #ifndef NO_MPI
 #include <mpi.h>
 #endif
@@ -52,14 +53,16 @@ email                : markidis@lanl.gov, lapenta@lanl.gov
 class MPIdata {
 public:
   static MPIdata& instance();
+
 private:
   // disable constructor and destructor of this singleton
   // by making them private.
-  ~MPIdata(){}
-  MPIdata(){}
+  ~MPIdata() {}
+  MPIdata() {}
+
 public:
   /** initialize MPI environment */
-  static void init(int *, char ***);
+  static void init(int*, char***);
   /** close MPI environment */
   static void finalize_mpi();
   /** finalize and exit with error code */
@@ -67,13 +70,14 @@ public:
   /** print MPI data structure */
   void Print(void);
   /** MPI status during the communication */
-  //MPI_Status status;
+  // MPI_Status status;
 public:
-  static int get_rank(){return instance().rank;}
-  static int get_nprocs(){return instance().nprocs;}
-  static MPI_Comm get_PicGlobalComm(){return instance().PIC_COMM;}
+  static int get_rank() { return instance().rank; }
+  static int get_nprocs() { return instance().nprocs; }
+  static MPI_Comm get_PicGlobalComm() { return instance().PIC_COMM; }
+
 private:
-    /*iPIC3D Global Communicator*/
+  /*iPIC3D Global Communicator*/
   static MPI_Comm PIC_COMM;
   /** rank of the process */
   static int rank;
@@ -81,10 +85,12 @@ private:
   static int nprocs;
 
   // evidently unused...
-  //char *buffer;
-  //int buffer_size;
+  // char *buffer;
+  // int buffer_size;
 };
 
-#define printf0(first, args...) \
-  if(!MPIdata::get_rank()) printf(first, ## args);
-#endif
+#define printf0(first, args...)                                                \
+  if (!MPIdata::get_rank())                                                    \
+    printf(first, ##args);
+
+#endif // MPI_DATA_H

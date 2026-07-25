@@ -1,6 +1,5 @@
-#ifndef _PARTICLE_CONTROL_KERNEL_CUH_
-#define _PARTICLE_CONTROL_KERNEL_CUH_
-
+#ifndef PARTICLE_CONTROL_KERNEL_CUH
+#define PARTICLE_CONTROL_KERNEL_CUH
 
 #include "cudaTypeDef.cuh"
 #include "particleControlKernel.cuh"
@@ -10,9 +9,9 @@
 #include "particleExchange.cuh"
 
 #include "gridCUDA.cuh"
-#include "particleExchange.cuh"
 #include "hashedSum.cuh"
 #include "moverKernel.cuh"
+#include "particleExchange.cuh"
 
 /**
  * @brief Merge near-duplicate particles inside each cell of a sorted SoA array.
@@ -26,7 +25,9 @@
  * @param pclArray Device-side particle SoA container.
  * @param departureArray Device-side departure metadata array.
  */
-__global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList, grid3DCUDA* grid, particleArrayCUDA* pclArray, departureArrayType* departureArray);
+__global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList,
+                              grid3DCUDA* grid, particleArrayCUDA* pclArray,
+                              departureArrayType* departureArray);
 
 template <bool MULTIPLE>
 /**
@@ -39,6 +40,7 @@ template <bool MULTIPLE>
  * @param moverParam Device-side mover parameter bundle for one species.
  * @param grid Device-side grid descriptor.
  */
-__global__ void particleSplittingKernel(moverParameter* moverParam, grid3DCUDA* grid);
+__global__ void particleSplittingKernel(moverParameter* moverParam,
+                                        grid3DCUDA* grid);
 
-#endif // _PARTICLE_CONTROL_KERNEL_CUH_
+#endif // PARTICLE_CONTROL_KERNEL_CUH

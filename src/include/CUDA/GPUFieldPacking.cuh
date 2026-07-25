@@ -39,11 +39,15 @@
  * @param nxn,nyn,nzn  Node dimensions (including ghosts)
  */
 __global__ void gpuPackFieldForPclsToCenter(
-    cudaFieldType* __restrict__ out,
-    const cudaSolverType*  __restrict__ Ex,      const cudaSolverType* __restrict__ Ey,      const cudaSolverType* __restrict__ Ez,
-    const cudaSolverType*  __restrict__ Bxn,     const cudaSolverType* __restrict__ Byn,     const cudaSolverType* __restrict__ Bzn,
-    const cudaSolverType*  __restrict__ Bx_ext,  const cudaSolverType* __restrict__ By_ext,  const cudaSolverType* __restrict__ Bz_ext,
-    int nxn, int nyn, int nzn);
+    cudaFieldType* __restrict__ out, const cudaSolverType* __restrict__ Ex,
+    const cudaSolverType* __restrict__ Ey,
+    const cudaSolverType* __restrict__ Ez,
+    const cudaSolverType* __restrict__ Bxn,
+    const cudaSolverType* __restrict__ Byn,
+    const cudaSolverType* __restrict__ Bzn,
+    const cudaSolverType* __restrict__ Bx_ext,
+    const cudaSolverType* __restrict__ By_ext,
+    const cudaSolverType* __restrict__ Bz_ext, int nxn, int nyn, int nzn);
 
 #endif // GPU_SOLVER
 

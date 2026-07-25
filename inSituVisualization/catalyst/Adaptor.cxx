@@ -20,9 +20,9 @@
 #include <vtkStringArray.h>
 
 namespace {
-vtkCPProcessor *Processor = nullptr;
-vtkImageData *VTKGrid = nullptr;
-const char *InputName = "particles";
+vtkCPProcessor* Processor = nullptr;
+vtkImageData* VTKGrid = nullptr;
+const char* InputName = "particles";
 
 int _start_x;
 int _nx;
@@ -33,18 +33,18 @@ int _dy;
 int _start_z;
 int _nz;
 int _dz;
-const Collective *_sim_params{};
+const Collective* _sim_params{};
 
 //----------------------------------------------------------------------------
 
 //----------------------------------------------------------------------------
-void UpdateVTKAttributes(vtkCPInputDataDescription *idd, EMfields3D *EMf) {
+void UpdateVTKAttributes(vtkCPInputDataDescription* idd, EMfields3D* EMf) {
   // I am not sure whether we need to do this check
   if (idd->IsFieldNeeded("B", vtkDataObject::POINT) == true) {
     // Create a VTK object representing magnetic field array
 
     // Get a reference to the grid's point data object.
-    vtkPointData *vtk_point_data = VTKGrid->GetPointData();
+    vtkPointData* vtk_point_data = VTKGrid->GetPointData();
 
     // We need to create a new VTK array object and attach it to the point data,
     // if it hasn't been done yet.
@@ -55,14 +55,14 @@ void UpdateVTKAttributes(vtkCPInputDataDescription *idd, EMfields3D *EMf) {
       field_array->SetNumberOfTuples(static_cast<vtkIdType>(_nx * _ny * _nz));
       vtk_point_data->AddArray(field_array);
     }
-    vtkDoubleArray *field_array =
+    vtkDoubleArray* field_array =
         vtkDoubleArray::SafeDownCast(vtk_point_data->GetArray("B"));
 
     // Feed the data into VTK array. Since we don't know the memory layout of
     // our B field data, we feed it point-by-point, in a very slow way
 
     // Array of grid's dimensions
-    int *dims = VTKGrid->GetDimensions();
+    int* dims = VTKGrid->GetDimensions();
 
     auto Bx = EMf->getBx();
     auto By = EMf->getBy();
@@ -128,7 +128,7 @@ void UpdateVTKAttributes(vtkCPInputDataDescription *idd, EMfields3D *EMf) {
 }
 
 //----------------------------------------------------------------------------
-void BuildVTKDataStructures(vtkCPInputDataDescription *idd, EMfields3D *EMf) {
+void BuildVTKDataStructures(vtkCPInputDataDescription* idd, EMfields3D* EMf) {
   // feed data to grid
   UpdateVTKAttributes(idd, EMf);
 }
@@ -137,7 +137,7 @@ void BuildVTKDataStructures(vtkCPInputDataDescription *idd, EMfields3D *EMf) {
 namespace Adaptor {
 
 //----------------------------------------------------------------------------
-void Initialize(const Collective *sim_params, const int start_x,
+void Initialize(const Collective* sim_params, const int start_x,
                 const int start_y, const int start_z, const int nx,
                 const int ny, const int nz, const double dx, const double dy,
                 const double dz) {
@@ -188,7 +188,7 @@ void Finalize() {
 }
 
 //----------------------------------------------------------------------------
-void CoProcess(double time, unsigned int timeStep, EMfields3D *EMf) {
+void CoProcess(double time, unsigned int timeStep, EMfields3D* EMf) {
   vtkNew<vtkCPDataDescription> dataDescription;
   dataDescription->AddInput(InputName);
   dataDescription->SetTimeData(time, timeStep);
@@ -211,7 +211,7 @@ void CoProcess(double time, unsigned int timeStep, EMfields3D *EMf) {
       {"B0z", _sim_params->getB0z()},
       {"ns", _sim_params->getNs()}};
 
-  for (const auto &pair : params) {
+  for (const auto& pair : params) {
     vtkNew<vtkDoubleArray> fd{};
     fd->SetNumberOfComponents(1);
     fd->SetName(pair.first.c_str());
@@ -220,7 +220,7 @@ void CoProcess(double time, unsigned int timeStep, EMfields3D *EMf) {
   }
 
   if (Processor->RequestDataDescription(dataDescription) != 0) {
-    vtkCPInputDataDescription *idd =
+    vtkCPInputDataDescription* idd =
         dataDescription->GetInputDescriptionByName(InputName);
     BuildVTKDataStructures(idd, EMf);
     idd->SetGrid(VTKGrid);

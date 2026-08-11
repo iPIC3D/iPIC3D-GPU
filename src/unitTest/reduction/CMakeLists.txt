@@ -116,5 +116,9 @@ include(CTest)
 enable_testing()
 
 # Test cases
-add_test(NAME reductionTest1 COMMAND reductionTest)
+add_test(
+  NAME reductionTest1
+  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1
+          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:reductionTest>
+          ${MPIEXEC_POSTFLAGS})
 set_tests_properties(reductionTest1 PROPERTIES TIMEOUT 10) # Timeout in seconds

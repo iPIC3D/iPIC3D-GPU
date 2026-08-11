@@ -8,6 +8,18 @@ cmake_policy(SET CMP0042 NEW)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+if(NOT CMAKE_CONFIGURATION_TYPES)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+               Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  add_compile_definitions(DEBUG_MODE)
+endif()
+
 macro(DP var)
   message(NOTICE "${var} = '${${var}}'")
 endmacro()
@@ -372,14 +384,6 @@ target_link_libraries(
   iPIC3Dlib
   )
 
-
-if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE Release)
-endif()
-
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  add_compile_definitions(DEBUG_MODE)
-endif()
 
 if(BENCH_MARK)
 target_compile_definitions(iPIC3Dlib PUBLIC LOG_TASKS_TOTAL_TIME)

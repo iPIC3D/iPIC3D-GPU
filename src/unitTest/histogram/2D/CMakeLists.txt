@@ -120,5 +120,9 @@ include(CTest)
 enable_testing()
 
 # Test cases
-add_test(NAME histogram2DTest COMMAND histogram2DTest)
+add_test(
+  NAME histogram2DTest
+  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1
+          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:histogram2DTest>
+          ${MPIEXEC_POSTFLAGS})
 set_tests_properties(histogram2DTest PROPERTIES TIMEOUT 10) # Timeout in seconds

@@ -10,8 +10,6 @@ inline constexpr uint32_t WARP_FULL_MASK = 0xFFFFFFFF;
 using warp_mask_t = uint32_t;
 #else
 #include "hipifly.hpp"
-#include <hip/hip_fp16.h>
-#include <hip/hip_runtime.h>
 #define WARP_SIZE (64)
 inline constexpr uint64_t WARP_FULL_MASK = 0xFFFFFFFFFFFFFFFF;
 using warp_mask_t = uint64_t;

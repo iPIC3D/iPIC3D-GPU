@@ -1,6 +1,9 @@
 #ifndef HIPIFLY_HPP
 #define HIPIFLY_HPP
 
+#include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
+
 // Error Handling
 #define cudaError_t hipError_t
 #define cudaSuccess hipSuccess

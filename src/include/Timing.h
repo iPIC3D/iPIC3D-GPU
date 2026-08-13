@@ -28,6 +28,8 @@ developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
 #ifndef TIMING_H
 #define TIMING_H
 
+#include <chrono>
+
 // #include "MPIdata.h"
 
 // #include <iostream>
@@ -71,6 +73,25 @@ public:
   /** print the execution time without stopping the clock*/
   void Print_OnAir();
 
+  // Program-phase marks (wall clock), set from main(). stopTiming() uses
+  // them to print the timing breakdown alongside the simulation time.
+  /** mark program start (right after MPI init) */
+  static void markProgramStart();
+  /** mark end of solver Init() */
+  static void markInitEnd();
+  /** mark start of the cycle loop (after initial moments) */
+  static void markLoopStart();
+  /** per-cycle wall-clock marks captured in the main loop */
+  using TimePoint = std::chrono::high_resolution_clock::time_point;
+  /** accumulate one cycle's stats for avg/stddev and print the rank-0
+   * per-cycle breakdown */
+  static void recordCycle(int rank, TimePoint start, TimePoint sort,
+                          TimePoint field, TimePoint daWait, TimePoint mover,
+                          TimePoint exchange, TimePoint bField,
+                          TimePoint moments, TimePoint end);
+  /** mark end of the cycle loop (before Finalize()) */
+  static void markLoopEnd();
+
 private:
   /** rank of the processor */
   int rank_id;
@@ -85,6 +106,15 @@ private:
   /** events to write the logging: particle mover, field solver. it can be
    * extended with other events */
   int event1a, event1b, event2a, event2b, event3a, event3b, event4a, event4b;
+
+  /** program-phase marks (0 = never set) and per-cycle statistics */
+  static double tProgStart;
+  static double tInitEnd;
+  static double tLoopStart;
+  static double tLoopEnd;
+  static double cycleMsSum;
+  static double cycleMsSumSq;
+  static int nCycles;
 };
 
 #endif // TIMING_H

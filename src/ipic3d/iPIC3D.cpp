@@ -22,6 +22,7 @@
 #include "iPic3D.h"
 #include "MPIdata.h"
 #include "TimeTasks.h"
+#include "Timing.h"
 #include "debug.h"
 #include <chrono>
 #include <stdio.h>
@@ -34,14 +35,19 @@ int main(int argc, char** argv) {
 
   MPIdata::init(&argc, &argv);
   {
+    Timing::markProgramStart();
 
     iPic3D::c_Solver KCode;
     KCode.Init(argc, argv); //! load param from file, init the grid, fields
+    Timing::markInitEnd();
+
     dataAnalysis::dataAnalysisPipeline DA(
         KCode); // has to be created after KCode.Init()
 
     timeTasks.resetCycle(); // reset timer
     KCode.CalculateMoments();
+    Timing::markLoopStart();
+
     for (int i = KCode.FirstCycle(); i < KCode.LastCycle(); i++) {
 
       if (KCode.get_myrank() == 0)
@@ -87,35 +93,10 @@ int main(int argc, char** argv) {
 
       KCode.outputCopyAsync(i); // copy output data to host, for next output
       auto end = std::chrono::high_resolution_clock::now();
-      std::chrono::duration<double, std::milli> elapsed = end - start;
-      if (KCode.get_myrank() == 0) {
-        std::cout
-            << "Execution time cycle: " << elapsed.count() << " ms"
-            << "  [sort="
-            << std::chrono::duration<double, std::milli>(t_sort - start).count()
-            << " field="
-            << std::chrono::duration<double, std::milli>(t_field - t_sort)
-                   .count()
-            << " da_wait="
-            << std::chrono::duration<double, std::milli>(t_da_wait - t_field)
-                   .count()
-            << " mover+out="
-            << std::chrono::duration<double, std::milli>(t_mover - t_da_wait)
-                   .count()
-            << " exchange+sort+moments="
-            << std::chrono::duration<double, std::milli>(t_exchange - t_mover)
-                   .count()
-            << " B="
-            << std::chrono::duration<double, std::milli>(t_bfield - t_exchange)
-                   .count()
-            << " momentsAwait="
-            << std::chrono::duration<double, std::milli>(t_moments - t_bfield)
-                   .count()
-            << " outCopy="
-            << std::chrono::duration<double, std::milli>(end - t_moments)
-                   .count()
-            << "]" << std::endl;
-      }
+
+      Timing::recordCycle(KCode.get_myrank(), start, t_sort, t_field,
+                          t_da_wait, t_mover, t_exchange, t_bfield, t_moments,
+                          end);
 
 #ifdef LOG_TASKS_TOTAL_TIME
       timeTasks.print_cycle_times(i); // print out total time for all tasks
@@ -126,6 +107,9 @@ int main(int argc, char** argv) {
     timeTasks.print_tasks_total_times();
 #endif
 
+    Timing::markLoopEnd();
+    // Finalize() ends with my_clock->stopTiming(), which prints the
+    // simulation time together with the phase breakdown.
     KCode.Finalize();
   }
   // close MPI

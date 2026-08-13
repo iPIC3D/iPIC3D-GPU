@@ -1313,6 +1313,12 @@ void c_Solver::CalculateMoments() {
 
   // timeTasks_set_main_task(TimeTasks::MOMENTS);
 
+  // With sorting enabled, cell-sort first and use the cell-aware moment
+  // kernel
+  const bool useSortedMoments = (sortingCycle_ >= 1);
+  if (useSortedMoments)
+    sortAllSpecies();
+
   auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
   for (int i = 0; i < ns; i++) {
     cudaErrChk(cudaMemsetAsync(momentsCUDAPtr[i], 0,
@@ -1320,9 +1326,21 @@ void c_Solver::CalculateMoments() {
                                streams[i]));
     // Particle data is already resident on the device; only the kernel launch
     // is needed here.
-    momentKernelNew<<<(pclsArrayHostPtr[i]->getNOP() / DEFAULT_BLOCK_SIZE + 1),
-                      DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
-        momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i], 0);
+    const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
+    if (useSortedMoments) {
+      if (nop > 0) {
+        const int numCells = cellSorters[i].getNumCells();
+        const int threads = numCells * WARP_SIZE;
+        cellAwareMomentKernel<<<getGridSize(threads, DEFAULT_BLOCK_SIZE),
+                                DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
+            cellSorters[i].getCellStartOffsets(), numCells, nop,
+            pclsArrayCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i]);
+      }
+    } else {
+      momentKernelNew<<<(nop / DEFAULT_BLOCK_SIZE + 1), DEFAULT_BLOCK_SIZE, 0,
+                        streams[i]>>>(momentParamCUDAPtr[i], grid3DCUDACUDAPtr,
+                                      momentsCUDAPtr[i], 0);
+    }
 #ifdef GPU_SOLVER
     // D2D scatter: packed moments → per-field GPU solver arrays (no host touch)
     EMf->gpuScatterMomentsD2D(momentsCUDAPtr[i], i, streams[i]);

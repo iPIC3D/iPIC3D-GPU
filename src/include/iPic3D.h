@@ -104,7 +104,8 @@ public:
   c_Solver()
       : col(0), vct(0), grid(0), EMf(0), particlesCommInj(nullptr),
         particlesHost(nullptr), testpart(nullptr), exosphereIonization(nullptr),
-        ioManager(0), heatFluxEnabled_(false), heatFluxScheduledCycle_(-1),
+        ioManager(0), heatFluxCalculationEnabled_(false),
+        heatFluxOutputEnabled_(false), heatFluxScheduledCycle_(-1),
         heatFluxStream(nullptr), heatFluxReadDoneEvt(nullptr),
         heatFluxHostDoneEvt(nullptr), heatFluxCUDAPtr(nullptr),
         heatFluxBulkCUDAPtr(nullptr), Ke(0), BulkEnergy(0), momentum(0),
@@ -251,9 +252,9 @@ private:
   /** @brief Complete heat-flux D2H, halo communication, and make data writable.
    */
   void finishHeatFluxForOutput(int cycle);
-  /** @brief Return true when this cycle's configured field output needs heat
-   * flux. */
-  bool needsHeatFluxOutput(int cycle) const;
+  /** @brief Return true when this cycle requests the optional heat-flux
+   * calculation. */
+  bool needsHeatFluxCalculation(int cycle) const;
   /** @brief Ensure restart particle cell metadata buffers match the local grid.
    */
   void ensureRestartParticleCellMetadataBuffers();
@@ -413,8 +414,9 @@ private:
       heatFluxReadDoneEvt; // [ns] : heat kernel has finished reading particles
   cudaEvent_t*
       heatFluxHostDoneEvt;     // [ns] : heat D2H copy into EMfields is complete
-  cudaStream_t heatFluxStream; // dedicated stream for heat-flux output work
-  bool heatFluxEnabled_;
+  cudaStream_t heatFluxStream; // dedicated stream for heat-flux calculation
+  bool heatFluxCalculationEnabled_;
+  bool heatFluxOutputEnabled_;
   int heatFluxScheduledCycle_;
 
   // bool verbose;

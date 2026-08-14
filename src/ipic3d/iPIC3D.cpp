@@ -20,6 +20,7 @@
  */
 
 #include "iPic3D.h"
+#include "BenchmarkMode.h"
 #include "MPIdata.h"
 #include "TimeTasks.h"
 #include "Timing.h"
@@ -27,7 +28,9 @@
 #include <chrono>
 #include <stdio.h>
 
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
 #include "dataAnalysis.cuh"
+#endif
 
 using namespace iPic3D;
 
@@ -41,8 +44,10 @@ int main(int argc, char** argv) {
     KCode.Init(argc, argv); //! load param from file, init the grid, fields
     Timing::markInitEnd();
 
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
     dataAnalysis::dataAnalysisPipeline DA(
         KCode); // has to be created after KCode.Init()
+#endif
 
     timeTasks.resetCycle(); // reset timer
     KCode.CalculateMoments();
@@ -56,30 +61,42 @@ int main(int argc, char** argv) {
       auto start = std::chrono::high_resolution_clock::now();
       timeTasks.resetCycle();
 
+#if IPIC3D_COMPILE_DISK_OUTPUT
       KCode.writeParticleNum(i);
+#endif
 
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
       // Sort all species on GPU before data-analysis cycles
       if (dataAnalysis::dataAnalysisPipeline::isAnalysisCycle(i)) {
         KCode.sortAllSpecies();
       }
+#endif
       auto t_sort = std::chrono::high_resolution_clock::now();
 
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
       KCode.ScheduleHeatFlux(i);
+#endif
 
       // DA analysis runs async on GPU while CalculateField runs on CPU.
       // t_field is sampled *before* DA.waitForAnalysis() so that field=
       // reflects only the field solver and not particle-count-dependent
       // analysis wait time.
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
       DA.startAnalysis(i);
+#endif
       KCode.CalculateField(i); // E field
       auto t_field = std::chrono::high_resolution_clock::now();
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
       DA.waitForAnalysis();
+#endif
       auto t_da_wait = std::chrono::high_resolution_clock::now();
 
-      KCode.ParticlesMoverMomentAsync(
-          i); // launch Mover kernels (moments computed post-sort)
-      // some spare CPU cycles
+      // Launch mover kernels; moments are computed after the sort.
+      KCode.ParticlesMoverMomentAsync(i);
+#if IPIC3D_COMPILE_DISK_OUTPUT
+      // Use otherwise-idle CPU time for output while the GPU mover runs.
       KCode.WriteOutput(i);
+#endif
       auto t_mover = std::chrono::high_resolution_clock::now();
 
       KCode.MoverAwaitAndPclExchange(i); // includes sort + moments
@@ -91,12 +108,16 @@ int main(int argc, char** argv) {
       KCode.MomentsAwait();
       auto t_moments = std::chrono::high_resolution_clock::now();
 
-      KCode.outputCopyAsync(i); // copy output data to host, for next output
+#if IPIC3D_COMPILE_DISK_OUTPUT
+      // There is no future cycle after the final loop iteration.  Avoid
+      // predicting and copying output for a cycle that will never be written.
+      if (i + 1 < KCode.LastCycle())
+        KCode.outputCopyAsync(i); // copy output data for the next cycle
+#endif
       auto end = std::chrono::high_resolution_clock::now();
 
-      Timing::recordCycle(KCode.get_myrank(), start, t_sort, t_field,
-                          t_da_wait, t_mover, t_exchange, t_bfield, t_moments,
-                          end);
+      Timing::recordCycle(KCode.get_myrank(), start, t_sort, t_field, t_da_wait,
+                          t_mover, t_exchange, t_bfield, t_moments, end);
 
 #ifdef LOG_TASKS_TOTAL_TIME
       timeTasks.print_cycle_times(i); // print out total time for all tasks

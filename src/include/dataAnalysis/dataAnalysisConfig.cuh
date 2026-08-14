@@ -1,13 +1,15 @@
 #ifndef DATA_ANALYSIS_CONFIG_CUH
 #define DATA_ANALYSIS_CONFIG_CUH
 
+#include "BenchmarkMode.h"
 #include "cudaTypeDef.cuh"
 #include <string>
 
 namespace DAConfig {
 
 // General configuration
-inline constexpr bool DATA_ANALYSIS_ENABLED = true;
+inline constexpr bool DATA_ANALYSIS_ENABLED =
+    BenchmarkConfig::DATA_ANALYSIS_ENABLED;
 inline constexpr bool VELOCITY_HISTOGRAM_ENABLE =
     DATA_ANALYSIS_ENABLED && false;
 inline constexpr bool GMM_ENABLE = VELOCITY_HISTOGRAM_ENABLE && false;
@@ -16,7 +18,8 @@ inline const std::string DATA_ANALYSIS_OUTPUT_DIR = "./";
 inline constexpr int DATA_ANALYSIS_EVERY_CYCLE = 50;
 
 // Histogram configuration
-inline constexpr bool HISTOGRAM_OUTPUT = VELOCITY_HISTOGRAM_ENABLE && true;
+inline constexpr bool HISTOGRAM_OUTPUT =
+    VELOCITY_HISTOGRAM_ENABLE && BenchmarkConfig::DISK_OUTPUT_ENABLED;
 inline const std::string HISTOGRAM_OUTPUT_DIR =
     DATA_ANALYSIS_OUTPUT_DIR + "velocityHistogram/";
 // For 2D
@@ -45,7 +48,7 @@ inline constexpr cudaCommonType MAX_VELOCITY_HIST_I = 0.09;
 // disables the feature at runtime even if MACROCELL_SPECTRA_ENABLE is true.
 inline constexpr bool MACROCELL_SPECTRA_ENABLE = DATA_ANALYSIS_ENABLED && true;
 inline constexpr bool MACROCELL_SPECTRA_OUTPUT =
-    MACROCELL_SPECTRA_ENABLE && true;
+    MACROCELL_SPECTRA_ENABLE && BenchmarkConfig::DISK_OUTPUT_ENABLED;
 inline const std::string MACROCELL_SPECTRA_OUTPUT_DIR =
     DATA_ANALYSIS_OUTPUT_DIR + "macrocellSpectra/";
 inline constexpr int MACROCELL_BINS_VPAR = 64;
@@ -56,7 +59,8 @@ inline constexpr cudaCommonType MACROCELL_BMIN = 1e-12;
 
 // GMM configuration
 
-inline constexpr bool GMM_OUTPUT = GMM_ENABLE && true;
+inline constexpr bool GMM_OUTPUT =
+    GMM_ENABLE && BenchmarkConfig::DISK_OUTPUT_ENABLED;
 inline const std::string GMM_OUTPUT_DIR =
     DATA_ANALYSIS_OUTPUT_DIR + "velocityGMM/";
 inline constexpr int DATA_DIM_GMM = 3; // only works with DATA_DIM = 3 now

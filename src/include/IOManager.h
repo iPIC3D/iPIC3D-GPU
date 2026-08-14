@@ -125,6 +125,14 @@ public:
    */
   bool needsParticleSync(int cycle) const;
 
+  /** @brief Will this cycle write at least one configured field or moment
+   * quantity through an available backend? */
+  bool needsFieldOutput(int cycle) const;
+
+  /** @brief Will this cycle write particle data through an available backend?
+   */
+  bool needsParticleOutput(int cycle) const;
+
   /**
    * @brief Will the given cycle write a restart checkpoint containing
    * particles?

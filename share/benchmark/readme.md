@@ -8,6 +8,13 @@
 - Wait with a cup of coffee, check the output from time to time, they are executed in serial.
 - Done.
 
+The benchmark build uses `BENCHMARK_MODE=2`: simulation output and its
+device-to-host copies are disabled, as are optional diagnostic calculations
+(data analysis, macrocell spectra, and heat flux).
+Task timing remains enabled and is printed to standard output. Use
+`BENCHMARK_MODE=1` instead when those calculations should remain part of the
+measured workload; heat-flux D2H and writing still remain disabled at level 1.
+
 **NOTE**: The name of the folder must be in the format `name_XxYxZ_cycle`, as the script relies on the second segment to launch MPI processes.
 
 ## Baseline

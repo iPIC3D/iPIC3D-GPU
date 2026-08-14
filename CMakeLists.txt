@@ -66,11 +66,19 @@ option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA, ON for HIP
 set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for (minimum 75 for double atomicAdd)")
 set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture to compile for (e.g. gfx90a, gfx940, gfx1100)")
 
-option(BENCH_MARK "Print tasks time" OFF)
+option(TIME_TASKS "Print per-cycle and cumulative task timings" OFF)
+set(BENCHMARK_MODE "0" CACHE STRING
+  "Benchmark mode: 0=normal, 1=disable disk output and related D2H copies, 2=also disable data analysis, macrocell spectra, and heat flux"
+  )
+set_property(CACHE BENCHMARK_MODE PROPERTY STRINGS 0 1 2)
+if(NOT "${BENCHMARK_MODE}" MATCHES "^[012]$")
+  message(FATAL_ERROR
+          "BENCHMARK_MODE must be 0, 1, or 2; got '${BENCHMARK_MODE}'")
+endif()
 option(USE_OPENMP "Use OpenMP in supported loops" ON) # must delete all cmake cache if you change this option
 option(GPU_SOLVER "Run the entire field solver on GPU (requires CUDA-aware MPI)" OFF)
 option(HALO_OVERLAP "Enable halo-computation overlap in the GPU field solver (requires GPU_SOLVER)" OFF)
-option(BUILD_TESTING "Build unit tests" OFF)
+option(BUILD_UTESTS "Build unit tests" OFF)
 
 include(GNUInstallDirs)
 include(CTest)
@@ -151,13 +159,17 @@ if(USE_CATALYST)
       "different build of ParaView) with PARAVIEW_ENABLE_CATALYST and "
       "PARAVIEW_ENABLE_PYTHON set to TRUE")
   else()
-    add_library(iPICAdaptor ${CMAKE_SOURCE_DIR}/${SOURCE_CODE_DIR}/catalyst/Adaptor.cxx)
+    set(IPIC_CATALYST_DIR "${CMAKE_SOURCE_DIR}/inSituVisualization/catalyst")
+    add_library(iPICAdaptor "${IPIC_CATALYST_DIR}/Adaptor.cxx")
     if (BUILD_SHARED_LIBS)
       install(TARGETS iPICAdaptor)
     endif()
 
     target_link_libraries(iPICAdaptor PRIVATE ParaView::PythonCatalyst VTK::CommonDataModel Python3::Python)
-    target_include_directories(iPICAdaptor INTERFACE ${CMAKE_SOURCE_DIR}/${SOURCE_CODE_DIR}/catalyst)
+    target_include_directories( iPICAdaptor
+      PRIVATE "${CMAKE_SOURCE_DIR}/${INCLUDE_CODE_DIR}"
+      INTERFACE "${IPIC_CATALYST_DIR}"
+      )
     target_compile_definitions(iPICAdaptor INTERFACE USE_CATALYST)
 
   endif()
@@ -229,7 +241,11 @@ file(
   processtopology/*.cpp
   )
 # CUDA source files
-file(GLOB cuda_src_files ${SOURCE_CODE_DIR}/cudaKernel/*.cu ${SOURCE_CODE_DIR}/main/*.cu ${SOURCE_CODE_DIR}/dataAnalysis/*.cu)
+file(GLOB cuda_src_files ${SOURCE_CODE_DIR}/cudaKernel/*.cu ${SOURCE_CODE_DIR}/main/*.cu)
+if(BENCHMARK_MODE LESS 2)
+  file(GLOB data_analysis_src_files ${SOURCE_CODE_DIR}/dataAnalysis/*.cu)
+  list(APPEND cuda_src_files ${data_analysis_src_files})
+endif()
 
 if(HIP_ON)
   set_source_files_properties(${cuda_src_files} PROPERTIES LANGUAGE HIP)
@@ -238,6 +254,10 @@ endif()
 list(APPEND src_files ${cuda_src_files})
 
 add_library( iPIC3Dlib ${src_files} )
+
+# Define the numeric mode for every library source and propagate the identical
+# value to consumers such as the iPIC3D executable.
+target_compile_definitions(iPIC3Dlib PUBLIC BENCHMARK_MODE=${BENCHMARK_MODE})
 
 
 if(HIP_ON)
@@ -298,6 +318,13 @@ target_include_directories(
   iPIC3Dlib
   PUBLIC ${include_path}
   )
+
+if(TARGET iPICAdaptor)
+  # The adaptor includes the field containers and therefore needs the same
+  # project/GPU headers even though its own source is ordinary C++.
+  target_include_directories(iPICAdaptor PRIVATE ${include_path})
+  target_link_libraries(iPICAdaptor PRIVATE MPI::MPI_CXX)
+endif()
 
 #
 # Link external libraries
@@ -385,14 +412,9 @@ target_link_libraries(
   )
 
 
-if(BENCH_MARK)
-target_compile_definitions(iPIC3Dlib PUBLIC LOG_TASKS_TOTAL_TIME)
-target_compile_definitions(iPIC3D PUBLIC LOG_TASKS_TOTAL_TIME)
-endif()
-
-if(BENCH_MARK)
-target_compile_definitions(iPIC3Dlib PUBLIC LOG_TASKS_TOTAL_TIME)
-target_compile_definitions(iPIC3D PUBLIC LOG_TASKS_TOTAL_TIME)
+if(TIME_TASKS)
+  target_compile_definitions(iPIC3Dlib PUBLIC LOG_TASKS_TOTAL_TIME)
+  target_compile_definitions(iPIC3D PUBLIC LOG_TASKS_TOTAL_TIME)
 endif()
 
 ## to save the executable in the folder where the CMakeLists.txt file is, i.e. CMAKE_CURRENT_SOURCE_DIR
@@ -422,7 +444,7 @@ add_install_libdir_to_rpath(iPIC3D)
 
 install(TARGETS iPIC3D)
 
-if(BUILD_TESTING)
+if(BUILD_UTESTS)
   add_subdirectory(src/unitTest/reduction)
   add_subdirectory(src/unitTest/histogram/2D)
   add_subdirectory(src/unitTest/histogram/3D)
@@ -461,7 +483,8 @@ message(STATUS "  ADIOS2 output               : ${USE_ADIOS2} (disabled if USE_A
 message(STATUS "  OpenMP                      : ${USE_OPENMP} ")
 message(STATUS "  Catalyst (in-situ)          : ${USE_CATALYST}")
 message(STATUS "  BATSRUS coupling            : ${USE_BATSRUS}")
-message(STATUS "  Benchmark timers            : ${BENCH_MARK}  (LOG_TASKS_TOTAL_TIME macro)")
-message(STATUS "  Unit tests                  : ${BUILD_TESTING}")
+message(STATUS "  Task timing output          : ${TIME_TASKS}  (LOG_TASKS_TOTAL_TIME macro)")
+message(STATUS "  Benchmark mode              : ${BENCHMARK_MODE}  (0=normal, 1=no output, 2=no output/analysis/heat flux)")
+message(STATUS "  Unit tests                  : ${BUILD_UTESTS}")
 message(STATUS "==========================================")
 message(STATUS "")

@@ -591,7 +591,8 @@ void dataAnalysisPipeline::createOutputDirectory(int myrank, int ns,
                                                  VirtualTopology3D* vct,
                                                  bool isRestart,
                                                  bool velocitySpectraEnabled) {
-  if constexpr (DATA_ANALYSIS_ENABLED == false) {
+  if constexpr (!DATA_ANALYSIS_ENABLED ||
+                !BenchmarkConfig::DISK_OUTPUT_ENABLED) {
     return;
   }
 

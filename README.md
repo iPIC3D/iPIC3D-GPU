@@ -71,15 +71,26 @@ cmake -DHIP_ON=ON .. # use HIP
 | `USE_CATALYST` | `OFF` | Enable ParaView Catalyst in-situ visualization (requires ParaView ≥ 5.7) |
 | `USE_BATSRUS` | `OFF` | Enable BATS-R-US MHD coupling (adds `BATSRUS` compile definition) |
 | `USE_OPENMP` | `ON` | Enable OpenMP in the CPU solver. **Delete CMake cache when changing this.** |
-| `BENCH_MARK` | `OFF` | Print per-task timing (`LOG_TASKS_TOTAL_TIME`) |
+| `TIME_TASKS` | `OFF` | Print per-cycle and cumulative task timings (`LOG_TASKS_TOTAL_TIME`) |
+| `BENCHMARK_MODE` | `0` | Compile-time benchmark level: `0` normal; `1` disables disk output and output-related device-to-host copies; `2` additionally disables data analysis, macrocell spectra, and heat-flux calculations |
 | `BUILD_SHARED_LIBS` | `ON` | Build shared libraries (`OFF` for static) |
 | `SITE` | `default` | Select a predefined site configuration from `cmake/sites/` |
+
+`BENCHMARK_MODE` removes output-related device-to-host transfers. Transfers
+required by the simulation itself—such as CPU-solver moment copies, MPI/planet
+particle exchange, and GPU-solver scalar reductions—remain enabled. At level 1,
+calculation-essential transfers inside an enabled analysis algorithm also remain;
+heat-flux kernels likewise remain on their configured field-output cadence, but
+their D2H, host ghost preparation, and writing are removed. Level 2 removes
+those optional diagnostic calculations entirely.
 
 Example with explicit architecture and selected backends:
 ```shell
 cmake -DCUDA_ARCH=80 -DUSE_ADIOS2=ON -DUSE_HDF5=ON -DUSE_PHDF5=ON ..
 # or for HIP:
 cmake -DHIP_ON=ON -DHIP_ARCH=gfx90a -DUSE_ADIOS2=ON ..
+# core-solver benchmark with task timing, no disk output or data analysis:
+cmake -DBENCHMARK_MODE=2 -DTIME_TASKS=ON ..
 ```
 
 

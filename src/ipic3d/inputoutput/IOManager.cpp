@@ -5,6 +5,7 @@
 
 #include "IOManager.h"
 #include "Alloc.h" // newArr3, newArr4, delArr3, delArr4
+#include "BenchmarkMode.h"
 #include "Collective.h"
 #include "EMfields3D.h"
 #include "Grid3DCU.h"
@@ -68,6 +69,9 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
                      EMfields3D* EMf, ParticleSoAHost** outputPart, int ns,
                      ParticleSoAHost** testpart, int nstestpart,
                      int first_cycle) {
+  if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
+    return;
+
   // Store non-owning pointers
   col_ = col;
   vct_ = vct;
@@ -251,6 +255,8 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
 // ======= Field output =======
 
 void IOManager::writeFields(int cycle) {
+  if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
+    return;
 
   const OutputTagConfig& cfg = col_->getOutputConfig();
 
@@ -354,6 +360,9 @@ void IOManager::writeFields(int cycle) {
 // ======= Particle output =======
 
 void IOManager::writeParticles(int cycle) {
+  if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
+    return;
+
   switch (particleBackend_) {
 
   case ParticleBackend::ADIOS2:
@@ -384,6 +393,9 @@ void IOManager::writeParticles(int cycle) {
 // ======= Test-particle output =======
 
 void IOManager::writeTestParticles(int cycle) {
+  if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
+    return;
+
   if (nstestpart_ == 0)
     return;
 
@@ -400,6 +412,9 @@ void IOManager::writeTestParticles(int cycle) {
 // ======= Restart output =======
 
 void IOManager::writeRestart(int cycle) {
+  if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
+    return;
+
   if (restartBackend_ == RestartBackend::NONE)
     return;
 
@@ -436,6 +451,9 @@ void IOManager::writeRestart(int cycle) {
 // ======= Finalization =======
 
 void IOManager::finalize() {
+  if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
+    return;
+
   // Drain any in-flight NBCVTK split-collective writes from the last output
   // cycle. Must run before MPI_Finalize and is collective on the file's
   // communicator; c_Solver::Finalize() guarantees both.
@@ -492,11 +510,47 @@ void IOManager::drainNBCVTKPending() {
 
 // ======= Scheduling query =======
 
+bool IOManager::needsFieldOutput(int cycle) const {
+  if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
+    return false;
+
+  if (fieldBackend_ == FieldBackend::NONE || !Parameters::get_doWriteOutput() ||
+      col_->field_output_is_off())
+    return false;
+
+  const OutputTagConfig& cfg = col_->getOutputConfig();
+  if (!cfg.needsAnyField() && !cfg.needsAnyMoments())
+    return false;
+
+  return cycle % col_->getFieldOutputCycle() == 0 || cycle == first_cycle_;
+}
+
+bool IOManager::needsParticleOutput(int cycle) const {
+  if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
+    return false;
+
+  // H5hut always writes the full particle record.  The tag-driven SHDF5 and
+  // ADIOS2 paths have no particle consumer when their tag is empty.
+  const string particleTag = col_->getPclOutputTag();
+  const bool hasParticleTag =
+      particleTag.find_first_not_of(" \t\r\n") != string::npos;
+  const bool backendConsumesData =
+      particleBackend_ == ParticleBackend::H5HUT ||
+      ((particleBackend_ == ParticleBackend::SHDF5 ||
+        particleBackend_ == ParticleBackend::ADIOS2) &&
+       hasParticleTag);
+  return backendConsumesData && Parameters::get_doWriteOutput() &&
+         !col_->particle_output_is_off() &&
+         cycle % col_->getParticlesOutputCycle() == 0;
+}
+
 bool IOManager::needsParticleSync(int cycle) const {
-  if (restart_cycle_ > 0 && cycle % restart_cycle_ == 0)
+  if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
+    return false;
+
+  if (needsRestartParticleSync(cycle))
     return true;
-  if (!col_->particle_output_is_off() &&
-      cycle % col_->getParticlesOutputCycle() == 0)
+  if (needsParticleOutput(cycle))
     return true;
   // Also sync particles when diagnostics (ConservedQuantities) are due
   if (col_->getDiagnosticsOutputCycle() > 0 &&
@@ -506,6 +560,9 @@ bool IOManager::needsParticleSync(int cycle) const {
 }
 
 bool IOManager::needsRestartParticleSync(int cycle) const {
+  if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
+    return false;
+
   return restartBackend_ != RestartBackend::NONE && restart_cycle_ > 0 &&
          cycle % restart_cycle_ == 0;
 }

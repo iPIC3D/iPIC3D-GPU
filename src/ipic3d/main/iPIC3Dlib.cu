@@ -19,6 +19,7 @@
  * limitations under the License.
  */
 
+#include "BenchmarkMode.h"
 #include "Collective.h"
 #include "EMfields3D.h"
 #include "Grid3DCU.h"
@@ -57,7 +58,9 @@
 #include "ExosphereIonization.h"
 
 #include "cudaTypeDef.cuh"
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
 #include "dataAnalysis.cuh"
+#endif
 #include "injectionKernel.cuh"
 #include "momentKernel.cuh"
 #include "moverKernel.cuh"
@@ -65,7 +68,7 @@
 #include "particleControlKernel.cuh"
 #include "particleExchange.cuh"
 
-#ifdef USE_CATALYST
+#if defined(USE_CATALYST) && IPIC3D_COMPILE_DISK_OUTPUT
 #include "Adaptor.h"
 #endif
 
@@ -166,7 +169,7 @@ c_Solver::~c_Solver() {
     delete[] particlesHost;
   }
 
-#ifdef USE_CATALYST
+#if defined(USE_CATALYST) && IPIC3D_COMPILE_DISK_OUTPUT
   Adaptor::Finalize();
 #endif
   delete[] Ke;
@@ -256,6 +259,7 @@ int c_Solver::Init(int argc, char** argv) {
 
   // Print the initial settings to stdout and a file
   if (myrank == 0) {
+#if IPIC3D_COMPILE_DISK_OUTPUT
     // Fresh runs clear old output. Restart runs must preserve restart files but
     // still need writable output directories for settings/proc files.
     if (restart_status == 0) {
@@ -267,11 +271,19 @@ int c_Solver::Init(int argc, char** argv) {
       if (RestartDirName != SaveDirName)
         ensureOutputFolder(RestartDirName);
     }
+#endif
 
     MPIdata::instance().Print();
     vct->Print();
     col->Print();
+#if IPIC3D_COMPILE_DISK_OUTPUT
     col->save();
+#else
+    cout << "Benchmark mode " << BENCHMARK_MODE
+         << ": disk output and output-related device-to-host copies are "
+            "disabled at compile time."
+         << endl;
+#endif
   }
 #ifndef NO_MPI
   MPI_Barrier(MPIdata::get_PicGlobalComm());
@@ -424,6 +436,7 @@ int c_Solver::Init(int argc, char** argv) {
   }
 
   // ======= Initialize modular I/O manager =======
+#if IPIC3D_COMPILE_DISK_OUTPUT
   ioManager = new IOManager;
   if (Parameters::get_doWriteOutput() || restart_cycle > 0 ||
       col->getCallFinalize()) {
@@ -442,6 +455,7 @@ int c_Solver::Init(int argc, char** argv) {
   }
 
   Qremoved = new double[ns];
+#endif
 
   // ======= Exosphere ionization source =======
   numSolarWindSpecies = col->getNumSolarWindSpecies();
@@ -453,7 +467,7 @@ int c_Solver::Init(int argc, char** argv) {
     exosphereIonization = nullptr;
   }
 
-#ifdef USE_CATALYST
+#if defined(USE_CATALYST) && IPIC3D_COMPILE_DISK_OUTPUT
   Adaptor::Initialize(col, (int)(grid->getXstart() / grid->getDX()),
                       (int)(grid->getYstart() / grid->getDY()),
                       (int)(grid->getZstart() / grid->getDZ()), grid->getNXN(),
@@ -461,6 +475,7 @@ int c_Solver::Init(int argc, char** argv) {
                       grid->getDY(), grid->getDZ());
 #endif
 
+#if IPIC3D_COMPILE_DISK_OUTPUT
   // Create or open the particle number file csv
   pclNumCSV = std::ofstream(SaveDirName + "/particleNum" +
                                 std::to_string(myrank) + ".csv",
@@ -470,8 +485,10 @@ int c_Solver::Init(int argc, char** argv) {
     pclNumCSV << "species" << i << ",";
   }
   pclNumCSV << "species" << ns - 1 << std::endl;
+#endif
 
   initCUDA();
+#if IPIC3D_COMPILE_DISK_OUTPUT
   if (Parameters::get_doWriteOutput() || restart_cycle > 0 ||
       col->getCallFinalize()) {
     ioManager->setRestartParticleCellMetadata(&restartParticleCellMetadata_);
@@ -480,6 +497,7 @@ int c_Solver::Init(int argc, char** argv) {
       cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     }
   }
+#endif
 
   my_clock = new Timing(myrank);
 
@@ -493,8 +511,22 @@ int c_Solver::Init(int argc, char** argv) {
  * pinned host registrations, sorting buffers, and planet-boundary workspaces.
  */
 int c_Solver::initCUDA() {
-  heatFluxEnabled_ = Parameters::get_doWriteOutput() &&
-                     col->getOutputConfig().needsAnyHeatFlux();
+  const bool heatFluxRequested = Parameters::get_doWriteOutput() &&
+                                 !col->field_output_is_off() &&
+                                 col->getOutputConfig().needsAnyHeatFlux();
+
+  // Mode 0 calculates heat flux only when a real field-output backend consumes
+  // it. Mode 1 retains the requested device calculation while compiling out
+  // its D2H, ghost-preparation, and write stages. Mode 2 enables neither path.
+  heatFluxOutputEnabled_ = false;
+  if constexpr (BenchmarkConfig::DISK_OUTPUT_ENABLED) {
+    heatFluxOutputEnabled_ =
+        heatFluxRequested && ioManager &&
+        ioManager->getFieldBackend() != IOManager::FieldBackend::NONE;
+  }
+  heatFluxCalculationEnabled_ =
+      heatFluxOutputEnabled_ ||
+      (BenchmarkConfig::MODE == 1 && heatFluxRequested);
   heatFluxScheduledCycle_ = -1;
 
   // ======= Select the GPU assigned to this MPI rank =======
@@ -547,7 +579,7 @@ int c_Solver::initCUDA() {
   // re-established explicitly via cycleEndEvent/eventOutputCopy below.
   cudaErrChk(cudaStreamCreate(&outputStream));
   cudaErrChk(cudaStreamCreate(&fieldH2DStream));
-  if (heatFluxEnabled_)
+  if (heatFluxCalculationEnabled_)
     cudaErrChk(cudaStreamCreate(&heatFluxStream));
 
   for (int i = 0; i < ns; i++)
@@ -695,7 +727,7 @@ int c_Solver::initCUDA() {
 
   heatFluxCUDAPtr = nullptr;
   heatFluxBulkCUDAPtr = nullptr;
-  if (heatFluxEnabled_) {
+  if (heatFluxCalculationEnabled_) {
     heatFluxCUDAPtr = new cudaTypeArray1<cudaMomentType>[ns];
     heatFluxBulkCUDAPtr = new cudaTypeArray1<cudaMomentType>[ns];
     for (int i = 0; i < ns; i++) {
@@ -709,6 +741,8 @@ int c_Solver::initCUDA() {
 
 #ifndef GPU_SOLVER
   { // Register the 10 host-side moment arrays per species as pinned memory.
+    // The CPU field solver consumes these arrays every cycle, so they must
+    // remain pinned even when disk output is compiled out.
     // NOTE: when GPU_SOLVER is ON, pinning is deferred to after
     // gpuSolverSyncH2D to avoid conflicting with cudaMemcpyAsync
     // on the full 4D arrays (cudaHostRegister per-species slices
@@ -749,22 +783,27 @@ int c_Solver::initCUDA() {
   // Pre-record here (on the now-synchronized solverStream_) so that
   // ScheduleHeatFlux on cycle 0 — which runs after the pre-loop MomentsAwait()
   // has already re-recorded the event — never observes an uninitialised handle.
-  if (heatFluxEnabled_) {
+  if (heatFluxCalculationEnabled_) {
     cudaErrChk(cudaEventCreateWithFlags(&momentsPipelineDoneEvt,
                                         cudaEventDisableTiming));
     cudaErrChk(cudaEventRecord(momentsPipelineDoneEvt, EMf->gpuSolverStream()));
   }
 
-  // Now safe to pin moment memory (after the initial H2D sync is done)
+  // GPU-solver calculations keep moments device-resident.  Its host moment
+  // mirror is populated only by output/restart device-to-host syncs.
+#if IPIC3D_COMPILE_DISK_OUTPUT
   for (int i = 0; i < ns; i++)
     registerMomentsPinnedMemory(i);
+#endif
 #else
   cudaErrChk(cudaHostAlloc((void**)&fieldForPclHostPtr,
                            fieldSize * 24 * sizeof(cudaFieldType), 0));
 #endif
 
-  if (heatFluxEnabled_)
+#if IPIC3D_COMPILE_DISK_OUTPUT
+  if (heatFluxOutputEnabled_)
     registerHeatFluxPinnedMemory();
+#endif
 
   threadPoolPtr = new ThreadPool(ns);
   cudaErrChk(cudaEventCreateWithFlags(&event0, cudaEventDisableTiming));
@@ -778,8 +817,13 @@ int c_Solver::initCUDA() {
   moverHashedReadyEvt = new cudaEvent_t[ns];
   auxHashedReadyEvt = new cudaEvent_t[ns];
   stayedMomentsDoneEvt = new cudaEvent_t[ns];
-  heatFluxReadDoneEvt = heatFluxEnabled_ ? new cudaEvent_t[ns] : nullptr;
-  heatFluxHostDoneEvt = heatFluxEnabled_ ? new cudaEvent_t[ns] : nullptr;
+  heatFluxReadDoneEvt =
+      heatFluxCalculationEnabled_ ? new cudaEvent_t[ns] : nullptr;
+  heatFluxHostDoneEvt = nullptr;
+#if IPIC3D_COMPILE_DISK_OUTPUT
+  if (heatFluxOutputEnabled_)
+    heatFluxHostDoneEvt = new cudaEvent_t[ns];
+#endif
   for (int i = 0; i < ns; i++) {
     cudaErrChk(cudaEventCreateWithFlags(
         &cycleEndEvent[i], cudaEventDisableTiming | cudaEventBlockingSync));
@@ -789,15 +833,19 @@ int c_Solver::initCUDA() {
                                         cudaEventDisableTiming));
     cudaErrChk(cudaEventCreateWithFlags(&stayedMomentsDoneEvt[i],
                                         cudaEventDisableTiming));
-    if (heatFluxEnabled_) {
+    if (heatFluxCalculationEnabled_) {
       cudaErrChk(cudaEventCreateWithFlags(&heatFluxReadDoneEvt[i],
                                           cudaEventDisableTiming));
+      cudaErrChk(cudaEventRecord(heatFluxReadDoneEvt[i], heatFluxStream));
+    }
+#if IPIC3D_COMPILE_DISK_OUTPUT
+    if (heatFluxOutputEnabled_) {
       cudaErrChk(cudaEventCreateWithFlags(&heatFluxHostDoneEvt[i],
                                           cudaEventDisableTiming |
                                               cudaEventBlockingSync));
-      cudaErrChk(cudaEventRecord(heatFluxReadDoneEvt[i], heatFluxStream));
       cudaErrChk(cudaEventRecord(heatFluxHostDoneEvt[i], heatFluxStream));
     }
+#endif
     // Pre-record cycleEndEvent[i] on streams[i] so MomentsAwait() / output-
     // CopyAsync() are well-defined even if invoked before any moment pipeline
     // has run. Both real producers (CalculateMoments and MoverAwaitAndPcl-
@@ -830,8 +878,10 @@ int c_Solver::initCUDA() {
     }
   }
 
+#if IPIC3D_COMPILE_DISK_OUTPUT
   dataAnalysis::dataAnalysisPipeline::createOutputDirectory(
       myrank, ns, vct, restart_status != 0, col->getVelocitySpectra());
+#endif
 
   // ======= Allocate planet quasi-neutral boundary-condition buffers =======
   {
@@ -944,10 +994,12 @@ int c_Solver::deInitCUDA() {
     cudaEventDestroy(moverHashedReadyEvt[i]);
     cudaEventDestroy(auxHashedReadyEvt[i]);
     cudaEventDestroy(stayedMomentsDoneEvt[i]);
-    if (heatFluxEnabled_) {
+    if (heatFluxCalculationEnabled_)
       cudaEventDestroy(heatFluxReadDoneEvt[i]);
+#if IPIC3D_COMPILE_DISK_OUTPUT
+    if (heatFluxOutputEnabled_)
       cudaEventDestroy(heatFluxHostDoneEvt[i]);
-    }
+#endif
   }
   delete[] cycleEndEvent;
   delete[] moverHashedReadyEvt;
@@ -955,7 +1007,7 @@ int c_Solver::deInitCUDA() {
   delete[] stayedMomentsDoneEvt;
 #ifdef GPU_SOLVER
   cudaEventDestroy(solverDoneEvent);
-  if (heatFluxEnabled_)
+  if (heatFluxCalculationEnabled_)
     cudaEventDestroy(momentsPipelineDoneEvt);
 #endif
   delete[] heatFluxReadDoneEvt;
@@ -1004,7 +1056,7 @@ int c_Solver::deInitCUDA() {
     cudaFree(injectionParamCUDAPtr[i]);
 
     cudaFree(momentsCUDAPtr[i]);
-    if (heatFluxEnabled_) {
+    if (heatFluxCalculationEnabled_) {
       cudaFree(heatFluxCUDAPtr[i]);
       cudaFree(heatFluxBulkCUDAPtr[i]);
     }
@@ -1076,18 +1128,23 @@ int c_Solver::deInitCUDA() {
   cudaStreamDestroy(planetStream);
   cudaStreamDestroy(outputStream);
   cudaStreamDestroy(fieldH2DStream);
-  if (heatFluxEnabled_)
+  if (heatFluxCalculationEnabled_)
     cudaStreamDestroy(heatFluxStream);
   delete[] streams;
   delete[] stayedParticle;
   delete[] exitingResults;
 
-  { // Unregister the host-side pinned moment arrays.
+  { // CPU-solver moment D2H copies always use these pinned arrays.  With the
+    // GPU solver they are pinned only in normal mode for output-related syncs.
+#if !defined(GPU_SOLVER) || IPIC3D_COMPILE_DISK_OUTPUT
     for (int i = 0; i < ns; i++)
       unregisterMomentsPinnedMemory(i);
+#endif
   }
-  if (heatFluxEnabled_)
+#if IPIC3D_COMPILE_DISK_OUTPUT
+  if (heatFluxOutputEnabled_)
     unregisterHeatFluxPinnedMemory();
+#endif
 
   return 0;
 }
@@ -1216,11 +1273,17 @@ void c_Solver::copyHeatFluxBulkD2D(int species, cudaStream_t stream) {
 }
 
 void c_Solver::copyHeatFluxD2H(int species, cudaStream_t stream) {
+#if IPIC3D_COMPILE_DISK_OUTPUT
   const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
   cudaErrChk(cudaMemcpyAsync(
       EMf->getHeatFluxSpeciesPtr(species), heatFluxCUDAPtr[species],
       gridSize * HeatFlux::ComponentCount * sizeof(cudaMomentType),
       cudaMemcpyDefault, stream));
+#else
+  (void)species;
+  (void)stream;
+  return;
+#endif
 }
 
 /**
@@ -1289,16 +1352,24 @@ void c_Solver::unregisterMomentsPinnedMemory(int species) {
 }
 
 void c_Solver::registerHeatFluxPinnedMemory() {
+#if IPIC3D_COMPILE_DISK_OUTPUT
   const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
   const size_t bytes = static_cast<size_t>(ns) *
                        static_cast<size_t>(HeatFlux::ComponentCount) *
                        static_cast<size_t>(gridSize) * sizeof(cudaCommonType);
   cudaErrChk(cudaHostRegister((void*)EMf->getHeatFluxRaw(), bytes,
                               cudaHostRegisterDefault));
+#else
+  return;
+#endif
 }
 
 void c_Solver::unregisterHeatFluxPinnedMemory() {
+#if IPIC3D_COMPILE_DISK_OUTPUT
   cudaErrChk(cudaHostUnregister((void*)EMf->getHeatFluxRaw()));
+#else
+  return;
+#endif
 }
 
 /**
@@ -1378,18 +1449,20 @@ void c_Solver::CalculateField(int cycle) {
 #endif
 }
 
-bool c_Solver::needsHeatFluxOutput(int cycle) const {
-  if (!heatFluxEnabled_)
-    return false;
-  if (!Parameters::get_doWriteOutput())
-    return false;
-  if (col->field_output_is_off())
+bool c_Solver::needsHeatFluxCalculation(int cycle) const {
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
+  if (!heatFluxCalculationEnabled_)
     return false;
   return (cycle % col->getFieldOutputCycle() == 0 || cycle == first_cycle);
+#else
+  (void)cycle;
+  return false;
+#endif
 }
 
 void c_Solver::ScheduleHeatFlux(int cycle) {
-  if (!needsHeatFluxOutput(cycle)) {
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
+  if (!needsHeatFluxCalculation(cycle)) {
     heatFluxScheduledCycle_ = -1;
     return;
   }
@@ -1429,14 +1502,23 @@ void c_Solver::ScheduleHeatFlux(int cycle) {
     cudaErrChk(cudaEventRecord(heatFluxReadDoneEvt[s], heatFluxStream));
   }
 
-  for (int s = 0; s < ns; ++s) {
-    copyHeatFluxD2H(s, heatFluxStream);
-    cudaErrChk(cudaEventRecord(heatFluxHostDoneEvt[s], heatFluxStream));
+#if IPIC3D_COMPILE_DISK_OUTPUT
+  if (heatFluxOutputEnabled_) {
+    for (int s = 0; s < ns; ++s) {
+      copyHeatFluxD2H(s, heatFluxStream);
+      cudaErrChk(cudaEventRecord(heatFluxHostDoneEvt[s], heatFluxStream));
+    }
   }
+#endif
+#else
+  (void)cycle;
+  return;
+#endif
 }
 
 void c_Solver::finishHeatFluxForOutput(int cycle) {
-  if (!heatFluxEnabled_ || heatFluxScheduledCycle_ != cycle)
+#if IPIC3D_COMPILE_DISK_OUTPUT
+  if (!heatFluxOutputEnabled_ || heatFluxScheduledCycle_ != cycle)
     return;
 
   timeTasks_set_main_task(TimeTasks::MOMENTS);
@@ -1448,6 +1530,10 @@ void c_Solver::finishHeatFluxForOutput(int cycle) {
     EMf->communicateGhostHeatFlux(s);
 
   heatFluxScheduledCycle_ = -1;
+#else
+  (void)cycle;
+  return;
+#endif
 }
 
 /**
@@ -1868,7 +1954,7 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle) {
   // species mover streams consume it through cudaStreamWaitEvent(event0).
   refreshFieldForPclsDeviceBuffer(false);
   const bool waitForHeatFlux =
-      heatFluxEnabled_ && (heatFluxScheduledCycle_ == cycle);
+      heatFluxCalculationEnabled_ && (heatFluxScheduledCycle_ == cycle);
 
   for (int i = 0; i < ns; i++) {
     if (i != mergeIdx) {
@@ -2601,7 +2687,7 @@ void c_Solver::MomentsAwait() {
   // d_rhons/d_Jxs/d_Jys/d_Jzs until the ghost exchange and hat functions
   // have committed all writes to those arrays.  Without this gate, the D2D
   // copy could read partially-updated ghost cells from gpuCommunicateGhostP2G.
-  if (heatFluxEnabled_)
+  if (heatFluxCalculationEnabled_)
     cudaErrChk(cudaEventRecord(momentsPipelineDoneEvt, EMf->gpuSolverStream()));
 
   auto tEnd = std::chrono::high_resolution_clock::now();
@@ -2650,6 +2736,7 @@ void c_Solver::MomentsAwait() {
  * @param cycle Simulation cycle associated with the recorded counts.
  */
 void c_Solver::writeParticleNum(int cycle) {
+#if IPIC3D_COMPILE_DISK_OUTPUT
   if (!pclNumCSV.is_open() || !pclNumCSV.good()) {
     // Reopen if stream is in a bad state
     pclNumCSV.close();
@@ -2664,6 +2751,10 @@ void c_Solver::writeParticleNum(int cycle) {
   }
   pclNumCSV << pclsArrayHostPtr[ns - 1]->getNOP() << std::endl;
   pclNumCSV.flush();
+#else
+  (void)cycle;
+  return;
+#endif
 }
 
 /**
@@ -2675,22 +2766,36 @@ void c_Solver::writeParticleNum(int cycle) {
  * @param cycle Simulation cycle being written.
  */
 void c_Solver::WriteOutput(int cycle) {
+#if IPIC3D_COMPILE_DISK_OUTPUT
+
+  const bool fieldOutputDue = ioManager && ioManager->needsFieldOutput(cycle);
+  const bool particleOutputDue =
+      ioManager && ioManager->needsParticleOutput(cycle);
+  const bool restartOutputDue =
+      ioManager && ioManager->needsRestartParticleSync(cycle);
+
+#ifdef USE_CATALYST
+  const bool catalystNeedsHostData =
+      Adaptor::RequestDataDescription(col->getDt() * cycle, cycle);
+#endif
 
 #ifdef GPU_SOLVER
   // ---- GPU solver: sync device → host only when I/O actually needs host
   // arrays ----
   {
     bool needFieldSync = false;
+#ifdef USE_CATALYST
+    needFieldSync = catalystNeedsHostData;
+#endif
     // Diagnostics (energy conservation) need host E, B, rhons, Jxs
     if (col->getDiagnosticsOutputCycle() > 0 &&
         cycle % col->getDiagnosticsOutputCycle() == 0)
       needFieldSync = true;
     // Restart checkpoint needs host fields
-    if (restart_cycle > 0 && cycle % restart_cycle == 0)
+    if (restartOutputDue)
       needFieldSync = true;
     // Field file output needs host fields
-    if (Parameters::get_doWriteOutput() && !col->field_output_is_off() &&
-        (cycle % col->getFieldOutputCycle() == 0 || cycle == first_cycle))
+    if (fieldOutputDue)
       needFieldSync = true;
     if (needFieldSync) {
       // gpuSolverSyncD2H internally synchronises the solver stream after
@@ -2701,13 +2806,16 @@ void c_Solver::WriteOutput(int cycle) {
 #endif
 
 #ifdef USE_CATALYST
-  Adaptor::CoProcess(col->getDt() * cycle, cycle, EMf);
+  // RequestDataDescription() has already decided whether the GPU host mirror
+  // needed refreshing.  This consumes that exact request without asking the
+  // Catalyst pipeline a second time.
+  Adaptor::CoProcess(EMf);
 #endif
 
   WriteConserved(cycle);
 
   // ======= Restart checkpoint =======
-  if (restart_cycle > 0 && cycle % restart_cycle == 0) {
+  if (restartOutputDue) {
     // Periodic restarts are written before the current iteration is completed.
     // The checkpoint label remains the triggering loop cycle, so a checkpoint
     // labeled N restarts by executing cycle N again.
@@ -2726,15 +2834,13 @@ void c_Solver::WriteOutput(int cycle) {
     return;
 
   // ======= Field output =======
-  if (!col->field_output_is_off() &&
-      (cycle % col->getFieldOutputCycle() == 0 || cycle == first_cycle)) {
+  if (fieldOutputDue) {
     finishHeatFluxForOutput(cycle);
     ioManager->writeFields(cycle);
   }
 
   // ======= Particle output =======
-  if (!col->particle_output_is_off() &&
-      cycle % col->getParticlesOutputCycle() == 0) {
+  if (particleOutputDue) {
     // See comment above: the event is pre-recorded so this is always safe.
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     // SoA data is already in host vectors after outputCopyAsync — no conversion
@@ -2747,6 +2853,10 @@ void c_Solver::WriteOutput(int cycle) {
       cycle % col->getTestParticlesOutputCycle() == 0) {
     ioManager->writeTestParticles(cycle);
   }
+#else
+  (void)cycle;
+  return;
+#endif
 }
 
 void c_Solver::ensureRestartParticleCellMetadataBuffers() {
@@ -2831,7 +2941,13 @@ void c_Solver::prepareActiveRestartParticleCellMetadata() {
  * @param cycle Current simulation cycle used to predict the next output step.
  */
 void c_Solver::outputCopyAsync(int cycle) {
-  if (ioManager->needsParticleSync(cycle + 1)) {
+#if IPIC3D_COMPILE_DISK_OUTPUT
+  // The main loop calls this one cycle ahead. Return before issuing any copy
+  // unless the predicted cycle actually consumes host particle data.
+  if (!ioManager || !ioManager->needsParticleSync(cycle + 1))
+    return;
+
+  {
     const bool restartSync = ioManager->needsRestartParticleSync(cycle + 1);
     if (restartSync) {
       ensureRestartParticleCellMetadataBuffers();
@@ -2907,6 +3023,10 @@ void c_Solver::outputCopyAsync(int cycle) {
     }
     cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
   }
+#else
+  (void)cycle;
+  return;
+#endif
 }
 
 /**
@@ -2914,6 +3034,7 @@ void c_Solver::outputCopyAsync(int cycle) {
  * @param cycle Simulation cycle being written.
  */
 void c_Solver::WriteConserved(int cycle) {
+#if IPIC3D_COMPILE_DISK_OUTPUT
   if (col->getDiagnosticsOutputCycle() > 0 &&
       cycle % col->getDiagnosticsOutputCycle() == 0) {
     // particlesHost[*]->getKe/getP/getTotalQ() iterate over the host SoA
@@ -2977,6 +3098,10 @@ void c_Solver::WriteConserved(int cycle) {
       my_file.close();
     }
   }
+#else
+  (void)cycle;
+  return;
+#endif
 }
 
 /**
@@ -2987,6 +3112,7 @@ void c_Solver::WriteConserved(int cycle) {
  * @param cycle Simulation cycle being written.
  */
 void c_Solver::WriteVelocityDistribution(int cycle) {
+#if IPIC3D_COMPILE_DISK_OUTPUT
   for (int is = 0; is < ns; is++) {
     double maxVel = particlesHost[is]->getMaxVelocity();
     long long* VelocityDist =
@@ -3001,6 +3127,10 @@ void c_Solver::WriteVelocityDistribution(int cycle) {
     }
     delete[] VelocityDist;
   }
+#else
+  (void)cycle;
+  return;
+#endif
 }
 
 /**
@@ -3011,6 +3141,7 @@ void c_Solver::WriteVelocityDistribution(int cycle) {
  * charge densities at `nsat^3` probe locations in the local domain.
  */
 void c_Solver::WriteVirtualSatelliteTraces() {
+#if IPIC3D_COMPILE_DISK_OUTPUT
   if (ns <= 2)
     return;
   assert_eq(ns, 4);
@@ -3060,6 +3191,9 @@ void c_Solver::WriteVirtualSatelliteTraces() {
   }
   my_file << endl;
   my_file.close();
+#else
+  return;
+#endif
 }
 
 /**
@@ -3068,9 +3202,12 @@ void c_Solver::WriteVirtualSatelliteTraces() {
  */
 void c_Solver::Finalize() {
 
+#if IPIC3D_COMPILE_DISK_OUTPUT
   pclNumCSV.close();
 
-  if (col->getCallFinalize() && Parameters::get_doWriteOutput() &&
+  if (ioManager &&
+      ioManager->getRestartBackend() != IOManager::RestartBackend::NONE &&
+      col->getCallFinalize() && Parameters::get_doWriteOutput() &&
       col->getRestartOutputCycle() > 0) {
     // Sync EM fields from device to host before final restart write
 #ifdef GPU_SOLVER
@@ -3087,7 +3224,9 @@ void c_Solver::Finalize() {
     ioManager->writeRestart(col->getNcycles() + first_cycle);
   }
 
-  ioManager->finalize();
+  if (ioManager)
+    ioManager->finalize();
+#endif
 
   deInitCUDA();
 
@@ -3149,6 +3288,7 @@ void c_Solver::sortAllSpecies() {
     cudaErrChk(cudaStreamSynchronize(streams[i]));
   }
 
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
   if constexpr (DAConfig::MACROCELL_SPECTRA_ENABLE) {
     if (col->getVelocitySpectra()) {
       bool anyMacrocellSpecies = false;
@@ -3166,6 +3306,7 @@ void c_Solver::sortAllSpecies() {
       }
     } // getVelocitySpectra()
   }
+#endif
 }
 
 /**

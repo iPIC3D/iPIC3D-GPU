@@ -17,11 +17,13 @@
 #include <vtkNew.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
+#include <vtkSmartPointer.h>
 #include <vtkStringArray.h>
 
 namespace {
 vtkCPProcessor* Processor = nullptr;
 vtkImageData* VTKGrid = nullptr;
+vtkSmartPointer<vtkCPDataDescription> PendingDescription;
 const char* InputName = "particles";
 
 int _start_x;
@@ -141,6 +143,7 @@ void Initialize(const Collective* sim_params, const int start_x,
                 const int start_y, const int start_z, const int nx,
                 const int ny, const int nz, const double dx, const double dy,
                 const double dz) {
+  PendingDescription = nullptr;
   if (Processor == NULL) {
     Processor = vtkCPProcessor::New();
     Processor->Initialize();
@@ -177,6 +180,7 @@ void Initialize(const Collective* sim_params, const int start_x,
 
 //----------------------------------------------------------------------------
 void Finalize() {
+  PendingDescription = nullptr;
   if (Processor) {
     Processor->Delete();
     Processor = NULL;
@@ -188,10 +192,40 @@ void Finalize() {
 }
 
 //----------------------------------------------------------------------------
-void CoProcess(double time, unsigned int timeStep, EMfields3D* EMf) {
-  vtkNew<vtkCPDataDescription> dataDescription;
-  dataDescription->AddInput(InputName);
-  dataDescription->SetTimeData(time, timeStep);
+bool RequestDataDescription(double time, unsigned int timeStep) {
+  // The adaptor is intentionally single-threaded and non-reentrant.  Clear a
+  // stale request defensively before starting the next timestep.
+  PendingDescription = vtkSmartPointer<vtkCPDataDescription>::New();
+  PendingDescription->AddInput(InputName);
+  PendingDescription->SetTimeData(time, timeStep);
+
+  if (!Processor ||
+      Processor->RequestDataDescription(PendingDescription.GetPointer()) == 0) {
+    PendingDescription = nullptr;
+    return false;
+  }
+
+  vtkCPInputDataDescription* idd =
+      PendingDescription->GetInputDescriptionByName(InputName);
+  if (!idd) {
+    PendingDescription = nullptr;
+    return false;
+  }
+  // UpdateVTKAttributes currently treats B and rhons as one host-data bundle.
+  return idd->IsFieldNeeded("B", vtkDataObject::POINT);
+}
+
+//----------------------------------------------------------------------------
+void CoProcess(EMfields3D* EMf) {
+  // Keep the accepted description alive locally, but clear global state before
+  // any operation that could throw so it can never be reused accidentally.
+  vtkSmartPointer<vtkCPDataDescription> dataDescription = PendingDescription;
+  PendingDescription = nullptr;
+  if (!dataDescription)
+    return;
+
+  const unsigned int timeStep =
+      static_cast<unsigned int>(dataDescription->GetTimeStep());
 
   vtkNew<vtkStringArray> fd0{};
   fd0->SetName("CaseName");
@@ -219,12 +253,10 @@ void CoProcess(double time, unsigned int timeStep, EMfields3D* EMf) {
     VTKGrid->GetFieldData()->AddArray(fd);
   }
 
-  if (Processor->RequestDataDescription(dataDescription) != 0) {
-    vtkCPInputDataDescription* idd =
-        dataDescription->GetInputDescriptionByName(InputName);
-    BuildVTKDataStructures(idd, EMf);
-    idd->SetGrid(VTKGrid);
-    Processor->CoProcess(dataDescription);
-  }
+  vtkCPInputDataDescription* idd =
+      dataDescription->GetInputDescriptionByName(InputName);
+  BuildVTKDataStructures(idd, EMf);
+  idd->SetGrid(VTKGrid);
+  Processor->CoProcess(dataDescription.GetPointer());
 }
 } // namespace Adaptor

@@ -2,11 +2,11 @@
 #define ADAPTOR_H
 
 // For iPic3D arrays
-#include "../include/Alloc.h"
+#include "Alloc.h"
 // Access to simulation parameters
-#include "../include/Collective.h"
+#include "Collective.h"
 // Access to physical quantities
-#include "../include/EMfields3D.h"
+#include "EMfields3D.h"
 
 namespace Adaptor {
 void Initialize(const Collective* sim_params, const int start_x,
@@ -16,7 +16,15 @@ void Initialize(const Collective* sim_params, const int start_x,
 
 void Finalize();
 
-void CoProcess(double time, unsigned int timeStep, EMfields3D* EMf);
+/**
+ * Submit this timestep to Catalyst and retain an accepted request for
+ * CoProcess().  The return value is true only when satisfying that request
+ * requires the host B/rho arrays to be current.
+ */
+bool RequestDataDescription(double time, unsigned int timeStep);
+
+/** Consume the request retained by RequestDataDescription(), if any. */
+void CoProcess(EMfields3D* EMf);
 } // namespace Adaptor
 
 #endif // ADAPTOR_H

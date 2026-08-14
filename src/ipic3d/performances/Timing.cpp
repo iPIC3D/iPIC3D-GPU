@@ -130,7 +130,7 @@ void Timing::stopTiming() {
       }
       printf(" Total execution    : %g sec (%g hours)\n"
              " Initialization     : %g sec\n"
-             " Pre-cycle setup    : %g sec (DA pipeline + initial moments)\n"
+             " Pre-cycle setup    : %g sec (runtime setup + initial moments)\n"
              " Cycle loop         : %g sec over %d cycles\n"
              "                      avg = %g ms/cycle, stddev = %g ms\n"
              " Finalize           : %g sec\n",

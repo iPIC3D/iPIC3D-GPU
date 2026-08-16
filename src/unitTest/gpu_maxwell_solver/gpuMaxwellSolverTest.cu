@@ -10,6 +10,7 @@
 #include "ConfigFile.h"
 #include "EMfields3D.h"
 #include "GPUBlas.cuh"
+#include "GPUStencils.cuh"
 #include "Grid3DCU.h"
 #include "MPIdata.h"
 #include "Parameters.h"
@@ -24,6 +25,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -221,6 +223,112 @@ struct Check {
     }
   }
 };
+
+#ifdef HALO_OVERLAP
+struct InterpolationBox {
+  const char* name;
+  int iLo;
+  int iHi;
+  int jLo;
+  int jHi;
+  int kLo;
+  int kHi;
+};
+
+int runInterpolationRangeComplementRegression(int rank) {
+  constexpr int nxn = 7;
+  constexpr int nyn = 8;
+  constexpr int nzn = 9;
+  constexpr int nxc = nxn - 1;
+  constexpr int nyc = nyn - 1;
+  constexpr int nzc = nzn - 1;
+  constexpr cudaSolverType sentinel = -1234567.0;
+  constexpr std::array<InterpolationBox, 4> boxes = {{
+      {"default", 2, nxn - 3, 2, nyn - 3, 2, nzn - 3},
+      {"asymmetric", 2, 3, 4, 5, 3, 6},
+      {"full", 1, nxn - 2, 1, nyn - 2, 1, nzn - 2},
+      {"empty", 4, 3, 2, nyn - 3, 2, nzn - 3},
+  }};
+
+  const size_t centerSize = static_cast<size_t>(nxc) * nyc * nzc;
+  const size_t nodeSize = static_cast<size_t>(nxn) * nyn * nzn;
+  std::vector<cudaSolverType> oldCenterHost(centerSize);
+  std::vector<cudaSolverType> newCenterHost(centerSize);
+  std::vector<cudaSolverType> oldReference(nodeSize);
+  std::vector<cudaSolverType> newReference(nodeSize);
+  std::vector<cudaSolverType> resultHost(nodeSize);
+
+  for (int i = 0; i < nxc; ++i) {
+    for (int j = 0; j < nyc; ++j) {
+      for (int k = 0; k < nzc; ++k) {
+        const size_t idx = (static_cast<size_t>(i) * nyc + j) * nzc + k;
+        oldCenterHost[idx] = 1000.0 + 100.0 * i + 10.0 * j + k;
+        newCenterHost[idx] = -2000.0 - 80.0 * i - 7.0 * j - 0.5 * k;
+      }
+    }
+  }
+
+  GPUFieldArray3 oldCenter(nxc, nyc, nzc);
+  GPUFieldArray3 newCenter(nxc, nyc, nzc);
+  GPUFieldArray3 reference(nxn, nyn, nzn);
+  GPUFieldArray3 result(nxn, nyn, nzn);
+  oldCenter.copyFromHost(oldCenterHost.data());
+  newCenter.copyFromHost(newCenterHost.data());
+
+  gpuInterpC2N(reference.devPtr(), oldCenter.devPtr(), nxn, nyn, nzn);
+  reference.copyToHost(oldReference.data());
+  gpuInterpC2N(reference.devPtr(), newCenter.devPtr(), nxn, nyn, nzn);
+  reference.copyToHost(newReference.data());
+
+  Check check;
+  check.rank = rank;
+  check.tolerance = 0.0;
+  for (const InterpolationBox& box : boxes) {
+    result.setAll(sentinel);
+    gpuInterpC2N_range(result.devPtr(), oldCenter.devPtr(), nxn, nyn, nzn,
+                       box.iLo, box.iHi, box.jLo, box.jHi, box.kLo, box.kHi);
+    gpuInterpC2N_complement(result.devPtr(), newCenter.devPtr(), nxn, nyn, nzn,
+                            box.iLo, box.iHi, box.jLo, box.jHi, box.kLo,
+                            box.kHi);
+    result.copyToHost(resultHost.data());
+
+    const int iLo = std::max(1, box.iLo);
+    const int iHi = std::min(nxn - 2, box.iHi);
+    const int jLo = std::max(1, box.jLo);
+    const int jHi = std::min(nyn - 2, box.jHi);
+    const int kLo = std::max(1, box.kLo);
+    const int kHi = std::min(nzn - 2, box.kHi);
+    const bool boxIsEmpty = iLo > iHi || jLo > jHi || kLo > kHi;
+    const std::string label = std::string("interpC2N ") + box.name;
+
+    for (int i = 0; i < nxn; ++i) {
+      for (int j = 0; j < nyn; ++j) {
+        for (int k = 0; k < nzn; ++k) {
+          const size_t idx = (static_cast<size_t>(i) * nyn + j) * nzn + k;
+          const bool active = i >= 1 && i <= nxn - 2 && j >= 1 &&
+                              j <= nyn - 2 && k >= 1 && k <= nzn - 2;
+          const bool inSafeBox = !boxIsEmpty && i >= iLo && i <= iHi &&
+                                 j >= jLo && j <= jHi && k >= kLo && k <= kHi;
+          const cudaSolverType expected =
+              !active ? sentinel
+                      : (inSafeBox ? oldReference[idx] : newReference[idx]);
+          check.near(label.c_str(), resultHost[idx], expected, i, j, k);
+        }
+      }
+    }
+  }
+  return check.failures;
+}
+
+void reportInterpolationResult(int failures) {
+  if (failures == 0) {
+    std::cout << "gpuMaxwellSolverTest interpolation PASS\n";
+  } else {
+    std::cerr << "gpuMaxwellSolverTest interpolation FAIL: " << failures
+              << " mismatches\n";
+  }
+}
+#endif
 
 const char* caseName(TestCase testCase) {
   switch (testCase) {
@@ -718,6 +826,17 @@ int main(int argc, char** argv) {
 
     const TestSelection selection = parseSelection(argc, argv);
     int failures = 0;
+#ifdef HALO_OVERLAP
+    const int localInterpolationFailures =
+        runInterpolationRangeComplementRegression(rank);
+    int interpolationFailures = 0;
+    MPI_Allreduce(&localInterpolationFailures, &interpolationFailures, 1,
+                  MPI_INT, MPI_SUM, MPIdata::get_PicGlobalComm());
+    failures += interpolationFailures;
+    if (rank == 0) {
+      reportInterpolationResult(interpolationFailures);
+    }
+#endif
     if (selection.runAll) {
       for (TestCase testCase : kAllTestCases) {
         const int caseFailures = runCase(testCase, rank, nprocs, input);
@@ -730,9 +849,11 @@ int main(int argc, char** argv) {
         std::cout << "gpuMaxwellSolverTest all PASS\n";
       }
     } else {
-      failures = runCase(selection.singleCase, rank, nprocs, input);
+      const int caseFailures =
+          runCase(selection.singleCase, rank, nprocs, input);
+      failures += caseFailures;
       if (rank == 0) {
-        reportCaseResult(selection.singleCase, failures);
+        reportCaseResult(selection.singleCase, caseFailures);
       }
     }
     exitCode = failures == 0 ? 0 : 1;

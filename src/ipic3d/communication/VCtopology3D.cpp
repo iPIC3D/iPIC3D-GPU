@@ -77,6 +77,10 @@ VCtopology3D::VCtopology3D(const Collective& col) {
 /** Within CART_COMM, processes find about their new rank numbers, their
   cartesian coordinates, and their neighbors  */
 void VCtopology3D::setup_vctopology(MPI_Comm old_comm) {
+  if (topology_initialized)
+    eprintf("The Cartesian topology has already been initialized.");
+  topology_initialized = true;
+
   // create a matrix with ranks, and neighbours for fields
   MPI_Cart_create(old_comm, 3, dims, periods, reorder, &CART_COMM);
 
@@ -115,6 +119,7 @@ void VCtopology3D::setup_vctopology(MPI_Comm old_comm) {
   assert_eq(cartesian_rank, MPIdata::get_rank());
 
   if (CART_COMM_P != MPI_COMM_NULL) {
+    MPI_Comm_rank(CART_COMM_P, &particle_cartesian_rank);
     MPI_Cart_shift(CART_COMM_P, XDIR, RIGHT, &xleft_neighbor_P,
                    &xright_neighbor_P);
     MPI_Cart_shift(CART_COMM_P, YDIR, RIGHT, &yleft_neighbor_P,
@@ -142,7 +147,20 @@ void VCtopology3D::setup_vctopology(MPI_Comm old_comm) {
                          _noZleftNeighbor_P || _noZrghtNeighbor_P;
 }
 /** destructor */
-VCtopology3D::~VCtopology3D() {}
+VCtopology3D::~VCtopology3D() {
+  if (CART_COMM == MPI_COMM_NULL && CART_COMM_P == MPI_COMM_NULL)
+    return;
+
+  int finalized = 0;
+  MPI_Finalized(&finalized);
+  if (finalized)
+    return;
+
+  if (CART_COMM_P != MPI_COMM_NULL)
+    MPI_Comm_free(&CART_COMM_P);
+  if (CART_COMM != MPI_COMM_NULL)
+    MPI_Comm_free(&CART_COMM);
+}
 /** print topology info */
 void VCtopology3D::Print() {
   cout << endl;

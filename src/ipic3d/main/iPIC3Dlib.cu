@@ -143,40 +143,19 @@ static CaseType parseCaseType(const std::string& s) {
  * handles the remaining owning pointers managed by c_Solver.
  */
 c_Solver::~c_Solver() {
-  // EMf must be deleted first: ~EMfields3D() calls freeDataType() which
-  // dereferences _col, _grid, and _vct (stored as const refs bound to
-  // *col, *grid, *vct). Deleting col/vct/grid first would leave those
-  // refs dangling.
-  delete EMf;  // field (destructor uses _col/_grid/_vct refs → must be first)
-  delete col;  // configuration parameters ("collectiveIO")
-  delete vct;  // process topology
-  delete grid; // grid
-  delete ioManager; // I/O backends (HDF5, ADIOS2, VTK buffers)
+#if defined(USE_CATALYST) && IPIC3D_COMPILE_DISK_OUTPUT
+  Adaptor::Finalize();
+#endif
 
-  // delete particles
-  //
-  if (particlesCommInj) // exchange particles
-  {
+  // I/O backends retain non-owning pointers to fields, particles, topology,
+  // grid, and configuration, so release them before their data sources.
+  delete ioManager;
+
+  if (particlesCommInj) {
     for (int i = 0; i < ns; i++)
       delete particlesCommInj[i];
     delete[] particlesCommInj;
   }
-
-  if (particlesHost) // lightweight SoA host mirror
-  {
-    for (int i = 0; i < ns; i++)
-      delete particlesHost[i];
-    delete[] particlesHost;
-  }
-
-#if defined(USE_CATALYST) && IPIC3D_COMPILE_DISK_OUTPUT
-  Adaptor::Finalize();
-#endif
-  delete[] Ke;
-  delete[] BulkEnergy;
-  delete[] momentum;
-  delete[] Qtot;
-  delete[] Qremoved;
 
   if (testpart) {
     for (int i = 0; i < nstestpart; i++)
@@ -184,8 +163,27 @@ c_Solver::~c_Solver() {
     delete[] testpart;
   }
 
+  if (particlesHost) {
+    for (int i = 0; i < ns; i++)
+      delete particlesHost[i];
+    delete[] particlesHost;
+  }
+
   delete exosphereIonization;
+
+  delete[] Ke;
+  delete[] BulkEnergy;
+  delete[] momentum;
+  delete[] Qtot;
+  delete[] Qremoved;
   delete my_clock;
+
+  // EMfields3D::freeDataType() dereferences its borrowed configuration, grid,
+  // and topology references; keep those owners alive through field teardown.
+  delete EMf;
+  delete grid;
+  delete vct;
+  delete col;
 }
 
 /**
@@ -233,15 +231,28 @@ int c_Solver::Init(int argc, char** argv) {
   vct = new VCtopology3D(*col);
   // Check if we can map the processes into a matrix ordering defined in
   // Collective.cpp
-  if (nprocs != vct->getNprocs()) {
+  const int localTopologyMismatch = nprocs != vct->getNprocs();
+  int topologyMismatch = localTopologyMismatch;
+#ifndef NO_MPI
+  int anyTopologyMismatch = 0;
+  MPI_Allreduce(&topologyMismatch, &anyTopologyMismatch, 1, MPI_INT, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
+  topologyMismatch = anyTopologyMismatch;
+#endif
+  if (topologyMismatch) {
     if (myrank == 0) {
-      cerr << "Error: " << nprocs << " processes cant be mapped into "
-           << vct->getXLEN() << "x" << vct->getYLEN() << "x" << vct->getZLEN()
-           << " matrix: Change XLEN,YLEN, ZLEN in method VCtopology3D.init()"
-           << endl;
-      MPIdata::instance().finalize_mpi();
-      return (1);
+      if (localTopologyMismatch) {
+        cerr << "Error: " << nprocs << " processes cannot be mapped into "
+             << vct->getXLEN() << "x" << vct->getYLEN() << "x" << vct->getZLEN()
+             << " matrix; change XLEN, YLEN, and ZLEN." << endl;
+      } else {
+        cerr << "Error: another MPI rank reported inconsistent topology "
+                "dimensions; ensure XLEN, YLEN, and ZLEN are identical on "
+                "all ranks."
+             << endl;
+      }
     }
+    return 1;
   }
   // We create a new communicator with a 3D virtual Cartesian topology
   vct->setup_vctopology(MPIdata::get_PicGlobalComm());
@@ -487,7 +498,8 @@ int c_Solver::Init(int argc, char** argv) {
   pclNumCSV << "species" << ns - 1 << std::endl;
 #endif
 
-  initCUDA();
+  if (initCUDA() != 0)
+    return 1;
 #if IPIC3D_COMPILE_DISK_OUTPUT
   if (Parameters::get_doWriteOutput() || restart_cycle > 0 ||
       col->getCallFinalize()) {
@@ -505,7 +517,7 @@ int c_Solver::Init(int argc, char** argv) {
 }
 
 /**
- * @brief Allocate and initialize all CUDA-side solver resources.
+ * @brief Allocate and initialize all GPU-side solver resources.
  *
  * This includes stream creation, particle/moment/device metadata allocation,
  * pinned host registrations, sorting buffers, and planet-boundary workspaces.
@@ -531,35 +543,52 @@ int c_Solver::initCUDA() {
 
   // ======= Select the GPU assigned to this MPI rank =======
   {
-    MPI_Comm sharedComm;
-    int sharedRank, sharedSize;
-    int deviceOnNode;
+    MPI_Comm sharedComm = MPI_COMM_NULL;
+    int sharedRank = 0, sharedSize = 0;
+    int deviceCount = 0;
     MPI_Comm_split_type(MPIdata::get_PicGlobalComm(), MPI_COMM_TYPE_SHARED, 0,
                         MPI_INFO_NULL, &sharedComm);
-    MPI_Comm_rank(sharedComm, &sharedRank); // rank in the node
-    MPI_Comm_size(sharedComm, &sharedSize); // total processes in this node
-    cudaErrChk(cudaGetDeviceCount(&deviceOnNode)); // GPU on the node
+    MPI_Comm_rank(sharedComm, &sharedRank);
+    MPI_Comm_size(sharedComm, &sharedSize);
 
-    if (sharedSize <= deviceOnNode) { // process <= device
-      cudaDeviceOnNode = sharedRank;
+    const cudaError_t countStatus = cudaGetDeviceCount(&deviceCount);
+    const char* failureReason = nullptr;
+    if (countStatus != cudaSuccess) {
+      failureReason = cudaGetErrorString(countStatus);
+    } else if (deviceCount <= 0) {
+      failureReason = "no visible GPU devices";
+    } else if (sharedSize > deviceCount && sharedSize % deviceCount != 0) {
+      failureReason =
+          "local MPI rank count is not divisible by the GPU device count";
     } else {
-      if (sharedSize % deviceOnNode !=
-          0) { // if proc is not a multiple of device
-        cerr << "Error: Can not map process to device on node. "
-             << "Global COMM rank: " << MPIdata::get_rank()
-             << " Shared COMM size: " << sharedSize
-             << " Device Number in Node: " << deviceOnNode << endl;
-        MPIdata::instance().finalize_mpi();
-        return (1);
-      }
-      int procPerDevice = sharedSize / deviceOnNode;
-      cudaDeviceOnNode = sharedRank / procPerDevice;
+      // Use one rank per device when possible; otherwise assign equal-sized
+      // contiguous groups of local ranks to each device.
+      const int ranksPerDevice =
+          sharedSize > deviceCount ? sharedSize / deviceCount : 1;
+      cudaDeviceOnNode = sharedRank / ranksPerDevice;
+      const cudaError_t setStatus = cudaSetDevice(cudaDeviceOnNode);
+      if (setStatus != cudaSuccess)
+        failureReason = cudaGetErrorString(setStatus);
     }
-    cudaErrChk(cudaSetDevice(cudaDeviceOnNode));
+
+    if (failureReason) {
+      cerr << "Error: cannot map MPI rank " << MPIdata::get_rank()
+           << " to a GPU device (local ranks=" << sharedSize
+           << ", visible GPU devices=" << deviceCount << "): " << failureReason
+           << "." << endl;
+    }
+
+    MPI_Comm_free(&sharedComm);
+    const int mappingFailure = failureReason ? 1 : 0;
+    int anyMappingFailure = 0;
+    MPI_Allreduce(&mappingFailure, &anyMappingFailure, 1, MPI_INT, MPI_MAX,
+                  MPIdata::get_PicGlobalComm());
+    if (anyMappingFailure)
+      return 1;
 #ifndef NDEBUG
     if (sharedRank == 0)
       cout << "[*]GPU assignment: shared comm size: " << sharedSize
-           << " GPU device on the node: " << deviceOnNode << endl;
+           << " visible GPU devices: " << deviceCount << endl;
 #endif
   }
 

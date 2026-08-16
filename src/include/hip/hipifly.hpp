@@ -17,6 +17,7 @@
 #define cudaSetDevice hipSetDevice
 #define cudaGetDevice hipGetDevice
 #define cudaGetDeviceCount hipGetDeviceCount
+#define cudaDeviceGetStreamPriorityRange hipDeviceGetStreamPriorityRange
 
 // Memory Management
 #define cudaMalloc hipMalloc
@@ -52,6 +53,7 @@
 #define cudaStream_t hipStream_t
 #define cudaStreamCreate hipStreamCreate
 #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
+#define cudaStreamCreateWithPriority hipStreamCreateWithPriority
 #define cudaStreamDestroy hipStreamDestroy
 #define cudaStreamSynchronize hipStreamSynchronize
 #define cudaStreamWaitEvent hipStreamWaitEvent

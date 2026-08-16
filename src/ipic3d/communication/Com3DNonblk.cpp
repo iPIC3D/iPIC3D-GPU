@@ -40,7 +40,8 @@ void NBDerivedHaloComm(int nx, int ny, int nz, double*** vector,
   const int tag_XL = 1, tag_YL = 2, tag_ZL = 3, tag_XR = 4, tag_YR = 5,
             tag_ZR = 6; // To address same rank as left and right neighbour in
                         // periodic case
-  const int myrank = vct->getCartesian_rank();
+  const int myrank =
+      isParticle ? vct->getParticleCartesian_rank() : vct->getCartesian_rank();
   const int right_neighborX =
       isParticle ? vct->getXright_neighbor_P() : vct->getXright_neighbor();
   const int left_neighborX =

@@ -787,24 +787,110 @@ k_interpC2N_interior(T* __restrict__ fN, const T* __restrict__ fC, int nxn,
 }
 
 template <typename T>
-__global__ void
-k_interpC2N_boundary(T* __restrict__ fN, const T* __restrict__ fC, int nxn,
-                     int nyn, int nzn, int nyc, int nzc, int sILo, int sIHi,
-                     int sJLo, int sJHi, int sKLo, int sKHi) {
-  int i = blockIdx.x * BX + threadIdx.x + 1,
-      j = blockIdx.y * BY + threadIdx.y + 1,
-      k = blockIdx.z * BZ + threadIdx.z + 1;
-  if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
-    return;
-  if (i >= sILo && i <= sIHi && j >= sJLo && j <= sJHi && k >= sKLo &&
-      k <= sKHi)
-    return;
+__device__ __forceinline__ void
+d_interpC2N_box(T* __restrict__ fN, const T* __restrict__ fC,
+                unsigned int linear, int iLo, int jLo, int kLo, int jCount,
+                int kCount, int nyn, int nzn, int nyc, int nzc) {
+  const unsigned int jkCount = jCount * kCount;
+  const int i = iLo + static_cast<int>(linear / jkCount);
+  const unsigned int rem = linear % jkCount;
+  const int j = jLo + static_cast<int>(rem / kCount);
+  const int k = kLo + static_cast<int>(rem % kCount);
   d_interpC2N(fN, fC, i, j, k, nyn, nzn, nyc, nzc);
 }
 
-void gpuInterpC2N_interior(cudaSolverType* fN, const cudaSolverType* fC,
-                           int nxn, int nyn, int nzn, cudaStream_t stream) {
-  int iLo = 2, iHi = nxn - 3, jLo = 2, jHi = nyn - 3, kLo = 2, kHi = nzn - 3;
+// Map one linear launch over the six disjoint slabs surrounding the safe box,
+// with one thread for each node in the complement.
+template <typename T>
+__global__ void k_interpC2N_complement(T* __restrict__ fN,
+                                       const T* __restrict__ fC, int nxn,
+                                       int nyn, int nzn, int nyc, int nzc,
+                                       int sILo, int sIHi, int sJLo, int sJHi,
+                                       int sKLo, int sKHi, unsigned int total) {
+  unsigned int linear = blockIdx.x * blockDim.x + threadIdx.x;
+  if (linear >= total)
+    return;
+
+  const int activeI = nxn - 2;
+  const int activeJ = nyn - 2;
+  const int activeK = nzn - 2;
+  const int safeI = sIHi - sILo + 1;
+  const int safeJ = sJHi - sJLo + 1;
+
+  // Select slab metadata first, then execute one shared interpolation tail.
+  // Keeping d_interpC2N outside the branch tree prevents the compiler from
+  // cloning the eight-load stencil for every slab.
+  int iLo, jLo, kLo, jCount, kCount;
+  unsigned int slab = (sILo - 1) * activeJ * activeK;
+  if (linear < slab) {
+    // Low-X slab spans the full active Y-Z plane.
+    iLo = jLo = kLo = 1;
+    jCount = activeJ;
+    kCount = activeK;
+  } else {
+    linear -= slab;
+    slab = (activeI - sIHi) * activeJ * activeK;
+    if (linear < slab) {
+      // High-X slab spans the full active Y-Z plane.
+      iLo = sIHi + 1;
+      jLo = kLo = 1;
+      jCount = activeJ;
+      kCount = activeK;
+    } else {
+      linear -= slab;
+      slab = safeI * (sJLo - 1) * activeK;
+      if (linear < slab) {
+        // Low-Y slab is restricted to the safe X interval.
+        iLo = sILo;
+        jLo = kLo = 1;
+        jCount = sJLo - 1;
+        kCount = activeK;
+      } else {
+        linear -= slab;
+        slab = safeI * (activeJ - sJHi) * activeK;
+        if (linear < slab) {
+          // High-Y slab is restricted to the safe X interval.
+          iLo = sILo;
+          jLo = sJHi + 1;
+          kLo = 1;
+          jCount = activeJ - sJHi;
+          kCount = activeK;
+        } else {
+          linear -= slab;
+          slab = safeI * safeJ * (sKLo - 1);
+          iLo = sILo;
+          jLo = sJLo;
+          jCount = safeJ;
+          if (linear < slab) {
+            // Low-Z slab is restricted to the safe X-Y rectangle.
+            kLo = 1;
+            kCount = sKLo - 1;
+          } else {
+            // High-Z slab is the remaining safe-X-Y complement.
+            linear -= slab;
+            kLo = sKHi + 1;
+            kCount = activeK - sKHi;
+          }
+        }
+      }
+    }
+  }
+
+  d_interpC2N_box(fN, fC, linear, iLo, jLo, kLo, jCount, kCount, nyn, nzn, nyc,
+                  nzc);
+}
+
+void gpuInterpC2N_range(cudaSolverType* fN, const cudaSolverType* fC, int nxn,
+                        int nyn, int nzn, int iLo, int iHi, int jLo, int jHi,
+                        int kLo, int kHi, cudaStream_t stream) {
+  // Only active node values are defined by interpC2N.  Clamp here so callers
+  // can conservatively shrink a safe box without manufacturing launch bounds.
+  iLo = (iLo < 1) ? 1 : iLo;
+  jLo = (jLo < 1) ? 1 : jLo;
+  kLo = (kLo < 1) ? 1 : kLo;
+  iHi = (iHi > nxn - 2) ? nxn - 2 : iHi;
+  jHi = (jHi > nyn - 2) ? nyn - 2 : jHi;
+  kHi = (kHi > nzn - 2) ? nzn - 2 : kHi;
   if (iLo > iHi || jLo > jHi || kLo > kHi)
     return;
   int nyc = nyn - 1, nzc = nzn - 1;
@@ -815,14 +901,55 @@ void gpuInterpC2N_interior(cudaSolverType* fN, const cudaSolverType* fC,
   cudaErrChk(cudaGetLastError());
 }
 
+void gpuInterpC2N_complement(cudaSolverType* fN, const cudaSolverType* fC,
+                             int nxn, int nyn, int nzn, int safeILo,
+                             int safeIHi, int safeJLo, int safeJHi, int safeKLo,
+                             int safeKHi, cudaStream_t stream) {
+  safeILo = (safeILo < 1) ? 1 : safeILo;
+  safeJLo = (safeJLo < 1) ? 1 : safeJLo;
+  safeKLo = (safeKLo < 1) ? 1 : safeKLo;
+  safeIHi = (safeIHi > nxn - 2) ? nxn - 2 : safeIHi;
+  safeJHi = (safeJHi > nyn - 2) ? nyn - 2 : safeJHi;
+  safeKHi = (safeKHi > nzn - 2) ? nzn - 2 : safeKHi;
+
+  // No early work was possible: overwrite every active node after the halo
+  // and all center-field fixups have completed.
+  if (safeILo > safeIHi || safeJLo > safeJHi || safeKLo > safeKHi) {
+    gpuInterpC2N(fN, fC, nxn, nyn, nzn, stream);
+    return;
+  }
+
+  const int activeI = nxn - 2, activeJ = nyn - 2, activeK = nzn - 2;
+  const int safeI = safeIHi - safeILo + 1;
+  const int safeJ = safeJHi - safeJLo + 1;
+  const size_t totalSize =
+      (size_t)(safeILo - 1 + activeI - safeIHi) * activeJ * activeK +
+      (size_t)safeI * (safeJLo - 1 + activeJ - safeJHi) * activeK +
+      (size_t)safeI * safeJ * (safeKLo - 1 + activeK - safeKHi);
+  if (totalSize == 0)
+    return;
+  // EMfields3D construction validates the signed-int Krylov/indexing contract;
+  // the compact decoder therefore uses faster 32-bit div/rem safely.
+  const unsigned int total = static_cast<unsigned int>(totalSize);
+
+  constexpr int block = 256;
+  const int nyc = nyn - 1, nzc = nzn - 1;
+  k_interpC2N_complement<<<(total - 1) / block + 1, block, 0, stream>>>(
+      fN, fC, nxn, nyn, nzn, nyc, nzc, safeILo, safeIHi, safeJLo, safeJHi,
+      safeKLo, safeKHi, total);
+  cudaErrChk(cudaGetLastError());
+}
+
+void gpuInterpC2N_interior(cudaSolverType* fN, const cudaSolverType* fC,
+                           int nxn, int nyn, int nzn, cudaStream_t stream) {
+  gpuInterpC2N_range(fN, fC, nxn, nyn, nzn, 2, nxn - 3, 2, nyn - 3, 2, nzn - 3,
+                     stream);
+}
+
 void gpuInterpC2N_boundary(cudaSolverType* fN, const cudaSolverType* fC,
                            int nxn, int nyn, int nzn, cudaStream_t stream) {
-  int nyc = nyn - 1, nzc = nzn - 1;
-  dim3 grid = stencilGrid(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_interpC2N_boundary<<<grid, block, 0, stream>>>(
-      fN, fC, nxn, nyn, nzn, nyc, nzc, 2, nxn - 3, 2, nyn - 3, 2, nzn - 3);
-  cudaErrChk(cudaGetLastError());
+  gpuInterpC2N_complement(fN, fC, nxn, nyn, nzn, 2, nxn - 3, 2, nyn - 3, 2,
+                          nzn - 3, stream);
 }
 
 // -----------------------------------------------------------------

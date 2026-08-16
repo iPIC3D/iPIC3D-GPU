@@ -80,6 +80,10 @@ option(GPU_SOLVER "Run the entire field solver on GPU (requires CUDA-aware MPI)"
 option(HALO_OVERLAP "Enable halo-computation overlap in the GPU field solver (requires GPU_SOLVER)" OFF)
 option(BUILD_UTESTS "Build unit tests" OFF)
 
+if(HALO_OVERLAP AND NOT GPU_SOLVER)
+  message(FATAL_ERROR "HALO_OVERLAP requires GPU_SOLVER=ON")
+endif()
+
 include(GNUInstallDirs)
 include(CTest)
 

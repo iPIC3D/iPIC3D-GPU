@@ -190,6 +190,22 @@ void gpuInterpC2N_interior(cudaSolverType* fieldN, const cudaSolverType* fieldC,
 void gpuInterpC2N_boundary(cudaSolverType* fieldN, const cudaSolverType* fieldC,
                            int nxn, int nyn, int nzn, cudaStream_t stream = 0);
 
+/** Interpolate a caller-supplied inclusive node box.  Bounds are clamped to
+ *  the active node domain [1..n-2]; an empty box is a no-op. */
+void gpuInterpC2N_range(cudaSolverType* fieldN, const cudaSolverType* fieldC,
+                        int nxn, int nyn, int nzn, int iLo, int iHi, int jLo,
+                        int jHi, int kLo, int kHi, cudaStream_t stream = 0);
+
+/** Interpolate the active node domain except for a caller-supplied inclusive
+ *  safe box.  The complement is mapped as six disjoint boundary slabs.  If the
+ *  clamped safe box is empty, interpolates the full active domain.  This lets
+ *  callers exclude center layers modified by post-halo fixups. */
+void gpuInterpC2N_complement(cudaSolverType* fieldN,
+                             const cudaSolverType* fieldC, int nxn, int nyn,
+                             int nzn, int safeILo, int safeIHi, int safeJLo,
+                             int safeJHi, int safeKLo, int safeKHi,
+                             cudaStream_t stream = 0);
+
 void gpuSmoothStep_interior(cudaSolverType* out, const cudaSolverType* in,
                             int nx, int ny, int nz, cudaSolverType alpha,
                             cudaSolverType beta3D, cudaStream_t stream = 0);

@@ -16,7 +16,9 @@
 #include "GPUHaloComm.cuh" // single-array self-copy kernels, BC kernels
 #include "GPUSolverMPITypes.h"
 #include "VCtopology3D.h"
-#include <cassert>
+#include <climits>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 // =========================================================================
@@ -294,6 +296,238 @@ __global__ void k_batchAddCorner(cudaSolverType* const* __restrict__ fields,
 // =========================================================================
 
 static constexpr int BATCH_BLK = 256;
+static constexpr int HALO_SEND_TAG[6] = {1, 4, 2, 5, 3, 6};
+static constexpr int HALO_RECV_TAG[6] = {4, 1, 5, 2, 6, 3};
+
+static inline int haloBatchBlocks(int total) {
+  return 1 + (total - 1) / BATCH_BLK;
+}
+
+[[noreturn]] static void batchedHaloContractFailure(const char* reason) {
+  std::fprintf(stderr, "GPU batched-halo contract failure: %s\n", reason);
+  MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+  std::abort();
+}
+
+[[noreturn]] static void batchedHaloMpiFailure(int error, MPI_Comm comm,
+                                               const char* operation) {
+  char message[MPI_MAX_ERROR_STRING] = {};
+  int length = 0;
+  MPI_Error_string(error, message, &length);
+  std::fprintf(stderr, "GPU batched-halo MPI failure in %s: %.*s\n", operation,
+               length, message);
+  MPI_Abort(comm, error);
+  std::abort();
+}
+
+static void haloIrecv(void* buffer, int count, MPI_Datatype datatype,
+                      int source, int tag, MPI_Comm comm,
+                      MPI_Request* request) {
+  const int error =
+      MPI_Irecv(buffer, count, datatype, source, tag, comm, request);
+  if (error != MPI_SUCCESS)
+    batchedHaloMpiFailure(error, comm, "MPI_Irecv");
+}
+
+static void haloIsend(const void* buffer, int count, MPI_Datatype datatype,
+                      int destination, int tag, MPI_Comm comm,
+                      MPI_Request* request) {
+  const int error =
+      MPI_Isend(buffer, count, datatype, destination, tag, comm, request);
+  if (error != MPI_SUCCESS)
+    batchedHaloMpiFailure(error, comm, "MPI_Isend");
+}
+
+static void haloWaitall(int count, MPI_Request* requests, MPI_Status* statuses,
+                        MPI_Comm comm) {
+  const int error = MPI_Waitall(count, requests, statuses);
+  if (error != MPI_SUCCESS)
+    batchedHaloMpiFailure(error, comm, "MPI_Waitall");
+}
+
+void EMfields3D::gpuInitializeHaloPlans() {
+  if (haloPlansInitialized_)
+    return;
+
+  const VirtualTopology3D& vct = get_vct();
+  for (int kind = HALO_FIELD; kind <= HALO_PARTICLE; ++kind) {
+    const bool particle = kind == HALO_PARTICLE;
+    HaloTopologyPlan& plan = haloTopologyPlans_[kind];
+    plan.comm = particle ? vct.getParticleComm() : vct.getFieldComm();
+    const int rank =
+        particle ? vct.getParticleCartesian_rank() : vct.getCartesian_rank();
+    plan.neighbors[0] =
+        particle ? vct.getXleft_neighbor_P() : vct.getXleft_neighbor();
+    plan.neighbors[1] =
+        particle ? vct.getXright_neighbor_P() : vct.getXright_neighbor();
+    plan.neighbors[2] =
+        particle ? vct.getYleft_neighbor_P() : vct.getYleft_neighbor();
+    plan.neighbors[3] =
+        particle ? vct.getYright_neighbor_P() : vct.getYright_neighbor();
+    plan.neighbors[4] =
+        particle ? vct.getZleft_neighbor_P() : vct.getZleft_neighbor();
+    plan.neighbors[5] =
+        particle ? vct.getZright_neighbor_P() : vct.getZright_neighbor();
+    if (plan.comm == MPI_COMM_NULL || rank == MPI_PROC_NULL)
+      batchedHaloContractFailure("halo topology is not initialized");
+
+    bool remote[6] = {};
+    for (int direction = 0; direction < 6; ++direction) {
+      plan.present[direction] = plan.neighbors[direction] != MPI_PROC_NULL;
+      remote[direction] =
+          plan.present[direction] && plan.neighbors[direction] != rank;
+      if (remote[direction])
+        plan.remoteDirections[plan.remoteDirectionCount++] = direction;
+    }
+    for (int axis = 0; axis < 3; ++axis)
+      plan.selfAxis[axis] = plan.neighbors[2 * axis] == rank &&
+                            plan.neighbors[2 * axis + 1] == rank;
+
+    static constexpr int edgeDependencies[3][2] = {{4, 5}, {0, 1}, {2, 3}};
+    for (int direction = 0; direction < 6; ++direction) {
+      const int edgeAxis = direction / 2;
+      for (int segment = 0; segment < 2; ++segment) {
+        const int dependency = edgeDependencies[edgeAxis][segment];
+        if (remote[dependency])
+          plan.edgeSegments[direction][plan.edgeMultiplicity[direction]++] =
+              segment;
+      }
+      if (remote[direction] && plan.edgeMultiplicity[direction] > 0)
+        plan.edgeDirections[plan.edgeDirectionCount++] = direction;
+    }
+    for (int direction = 0; direction < 2; ++direction) {
+      if (remote[direction])
+        plan.cornerDirections[plan.cornerDirectionCount++] = direction;
+    }
+    const bool remoteY = remote[2] || remote[3];
+    const bool remoteZ = remote[4] || remote[5];
+    plan.hasRemoteYZ = remoteY && remoteZ;
+  }
+
+  auto buildGeometry = [&](HaloGeometryPlan& plan, int nx, int ny, int nz,
+                           int offset) {
+    const int minExtent = offset == 0 ? 3 : 4;
+    if (nx < minExtent || ny < minExtent || nz < minExtent)
+      batchedHaloContractFailure("invalid canonical halo geometry");
+    const size_t volume = (size_t)nx * ny * nz;
+    if (volume > INT_MAX)
+      batchedHaloContractFailure("invalid canonical halo geometry");
+
+    plan.nx = nx;
+    plan.ny = ny;
+    plan.nz = nz;
+    plan.offset = offset;
+    plan.active[0] = nx - 2;
+    plan.active[1] = ny - 2;
+    plan.active[2] = nz - 2;
+
+    auto setFace = [&](int direction, int sendBase, int recvBase,
+                       int outerStride, int innerStride, int outerCount,
+                       int innerCount) {
+      const size_t elements = (size_t)outerCount * innerCount;
+      if (elements > (size_t)INT_MAX / HALO_MAX_BATCH)
+        batchedHaloContractFailure("halo face MPI count exceeds INT_MAX");
+      HaloFacePlan& face = plan.faces[direction];
+      face.sendBase = sendBase;
+      face.recvBase = recvBase;
+      face.outerStride = outerStride;
+      face.innerStride = innerStride;
+      face.outerCount = outerCount;
+      face.innerCount = innerCount;
+      face.elements = static_cast<int>(elements);
+    };
+
+    const int yz = ny * nz;
+    setFace(0, (1 + offset) * yz + nz + 1, nz + 1, nz, 1, ny - 2, nz - 2);
+    setFace(1, (nx - 2 - offset) * yz + nz + 1, (nx - 1) * yz + nz + 1, nz, 1,
+            ny - 2, nz - 2);
+    setFace(2, yz + (1 + offset) * nz + 1, yz + 1, yz, 1, nx - 2, nz - 2);
+    setFace(3, yz + (ny - 2 - offset) * nz + 1, yz + (ny - 1) * nz + 1, yz, 1,
+            nx - 2, nz - 2);
+    setFace(4, yz + nz + 1 + offset, yz + nz, yz, nz, nx - 2, ny - 2);
+    setFace(5, yz + nz + nz - 2 - offset, yz + nz + nz - 1, yz, nz, nx - 2,
+            ny - 2);
+
+    auto setEdge = [&](int direction, int segment, int sendBase, int recvBase,
+                       int stride, int elements) {
+      HaloEdgePlan& edge = plan.edges[direction][segment];
+      edge.sendBase = sendBase;
+      edge.recvBase = recvBase;
+      edge.stride = stride;
+      edge.elements = elements;
+    };
+    for (int direction = 0; direction < 2; ++direction) {
+      const int sendX = direction == 0 ? 1 + offset : nx - 2 - offset;
+      const int recvX = direction == 0 ? 0 : nx - 1;
+      setEdge(direction, 0, sendX * yz + nz, recvX * yz + nz, nz, ny - 2);
+      setEdge(direction, 1, sendX * yz + nz + nz - 1, recvX * yz + nz + nz - 1,
+              nz, ny - 2);
+    }
+    for (int direction = 2; direction < 4; ++direction) {
+      const int sendY = direction == 2 ? 1 + offset : ny - 2 - offset;
+      const int recvY = direction == 2 ? 0 : ny - 1;
+      setEdge(direction, 0, sendY * nz + 1, recvY * nz + 1, 1, nz - 2);
+      setEdge(direction, 1, (nx - 1) * yz + sendY * nz + 1,
+              (nx - 1) * yz + recvY * nz + 1, 1, nz - 2);
+    }
+    for (int direction = 4; direction < 6; ++direction) {
+      const int sendZ = direction == 4 ? 1 + offset : nz - 2 - offset;
+      const int recvZ = direction == 4 ? 0 : nz - 1;
+      setEdge(direction, 0, yz + sendZ, yz + recvZ, yz, nx - 2);
+      setEdge(direction, 1, yz + (ny - 1) * nz + sendZ,
+              yz + (ny - 1) * nz + recvZ, yz, nx - 2);
+    }
+
+    plan.edgeLength[0] = ny - 2;
+    plan.edgeLength[1] = nz - 2;
+    plan.edgeLength[2] = nx - 2;
+    for (int direction = 0; direction < 6; ++direction) {
+      const int worstEdgeElements = 2 * plan.edgeLength[direction / 2];
+      int maximum = plan.faces[direction].elements;
+      if (worstEdgeElements > maximum)
+        maximum = worstEdgeElements;
+      if (maximum < 4)
+        maximum = 4;
+      if (maximum > INT_MAX / HALO_MAX_BATCH)
+        batchedHaloContractFailure("halo buffer or MPI count exceeds INT_MAX");
+      plan.maxBufferElements[direction] = maximum;
+    }
+
+    constexpr int faceBlock = 16;
+    plan.selfFaceBlocks[0][0] = (ny - 2 + faceBlock - 1) / faceBlock;
+    plan.selfFaceBlocks[0][1] = (nz - 2 + faceBlock - 1) / faceBlock;
+    plan.selfFaceBlocks[1][0] = (nx - 2 + faceBlock - 1) / faceBlock;
+    plan.selfFaceBlocks[1][1] = (nz - 2 + faceBlock - 1) / faceBlock;
+    plan.selfFaceBlocks[2][0] = (nx - 2 + faceBlock - 1) / faceBlock;
+    plan.selfFaceBlocks[2][1] = (ny - 2 + faceBlock - 1) / faceBlock;
+    int maximumExtent = nx > ny ? nx : ny;
+    if (nz > maximumExtent)
+      maximumExtent = nz;
+    plan.edgeKernelBlocks = (maximumExtent + 255) / 256;
+    plan.cornerSendBase[0] = (1 + offset) * yz;
+    plan.cornerSendBase[1] = (nx - 2 - offset) * yz;
+    plan.cornerRecvBase[0] = 0;
+    plan.cornerRecvBase[1] = (nx - 1) * yz;
+  };
+
+  buildGeometry(haloGeometryPlans_[HALO_CENTER_OFFSET0], nxc, nyc, nzc, 0);
+  buildGeometry(haloGeometryPlans_[HALO_NODE_OFFSET1], nxn, nyn, nzn, 1);
+  buildGeometry(haloGeometryPlans_[HALO_NODE_OFFSET0], nxn, nyn, nzn, 0);
+  haloPlansInitialized_ = true;
+}
+
+const EMfields3D::HaloGeometryPlan&
+EMfields3D::gpuSelectHaloGeometry(int nx, int ny, int nz,
+                                  bool offsetZero) const {
+  if (!haloPlansInitialized_)
+    batchedHaloContractFailure("halo plans are not initialized");
+  if (nx == nxc && ny == nyc && nz == nzc && offsetZero)
+    return haloGeometryPlans_[HALO_CENTER_OFFSET0];
+  if (nx == nxn && ny == nyn && nz == nzn)
+    return haloGeometryPlans_[offsetZero ? HALO_NODE_OFFSET0
+                                         : HALO_NODE_OFFSET1];
+  batchedHaloContractFailure("exchange does not match a cached halo geometry");
+}
 
 // Helper: launch k_batchPack2D with auto grid sizing
 static inline void launchPack2D(cudaSolverType* buf,
@@ -304,7 +538,7 @@ static inline void launchPack2D(cudaSolverType* buf,
   int total = outerCount * innerCount * nFields;
   if (total <= 0)
     return;
-  k_batchPack2D<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0, s>>>(
+  k_batchPack2D<<<haloBatchBlocks(total), BATCH_BLK, 0, s>>>(
       buf, fields, nFields, base, outerStride, innerStride, outerCount,
       innerCount);
 }
@@ -317,548 +551,247 @@ static inline void launchUnpack2D(const cudaSolverType* buf,
   int total = outerCount * innerCount * nFields;
   if (total <= 0)
     return;
-  k_batchUnpack2D<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0, s>>>(
+  k_batchUnpack2D<<<haloBatchBlocks(total), BATCH_BLK, 0, s>>>(
       buf, fields, nFields, base, outerStride, innerStride, outerCount,
       innerCount);
 }
 
+void EMfields3D::gpuQueueHaloFacePack(cudaSolverType** h_fieldPtrs, int nFields,
+                                      const HaloTopologyPlan& topology,
+                                      const HaloGeometryPlan& geometry,
+                                      cudaStream_t stream) {
+  memcpy(h_ptrArray_, h_fieldPtrs, nFields * sizeof(cudaSolverType*));
+  cudaErrChk(cudaMemcpyAsync(d_ptrArray_, h_ptrArray_,
+                             nFields * sizeof(cudaSolverType*),
+                             cudaMemcpyHostToDevice, stream));
+
+  auto* const* d_ptrs = reinterpret_cast<cudaSolverType* const*>(d_ptrArray_);
+  for (int item = 0; item < topology.remoteDirectionCount; ++item) {
+    const int direction = topology.remoteDirections[item];
+    const HaloFacePlan& face = geometry.faces[direction];
+    launchPack2D(d_haloBuf_send_[direction], d_ptrs, nFields, face.sendBase,
+                 face.outerStride, face.innerStride, face.outerCount,
+                 face.innerCount, stream);
+  }
+  cudaErrChk(cudaGetLastError());
+}
+
+void EMfields3D::gpuCompleteHaloPhases(const HaloTopologyPlan& topology,
+                                       const HaloGeometryPlan& geometry,
+                                       int nFields, bool faceOnly,
+                                       cudaStream_t stream) {
+  const int* neighbors = topology.neighbors;
+  const MPI_Comm comm = topology.comm;
+  const int nx = geometry.nx;
+  const int ny = geometry.ny;
+  const int nz = geometry.nz;
+  const int offset = geometry.offset;
+  auto* const* d_ptrs = reinterpret_cast<cudaSolverType* const*>(d_ptrArray_);
+  MPI_Status statuses[12];
+  MPI_Request requests[12];
+
+  int requestCount = 0;
+  for (int item = 0; item < topology.remoteDirectionCount; ++item) {
+    const int direction = topology.remoteDirections[item];
+    haloIrecv(d_haloBuf_recv_[direction],
+              geometry.faces[direction].elements * nFields,
+              mpiTypeOf<cudaSolverType>(), neighbors[direction],
+              HALO_RECV_TAG[direction], comm, &requests[requestCount++]);
+  }
+  for (int item = 0; item < topology.remoteDirectionCount; ++item) {
+    const int direction = topology.remoteDirections[item];
+    haloIsend(d_haloBuf_send_[direction],
+              geometry.faces[direction].elements * nFields,
+              mpiTypeOf<cudaSolverType>(), neighbors[direction],
+              HALO_SEND_TAG[direction], comm, &requests[requestCount++]);
+  }
+
+  constexpr int faceBlock = 16;
+  const dim3 block(faceBlock, faceBlock);
+  if (topology.selfAxis[0]) {
+    const dim3 grid(geometry.selfFaceBlocks[0][0],
+                    geometry.selfFaceBlocks[0][1], nFields);
+    gpuBatchSelfCopyFaceX<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
+                                                      offset);
+  }
+  if (topology.selfAxis[1]) {
+    const dim3 grid(geometry.selfFaceBlocks[1][0],
+                    geometry.selfFaceBlocks[1][1], nFields);
+    gpuBatchSelfCopyFaceY<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
+                                                      offset);
+  }
+  if (topology.selfAxis[2]) {
+    const dim3 grid(geometry.selfFaceBlocks[2][0],
+                    geometry.selfFaceBlocks[2][1], nFields);
+    gpuBatchSelfCopyFaceZ<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
+                                                      offset);
+  }
+
+  if (requestCount > 0)
+    haloWaitall(requestCount, requests, statuses, comm);
+  for (int item = 0; item < topology.remoteDirectionCount; ++item) {
+    const int direction = topology.remoteDirections[item];
+    const HaloFacePlan& face = geometry.faces[direction];
+    launchUnpack2D(d_haloBuf_recv_[direction], d_ptrs, nFields, face.recvBase,
+                   face.outerStride, face.innerStride, face.outerCount,
+                   face.innerCount, stream);
+  }
+
+  if (faceOnly)
+    return;
+
+  for (int item = 0; item < topology.edgeDirectionCount; ++item) {
+    const int direction = topology.edgeDirections[item];
+    int bufferOffset = 0;
+    for (int edgeItem = 0; edgeItem < topology.edgeMultiplicity[direction];
+         ++edgeItem) {
+      const int segment = topology.edgeSegments[direction][edgeItem];
+      const HaloEdgePlan& edge = geometry.edges[direction][segment];
+      launchPack2D(d_haloBuf_send_[direction] + bufferOffset, d_ptrs, nFields,
+                   edge.sendBase, edge.stride, 1, edge.elements, 1, stream);
+      bufferOffset += edge.elements * nFields;
+    }
+  }
+  cudaErrChk(cudaGetLastError());
+  if (topology.edgeDirectionCount > 0)
+    cudaErrChk(cudaStreamSynchronize(stream));
+
+  requestCount = 0;
+  for (int item = 0; item < topology.edgeDirectionCount; ++item) {
+    const int direction = topology.edgeDirections[item];
+    const int count = topology.edgeMultiplicity[direction] *
+                      geometry.edgeLength[direction / 2] * nFields;
+    haloIrecv(d_haloBuf_recv_[direction], count, mpiTypeOf<cudaSolverType>(),
+              neighbors[direction], HALO_RECV_TAG[direction], comm,
+              &requests[requestCount++]);
+  }
+  for (int item = 0; item < topology.edgeDirectionCount; ++item) {
+    const int direction = topology.edgeDirections[item];
+    const int count = topology.edgeMultiplicity[direction] *
+                      geometry.edgeLength[direction / 2] * nFields;
+    haloIsend(d_haloBuf_send_[direction], count, mpiTypeOf<cudaSolverType>(),
+              neighbors[direction], HALO_SEND_TAG[direction], comm,
+              &requests[requestCount++]);
+  }
+
+  const int edgeBlocks = geometry.edgeKernelBlocks;
+  if (topology.selfAxis[0]) {
+    const dim3 grid(edgeBlocks, nFields);
+    gpuBatchSelfCopyEdgeX<<<grid, 256, 0, stream>>>(
+        d_ptrs, nx, ny, nz, offset, topology.present[5], topology.present[4],
+        topology.present[3], topology.present[2]);
+  }
+  if (topology.selfAxis[1]) {
+    const dim3 grid(edgeBlocks, nFields);
+    gpuBatchSelfCopyEdgeY<<<grid, 256, 0, stream>>>(
+        d_ptrs, nx, ny, nz, offset, topology.present[1], topology.present[0],
+        topology.present[5], topology.present[4]);
+  }
+  if (topology.selfAxis[2]) {
+    const dim3 grid(edgeBlocks, nFields);
+    gpuBatchSelfCopyEdgeZ<<<grid, 256, 0, stream>>>(
+        d_ptrs, nx, ny, nz, offset, topology.present[3], topology.present[2],
+        topology.present[1], topology.present[0]);
+  }
+
+  if (requestCount > 0)
+    haloWaitall(requestCount, requests, statuses, comm);
+  for (int item = 0; item < topology.edgeDirectionCount; ++item) {
+    const int direction = topology.edgeDirections[item];
+    int bufferOffset = 0;
+    for (int edgeItem = 0; edgeItem < topology.edgeMultiplicity[direction];
+         ++edgeItem) {
+      const int segment = topology.edgeSegments[direction][edgeItem];
+      const HaloEdgePlan& edge = geometry.edges[direction][segment];
+      launchUnpack2D(d_haloBuf_recv_[direction] + bufferOffset, d_ptrs, nFields,
+                     edge.recvBase, edge.stride, 1, edge.elements, 1, stream);
+      bufferOffset += edge.elements * nFields;
+    }
+  }
+
+  requestCount = 0;
+  if (topology.hasRemoteYZ) {
+    for (int item = 0; item < topology.cornerDirectionCount; ++item) {
+      const int direction = topology.cornerDirections[item];
+      const int total = 4 * nFields;
+      k_batchPackCorners4<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
+          d_haloBuf_send_[direction], d_ptrs, nFields,
+          geometry.cornerSendBase[direction], ny, nz);
+    }
+    cudaErrChk(cudaGetLastError());
+    if (topology.cornerDirectionCount > 0)
+      cudaErrChk(cudaStreamSynchronize(stream));
+
+    for (int item = 0; item < topology.cornerDirectionCount; ++item) {
+      const int direction = topology.cornerDirections[item];
+      haloIrecv(d_haloBuf_recv_[direction], 4 * nFields,
+                mpiTypeOf<cudaSolverType>(), neighbors[direction],
+                HALO_RECV_TAG[direction], comm, &requests[requestCount++]);
+    }
+    for (int item = 0; item < topology.cornerDirectionCount; ++item) {
+      const int direction = topology.cornerDirections[item];
+      haloIsend(d_haloBuf_send_[direction], 4 * nFields,
+                mpiTypeOf<cudaSolverType>(), neighbors[direction],
+                HALO_SEND_TAG[direction], comm, &requests[requestCount++]);
+    }
+  }
+
+  if (topology.selfAxis[0])
+    gpuBatchSelfCopyCornerX<<<nFields, 1, 0, stream>>>(
+        d_ptrs, nx, ny, nz, offset, topology.present[2], topology.present[3],
+        topology.present[4], topology.present[5]);
+  else if (topology.selfAxis[1])
+    gpuBatchSelfCopyCornerY<<<nFields, 1, 0, stream>>>(
+        d_ptrs, nx, ny, nz, offset, topology.present[0], topology.present[1],
+        topology.present[4], topology.present[5]);
+  else if (topology.selfAxis[2])
+    gpuBatchSelfCopyCornerZ<<<nFields, 1, 0, stream>>>(
+        d_ptrs, nx, ny, nz, offset, topology.present[2], topology.present[3],
+        topology.present[0], topology.present[1]);
+
+  if (requestCount > 0)
+    haloWaitall(requestCount, requests, statuses, comm);
+  if (topology.hasRemoteYZ) {
+    for (int item = 0; item < topology.cornerDirectionCount; ++item) {
+      const int direction = topology.cornerDirections[item];
+      const int total = 4 * nFields;
+      k_batchUnpackCorners4<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
+          d_haloBuf_recv_[direction], d_ptrs, nFields,
+          geometry.cornerRecvBase[direction], ny, nz);
+    }
+  }
+}
+
 void EMfields3D::gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs,
                                         int nFields, int nx, int ny, int nz,
-                                        bool isCenterFlag, bool isFaceOnlyFlag,
+                                        bool offsetZero, bool isFaceOnlyFlag,
                                         bool needInterp, bool isParticle,
                                         cudaStream_t stream) {
-  assert(nFields > 0 && nFields <= HALO_MAX_BATCH);
-  const VirtualTopology3D* vct = &get_vct();
-  const int myrank = vct->getCartesian_rank();
+  if (!h_fieldPtrs)
+    batchedHaloContractFailure("null blocking-exchange field table");
+  if (!haloBufsAllocated_)
+    batchedHaloContractFailure("blocking halo buffers are not initialized");
+  if (nFields <= 0 || nFields > HALO_MAX_BATCH)
+    batchedHaloContractFailure("invalid blocking-exchange field count");
+  const HaloGeometryPlan& geometry =
+      gpuSelectHaloGeometry(nx, ny, nz, offsetZero);
+  const HaloTopologyPlan& topology =
+      haloTopologyPlans_[isParticle ? HALO_PARTICLE : HALO_FIELD];
+#ifdef HALO_OVERLAP
+  if (haloExchange_.active)
+    batchedHaloContractFailure("overlapping use of shared GPU halo buffers");
+  // This also orders a blocking exchange on an arbitrary CUDA stream after
+  // the final buffer consumer of the preceding blocking or split exchange.
+  if (haloBuffersReady_)
+    cudaErrChk(cudaStreamWaitEvent(stream, haloBuffersReady_, 0));
+#endif
+  gpuQueueHaloFacePack(h_fieldPtrs, nFields, topology, geometry, stream);
+  // CUDA-aware MPI may consume the send buffers only after face packing.
+  // This also completes the pinned pointer-table upload before reuse.
+  cudaErrChk(cudaStreamSynchronize(stream));
+  gpuCompleteHaloPhases(topology, geometry, nFields, isFaceOnlyFlag, stream);
 
-  // ---- Neighbour ranks ----
-  const int xlN =
-      isParticle ? vct->getXleft_neighbor_P() : vct->getXleft_neighbor();
-  const int xrN =
-      isParticle ? vct->getXright_neighbor_P() : vct->getXright_neighbor();
-  const int ylN =
-      isParticle ? vct->getYleft_neighbor_P() : vct->getYleft_neighbor();
-  const int yrN =
-      isParticle ? vct->getYright_neighbor_P() : vct->getYright_neighbor();
-  const int zlN =
-      isParticle ? vct->getZleft_neighbor_P() : vct->getZleft_neighbor();
-  const int zrN =
-      isParticle ? vct->getZright_neighbor_P() : vct->getZright_neighbor();
-
-  const MPI_Comm comm =
-      isParticle ? vct->getParticleComm() : vct->getFieldComm();
-
-  // ---- Copy field pointers via pinned staging → device ----
-  memcpy(h_ptrArray_, h_fieldPtrs, nFields * sizeof(cudaSolverType*));
-  cudaMemcpyAsync(d_ptrArray_, h_ptrArray_, nFields * sizeof(cudaSolverType*),
-                  cudaMemcpyHostToDevice, stream);
-
-  // ---- Active-direction flags (not NULL and not self) ----
-  //   0=XL  1=XR  2=YL  3=YR  4=ZL  5=ZR
-  int cc[6];
-  cc[0] = (xlN != MPI_PROC_NULL && xlN != myrank) ? 1 : 0;
-  cc[1] = (xrN != MPI_PROC_NULL && xrN != myrank) ? 1 : 0;
-  cc[2] = (ylN != MPI_PROC_NULL && ylN != myrank) ? 1 : 0;
-  cc[3] = (yrN != MPI_PROC_NULL && yrN != myrank) ? 1 : 0;
-  cc[4] = (zlN != MPI_PROC_NULL && zlN != myrank) ? 1 : 0;
-  cc[5] = (zrN != MPI_PROC_NULL && zrN != myrank) ? 1 : 0;
-
-  // Node copies skip the shared boundary-node plane; center copies do not.
-  const int offset = isCenterFlag ? 0 : 1;
-
-  const int tag_XL = 1, tag_XR = 4;
-  const int tag_YL = 2, tag_YR = 5;
-  const int tag_ZL = 3, tag_ZR = 6;
-
-  MPI_Status mpiStat[12];
-  MPI_Request mpiReq[12];
-
-  cudaSolverType* const* d_ptrs = (cudaSolverType* const*)d_ptrArray_;
-
-  // ---- Stencil sizes ----
-  const int nyzF = (ny - 2) * (nz - 2); // YZ face element count per field
-  const int nxzF = (nx - 2) * (nz - 2); // XZ face
-  const int nxyF = (nx - 2) * (ny - 2); // XY face
-
-  // =====================================================================
-  //  PHASE 1 : Face exchange
-  // =====================================================================
-
-  // ---- Pack faces into contiguous send buffers ----
-  if (cc[0]) {
-    int ix = 1 + offset;
-    launchPack2D(d_haloBuf_send_[0], d_ptrs, nFields, ix * ny * nz + 1 * nz + 1,
-                 nz, 1, ny - 2, nz - 2, stream);
-  }
-  if (cc[1]) {
-    int ix = nx - 2 - offset;
-    launchPack2D(d_haloBuf_send_[1], d_ptrs, nFields, ix * ny * nz + 1 * nz + 1,
-                 nz, 1, ny - 2, nz - 2, stream);
-  }
-  if (cc[2]) {
-    int iy = 1 + offset;
-    launchPack2D(d_haloBuf_send_[2], d_ptrs, nFields, 1 * ny * nz + iy * nz + 1,
-                 ny * nz, 1, nx - 2, nz - 2, stream);
-  }
-  if (cc[3]) {
-    int iy = ny - 2 - offset;
-    launchPack2D(d_haloBuf_send_[3], d_ptrs, nFields, 1 * ny * nz + iy * nz + 1,
-                 ny * nz, 1, nx - 2, nz - 2, stream);
-  }
-  if (cc[4]) {
-    int iz = 1 + offset;
-    launchPack2D(d_haloBuf_send_[4], d_ptrs, nFields, 1 * ny * nz + 1 * nz + iz,
-                 ny * nz, nz, nx - 2, ny - 2, stream);
-  }
-  if (cc[5]) {
-    int iz = nz - 2 - offset;
-    launchPack2D(d_haloBuf_send_[5], d_ptrs, nFields, 1 * ny * nz + 1 * nz + iz,
-                 ny * nz, nz, nx - 2, ny - 2, stream);
-  }
-
-  // Wait for pack to finish before MPI reads the buffers
-  cudaStreamSynchronize(stream);
-
-  // ---- Post face Irecv / Isend ----
-  int rcnt = 0, scnt;
-  if (cc[0])
-    MPI_Irecv(d_haloBuf_recv_[0], nyzF * nFields, mpiTypeOf<cudaSolverType>(),
-              xlN, tag_XR, comm, &mpiReq[rcnt++]);
-  if (cc[1])
-    MPI_Irecv(d_haloBuf_recv_[1], nyzF * nFields, mpiTypeOf<cudaSolverType>(),
-              xrN, tag_XL, comm, &mpiReq[rcnt++]);
-  if (cc[2])
-    MPI_Irecv(d_haloBuf_recv_[2], nxzF * nFields, mpiTypeOf<cudaSolverType>(),
-              ylN, tag_YR, comm, &mpiReq[rcnt++]);
-  if (cc[3])
-    MPI_Irecv(d_haloBuf_recv_[3], nxzF * nFields, mpiTypeOf<cudaSolverType>(),
-              yrN, tag_YL, comm, &mpiReq[rcnt++]);
-  if (cc[4])
-    MPI_Irecv(d_haloBuf_recv_[4], nxyF * nFields, mpiTypeOf<cudaSolverType>(),
-              zlN, tag_ZR, comm, &mpiReq[rcnt++]);
-  if (cc[5])
-    MPI_Irecv(d_haloBuf_recv_[5], nxyF * nFields, mpiTypeOf<cudaSolverType>(),
-              zrN, tag_ZL, comm, &mpiReq[rcnt++]);
-
-  scnt = rcnt;
-  if (cc[0])
-    MPI_Isend(d_haloBuf_send_[0], nyzF * nFields, mpiTypeOf<cudaSolverType>(),
-              xlN, tag_XL, comm, &mpiReq[scnt++]);
-  if (cc[1])
-    MPI_Isend(d_haloBuf_send_[1], nyzF * nFields, mpiTypeOf<cudaSolverType>(),
-              xrN, tag_XR, comm, &mpiReq[scnt++]);
-  if (cc[2])
-    MPI_Isend(d_haloBuf_send_[2], nxzF * nFields, mpiTypeOf<cudaSolverType>(),
-              ylN, tag_YL, comm, &mpiReq[scnt++]);
-  if (cc[3])
-    MPI_Isend(d_haloBuf_send_[3], nxzF * nFields, mpiTypeOf<cudaSolverType>(),
-              yrN, tag_YR, comm, &mpiReq[scnt++]);
-  if (cc[4])
-    MPI_Isend(d_haloBuf_send_[4], nxyF * nFields, mpiTypeOf<cudaSolverType>(),
-              zlN, tag_ZL, comm, &mpiReq[scnt++]);
-  if (cc[5])
-    MPI_Isend(d_haloBuf_send_[5], nxyF * nFields, mpiTypeOf<cudaSolverType>(),
-              zrN, tag_ZR, comm, &mpiReq[scnt++]);
-
-  // ---- Self-copy faces (periodic self-neighbour, batched) ----
-  {
-    constexpr int BLK = 16;
-    dim3 block(BLK, BLK);
-    if (xlN == myrank && xrN == myrank) {
-      dim3 grid(((ny - 2) + BLK - 1) / BLK, ((nz - 2) + BLK - 1) / BLK,
-                nFields);
-      gpuBatchSelfCopyFaceX<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                        offset);
-    }
-    if (ylN == myrank && yrN == myrank) {
-      dim3 grid(((nx - 2) + BLK - 1) / BLK, ((nz - 2) + BLK - 1) / BLK,
-                nFields);
-      gpuBatchSelfCopyFaceY<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                        offset);
-    }
-    if (zlN == myrank && zrN == myrank) {
-      dim3 grid(((nx - 2) + BLK - 1) / BLK, ((ny - 2) + BLK - 1) / BLK,
-                nFields);
-      gpuBatchSelfCopyFaceZ<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                        offset);
-    }
-    // No sync needed: self-copy and unpack share the same stream,
-    // so CUDA stream ordering guarantees self-copy completes first.
-  }
-
-  if (scnt > 0)
-    MPI_Waitall(scnt, mpiReq, mpiStat);
-
-  // ---- Unpack face recv buffers into ghost faces ----
-  if (cc[0])
-    launchUnpack2D(d_haloBuf_recv_[0], d_ptrs, nFields,
-                   0 * ny * nz + 1 * nz + 1, nz, 1, ny - 2, nz - 2, stream);
-  if (cc[1])
-    launchUnpack2D(d_haloBuf_recv_[1], d_ptrs, nFields,
-                   (nx - 1) * ny * nz + 1 * nz + 1, nz, 1, ny - 2, nz - 2,
-                   stream);
-  if (cc[2])
-    launchUnpack2D(d_haloBuf_recv_[2], d_ptrs, nFields,
-                   1 * ny * nz + 0 * nz + 1, ny * nz, 1, nx - 2, nz - 2,
-                   stream);
-  if (cc[3])
-    launchUnpack2D(d_haloBuf_recv_[3], d_ptrs, nFields,
-                   1 * ny * nz + (ny - 1) * nz + 1, ny * nz, 1, nx - 2, nz - 2,
-                   stream);
-  if (cc[4])
-    launchUnpack2D(d_haloBuf_recv_[4], d_ptrs, nFields,
-                   1 * ny * nz + 1 * nz + 0, ny * nz, nz, nx - 2, ny - 2,
-                   stream);
-  if (cc[5])
-    launchUnpack2D(d_haloBuf_recv_[5], d_ptrs, nFields,
-                   1 * ny * nz + 1 * nz + (nz - 1), ny * nz, nz, nx - 2, ny - 2,
-                   stream);
-
-  // =====================================================================
-  //  PHASE 2 : Edge exchange  (skip if face-only)
-  // =====================================================================
-  if (!isFaceOnlyFlag) {
-
-    // Face unpack and edge pack share the same stream — CUDA
-    // stream ordering guarantees face data is visible to edge packing.
-
-    // ---- Pack edges ----
-    // Y-edges to X neighbours:  (ix_send, jy=1..ny-2, jz=0 and/or nz-1)
-    //   Edge at jz=0 exists if cc[4] (ZL active)
-    //   Edge at jz=nz-1 exists if cc[5] (ZR active)
-    int edgeYlen = ny - 2, edgeZlen = nz - 2, edgeXlen = nx - 2;
-
-    // --- X-direction edges (Y-edges sent to X neighbours) ---
-    for (int dir = 0; dir < 2; ++dir) { // dir 0=XL, 1=XR
-      if (!cc[dir])
-        continue;
-      int ix_send = (dir == 0) ? (1 + offset) : (nx - 2 - offset);
-      cudaSolverType* buf = d_haloBuf_send_[dir];
-      int off = 0;
-      if (cc[4]) { // ZL edge at jz=0
-        launchPack2D(buf + off, d_ptrs, nFields, ix_send * ny * nz + 1 * nz + 0,
-                     nz, 1, edgeYlen, 1, stream);
-        off += edgeYlen * nFields;
-      }
-      if (cc[5]) { // ZR edge at jz=nz-1
-        launchPack2D(buf + off, d_ptrs, nFields,
-                     ix_send * ny * nz + 1 * nz + (nz - 1), nz, 1, edgeYlen, 1,
-                     stream);
-        off += edgeYlen * nFields;
-      }
-    }
-
-    // --- Y-direction edges (Z-edges sent to Y neighbours) ---
-    for (int dir = 2; dir < 4; ++dir) { // dir 2=YL, 3=YR
-      if (!cc[dir])
-        continue;
-      int iy_send = (dir == 2) ? (1 + offset) : (ny - 2 - offset);
-      cudaSolverType* buf = d_haloBuf_send_[dir];
-      int off = 0;
-      if (cc[0]) { // XL edge at ix=0
-        launchPack2D(buf + off, d_ptrs, nFields, 0 * ny * nz + iy_send * nz + 1,
-                     1, 1, edgeZlen, 1, stream);
-        off += edgeZlen * nFields;
-      }
-      if (cc[1]) { // XR edge at ix=nx-1
-        launchPack2D(buf + off, d_ptrs, nFields,
-                     (nx - 1) * ny * nz + iy_send * nz + 1, 1, 1, edgeZlen, 1,
-                     stream);
-        off += edgeZlen * nFields;
-      }
-    }
-
-    // --- Z-direction edges (X-edges sent to Z neighbours) ---
-    for (int dir = 4; dir < 6; ++dir) { // dir 4=ZL, 5=ZR
-      if (!cc[dir])
-        continue;
-      int iz_send = (dir == 4) ? (1 + offset) : (nz - 2 - offset);
-      cudaSolverType* buf = d_haloBuf_send_[dir];
-      int off = 0;
-      if (cc[2]) { // YL edge at iy=0
-        launchPack2D(buf + off, d_ptrs, nFields, 1 * ny * nz + 0 * nz + iz_send,
-                     ny * nz, 1, edgeXlen, 1, stream);
-        off += edgeXlen * nFields;
-      }
-      if (cc[3]) { // YR edge at iy=ny-1
-        launchPack2D(buf + off, d_ptrs, nFields,
-                     1 * ny * nz + (ny - 1) * nz + iz_send, ny * nz, 1,
-                     edgeXlen, 1, stream);
-        off += edgeXlen * nFields;
-      }
-    }
-
-    cudaStreamSynchronize(stream);
-
-    // ---- Post edge Irecv / Isend ----
-    rcnt = 0;
-
-    // Recv Y-edges from X neighbours
-    for (int dir = 0; dir < 2; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nEdges = (cc[4] ? 1 : 0) + (cc[5] ? 1 : 0);
-      if (nEdges == 0)
-        continue;
-      int neighbor = (dir == 0) ? xlN : xrN;
-      int tag = (dir == 0) ? tag_XR : tag_XL;
-      MPI_Irecv(d_haloBuf_recv_[dir], nEdges * edgeYlen * nFields,
-                mpiTypeOf<cudaSolverType>(), neighbor, tag, comm,
-                &mpiReq[rcnt++]);
-    }
-    // Recv Z-edges from Y neighbours
-    for (int dir = 2; dir < 4; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nEdges = (cc[0] ? 1 : 0) + (cc[1] ? 1 : 0);
-      if (nEdges == 0)
-        continue;
-      int neighbor = (dir == 2) ? ylN : yrN;
-      int tag = (dir == 2) ? tag_YR : tag_YL;
-      MPI_Irecv(d_haloBuf_recv_[dir], nEdges * edgeZlen * nFields,
-                mpiTypeOf<cudaSolverType>(), neighbor, tag, comm,
-                &mpiReq[rcnt++]);
-    }
-    // Recv X-edges from Z neighbours
-    for (int dir = 4; dir < 6; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nEdges = (cc[2] ? 1 : 0) + (cc[3] ? 1 : 0);
-      if (nEdges == 0)
-        continue;
-      int neighbor = (dir == 4) ? zlN : zrN;
-      int tag = (dir == 4) ? tag_ZR : tag_ZL;
-      MPI_Irecv(d_haloBuf_recv_[dir], nEdges * edgeXlen * nFields,
-                mpiTypeOf<cudaSolverType>(), neighbor, tag, comm,
-                &mpiReq[rcnt++]);
-    }
-
-    scnt = rcnt;
-
-    // Send Y-edges to X neighbours
-    for (int dir = 0; dir < 2; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nEdges = (cc[4] ? 1 : 0) + (cc[5] ? 1 : 0);
-      if (nEdges == 0)
-        continue;
-      int neighbor = (dir == 0) ? xlN : xrN;
-      int tag = (dir == 0) ? tag_XL : tag_XR;
-      MPI_Isend(d_haloBuf_send_[dir], nEdges * edgeYlen * nFields,
-                mpiTypeOf<cudaSolverType>(), neighbor, tag, comm,
-                &mpiReq[scnt++]);
-    }
-    // Send Z-edges to Y neighbours
-    for (int dir = 2; dir < 4; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nEdges = (cc[0] ? 1 : 0) + (cc[1] ? 1 : 0);
-      if (nEdges == 0)
-        continue;
-      int neighbor = (dir == 2) ? ylN : yrN;
-      int tag = (dir == 2) ? tag_YL : tag_YR;
-      MPI_Isend(d_haloBuf_send_[dir], nEdges * edgeZlen * nFields,
-                mpiTypeOf<cudaSolverType>(), neighbor, tag, comm,
-                &mpiReq[scnt++]);
-    }
-    // Send X-edges to Z neighbours
-    for (int dir = 4; dir < 6; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nEdges = (cc[2] ? 1 : 0) + (cc[3] ? 1 : 0);
-      if (nEdges == 0)
-        continue;
-      int neighbor = (dir == 4) ? zlN : zrN;
-      int tag = (dir == 4) ? tag_ZL : tag_ZR;
-      MPI_Isend(d_haloBuf_send_[dir], nEdges * edgeXlen * nFields,
-                mpiTypeOf<cudaSolverType>(), neighbor, tag, comm,
-                &mpiReq[scnt++]);
-    }
-
-    // ---- Self-copy edges (batched) ----
-    {
-      int maxDim = (nx > ny ? (nx > nz ? nx : nz) : (ny > nz ? ny : nz));
-      int nblks = (maxDim + 255) / 256;
-      if (xlN == myrank && xrN == myrank) {
-        dim3 grid(nblks, nFields);
-        gpuBatchSelfCopyEdgeX<<<grid, 256, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, zrN != MPI_PROC_NULL,
-            zlN != MPI_PROC_NULL, yrN != MPI_PROC_NULL, ylN != MPI_PROC_NULL);
-      }
-      if (ylN == myrank && yrN == myrank) {
-        dim3 grid(nblks, nFields);
-        gpuBatchSelfCopyEdgeY<<<grid, 256, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, xrN != MPI_PROC_NULL,
-            xlN != MPI_PROC_NULL, zrN != MPI_PROC_NULL, zlN != MPI_PROC_NULL);
-      }
-      if (zlN == myrank && zrN == myrank) {
-        dim3 grid(nblks, nFields);
-        gpuBatchSelfCopyEdgeZ<<<grid, 256, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, yrN != MPI_PROC_NULL,
-            ylN != MPI_PROC_NULL, xrN != MPI_PROC_NULL, xlN != MPI_PROC_NULL);
-      }
-      // No sync needed: same stream as unpack.
-    }
-
-    if (scnt > 0)
-      MPI_Waitall(scnt, mpiReq, mpiStat);
-
-    // ---- Unpack edge recv buffers ----
-    // Y-edges from X neighbours → into ghost ix=0 or nx-1
-    for (int dir = 0; dir < 2; ++dir) {
-      if (!cc[dir])
-        continue;
-      int ix_recv = (dir == 0) ? 0 : (nx - 1);
-      const cudaSolverType* buf = d_haloBuf_recv_[dir];
-      int off = 0;
-      if (cc[4]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       ix_recv * ny * nz + 1 * nz + 0, nz, 1, edgeYlen, 1,
-                       stream);
-        off += edgeYlen * nFields;
-      }
-      if (cc[5]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       ix_recv * ny * nz + 1 * nz + (nz - 1), nz, 1, edgeYlen,
-                       1, stream);
-        off += edgeYlen * nFields;
-      }
-    }
-    // Z-edges from Y neighbours → into ghost iy=0 or ny-1
-    for (int dir = 2; dir < 4; ++dir) {
-      if (!cc[dir])
-        continue;
-      int iy_recv = (dir == 2) ? 0 : (ny - 1);
-      const cudaSolverType* buf = d_haloBuf_recv_[dir];
-      int off = 0;
-      if (cc[0]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       0 * ny * nz + iy_recv * nz + 1, 1, 1, edgeZlen, 1,
-                       stream);
-        off += edgeZlen * nFields;
-      }
-      if (cc[1]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       (nx - 1) * ny * nz + iy_recv * nz + 1, 1, 1, edgeZlen, 1,
-                       stream);
-        off += edgeZlen * nFields;
-      }
-    }
-    // X-edges from Z neighbours → into ghost iz=0 or nz-1
-    for (int dir = 4; dir < 6; ++dir) {
-      if (!cc[dir])
-        continue;
-      int iz_recv = (dir == 4) ? 0 : (nz - 1);
-      const cudaSolverType* buf = d_haloBuf_recv_[dir];
-      int off = 0;
-      if (cc[2]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       1 * ny * nz + 0 * nz + iz_recv, ny * nz, 1, edgeXlen, 1,
-                       stream);
-        off += edgeXlen * nFields;
-      }
-      if (cc[3]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       1 * ny * nz + (ny - 1) * nz + iz_recv, ny * nz, 1,
-                       edgeXlen, 1, stream);
-        off += edgeXlen * nFields;
-      }
-    }
-
-    // =================================================================
-    //  PHASE 3 : Corner exchange
-    // =================================================================
-
-    // Corners are only exchanged if at least one Y and one Z neighbour is
-    // active, and only with X neighbours.
-    if ((cc[2] || cc[3]) && (cc[4] || cc[5])) {
-      // Edge unpack and corner pack share the same stream — CUDA
-      // stream ordering guarantees visibility.
-
-      // Pack corners: 4 elements at (ix, 0, 0/nz-1, ny-1, 0/nz-1)
-      if (cc[0]) {
-        int total = nFields * 4;
-        k_batchPackCorners4<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                              stream>>>(d_haloBuf_send_[0], d_ptrs, nFields,
-                                        (1 + offset) * ny * nz, ny, nz);
-      }
-      if (cc[1]) {
-        int total = nFields * 4;
-        k_batchPackCorners4<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                              stream>>>(d_haloBuf_send_[1], d_ptrs, nFields,
-                                        (nx - 2 - offset) * ny * nz, ny, nz);
-      }
-
-      cudaStreamSynchronize(stream);
-
-      // Post corner Irecv / Isend
-      rcnt = 0;
-      if (cc[0])
-        MPI_Irecv(d_haloBuf_recv_[0], 4 * nFields, mpiTypeOf<cudaSolverType>(),
-                  xlN, tag_XR, comm, &mpiReq[rcnt++]);
-      if (cc[1])
-        MPI_Irecv(d_haloBuf_recv_[1], 4 * nFields, mpiTypeOf<cudaSolverType>(),
-                  xrN, tag_XL, comm, &mpiReq[rcnt++]);
-      scnt = rcnt;
-      if (cc[0])
-        MPI_Isend(d_haloBuf_send_[0], 4 * nFields, mpiTypeOf<cudaSolverType>(),
-                  xlN, tag_XL, comm, &mpiReq[scnt++]);
-      if (cc[1])
-        MPI_Isend(d_haloBuf_send_[1], 4 * nFields, mpiTypeOf<cudaSolverType>(),
-                  xrN, tag_XR, comm, &mpiReq[scnt++]);
-
-      // Corner self-copy (batched)
-      {
-        if (xlN == myrank && xrN == myrank) {
-          gpuBatchSelfCopyCornerX<<<nFields, 1, 0, stream>>>(
-              d_ptrs, nx, ny, nz, offset, ylN != MPI_PROC_NULL,
-              yrN != MPI_PROC_NULL, zlN != MPI_PROC_NULL, zrN != MPI_PROC_NULL);
-        } else if (ylN == myrank && yrN == myrank) {
-          gpuBatchSelfCopyCornerY<<<nFields, 1, 0, stream>>>(
-              d_ptrs, nx, ny, nz, offset, xlN != MPI_PROC_NULL,
-              xrN != MPI_PROC_NULL, zlN != MPI_PROC_NULL, zrN != MPI_PROC_NULL);
-        } else if (zlN == myrank && zrN == myrank) {
-          gpuBatchSelfCopyCornerZ<<<nFields, 1, 0, stream>>>(
-              d_ptrs, nx, ny, nz, offset, ylN != MPI_PROC_NULL,
-              yrN != MPI_PROC_NULL, xlN != MPI_PROC_NULL, xrN != MPI_PROC_NULL);
-        }
-        // No sync needed: same stream as unpack.
-      }
-
-      if (scnt > 0)
-        MPI_Waitall(scnt, mpiReq, mpiStat);
-
-      // Unpack corners
-      if (cc[0]) {
-        int total = nFields * 4;
-        k_batchUnpackCorners4<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK,
-                                0, stream>>>(d_haloBuf_recv_[0], d_ptrs,
-                                             nFields, 0 * ny * nz, ny, nz);
-      }
-      if (cc[1]) {
-        int total = nFields * 4;
-        k_batchUnpackCorners4<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK,
-                                0, stream>>>(
-            d_haloBuf_recv_[1], d_ptrs, nFields, (nx - 1) * ny * nz, ny, nz);
-      }
-    } else {
-      // Match CPU NBDerivedHaloComm: local periodic corner copies are
-      // still required even when no non-self corner MPI exchange exists.
-      if (xlN == myrank && xrN == myrank) {
-        gpuBatchSelfCopyCornerX<<<nFields, 1, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, ylN != MPI_PROC_NULL,
-            yrN != MPI_PROC_NULL, zlN != MPI_PROC_NULL, zrN != MPI_PROC_NULL);
-      } else if (ylN == myrank && yrN == myrank) {
-        gpuBatchSelfCopyCornerY<<<nFields, 1, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, xlN != MPI_PROC_NULL,
-            xrN != MPI_PROC_NULL, zlN != MPI_PROC_NULL, zrN != MPI_PROC_NULL);
-      } else if (zlN == myrank && zrN == myrank) {
-        gpuBatchSelfCopyCornerZ<<<nFields, 1, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, ylN != MPI_PROC_NULL,
-            yrN != MPI_PROC_NULL, xlN != MPI_PROC_NULL, xrN != MPI_PROC_NULL);
-      }
-    }
-  } // end !isFaceOnlyFlag
+  auto* const* d_ptrs = reinterpret_cast<cudaSolverType* const*>(d_ptrArray_);
 
   // =====================================================================
   //  Additive interpolation  (for moments: ghost → interior boundary)
@@ -867,645 +800,129 @@ void EMfields3D::gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs,
     // Unpack and additive kernels share the same stream — CUDA
     // stream ordering guarantees all ghost data is visible.
 
-    // The hasNeighbor flags for additive kernels use particle topology
-    bool hasXR = vct->hasXrghtNeighbor_P();
-    bool hasXL = vct->hasXleftNeighbor_P();
-    bool hasYR = vct->hasYrghtNeighbor_P();
-    bool hasYL = vct->hasYleftNeighbor_P();
-    bool hasZR = vct->hasZrghtNeighbor_P();
-    bool hasZL = vct->hasZleftNeighbor_P();
+    // Additive kernels use neighbor presence from the topology selected for
+    // this exchange.
+    const bool hasXR = topology.present[1];
+    const bool hasXL = topology.present[0];
+    const bool hasYR = topology.present[3];
+    const bool hasYL = topology.present[2];
+    const bool hasZR = topology.present[5];
+    const bool hasZL = topology.present[4];
 
-    int nxr = nx - 2, nyr = ny - 2, nzr = nz - 2;
+    const int nxr = geometry.active[0];
+    const int nyr = geometry.active[1];
+    const int nzr = geometry.active[2];
 
     // Face add
     {
       int total = nyr * nzr * nFields;
-      k_batchAddFaceX<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL);
+      k_batchAddFaceX<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
+          d_ptrs, nFields, nx, ny, nz, hasXR, hasXL);
     }
     {
       int total = nxr * nzr * nFields;
-      k_batchAddFaceY<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasYR, hasYL);
+      k_batchAddFaceY<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
+          d_ptrs, nFields, nx, ny, nz, hasYR, hasYL);
     }
     {
       int total = nxr * nyr * nFields;
-      k_batchAddFaceZ<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasZR, hasZL);
+      k_batchAddFaceZ<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
+          d_ptrs, nFields, nx, ny, nz, hasZR, hasZL);
     }
 
     // Edge add
     {
       int total = nzr * nFields;
-      k_batchAddEdgeZ<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL,
-                                  hasYR, hasYL);
+      k_batchAddEdgeZ<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
+          d_ptrs, nFields, nx, ny, nz, hasXR, hasXL, hasYR, hasYL);
     }
     {
       int total = nyr * nFields;
-      k_batchAddEdgeY<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL,
-                                  hasZR, hasZL);
+      k_batchAddEdgeY<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
+          d_ptrs, nFields, nx, ny, nz, hasXR, hasXL, hasZR, hasZL);
     }
     {
       int total = nxr * nFields;
-      k_batchAddEdgeX<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasYR, hasYL,
-                                  hasZR, hasZL);
+      k_batchAddEdgeX<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
+          d_ptrs, nFields, nx, ny, nz, hasYR, hasYL, hasZR, hasZL);
     }
 
     // Corner add
-    k_batchAddCorner<<<(nFields + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                       stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL,
-                                 hasYR, hasYL, hasZR, hasZL);
-
-    cudaStreamSynchronize(stream);
+    k_batchAddCorner<<<haloBatchBlocks(nFields), BATCH_BLK, 0, stream>>>(
+        d_ptrs, nFields, nx, ny, nz, hasXR, hasXL, hasYR, hasYL, hasZR, hasZL);
   }
+
+  cudaErrChk(cudaGetLastError());
+
+#ifdef HALO_OVERLAP
+  if (haloBuffersReady_)
+    cudaErrChk(cudaEventRecord(haloBuffersReady_, stream));
+#endif
 }
 
 // =========================================================================
-//  HALO_OVERLAP: split halo exchange into begin / end
-//
-//  gpuBatchedHaloBeginExchange:
-//    Packs face data → cudaStreamSync → posts MPI_Irecv / MPI_Isend
-//    → self-copy periodic faces.  Stores requests in haloFaceRequests_.
-//    Caller can launch interior stencil kernels on 'stream' while
-//    MPI messages are in flight.
-//
-//  gpuBatchedHaloEndExchange:
-//    MPI_Waitall on face requests → unpack faces → PHASE 2 edges
-//    → PHASE 3 corners → additive interpolation (if requested).
+//  HALO_OVERLAP: asynchronous face packing plus shared halo completion
 // =========================================================================
 #ifdef HALO_OVERLAP
 
-int EMfields3D::gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs,
-                                            int nFields, int nx, int ny, int nz,
-                                            bool isCenterFlag,
-                                            bool isFaceOnlyFlag,
-                                            bool needInterp, bool isParticle,
-                                            cudaStream_t stream) {
-  assert(nFields > 0 && nFields <= HALO_MAX_BATCH);
-  const VirtualTopology3D* vct = &get_vct();
-  const int myrank = vct->getCartesian_rank();
-  const int xlN =
-      isParticle ? vct->getXleft_neighbor_P() : vct->getXleft_neighbor();
-  const int xrN =
-      isParticle ? vct->getXright_neighbor_P() : vct->getXright_neighbor();
-  const int ylN =
-      isParticle ? vct->getYleft_neighbor_P() : vct->getYleft_neighbor();
-  const int yrN =
-      isParticle ? vct->getYright_neighbor_P() : vct->getYright_neighbor();
-  const int zlN =
-      isParticle ? vct->getZleft_neighbor_P() : vct->getZleft_neighbor();
-  const int zrN =
-      isParticle ? vct->getZright_neighbor_P() : vct->getZright_neighbor();
-  const MPI_Comm comm =
-      isParticle ? vct->getParticleComm() : vct->getFieldComm();
+void EMfields3D::gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs,
+                                             int nFields, int nx, int ny,
+                                             int nz, bool offsetZero,
+                                             bool isFaceOnlyFlag,
+                                             bool isParticle,
+                                             cudaStream_t computeStream) {
+  if (!h_fieldPtrs)
+    batchedHaloContractFailure("null split-exchange field table");
+  if (haloExchange_.active)
+    batchedHaloContractFailure("overlapping use of shared GPU halo buffers");
+  if (nFields <= 0 || nFields > HALO_MAX_BATCH)
+    batchedHaloContractFailure("invalid split halo field count");
+  if (!haloBufsAllocated_)
+    batchedHaloContractFailure("split halo buffers are not initialized");
+  if (!haloStream_ || !haloInputReady_ || !haloPhaseReady_ ||
+      !haloBuffersReady_)
+    batchedHaloContractFailure("split halo stream/events are not initialized");
 
-  memcpy(h_ptrArray_, h_fieldPtrs, nFields * sizeof(cudaSolverType*));
-  cudaMemcpyAsync(d_ptrArray_, h_ptrArray_, nFields * sizeof(cudaSolverType*),
-                  cudaMemcpyHostToDevice, stream);
+  const HaloGeometryPlan& geometry =
+      gpuSelectHaloGeometry(nx, ny, nz, offsetZero);
+  const HaloTopologyPlan& topology =
+      haloTopologyPlans_[isParticle ? HALO_PARTICLE : HALO_FIELD];
+  haloExchange_.active = true;
+  haloExchange_.topology = &topology;
+  haloExchange_.geometry = &geometry;
+  haloExchange_.nFields = nFields;
+  haloExchange_.faceOnly = isFaceOnlyFlag;
+  haloExchange_.computeStream = computeStream;
 
-  int cc[6];
-  cc[0] = (xlN != MPI_PROC_NULL && xlN != myrank) ? 1 : 0;
-  cc[1] = (xrN != MPI_PROC_NULL && xrN != myrank) ? 1 : 0;
-  cc[2] = (ylN != MPI_PROC_NULL && ylN != myrank) ? 1 : 0;
-  cc[3] = (yrN != MPI_PROC_NULL && yrN != myrank) ? 1 : 0;
-  cc[4] = (zlN != MPI_PROC_NULL && zlN != myrank) ? 1 : 0;
-  cc[5] = (zrN != MPI_PROC_NULL && zrN != myrank) ? 1 : 0;
+  // Capture the producer tail before the caller queues dependency-free work.
+  cudaErrChk(cudaEventRecord(haloInputReady_, computeStream));
+  cudaErrChk(cudaStreamWaitEvent(haloStream_, haloInputReady_, 0));
+  cudaErrChk(cudaStreamWaitEvent(haloStream_, haloBuffersReady_, 0));
+  gpuQueueHaloFacePack(h_fieldPtrs, nFields, topology, geometry, haloStream_);
 
-  const int offset = isCenterFlag ? 0 : 1;
-  const int tag_XL = 1, tag_XR = 4;
-  const int tag_YL = 2, tag_YR = 5;
-  const int tag_ZL = 3, tag_ZR = 6;
-
-  cudaSolverType* const* d_ptrs = (cudaSolverType* const*)d_ptrArray_;
-  const int nyzF = (ny - 2) * (nz - 2);
-  const int nxzF = (nx - 2) * (nz - 2);
-  const int nxyF = (nx - 2) * (ny - 2);
-
-  // ---- Pack faces ----
-  if (cc[0]) {
-    int ix = 1 + offset;
-    launchPack2D(d_haloBuf_send_[0], d_ptrs, nFields, ix * ny * nz + 1 * nz + 1,
-                 nz, 1, ny - 2, nz - 2, stream);
-  }
-  if (cc[1]) {
-    int ix = nx - 2 - offset;
-    launchPack2D(d_haloBuf_send_[1], d_ptrs, nFields, ix * ny * nz + 1 * nz + 1,
-                 nz, 1, ny - 2, nz - 2, stream);
-  }
-  if (cc[2]) {
-    int iy = 1 + offset;
-    launchPack2D(d_haloBuf_send_[2], d_ptrs, nFields, 1 * ny * nz + iy * nz + 1,
-                 ny * nz, 1, nx - 2, nz - 2, stream);
-  }
-  if (cc[3]) {
-    int iy = ny - 2 - offset;
-    launchPack2D(d_haloBuf_send_[3], d_ptrs, nFields, 1 * ny * nz + iy * nz + 1,
-                 ny * nz, 1, nx - 2, nz - 2, stream);
-  }
-  if (cc[4]) {
-    int iz = 1 + offset;
-    launchPack2D(d_haloBuf_send_[4], d_ptrs, nFields, 1 * ny * nz + 1 * nz + iz,
-                 ny * nz, nz, nx - 2, ny - 2, stream);
-  }
-  if (cc[5]) {
-    int iz = nz - 2 - offset;
-    launchPack2D(d_haloBuf_send_[5], d_ptrs, nFields, 1 * ny * nz + 1 * nz + iz,
-                 ny * nz, nz, nx - 2, ny - 2, stream);
-  }
-
-  cudaStreamSynchronize(stream);
-
-  // ---- Post face Irecv / Isend ----
-  int rcnt = 0;
-  if (cc[0])
-    MPI_Irecv(d_haloBuf_recv_[0], nyzF * nFields, mpiTypeOf<cudaSolverType>(),
-              xlN, tag_XR, comm, &haloFaceRequests_[rcnt++]);
-  if (cc[1])
-    MPI_Irecv(d_haloBuf_recv_[1], nyzF * nFields, mpiTypeOf<cudaSolverType>(),
-              xrN, tag_XL, comm, &haloFaceRequests_[rcnt++]);
-  if (cc[2])
-    MPI_Irecv(d_haloBuf_recv_[2], nxzF * nFields, mpiTypeOf<cudaSolverType>(),
-              ylN, tag_YR, comm, &haloFaceRequests_[rcnt++]);
-  if (cc[3])
-    MPI_Irecv(d_haloBuf_recv_[3], nxzF * nFields, mpiTypeOf<cudaSolverType>(),
-              yrN, tag_YL, comm, &haloFaceRequests_[rcnt++]);
-  if (cc[4])
-    MPI_Irecv(d_haloBuf_recv_[4], nxyF * nFields, mpiTypeOf<cudaSolverType>(),
-              zlN, tag_ZR, comm, &haloFaceRequests_[rcnt++]);
-  if (cc[5])
-    MPI_Irecv(d_haloBuf_recv_[5], nxyF * nFields, mpiTypeOf<cudaSolverType>(),
-              zrN, tag_ZL, comm, &haloFaceRequests_[rcnt++]);
-  int scnt = rcnt;
-  if (cc[0])
-    MPI_Isend(d_haloBuf_send_[0], nyzF * nFields, mpiTypeOf<cudaSolverType>(),
-              xlN, tag_XL, comm, &haloFaceRequests_[scnt++]);
-  if (cc[1])
-    MPI_Isend(d_haloBuf_send_[1], nyzF * nFields, mpiTypeOf<cudaSolverType>(),
-              xrN, tag_XR, comm, &haloFaceRequests_[scnt++]);
-  if (cc[2])
-    MPI_Isend(d_haloBuf_send_[2], nxzF * nFields, mpiTypeOf<cudaSolverType>(),
-              ylN, tag_YL, comm, &haloFaceRequests_[scnt++]);
-  if (cc[3])
-    MPI_Isend(d_haloBuf_send_[3], nxzF * nFields, mpiTypeOf<cudaSolverType>(),
-              yrN, tag_YR, comm, &haloFaceRequests_[scnt++]);
-  if (cc[4])
-    MPI_Isend(d_haloBuf_send_[4], nxyF * nFields, mpiTypeOf<cudaSolverType>(),
-              zlN, tag_ZL, comm, &haloFaceRequests_[scnt++]);
-  if (cc[5])
-    MPI_Isend(d_haloBuf_send_[5], nxyF * nFields, mpiTypeOf<cudaSolverType>(),
-              zrN, tag_ZR, comm, &haloFaceRequests_[scnt++]);
-
-  // ---- Self-copy periodic faces ----
-  {
-    constexpr int BLK = 16;
-    dim3 block(BLK, BLK);
-    if (xlN == myrank && xrN == myrank) {
-      dim3 grid(((ny - 2) + BLK - 1) / BLK, ((nz - 2) + BLK - 1) / BLK,
-                nFields);
-      gpuBatchSelfCopyFaceX<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                        offset);
-    }
-    if (ylN == myrank && yrN == myrank) {
-      dim3 grid(((nx - 2) + BLK - 1) / BLK, ((nz - 2) + BLK - 1) / BLK,
-                nFields);
-      gpuBatchSelfCopyFaceY<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                        offset);
-    }
-    if (zlN == myrank && zrN == myrank) {
-      dim3 grid(((nx - 2) + BLK - 1) / BLK, ((ny - 2) + BLK - 1) / BLK,
-                nFields);
-      gpuBatchSelfCopyFaceZ<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                        offset);
-    }
-  }
-
-  haloFaceReqCount_ = scnt;
-  return scnt;
+  // End waits at this exact point before CUDA-aware MPI reads send buffers.
+  cudaErrChk(cudaEventRecord(haloPhaseReady_, haloStream_));
 }
 
-void EMfields3D::gpuBatchedHaloEndExchange(cudaSolverType** h_fieldPtrs,
-                                           int nFields, int nx, int ny, int nz,
-                                           bool isCenterFlag,
-                                           bool isFaceOnlyFlag, bool needInterp,
-                                           bool isParticle,
-                                           cudaStream_t stream) {
-  // ---- Wait for face MPI ----
-  if (haloFaceReqCount_ > 0) {
-    MPI_Status stat[12];
-    MPI_Waitall(haloFaceReqCount_, haloFaceRequests_, stat);
-    haloFaceReqCount_ = 0;
-  }
+void EMfields3D::gpuBatchedHaloEndExchange() {
+  if (!haloExchange_.active)
+    batchedHaloContractFailure("EndExchange without a matching BeginExchange");
 
-  const VirtualTopology3D* vct = &get_vct();
-  const int myrank = vct->getCartesian_rank();
-  const int xlN =
-      isParticle ? vct->getXleft_neighbor_P() : vct->getXleft_neighbor();
-  const int xrN =
-      isParticle ? vct->getXright_neighbor_P() : vct->getXright_neighbor();
-  const int ylN =
-      isParticle ? vct->getYleft_neighbor_P() : vct->getYleft_neighbor();
-  const int yrN =
-      isParticle ? vct->getYright_neighbor_P() : vct->getYright_neighbor();
-  const int zlN =
-      isParticle ? vct->getZleft_neighbor_P() : vct->getZleft_neighbor();
-  const int zrN =
-      isParticle ? vct->getZright_neighbor_P() : vct->getZright_neighbor();
-  const MPI_Comm comm =
-      isParticle ? vct->getParticleComm() : vct->getFieldComm();
+  const HaloTopologyPlan& topology = *haloExchange_.topology;
+  const HaloGeometryPlan& geometry = *haloExchange_.geometry;
+  const int nFields = haloExchange_.nFields;
+  const bool faceOnly = haloExchange_.faceOnly;
+  const cudaStream_t computeStream = haloExchange_.computeStream;
 
-  int cc[6];
-  cc[0] = (xlN != MPI_PROC_NULL && xlN != myrank) ? 1 : 0;
-  cc[1] = (xrN != MPI_PROC_NULL && xrN != myrank) ? 1 : 0;
-  cc[2] = (ylN != MPI_PROC_NULL && ylN != myrank) ? 1 : 0;
-  cc[3] = (yrN != MPI_PROC_NULL && yrN != myrank) ? 1 : 0;
-  cc[4] = (zlN != MPI_PROC_NULL && zlN != myrank) ? 1 : 0;
-  cc[5] = (zrN != MPI_PROC_NULL && zrN != myrank) ? 1 : 0;
-
-  const int offset = isCenterFlag ? 0 : 1;
-  const int tag_XL = 1, tag_XR = 4;
-  const int tag_YL = 2, tag_YR = 5;
-  const int tag_ZL = 3, tag_ZR = 6;
-
-  // d_ptrArray_ was already populated by begin
-  cudaSolverType* const* d_ptrs = (cudaSolverType* const*)d_ptrArray_;
-
-  MPI_Status mpiStat[12];
-  MPI_Request mpiReq[12];
-  int rcnt, scnt;
-
-  // ---- Unpack face recv buffers ----
-  if (cc[0])
-    launchUnpack2D(d_haloBuf_recv_[0], d_ptrs, nFields,
-                   0 * ny * nz + 1 * nz + 1, nz, 1, ny - 2, nz - 2, stream);
-  if (cc[1])
-    launchUnpack2D(d_haloBuf_recv_[1], d_ptrs, nFields,
-                   (nx - 1) * ny * nz + 1 * nz + 1, nz, 1, ny - 2, nz - 2,
-                   stream);
-  if (cc[2])
-    launchUnpack2D(d_haloBuf_recv_[2], d_ptrs, nFields,
-                   1 * ny * nz + 0 * nz + 1, ny * nz, 1, nx - 2, nz - 2,
-                   stream);
-  if (cc[3])
-    launchUnpack2D(d_haloBuf_recv_[3], d_ptrs, nFields,
-                   1 * ny * nz + (ny - 1) * nz + 1, ny * nz, 1, nx - 2, nz - 2,
-                   stream);
-  if (cc[4])
-    launchUnpack2D(d_haloBuf_recv_[4], d_ptrs, nFields,
-                   1 * ny * nz + 1 * nz + 0, ny * nz, nz, nx - 2, ny - 2,
-                   stream);
-  if (cc[5])
-    launchUnpack2D(d_haloBuf_recv_[5], d_ptrs, nFields,
-                   1 * ny * nz + 1 * nz + (nz - 1), ny * nz, nz, nx - 2, ny - 2,
-                   stream);
-
-  // ---- PHASE 2: Edge exchange (skip if face-only) ----
-  if (!isFaceOnlyFlag) {
-    int edgeYlen = ny - 2, edgeZlen = nz - 2, edgeXlen = nx - 2;
-
-    // Pack edges
-    for (int dir = 0; dir < 2; ++dir) {
-      if (!cc[dir])
-        continue;
-      int ix_send = (dir == 0) ? (1 + offset) : (nx - 2 - offset);
-      cudaSolverType* buf = d_haloBuf_send_[dir];
-      int off = 0;
-      if (cc[4]) {
-        launchPack2D(buf + off, d_ptrs, nFields, ix_send * ny * nz + 1 * nz + 0,
-                     nz, 1, edgeYlen, 1, stream);
-        off += edgeYlen * nFields;
-      }
-      if (cc[5]) {
-        launchPack2D(buf + off, d_ptrs, nFields,
-                     ix_send * ny * nz + 1 * nz + (nz - 1), nz, 1, edgeYlen, 1,
-                     stream);
-        off += edgeYlen * nFields;
-      }
-    }
-    for (int dir = 2; dir < 4; ++dir) {
-      if (!cc[dir])
-        continue;
-      int iy_send = (dir == 2) ? (1 + offset) : (ny - 2 - offset);
-      cudaSolverType* buf = d_haloBuf_send_[dir];
-      int off = 0;
-      if (cc[0]) {
-        launchPack2D(buf + off, d_ptrs, nFields, 0 * ny * nz + iy_send * nz + 1,
-                     1, 1, edgeZlen, 1, stream);
-        off += edgeZlen * nFields;
-      }
-      if (cc[1]) {
-        launchPack2D(buf + off, d_ptrs, nFields,
-                     (nx - 1) * ny * nz + iy_send * nz + 1, 1, 1, edgeZlen, 1,
-                     stream);
-        off += edgeZlen * nFields;
-      }
-    }
-    for (int dir = 4; dir < 6; ++dir) {
-      if (!cc[dir])
-        continue;
-      int iz_send = (dir == 4) ? (1 + offset) : (nz - 2 - offset);
-      cudaSolverType* buf = d_haloBuf_send_[dir];
-      int off = 0;
-      if (cc[2]) {
-        launchPack2D(buf + off, d_ptrs, nFields, 1 * ny * nz + 0 * nz + iz_send,
-                     ny * nz, 1, edgeXlen, 1, stream);
-        off += edgeXlen * nFields;
-      }
-      if (cc[3]) {
-        launchPack2D(buf + off, d_ptrs, nFields,
-                     1 * ny * nz + (ny - 1) * nz + iz_send, ny * nz, 1,
-                     edgeXlen, 1, stream);
-        off += edgeXlen * nFields;
-      }
-    }
-
-    cudaStreamSynchronize(stream);
-
-    // Post edge Irecv / Isend
-    rcnt = 0;
-    for (int dir = 0; dir < 2; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nE = (cc[4] ? 1 : 0) + (cc[5] ? 1 : 0);
-      if (!nE)
-        continue;
-      int nb = (dir == 0) ? xlN : xrN;
-      int tag = (dir == 0) ? tag_XR : tag_XL;
-      MPI_Irecv(d_haloBuf_recv_[dir], nE * edgeYlen * nFields,
-                mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[rcnt++]);
-    }
-    for (int dir = 2; dir < 4; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nE = (cc[0] ? 1 : 0) + (cc[1] ? 1 : 0);
-      if (!nE)
-        continue;
-      int nb = (dir == 2) ? ylN : yrN;
-      int tag = (dir == 2) ? tag_YR : tag_YL;
-      MPI_Irecv(d_haloBuf_recv_[dir], nE * edgeZlen * nFields,
-                mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[rcnt++]);
-    }
-    for (int dir = 4; dir < 6; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nE = (cc[2] ? 1 : 0) + (cc[3] ? 1 : 0);
-      if (!nE)
-        continue;
-      int nb = (dir == 4) ? zlN : zrN;
-      int tag = (dir == 4) ? tag_ZR : tag_ZL;
-      MPI_Irecv(d_haloBuf_recv_[dir], nE * edgeXlen * nFields,
-                mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[rcnt++]);
-    }
-    scnt = rcnt;
-    for (int dir = 0; dir < 2; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nE = (cc[4] ? 1 : 0) + (cc[5] ? 1 : 0);
-      if (!nE)
-        continue;
-      int nb = (dir == 0) ? xlN : xrN;
-      int tag = (dir == 0) ? tag_XL : tag_XR;
-      MPI_Isend(d_haloBuf_send_[dir], nE * edgeYlen * nFields,
-                mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[scnt++]);
-    }
-    for (int dir = 2; dir < 4; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nE = (cc[0] ? 1 : 0) + (cc[1] ? 1 : 0);
-      if (!nE)
-        continue;
-      int nb = (dir == 2) ? ylN : yrN;
-      int tag = (dir == 2) ? tag_YL : tag_YR;
-      MPI_Isend(d_haloBuf_send_[dir], nE * edgeZlen * nFields,
-                mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[scnt++]);
-    }
-    for (int dir = 4; dir < 6; ++dir) {
-      if (!cc[dir])
-        continue;
-      int nE = (cc[2] ? 1 : 0) + (cc[3] ? 1 : 0);
-      if (!nE)
-        continue;
-      int nb = (dir == 4) ? zlN : zrN;
-      int tag = (dir == 4) ? tag_ZL : tag_ZR;
-      MPI_Isend(d_haloBuf_send_[dir], nE * edgeXlen * nFields,
-                mpiTypeOf<cudaSolverType>(), nb, tag, comm, &mpiReq[scnt++]);
-    }
-
-    // Edge self-copy
-    {
-      int maxDim = (nx > ny ? (nx > nz ? nx : nz) : (ny > nz ? ny : nz));
-      int nblks = (maxDim + 255) / 256;
-      if (xlN == myrank && xrN == myrank) {
-        dim3 grid(nblks, nFields);
-        gpuBatchSelfCopyEdgeX<<<grid, 256, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, zrN != MPI_PROC_NULL,
-            zlN != MPI_PROC_NULL, yrN != MPI_PROC_NULL, ylN != MPI_PROC_NULL);
-      }
-      if (ylN == myrank && yrN == myrank) {
-        dim3 grid(nblks, nFields);
-        gpuBatchSelfCopyEdgeY<<<grid, 256, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, xrN != MPI_PROC_NULL,
-            xlN != MPI_PROC_NULL, zrN != MPI_PROC_NULL, zlN != MPI_PROC_NULL);
-      }
-      if (zlN == myrank && zrN == myrank) {
-        dim3 grid(nblks, nFields);
-        gpuBatchSelfCopyEdgeZ<<<grid, 256, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, yrN != MPI_PROC_NULL,
-            ylN != MPI_PROC_NULL, xrN != MPI_PROC_NULL, xlN != MPI_PROC_NULL);
-      }
-    }
-
-    if (scnt > 0)
-      MPI_Waitall(scnt, mpiReq, mpiStat);
-
-    // Unpack edges
-    for (int dir = 0; dir < 2; ++dir) {
-      if (!cc[dir])
-        continue;
-      int ix_recv = (dir == 0) ? 0 : (nx - 1);
-      const cudaSolverType* buf = d_haloBuf_recv_[dir];
-      int off = 0;
-      if (cc[4]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       ix_recv * ny * nz + 1 * nz + 0, nz, 1, edgeYlen, 1,
-                       stream);
-        off += edgeYlen * nFields;
-      }
-      if (cc[5]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       ix_recv * ny * nz + 1 * nz + (nz - 1), nz, 1, edgeYlen,
-                       1, stream);
-        off += edgeYlen * nFields;
-      }
-    }
-    for (int dir = 2; dir < 4; ++dir) {
-      if (!cc[dir])
-        continue;
-      int iy_recv = (dir == 2) ? 0 : (ny - 1);
-      const cudaSolverType* buf = d_haloBuf_recv_[dir];
-      int off = 0;
-      if (cc[0]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       0 * ny * nz + iy_recv * nz + 1, 1, 1, edgeZlen, 1,
-                       stream);
-        off += edgeZlen * nFields;
-      }
-      if (cc[1]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       (nx - 1) * ny * nz + iy_recv * nz + 1, 1, 1, edgeZlen, 1,
-                       stream);
-        off += edgeZlen * nFields;
-      }
-    }
-    for (int dir = 4; dir < 6; ++dir) {
-      if (!cc[dir])
-        continue;
-      int iz_recv = (dir == 4) ? 0 : (nz - 1);
-      const cudaSolverType* buf = d_haloBuf_recv_[dir];
-      int off = 0;
-      if (cc[2]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       1 * ny * nz + 0 * nz + iz_recv, ny * nz, 1, edgeXlen, 1,
-                       stream);
-        off += edgeXlen * nFields;
-      }
-      if (cc[3]) {
-        launchUnpack2D(buf + off, d_ptrs, nFields,
-                       1 * ny * nz + (ny - 1) * nz + iz_recv, ny * nz, 1,
-                       edgeXlen, 1, stream);
-        off += edgeXlen * nFields;
-      }
-    }
-
-    // ---- PHASE 3: Corner exchange ----
-    if ((cc[2] || cc[3]) && (cc[4] || cc[5])) {
-      if (cc[0]) {
-        int total = nFields * 4;
-        k_batchPackCorners4<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                              stream>>>(d_haloBuf_send_[0], d_ptrs, nFields,
-                                        (1 + offset) * ny * nz, ny, nz);
-      }
-      if (cc[1]) {
-        int total = nFields * 4;
-        k_batchPackCorners4<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                              stream>>>(d_haloBuf_send_[1], d_ptrs, nFields,
-                                        (nx - 2 - offset) * ny * nz, ny, nz);
-      }
-      cudaStreamSynchronize(stream);
-
-      rcnt = 0;
-      if (cc[0])
-        MPI_Irecv(d_haloBuf_recv_[0], 4 * nFields, mpiTypeOf<cudaSolverType>(),
-                  xlN, tag_XR, comm, &mpiReq[rcnt++]);
-      if (cc[1])
-        MPI_Irecv(d_haloBuf_recv_[1], 4 * nFields, mpiTypeOf<cudaSolverType>(),
-                  xrN, tag_XL, comm, &mpiReq[rcnt++]);
-      scnt = rcnt;
-      if (cc[0])
-        MPI_Isend(d_haloBuf_send_[0], 4 * nFields, mpiTypeOf<cudaSolverType>(),
-                  xlN, tag_XL, comm, &mpiReq[scnt++]);
-      if (cc[1])
-        MPI_Isend(d_haloBuf_send_[1], 4 * nFields, mpiTypeOf<cudaSolverType>(),
-                  xrN, tag_XR, comm, &mpiReq[scnt++]);
-
-      // Corner self-copy
-      {
-        if (xlN == myrank && xrN == myrank)
-          gpuBatchSelfCopyCornerX<<<nFields, 1, 0, stream>>>(
-              d_ptrs, nx, ny, nz, offset, ylN != MPI_PROC_NULL,
-              yrN != MPI_PROC_NULL, zlN != MPI_PROC_NULL, zrN != MPI_PROC_NULL);
-        else if (ylN == myrank && yrN == myrank)
-          gpuBatchSelfCopyCornerY<<<nFields, 1, 0, stream>>>(
-              d_ptrs, nx, ny, nz, offset, xlN != MPI_PROC_NULL,
-              xrN != MPI_PROC_NULL, zlN != MPI_PROC_NULL, zrN != MPI_PROC_NULL);
-        else if (zlN == myrank && zrN == myrank)
-          gpuBatchSelfCopyCornerZ<<<nFields, 1, 0, stream>>>(
-              d_ptrs, nx, ny, nz, offset, ylN != MPI_PROC_NULL,
-              yrN != MPI_PROC_NULL, xlN != MPI_PROC_NULL, xrN != MPI_PROC_NULL);
-      }
-
-      if (scnt > 0)
-        MPI_Waitall(scnt, mpiReq, mpiStat);
-
-      if (cc[0]) {
-        int total = nFields * 4;
-        k_batchUnpackCorners4<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK,
-                                0, stream>>>(d_haloBuf_recv_[0], d_ptrs,
-                                             nFields, 0 * ny * nz, ny, nz);
-      }
-      if (cc[1]) {
-        int total = nFields * 4;
-        k_batchUnpackCorners4<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK,
-                                0, stream>>>(
-            d_haloBuf_recv_[1], d_ptrs, nFields, (nx - 1) * ny * nz, ny, nz);
-      }
-    } else {
-      // Match CPU NBDerivedHaloComm: local periodic corner copies are
-      // still required even when no non-self corner MPI exchange exists.
-      if (xlN == myrank && xrN == myrank)
-        gpuBatchSelfCopyCornerX<<<nFields, 1, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, ylN != MPI_PROC_NULL,
-            yrN != MPI_PROC_NULL, zlN != MPI_PROC_NULL, zrN != MPI_PROC_NULL);
-      else if (ylN == myrank && yrN == myrank)
-        gpuBatchSelfCopyCornerY<<<nFields, 1, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, xlN != MPI_PROC_NULL,
-            xrN != MPI_PROC_NULL, zlN != MPI_PROC_NULL, zrN != MPI_PROC_NULL);
-      else if (zlN == myrank && zrN == myrank)
-        gpuBatchSelfCopyCornerZ<<<nFields, 1, 0, stream>>>(
-            d_ptrs, nx, ny, nz, offset, ylN != MPI_PROC_NULL,
-            yrN != MPI_PROC_NULL, xlN != MPI_PROC_NULL, xrN != MPI_PROC_NULL);
-    }
-  } // end !isFaceOnlyFlag
-
-  // ---- Additive interpolation ----
-  if (needInterp) {
-    bool hasXR = vct->hasXrghtNeighbor_P(), hasXL = vct->hasXleftNeighbor_P();
-    bool hasYR = vct->hasYrghtNeighbor_P(), hasYL = vct->hasYleftNeighbor_P();
-    bool hasZR = vct->hasZrghtNeighbor_P(), hasZL = vct->hasZleftNeighbor_P();
-    int nxr = nx - 2, nyr = ny - 2, nzr = nz - 2;
-
-    {
-      int total = nyr * nzr * nFields;
-      k_batchAddFaceX<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL);
-    }
-    {
-      int total = nxr * nzr * nFields;
-      k_batchAddFaceY<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasYR, hasYL);
-    }
-    {
-      int total = nxr * nyr * nFields;
-      k_batchAddFaceZ<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasZR, hasZL);
-    }
-    {
-      int total = nzr * nFields;
-      k_batchAddEdgeZ<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL,
-                                  hasYR, hasYL);
-    }
-    {
-      int total = nyr * nFields;
-      k_batchAddEdgeY<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL,
-                                  hasZR, hasZL);
-    }
-    {
-      int total = nxr * nFields;
-      k_batchAddEdgeX<<<(total + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                        stream>>>(d_ptrs, nFields, nx, ny, nz, hasYR, hasYL,
-                                  hasZR, hasZL);
-    }
-    k_batchAddCorner<<<(nFields + BATCH_BLK - 1) / BATCH_BLK, BATCH_BLK, 0,
-                       stream>>>(d_ptrs, nFields, nx, ny, nz, hasXR, hasXL,
-                                 hasYR, hasYL, hasZR, hasZL);
-    cudaStreamSynchronize(stream);
-  }
+  // This fence also protects the pinned pointer staging table when a topology
+  // has no remote faces.
+  cudaErrChk(cudaEventSynchronize(haloPhaseReady_));
+  gpuCompleteHaloPhases(topology, geometry, nFields, faceOnly, haloStream_);
+  cudaErrChk(cudaGetLastError());
+  cudaErrChk(cudaEventRecord(haloBuffersReady_, haloStream_));
+  cudaErrChk(cudaStreamWaitEvent(computeStream, haloBuffersReady_, 0));
+  haloExchange_ = HaloExchangeState{};
 }
 
 #endif // HALO_OVERLAP
-
 #endif // GPU_SOLVER

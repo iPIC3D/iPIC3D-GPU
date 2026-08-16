@@ -601,22 +601,36 @@ int runGpu(ExchangeCase exchangeCase, const Scenario& scenario,
   }
 
   StreamGuard stream;
+  const cudaStream_t testStream = stream.get();
   DeviceFields device(nx, ny, nz);
   // GPUFieldArray3 initializes with cudaMemset on the legacy default stream.
   // A cudaStreamNonBlocking stream has no implicit ordering with that stream,
   // so finish constructor initialization before starting the test H2D copies.
   cudaErrChk(cudaDeviceSynchronize());
+  HaloBufferGuard haloBuffers(emFields);
   for (int field = 0; field < kFieldCount; ++field) {
-    device[field].copyFromHostAsync(host[field].fetch_arr(), stream.get());
+    device[field].copyFromHostAsync(host[field].fetch_arr(), testStream);
   }
   auto pointers = device.pointers();
-  HaloBufferGuard haloBuffers(emFields);
+#ifdef HALO_OVERLAP
+  if (exchangeCase == ExchangeCase::Conventional) {
+    emFields.gpuBatchedHaloBeginExchange(pointers.data(), kFieldCount, nx, ny,
+                                         nz, false, false, true, testStream);
+    emFields.gpuBatchedHaloEndExchange();
+  } else {
+    // Additive exchange updates active nodes and has no safe split contract,
+    // so it uses the checked blocking path.
+    emFields.gpuBatchedHaloExchange(pointers.data(), kFieldCount, nx, ny, nz,
+                                    true, false, true, true, testStream);
+  }
+#else
   emFields.gpuBatchedHaloExchange(pointers.data(), kFieldCount, nx, ny, nz,
                                   exchangeCase == ExchangeCase::Additive, false,
                                   exchangeCase == ExchangeCase::Additive, true,
-                                  stream.get());
+                                  testStream);
+#endif
   cudaErrChk(cudaGetLastError());
-  cudaErrChk(cudaStreamSynchronize(stream.get()));
+  cudaErrChk(cudaStreamSynchronize(testStream));
 
   for (int field = 0; field < kFieldCount; ++field) {
     device[field].copyToHost(host[field].fetch_arr());
@@ -629,8 +643,6 @@ int runGpu(ExchangeCase exchangeCase, const Scenario& scenario,
 
 int runScenario(ExchangeCase exchangeCase, Backend backend,
                 const Scenario& scenario, int rank) {
-  MPI_Comm fieldComm = MPI_COMM_NULL;
-  MPI_Comm particleComm = MPI_COMM_NULL;
   int globalFailures = 0;
 
   {
@@ -638,8 +650,6 @@ int runScenario(ExchangeCase exchangeCase, Backend backend,
     Collective collective(config, "haloCommunicationTest");
     VCtopology3D vct(collective);
     vct.setup_vctopology(MPIdata::get_PicGlobalComm());
-    fieldComm = vct.getFieldComm();
-    particleComm = vct.getParticleComm();
 
     Grid3DCU grid(&collective, &vct);
     EMfields3D emFields(&collective, &grid, &vct);
@@ -668,11 +678,6 @@ int runScenario(ExchangeCase exchangeCase, Backend backend,
     MPI_Allreduce(&localFailures, &globalFailures, 1, MPI_INT, MPI_SUM,
                   MPIdata::get_PicGlobalComm());
   }
-
-  if (fieldComm != MPI_COMM_NULL)
-    MPI_Comm_free(&fieldComm);
-  if (particleComm != MPI_COMM_NULL)
-    MPI_Comm_free(&particleComm);
 
   if (rank == 0) {
     if (globalFailures == 0) {

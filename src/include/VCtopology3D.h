@@ -56,9 +56,11 @@ public:
   /** constructor: Define topology parameters: dimension, domain
    * decomposition,... */
   VCtopology3D(const Collective& col);
+  VCtopology3D(const VCtopology3D&) = delete;
+  VCtopology3D& operator=(const VCtopology3D&) = delete;
   /** destructor */
   ~VCtopology3D();
-  /** Find the neighbors in the new communicator  */
+  /** Create the fixed communicators and cache their ranks/neighbors once. */
   void setup_vctopology(MPI_Comm comm_old);
   /** Print topology info */
   void Print();
@@ -98,6 +100,7 @@ public:
   bool isZupper() const { return (coordinates[2] == dims[2] - 1); }
 
   // the below only called by particle
+  int getParticleCartesian_rank() const { return particle_cartesian_rank; }
   int getXleft_neighbor_P() const { return (xleft_neighbor_P); }
   int getXright_neighbor_P() const { return (xright_neighbor_P); }
   int getYleft_neighbor_P() const { return (yleft_neighbor_P); }
@@ -138,9 +141,11 @@ public:
 
 private:
   /** New communicator with virtual cartesian topology */
-  MPI_Comm CART_COMM;
+  MPI_Comm CART_COMM = MPI_COMM_NULL;
   /** New communicator with virtual cartesian topology for Particles*/
-  MPI_Comm CART_COMM_P;
+  MPI_Comm CART_COMM_P = MPI_COMM_NULL;
+  /** setup_vctopology is a one-shot operation for a simulation topology. */
+  bool topology_initialized = false;
   /** MPI status during sending and receiving communication */
   MPI_Status status;
   /** Direction X for shift MPI_Cart_Shift*/
@@ -188,25 +193,27 @@ private:
   /** coordinates on processors grid */
   int coordinates[3];
   /** cartesian rank */
-  int cartesian_rank;
+  int cartesian_rank = MPI_PROC_NULL;
+  /** Cartesian rank in the particle communicator. */
+  int particle_cartesian_rank = MPI_PROC_NULL;
   /** cartesian rank of XLEFT neighbor */
-  int xleft_neighbor;
-  int xleft_neighbor_P;
+  int xleft_neighbor = MPI_PROC_NULL;
+  int xleft_neighbor_P = MPI_PROC_NULL;
   /** cartesian rank of XRIGHT neighbor */
-  int xright_neighbor;
-  int xright_neighbor_P;
+  int xright_neighbor = MPI_PROC_NULL;
+  int xright_neighbor_P = MPI_PROC_NULL;
   /** cartesian rank of YLEFT neighbor */
-  int yleft_neighbor;
-  int yleft_neighbor_P;
+  int yleft_neighbor = MPI_PROC_NULL;
+  int yleft_neighbor_P = MPI_PROC_NULL;
   /** cartesian rank of YRIGHT neighbor */
-  int yright_neighbor;
-  int yright_neighbor_P;
+  int yright_neighbor = MPI_PROC_NULL;
+  int yright_neighbor_P = MPI_PROC_NULL;
   /** cartesian rank of ZRIGHT neighbor */
-  int zleft_neighbor;
-  int zleft_neighbor_P;
+  int zleft_neighbor = MPI_PROC_NULL;
+  int zleft_neighbor_P = MPI_PROC_NULL;
   /** cartesian rank of ZLEFT neighbor */
-  int zright_neighbor;
-  int zright_neighbor_P;
+  int zright_neighbor = MPI_PROC_NULL;
+  int zright_neighbor_P = MPI_PROC_NULL;
 
   /**  for Field Communicator **/
   bool _noXrghtNeighbor;

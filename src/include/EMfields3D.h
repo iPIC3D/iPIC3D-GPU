@@ -34,6 +34,8 @@
 #include "ipicfwd.h"
 #include "mpi.h"
 
+#include <cstddef>
+
 #include "HeatFluxComponents.h"
 #include "cudaTypeDef.cuh"
 
@@ -809,31 +811,34 @@ public:
    *  persistent contiguous GPU buffers.
    *  @param h_fieldPtrs  Host array of nFields device pointers.
    *  @param nFields      Number of field arrays to batch.
-   *  @param nx,ny,nz     Grid dimensions (including ghosts).
-   *  @param isCenterFlag true = center-grid offsets, false = node-grid.
+   *  @param nx,ny,nz     Canonical local dimensions including ghosts: center
+   *                      with offset 0, or node with offset 0/1. Arbitrary
+   *                      subarray geometries are not accepted.
+   *  @param offsetZero   true = send offset 0, false = send offset 1.  P2G
+   *                      accumulation intentionally uses node dimensions with
+   *                      offset 0.
    *  @param isFaceOnlyFlag true = skip edges/corners.
    *  @param needInterp   true = additive accumulation after exchange.
    *  @param isParticle   true = use particle communicator.
-   *  @param stream       CUDA stream for kernels. */
+   *  @param stream       CUDA stream for kernels.  Without HALO_OVERLAP,
+   *                      successive calls sharing the persistent buffers must
+   *                      use this same stream or be externally synchronized. */
   void gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs, int nFields, int nx,
-                              int ny, int nz, bool isCenterFlag,
+                              int ny, int nz, bool offsetZero,
                               bool isFaceOnlyFlag, bool needInterp,
                               bool isParticle, cudaStream_t stream);
 
 #ifdef HALO_OVERLAP
-  /** Phase 1 of split halo exchange: pack boundary faces, post
-   *  non-blocking MPI sends/receives, self-copy periodic faces.
-   *  Returns the number of MPI requests stored in haloFaceRequests_. */
-  int gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs, int nFields,
-                                  int nx, int ny, int nz, bool isCenterFlag,
-                                  bool isFaceOnlyFlag, bool needInterp,
-                                  bool isParticle, cudaStream_t stream);
-  /** Phase 2 of split halo exchange: MPI_Waitall on face requests,
-   *  unpack face buffers, then run edge + corner phases as usual. */
-  void gpuBatchedHaloEndExchange(cudaSolverType** h_fieldPtrs, int nFields,
-                                 int nx, int ny, int nz, bool isCenterFlag,
-                                 bool isFaceOnlyFlag, bool needInterp,
-                                 bool isParticle, cudaStream_t stream);
+  /** Queue pointer upload and face packing on the halo stream.  The caller
+   *  then queues dependency-free work on @p computeStream. */
+  void gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs, int nFields,
+                                   int nx, int ny, int nz, bool offsetZero,
+                                   bool isFaceOnlyFlag, bool isParticle,
+                                   cudaStream_t computeStream);
+  /** Post face MPI as soon as packing completes, progress faces, edges and
+   *  corners, then make the caller-provided compute stream wait for
+   *  completion. */
+  void gpuBatchedHaloEndExchange();
 #endif
 
   /** Allocate persistent GPU halo exchange buffers. */
@@ -1201,6 +1206,8 @@ private:
   array3_double gradPSIZ;
   double* xkrylovPoisson_B;
   double* bkrylovPoisson_B;
+  int maxwellKrylovSize_ = 0;
+  int poissonKrylovSize_ = 0;
 
   // Persistent arrays for calculateE (avoid per-cycle allocation)
   double* xkrylovMaxwell;
@@ -1347,12 +1354,12 @@ private:
   // GPU GMRES workspace, persistently allocated for max(Maxwell, Poisson).
   cudaSolverType* d_gmresV = nullptr; // [GMRES_MP1][max krylov length]
   cudaSolverType* d_gmresW = nullptr; // [max krylov length]
-  int gmresVAlloc = 0;                // allocated d_gmresV element count
+  std::size_t gmresVAlloc = 0;        // allocated d_gmresV element count
 
   // GPU FGMRES workspace (Z basis = preconditioned vectors), allocated on first
   // FGMRES use.
   cudaSolverType* d_fgmresZ = nullptr; // [GMRES_M][max krylov length]
-  int fgmresZAlloc = 0;                // allocated d_fgmresZ element count
+  std::size_t fgmresZAlloc = 0;        // allocated d_fgmresZ element count
 
   // ---- GPU Chebyshev workspace (4 Krylov-sized vectors) ----
   cudaSolverType* d_chebY = nullptr;   // current iterate
@@ -1422,10 +1429,98 @@ private:
       nullptr; // pinned host staging for d_ptrArray_ H→D copies
   bool haloBufsAllocated_ = false;
 
+  // ---- Immutable halo topology and geometry plans ----
+  // Topology and local mesh dimensions do not change while an EMfields3D
+  // instance is alive.  Resolve them once when halo storage is initialized;
+  // exchanges only select one of these fixed plans.
+  struct HaloTopologyPlan {
+    MPI_Comm comm = MPI_COMM_NULL;
+    int neighbors[6] = {};
+    int present[6] = {};
+    int selfAxis[3] = {};
+    int remoteDirections[6] = {};
+    int remoteDirectionCount = 0;
+    int edgeDirections[6] = {};
+    int edgeDirectionCount = 0;
+    int edgeSegments[6][2] = {};
+    int edgeMultiplicity[6] = {};
+    int cornerDirections[2] = {};
+    int cornerDirectionCount = 0;
+    bool hasRemoteYZ = false;
+  };
+
+  struct HaloFacePlan {
+    int sendBase = 0;
+    int recvBase = 0;
+    int outerStride = 0;
+    int innerStride = 0;
+    int outerCount = 0;
+    int innerCount = 0;
+    int elements = 0;
+  };
+
+  struct HaloEdgePlan {
+    int sendBase = 0;
+    int recvBase = 0;
+    int stride = 0;
+    int elements = 0;
+  };
+
+  struct HaloGeometryPlan {
+    int nx = 0;
+    int ny = 0;
+    int nz = 0;
+    int offset = 0;
+    int active[3] = {};
+    HaloFacePlan faces[6] = {};
+    HaloEdgePlan edges[6][2] = {};
+    int edgeLength[3] = {};
+    int selfFaceBlocks[3][2] = {};
+    int edgeKernelBlocks = 0;
+    int cornerSendBase[2] = {};
+    int cornerRecvBase[2] = {};
+    int maxBufferElements[6] = {};
+  };
+
+  enum HaloTopologyKind { HALO_FIELD = 0, HALO_PARTICLE = 1 };
+  enum HaloGeometryKind {
+    HALO_CENTER_OFFSET0 = 0,
+    HALO_NODE_OFFSET1 = 1,
+    HALO_NODE_OFFSET0 = 2
+  };
+  HaloTopologyPlan haloTopologyPlans_[2] = {};
+  HaloGeometryPlan haloGeometryPlans_[3] = {};
+  bool haloPlansInitialized_ = false;
+
+  void gpuInitializeHaloPlans();
+  const HaloGeometryPlan& gpuSelectHaloGeometry(int nx, int ny, int nz,
+                                                bool offsetZero) const;
+  void gpuQueueHaloFacePack(cudaSolverType** h_fieldPtrs, int nFields,
+                            const HaloTopologyPlan& topology,
+                            const HaloGeometryPlan& geometry,
+                            cudaStream_t stream);
+  void gpuCompleteHaloPhases(const HaloTopologyPlan& topology,
+                             const HaloGeometryPlan& geometry, int nFields,
+                             bool faceOnly, cudaStream_t stream);
+
 #ifdef HALO_OVERLAP
   // ---- Split halo exchange state ----
-  MPI_Request haloFaceRequests_[12] = {};
-  int haloFaceReqCount_ = 0;
+  // Communication kernels use a separate stream so face, edge and corner
+  // progress can overlap the dependency-free stencil core on solverStream_.
+  cudaStream_t haloStream_ = 0;
+  cudaEvent_t haloInputReady_ = nullptr;
+  cudaEvent_t haloPhaseReady_ = nullptr;
+  cudaEvent_t haloBuffersReady_ = nullptr;
+
+  struct HaloExchangeState {
+    bool active = false;
+    const HaloTopologyPlan* topology = nullptr;
+    const HaloGeometryPlan* geometry = nullptr;
+    int nFields = 0;
+    bool faceOnly = false;
+    cudaStream_t computeStream = 0;
+  } haloExchange_;
+
 #endif // HALO_OVERLAP
 
   // Flag tracking whether GPU solver arrays have been allocated

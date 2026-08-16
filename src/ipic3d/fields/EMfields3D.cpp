@@ -48,7 +48,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
 // #include <sstream>
@@ -142,18 +144,34 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
       poissonTemp(nxc, nyc, nzc), poissonIm(nxc, nyc, nzc),
       // persistent temp buffer for smooth
       smoothTemp(nxn, nyn, nzn) {
+  auto checkedKrylovLength = [&](const char* name, int components, int nx,
+                                 int ny, int nz) {
+    const int extents[3] = {nx - 2, ny - 2, nz - 2};
+    size_t count = components;
+    for (const int extent : extents) {
+      if (extent <= 0 || count > static_cast<size_t>(INT_MAX) / extent) {
+        std::cerr << "ERROR: invalid " << name
+                  << " Krylov length for local grid " << nx << "x" << ny << "x"
+                  << nz << " on rank " << _vct.getCartesian_rank() << std::endl;
+        MPI_Abort(_vct.getFieldComm(), EXIT_FAILURE);
+        std::abort();
+      }
+      count *= extent;
+    }
+    return static_cast<int>(count);
+  };
+  poissonKrylovSize_ = checkedKrylovLength("Poisson", 1, nxc, nyc, nzc);
+  maxwellKrylovSize_ = checkedKrylovLength("Maxwell", 3, nxn, nyn, nzn);
+
   // allocate persistent Krylov vectors for divB cleaning
-  const int nPoissonKrylov = (nxc - 2) * (nyc - 2) * (nzc - 2);
-  xkrylovPoisson_B = new double[nPoissonKrylov];
-  bkrylovPoisson_B = new double[nPoissonKrylov];
+  xkrylovPoisson_B = new double[poissonKrylovSize_];
+  bkrylovPoisson_B = new double[poissonKrylovSize_];
 
   // allocate persistent Krylov vectors for calculateE
-  const int nMaxwellKrylov = 3 * (nxn - 2) * (nyn - 2) * (nzn - 2);
-  xkrylovMaxwell = new double[nMaxwellKrylov];
-  bkrylovMaxwell = new double[nMaxwellKrylov];
-  const int nPoissonKrylov_E = (nxc - 2) * (nyc - 2) * (nzc - 2);
-  xkrylovPoisson_E = new double[nPoissonKrylov_E];
-  bkrylovPoisson_E = new double[nPoissonKrylov_E];
+  xkrylovMaxwell = new double[maxwellKrylovSize_];
+  bkrylovMaxwell = new double[maxwellKrylovSize_];
+  xkrylovPoisson_E = new double[poissonKrylovSize_];
+  bkrylovPoisson_E = new double[poissonKrylovSize_];
 
   // External imposed fields
   //
@@ -490,8 +508,8 @@ void EMfields3D::calculateE(int cycle) {
   if (vct->getCartesian_rank() == 0)
     cout << "*** E CALCULATION [CPU] ***" << endl;
 
-  const int nMaxwellKrylov = 3 * (nxn - 2) * (nyn - 2) * (nzn - 2);
-  const int nPoissonKrylov_E = (nxc - 2) * (nyc - 2) * (nzc - 2);
+  const int nMaxwellKrylov = maxwellKrylovSize_;
+  const int nPoissonKrylov_E = poissonKrylovSize_;
 
   // set to zero persistent Krylov vectors and work arrays
   eqValue(0.0, xkrylovMaxwell, nMaxwellKrylov);
@@ -756,7 +774,7 @@ void EMfields3D::MaxwellImage(double* im, double* vector) {
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
 
-  eqValue(0.0, im, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2));
+  eqValue(0.0, im, maxwellKrylovSize_);
   eqValue(0.0, imageX, nxn, nyn, nzn);
   eqValue(0.0, imageY, nxn, nyn, nzn);
   eqValue(0.0, imageZ, nxn, nyn, nzn);
@@ -842,7 +860,7 @@ void EMfields3D::MaxwellImageLocal(double* im, double* vector) {
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
 
-  eqValue(0.0, im, 3 * (nxn - 2) * (nyn - 2) * (nzn - 2));
+  eqValue(0.0, im, maxwellKrylovSize_);
   eqValue(0.0, imageX, nxn, nyn, nzn);
   eqValue(0.0, imageY, nxn, nyn, nzn);
   eqValue(0.0, imageZ, nxn, nyn, nzn);
@@ -1750,7 +1768,7 @@ void EMfields3D::applyDivBCleaning() {
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
 
-  const int nPoissonKrylov = (nxc - 2) * (nyc - 2) * (nzc - 2);
+  const int nPoissonKrylov = poissonKrylovSize_;
 
   // zero work arrays
   eqValue(0.0, divBwork, nxc, nyc, nzc);
@@ -1989,7 +2007,7 @@ void EMfields3D::PoissonImage(double* image, double* vector) {
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
 
-  eqValue(0.0, image, (nxc - 2) * (nyc - 2) * (nzc - 2));
+  eqValue(0.0, image, poissonKrylovSize_);
   eqValue(0.0, poissonTemp, nxc, nyc, nzc);
   eqValue(0.0, poissonIm, nxc, nyc, nzc);
   // move from krylov space to physical space and communicate ghost cells

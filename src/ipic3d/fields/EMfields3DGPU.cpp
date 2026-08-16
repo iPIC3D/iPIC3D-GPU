@@ -62,7 +62,9 @@ void gpuBCface_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
 
@@ -73,6 +75,99 @@ void gpuBCface_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
 void EMfields3D::gpuSolverAllocate() {
   if (gpuSolverAllocated_)
     return;
+
+  const VirtualTopology3D* vct = &get_vct();
+  const Collective* col = &get_col();
+  const size_t centerPoints = (size_t)nxc * nyc * nzc;
+  const size_t nodePoints = (size_t)nxn * nyn * nzn;
+  if (centerPoints > INT_MAX || nodePoints > INT_MAX) {
+    cerr << "ERROR: GPU field solver uses signed-int stencil indexing; rank "
+         << vct->getCartesian_rank() << " has center/node volumes "
+         << centerPoints << "/" << nodePoints << " exceeding INT_MAX" << endl;
+    MPI_Abort(vct->getFieldComm(), EXIT_FAILURE);
+    std::abort();
+  }
+
+  // Boundary kernels index n_layers_sal directly.  Validate active physical
+  // boundary branches against their local array extent.
+  auto validateLayers = [&](bool active, int extent, int reserved,
+                            const char* operation) {
+    if (!active)
+      return;
+    const int minLayers = yes_sal ? 1 : 0;
+    const int maxLayers = extent - reserved;
+    if (n_layers_sal >= minLayers && n_layers_sal <= maxLayers)
+      return;
+    cerr << "ERROR: invalid n_layers_sal=" << n_layers_sal << " for "
+         << operation << " on rank " << vct->getCartesian_rank()
+         << "; valid local range is [" << minLayers << "," << maxLayers
+         << "] for extent " << extent << endl;
+    MPI_Abort(vct->getFieldComm(), EXIT_FAILURE);
+    std::abort();
+  };
+
+  const bool xLeftOpen =
+      vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 2;
+  const bool xRightOpen =
+      vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2;
+  const bool yLeftOpen =
+      vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2;
+  const bool yRightOpen =
+      vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 2;
+  const bool zLeftOpen =
+      vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 2;
+  const bool zRightOpen =
+      vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 2;
+
+  validateLayers(xLeftOpen && col->getBcPfaceXleft() == 2, nxn, 1,
+                 "electric X-left open boundary");
+  validateLayers(xRightOpen && col->getBcPfaceXright() == 3, nxn, 2,
+                 "electric X-right open boundary");
+  validateLayers(yLeftOpen && col->getBcPfaceYleft() == 2, nyn, yes_sal ? 1 : 2,
+                 "electric Y-left open boundary");
+  validateLayers(yRightOpen && col->getBcPfaceYright() == 2, nyn,
+                 yes_sal ? 1 : 2, "electric Y-right open boundary");
+  validateLayers(zLeftOpen && col->getBcPfaceZleft() == 2, nzn, yes_sal ? 1 : 2,
+                 "electric Z-left open boundary");
+  validateLayers(zRightOpen && col->getBcPfaceZright() == 2, nzn,
+                 yes_sal ? 1 : 2, "electric Z-right open boundary");
+
+  // Center-B open-boundary extrapolation is active only for extents greater
+  // than 10 and requires one untouched reference layer beyond the corrected
+  // range.
+  validateLayers(xLeftOpen && nxc > 10, nxc, 1,
+                 "magnetic X-left open boundary");
+  validateLayers(xRightOpen && nxc > 10, nxc, 2,
+                 "magnetic X-right open boundary");
+  validateLayers(yLeftOpen && nyc > 10, nyc, yes_sal ? 1 : 2,
+                 "magnetic Y-left open boundary");
+  validateLayers(yRightOpen && nyc > 10, nyc, yes_sal ? 1 : 2,
+                 "magnetic Y-right open boundary");
+  validateLayers(zLeftOpen && nzc > 10, nzc, yes_sal ? 1 : 2,
+                 "magnetic Z-left open boundary");
+  validateLayers(zRightOpen && nzc > 10, nzc, yes_sal ? 1 : 2,
+                 "magnetic Z-right open boundary");
+
+  if (divBCorrection) {
+    validateLayers(xLeftOpen || xRightOpen, nxn, 0,
+                   "magnetic divergence correction in X");
+    validateLayers(yLeftOpen || yRightOpen, nyn, 0,
+                   "magnetic divergence correction in Y");
+    validateLayers(zLeftOpen || zRightOpen, nzn, 0,
+                   "magnetic divergence correction in Z");
+  }
+
+  // Raw CUDA workspaces below coexist with RAII field wrappers.  Mark the
+  // aggregate live up front so an allocation exception rolls all completed
+  // pieces back through the normal teardown path.
+  gpuSolverAllocated_ = true;
+  struct AllocationRollback {
+    EMfields3D* fields;
+    ~AllocationRollback() {
+      if (fields)
+        fields->gpuSolverFree();
+    }
+  } rollback{this};
 
   // ---- Electric field (node-based) ----
   d_Ex = GPUFieldArray3(nxn, nyn, nzn);
@@ -156,8 +251,8 @@ void EMfields3D::gpuSolverAllocate() {
   d_gradPSIZ = GPUFieldArray3(nxn, nyn, nzn);
 
   // ---- Krylov vectors ----
-  const int nMaxwellKrylov = 3 * (nxn - 2) * (nyn - 2) * (nzn - 2);
-  const int nPoissonKrylov = (nxc - 2) * (nyc - 2) * (nzc - 2);
+  const int nMaxwellKrylov = maxwellKrylovSize_;
+  const int nPoissonKrylov = poissonKrylovSize_;
   d_xkrylovMaxwell = GPUKrylovVector(nMaxwellKrylov);
   d_bkrylovMaxwell = GPUKrylovVector(nMaxwellKrylov);
   d_xkrylovPoisson_B = GPUKrylovVector(nPoissonKrylov);
@@ -214,7 +309,7 @@ void EMfields3D::gpuSolverAllocate() {
                                        sizeof(cudaSolverType)));
   cudaErrChk(
       cudaMalloc(&d_gmresW, (size_t)nGMRESKrylov * sizeof(cudaSolverType)));
-  gmresVAlloc = GMRES_MP1 * nGMRESKrylov;
+  gmresVAlloc = static_cast<size_t>(GMRES_MP1) * nGMRESKrylov;
 
   // ---- FGMRES workspace (allocated on first FGMRES use, then reused) ----
   d_fgmresZ = nullptr;
@@ -233,12 +328,24 @@ void EMfields3D::gpuSolverAllocate() {
   // ---- Persistent batched halo-exchange buffers ----
   gpuAllocateHaloBuffers();
 
-  gpuSolverAllocated_ = true;
+  rollback.fields = nullptr;
 }
 
 void EMfields3D::gpuSolverFree() {
-  if (!gpuSolverAllocated_)
+  if (!gpuSolverAllocated_) {
+    // Halo communication can be used without allocating the full GPU solver.
+    gpuFreeHaloBuffers();
     return;
+  }
+
+  // No device allocation may be released while solver work can reference it.
+  // gpuFreeHaloBuffers() owns the active split-exchange guard.
+  if (solverStream_)
+    cudaErrChk(cudaStreamSynchronize(solverStream_));
+
+  // Free the shared communication storage while haloBuffersReady_ is still
+  // available to fence any asynchronous final unpack.
+  gpuFreeHaloBuffers();
 
   // Electric field
   d_Ex.free();
@@ -426,12 +533,9 @@ void EMfields3D::gpuSolverFree() {
     h_gmresY = nullptr;
   }
 
-  // Free batched halo buffers
-  gpuFreeHaloBuffers();
-
   // Destroy solver stream
   if (solverStream_) {
-    cudaStreamDestroy(solverStream_);
+    cudaErrChk(cudaStreamDestroy(solverStream_));
     solverStream_ = 0;
   }
 
@@ -446,52 +550,66 @@ void EMfields3D::gpuAllocateHaloBuffers() {
   if (haloBufsAllocated_)
     return;
 
-  // Compute max per-field element count per direction across ALL phases
-  // (face, edge, corner) to avoid overflow for skinny local domains.
-  //
-  // Face phase (per field):
-  //   Dir 0,1 (XL,XR): (nyn-2)*(nzn-2)
-  //   Dir 2,3 (YL,YR): (nxn-2)*(nzn-2)
-  //   Dir 4,5 (ZL,ZR): (nxn-2)*(nyn-2)
-  // Edge phase (per field, worst case both cross-edges active):
-  //   Dir 0,1: 2*(nyn-2)   [Y-edges to X neighbours]
-  //   Dir 2,3: 2*(nzn-2)   [Z-edges to Y neighbours]
-  //   Dir 4,5: 2*(nxn-2)   [X-edges to Z neighbours]
-  // Corner phase (per field): 4 per direction
-
-  size_t faceSz[6], edgeSz[6];
-  faceSz[0] = faceSz[1] = (size_t)(nyn - 2) * (nzn - 2);
-  faceSz[2] = faceSz[3] = (size_t)(nxn - 2) * (nzn - 2);
-  faceSz[4] = faceSz[5] = (size_t)(nxn - 2) * (nyn - 2);
-
-  edgeSz[0] = edgeSz[1] = 2 * (size_t)(nyn - 2);
-  edgeSz[2] = edgeSz[3] = 2 * (size_t)(nzn - 2);
-  edgeSz[4] = edgeSz[5] = 2 * (size_t)(nxn - 2);
-
-  constexpr size_t cornerSz = 4; // 4 corners per direction
-
-  for (int d = 0; d < 6; ++d) {
-    size_t maxPerField = faceSz[d];
-    if (edgeSz[d] > maxPerField)
-      maxPerField = edgeSz[d];
-    if (cornerSz > maxPerField)
-      maxPerField = cornerSz;
-    size_t bytes = maxPerField * HALO_MAX_BATCH * sizeof(cudaSolverType);
-    cudaErrChk(cudaMalloc(&d_haloBuf_send_[d], bytes));
-    cudaErrChk(cudaMalloc(&d_haloBuf_recv_[d], bytes));
-  }
-  cudaErrChk(
-      cudaMalloc(&d_ptrArray_, HALO_MAX_BATCH * sizeof(cudaSolverType*)));
-  cudaErrChk(cudaHostAlloc(&h_ptrArray_,
-                           HALO_MAX_BATCH * sizeof(cudaSolverType*),
-                           cudaHostAllocDefault));
-
+  // Topology, layouts, counts, and launch geometry are immutable for this
+  // EMfields3D instance.  Build them once before allocating their storage.
+  gpuInitializeHaloPlans();
   haloBufsAllocated_ = true;
+
+  try {
+    // Node extents dominate center extents.  Each cached maximum covers face,
+    // edge, and corner phases for one direction and one field.
+    const HaloGeometryPlan& nodePlan = haloGeometryPlans_[HALO_NODE_OFFSET1];
+    for (int d = 0; d < 6; ++d) {
+      const size_t bytes = (size_t)nodePlan.maxBufferElements[d] *
+                           HALO_MAX_BATCH * sizeof(cudaSolverType);
+      cudaErrChk(cudaMalloc(&d_haloBuf_send_[d], bytes));
+      cudaErrChk(cudaMalloc(&d_haloBuf_recv_[d], bytes));
+    }
+    cudaErrChk(
+        cudaMalloc(&d_ptrArray_, HALO_MAX_BATCH * sizeof(cudaSolverType*)));
+    cudaErrChk(cudaHostAlloc(&h_ptrArray_,
+                             HALO_MAX_BATCH * sizeof(cudaSolverType*),
+                             cudaHostAllocDefault));
+
+#ifdef HALO_OVERLAP
+    // Split exchange resources belong to the halo subsystem, so tests and
+    // communication-only users do not need the full field solver.
+    int leastPriority = 0;
+    int greatestPriority = 0;
+    cudaErrChk(
+        cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
+    cudaErrChk(cudaStreamCreateWithPriority(&haloStream_, cudaStreamNonBlocking,
+                                            greatestPriority));
+    cudaErrChk(
+        cudaEventCreateWithFlags(&haloInputReady_, cudaEventDisableTiming));
+    cudaErrChk(
+        cudaEventCreateWithFlags(&haloPhaseReady_, cudaEventDisableTiming));
+    cudaErrChk(
+        cudaEventCreateWithFlags(&haloBuffersReady_, cudaEventDisableTiming));
+#endif
+  } catch (...) {
+    gpuFreeHaloBuffers();
+    throw;
+  }
 }
 
 void EMfields3D::gpuFreeHaloBuffers() {
   if (!haloBufsAllocated_)
     return;
+
+#ifdef HALO_OVERLAP
+  if (haloExchange_.active) {
+    cerr << "ERROR: freeing shared GPU halo buffers during an active exchange"
+         << endl;
+    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    std::abort();
+  }
+  // A blocking or split exchange may have returned after queueing its final
+  // unpack.  The shared buffers and device pointer table remain live until the
+  // unified availability event completes.
+  if (haloBuffersReady_)
+    cudaErrChk(cudaEventSynchronize(haloBuffersReady_));
+#endif
 
   for (int d = 0; d < 6; ++d) {
     if (d_haloBuf_send_[d]) {
@@ -511,6 +629,25 @@ void EMfields3D::gpuFreeHaloBuffers() {
     cudaFreeHost(h_ptrArray_);
     h_ptrArray_ = nullptr;
   }
+
+#ifdef HALO_OVERLAP
+  if (haloInputReady_) {
+    cudaErrChk(cudaEventDestroy(haloInputReady_));
+    haloInputReady_ = nullptr;
+  }
+  if (haloPhaseReady_) {
+    cudaErrChk(cudaEventDestroy(haloPhaseReady_));
+    haloPhaseReady_ = nullptr;
+  }
+  if (haloBuffersReady_) {
+    cudaErrChk(cudaEventDestroy(haloBuffersReady_));
+    haloBuffersReady_ = nullptr;
+  }
+  if (haloStream_) {
+    cudaErrChk(cudaStreamDestroy(haloStream_));
+    haloStream_ = 0;
+  }
+#endif
 
   haloBufsAllocated_ = false;
 }
@@ -691,12 +828,11 @@ void EMfields3D::gpuSmooth(GPUFieldArray3& arr, int type) {
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
 #ifdef HALO_OVERLAP
     cudaSolverType* ptr1[1] = {arr.devPtr()};
-    gpuBatchedHaloBeginExchange(ptr1, 1, nx, ny, nz, isCenter, true, false,
-                                true, solverStream_);
+    gpuBatchedHaloBeginExchange(ptr1, 1, nx, ny, nz, isCenter, true, true,
+                                solverStream_);
     gpuSmoothStep_interior(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz,
                            alpha, beta3D, solverStream_);
-    gpuBatchedHaloEndExchange(ptr1, 1, nx, ny, nz, isCenter, true, false, true,
-                              solverStream_);
+    gpuBatchedHaloEndExchange();
     gpuBCface_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
     gpuSmoothStep_boundary(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz,
                            alpha, beta3D, solverStream_);
@@ -725,15 +861,14 @@ void EMfields3D::gpuSmoothE() {
 #ifdef HALO_OVERLAP
     cudaSolverType* eptrs[3] = {d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr()};
     gpuBatchedHaloBeginExchange(eptrs, 3, nxn, nyn, nzn, false, true, false,
-                                false, solverStream_);
+                                solverStream_);
     gpuSmoothStep_interior(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn,
                            alpha, beta3D, solverStream_);
     gpuSmoothStep_interior(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn,
                            alpha, beta3D, solverStream_);
     gpuSmoothStep_interior(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn,
                            alpha, beta3D, solverStream_);
-    gpuBatchedHaloEndExchange(eptrs, 3, nxn, nyn, nzn, false, true, false,
-                              false, solverStream_);
+    gpuBatchedHaloEndExchange();
     gpuBCface(nxn, nyn, nzn, d_Ex, col->bcEx[0], col->bcEx[1], col->bcEx[2],
               col->bcEx[3], col->bcEx[4], col->bcEx[5], &_vct, solverStream_);
     gpuBCface(nxn, nyn, nzn, d_Ey, col->bcEy[0], col->bcEy[1], col->bcEy[2],
@@ -789,16 +924,15 @@ void EMfields3D::gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2,
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
 #ifdef HALO_OVERLAP
     cudaSolverType* s3ptrs[3] = {a1.devPtr(), a2.devPtr(), a3.devPtr()};
-    gpuBatchedHaloBeginExchange(s3ptrs, 3, nx, ny, nz, isCenter, true, false,
-                                true, solverStream_);
+    gpuBatchedHaloBeginExchange(s3ptrs, 3, nx, ny, nz, isCenter, true, true,
+                                solverStream_);
     gpuSmoothStep_interior(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha,
                            beta3D, solverStream_);
     gpuSmoothStep_interior(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha,
                            beta3D, solverStream_);
     gpuSmoothStep_interior(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha,
                            beta3D, solverStream_);
-    gpuBatchedHaloEndExchange(s3ptrs, 3, nx, ny, nz, isCenter, true, false,
-                              true, solverStream_);
+    gpuBatchedHaloEndExchange();
     gpuBCface_P(nx, ny, nz, a1, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
     gpuBCface_P(nx, ny, nz, a2, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
     gpuBCface_P(nx, ny, nz, a3, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
@@ -894,7 +1028,7 @@ void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
       d_divC.devPtr(),     d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
       d_divBwork.devPtr(), d_divE_work.devPtr(),   d_tempC.devPtr()};
   gpuBatchedHaloBeginExchange(ptrs9, 9, nxc, nyc, nzc, true, false, false,
-                              false, solverStream_);
+                              solverStream_);
 
   // ---- Interior divC2N while MPI is in flight ----
   gpuDivC2N_interior(lapA.devPtr(), d_tempXC.devPtr(), d_tempYC.devPtr(),
@@ -908,8 +1042,7 @@ void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
                      solverStream_);
 
   // ---- End halo exchange: MPI_Waitall + unpack + edges/corners ----
-  gpuBatchedHaloEndExchange(ptrs9, 9, nxc, nyc, nzc, true, false, false, false,
-                            solverStream_);
+  gpuBatchedHaloEndExchange();
 
   // ---- BC face application (type 1 on all faces) ----
   gpuBCface(nxc, nyc, nzc, d_tempXC, 1, 1, 1, 1, 1, 1, &_vct, solverStream_);
@@ -997,7 +1130,7 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
 #ifdef HALO_OVERLAP
   // ---- Begin halo on divC ----
   cudaSolverType* ptr1[1] = {d_divC.devPtr()};
-  gpuBatchedHaloBeginExchange(ptr1, 1, nxc, nyc, nzc, true, false, false, false,
+  gpuBatchedHaloBeginExchange(ptr1, 1, nxc, nyc, nzc, true, false, false,
                               solverStream_);
 
   // ---- Interior gradC2N while MPI is in flight ----
@@ -1006,8 +1139,7 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
                       solverStream_);
 
   // ---- End halo ----
-  gpuBatchedHaloEndExchange(ptr1, 1, nxc, nyc, nzc, true, false, false, false,
-                            solverStream_);
+  gpuBatchedHaloEndExchange();
   gpuBCface(nxc, nyc, nzc, d_divC, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
 
   // ---- Boundary gradC2N ----
@@ -1527,7 +1659,7 @@ gpuGMRES_impl(EMfields3D* field,
               cudaSolverType* d_x, int n, cudaSolverType* d_b, int m,
               int max_iter, cudaSolverType tol, cudaSolverType* d_scratch,
               cudaSolverType* const d_gmresV, cudaSolverType* const d_gmresW,
-              const int gmresVAlloc, MPI_Comm fieldcomm, cudaStream_t stream,
+              const size_t gmresVAlloc, MPI_Comm fieldcomm, cudaStream_t stream,
               // Persistent PINNED host buffers (from EMfields3D members)
               cudaSolverType* h_reduceLocal, cudaSolverType* h_reduceGlobal,
               cudaSolverType* H,  // [mp1 * m]
@@ -1537,12 +1669,13 @@ gpuGMRES_impl(EMfields3D* field,
               cudaSolverType* y)  // [mp1]
 {
   const int mp1 = m + 1;
+  const size_t requiredV = static_cast<size_t>(mp1) * n;
 
   // GMRES workspace is allocated persistently in gpuSolverAllocate().
-  if (!d_gmresV || !d_gmresW || gmresVAlloc < mp1 * n) {
-    eprintf(
-        "Persistent GPU GMRES workspace too small: allocated %d, required %d",
-        gmresVAlloc, mp1 * n);
+  if (!d_gmresV || !d_gmresW || gmresVAlloc < requiredV) {
+    eprintf("Persistent GPU GMRES workspace too small: allocated %zu, required "
+            "%zu",
+            gmresVAlloc, requiredV);
     abort();
   }
 
@@ -1717,8 +1850,8 @@ gpuGMRES_impl(EMfields3D* field,
 // =========================================================================
 
 void EMfields3D::gpuEnsureFGMRESWorkspace(int m, int n) {
-  const int nMaxwellKrylov = 3 * (nxn - 2) * (nyn - 2) * (nzn - 2);
-  const int nPoissonKrylov = (nxc - 2) * (nyc - 2) * (nzc - 2);
+  const int nMaxwellKrylov = maxwellKrylovSize_;
+  const int nPoissonKrylov = poissonKrylovSize_;
   const int nGMRESKrylov = std::max(nMaxwellKrylov, nPoissonKrylov);
 
   if (m > GMRES_M || n > nGMRESKrylov) {
@@ -1728,17 +1861,16 @@ void EMfields3D::gpuEnsureFGMRESWorkspace(int m, int n) {
     abort();
   }
 
-  const int required = GMRES_M * nGMRESKrylov;
+  const size_t required = static_cast<size_t>(GMRES_M) * nGMRESKrylov;
   if (!d_fgmresZ) {
-    cudaErrChk(
-        cudaMalloc(&d_fgmresZ, (size_t)required * sizeof(cudaSolverType)));
+    cudaErrChk(cudaMalloc(&d_fgmresZ, required * sizeof(cudaSolverType)));
     fgmresZAlloc = required;
     return;
   }
 
   if (fgmresZAlloc < required) {
-    eprintf("Persistent GPU FGMRES Z workspace too small: allocated %d, "
-            "required %d",
+    eprintf("Persistent GPU FGMRES Z workspace too small: allocated %zu, "
+            "required %zu",
             fgmresZAlloc, required);
     abort();
   }
@@ -1759,24 +1891,27 @@ gpuFGMRES_impl(EMfields3D* field,
                cudaSolverType* d_x, int n, cudaSolverType* d_b, int m,
                int max_iter, cudaSolverType tol, cudaSolverType* d_scratch,
                cudaSolverType* const d_gmresV, cudaSolverType* const d_gmresW,
-               const int gmresVAlloc, cudaSolverType* const d_fgmresZ,
-               const int fgmresZAlloc, MPI_Comm fieldcomm, cudaStream_t stream,
-               cudaSolverType* h_reduceLocal, cudaSolverType* h_reduceGlobal,
-               cudaSolverType* H, cudaSolverType* g, cudaSolverType* cs,
-               cudaSolverType* sn, cudaSolverType* y, const char* label) {
+               const size_t gmresVAlloc, cudaSolverType* const d_fgmresZ,
+               const size_t fgmresZAlloc, MPI_Comm fieldcomm,
+               cudaStream_t stream, cudaSolverType* h_reduceLocal,
+               cudaSolverType* h_reduceGlobal, cudaSolverType* H,
+               cudaSolverType* g, cudaSolverType* cs, cudaSolverType* sn,
+               cudaSolverType* y, const char* label) {
   const int mp1 = m + 1;
+  const size_t requiredV = static_cast<size_t>(mp1) * n;
+  const size_t requiredZ = static_cast<size_t>(m) * n;
 
   // V[(m+1)*n] and w[n] are shared with GMRES and allocated persistently.
-  if (!d_gmresV || !d_gmresW || gmresVAlloc < mp1 * n) {
-    eprintf(
-        "Persistent GPU GMRES workspace too small: allocated %d, required %d",
-        gmresVAlloc, mp1 * n);
+  if (!d_gmresV || !d_gmresW || gmresVAlloc < requiredV) {
+    eprintf("Persistent GPU GMRES workspace too small: allocated %zu, required "
+            "%zu",
+            gmresVAlloc, requiredV);
     abort();
   }
-  if (!d_fgmresZ || fgmresZAlloc < m * n) {
-    eprintf("Persistent GPU FGMRES Z workspace too small: allocated %d, "
-            "required %d",
-            fgmresZAlloc, m * n);
+  if (!d_fgmresZ || fgmresZAlloc < requiredZ) {
+    eprintf("Persistent GPU FGMRES Z workspace too small: allocated %zu, "
+            "required %zu",
+            fgmresZAlloc, requiredZ);
     abort();
   }
 
@@ -1969,7 +2104,7 @@ gpuFGMRES_impl(EMfields3D* field,
 void EMfields3D::gpuBlockJacobiPrecond(cudaSolverType* d_x,
                                        cudaSolverType* d_b) {
   const Grid* grid = &get_grid();
-  const int n = 3 * (nxn - 2) * (nyn - 2) * (nzn - 2);
+  const int n = maxwellKrylovSize_;
   double invdx = grid->get_invdx();
   double invdy = grid->get_invdy();
   double invdz = grid->get_invdz();
@@ -2107,7 +2242,7 @@ void EMfields3D::gpuCalculateE(int cycle) {
   if (vct->getCartesian_rank() == 0)
     cout << "*** E CALCULATION [GPU] ***" << endl;
 
-  const int nMaxwell = 3 * (nxn - 2) * (nyn - 2) * (nzn - 2);
+  const int nMaxwell = maxwellKrylovSize_;
   size_t nodeSize = (size_t)nxn * nyn * nzn;
 
   // Divergence cleaning on E (Poisson correction)
@@ -2184,6 +2319,10 @@ void EMfields3D::gpuCalculateB(int cycle) {
   const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
+  const string& simCase = col->getCase();
+  const bool isGemCase = simCase == "GEM" || simCase == "GEMnoPert" ||
+                         simCase == "GEMDoubleHarris";
+  const bool isForceFreeCase = simCase == "ForceFree";
   double _invdx = grid->get_invdx();
   double _invdy = grid->get_invdy();
   double _invdz = grid->get_invdz();
@@ -2206,20 +2345,75 @@ void EMfields3D::gpuCalculateB(int cycle) {
   // Communicate center B ghost cells (batched: 3 fields in 1 MPI round)
 #ifdef HALO_OVERLAP
   {
+    // C2N at node (i,j,k) reads centers (i-1..i, j-1..j, k-1..k).
+    // Start with the halo-independent core, then exclude every node whose
+    // stencil can intersect a center layer modified after the halo exchange.
+    int safeILo = 2, safeIHi = nxn - 3;
+    int safeJLo = 2, safeJHi = nyn - 3;
+    int safeKLo = 2, safeKHi = nzn - 3;
+
+    if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 2 &&
+        nxc > 10)
+      safeILo = std::max(safeILo, n_layers_sal + 2);
+    if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
+        nxc > 10)
+      safeIHi = std::min(safeIHi, nxn - n_layers_sal - 3);
+    if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
+        nyc > 10)
+      safeJLo = std::max(safeJLo, n_layers_sal + 2);
+    if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 2 &&
+        nyc > 10)
+      safeJHi = std::min(safeJHi, nyn - n_layers_sal - 3);
+    if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 2 &&
+        nzc > 10)
+      safeKLo = std::max(safeKLo, n_layers_sal + 2);
+    if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 2 &&
+        nzc > 10)
+      safeKHi = std::min(safeKHi, nzn - n_layers_sal - 3);
+
+    // The case-specific fixes do not modify all three components to the same
+    // depth.  Preserve a separate Y-safe box per component so work that is
+    // genuinely independent is not needlessly delayed:
+    //   GEM:       Bx/Bz change on 3 layers, By only on the ghost layer.
+    //   ForceFree: Bz changes on 3 layers, Bx/By only on the ghost layer.
+    int bxSafeJLo = safeJLo, bxSafeJHi = safeJHi;
+    int bySafeJLo = safeJLo, bySafeJHi = safeJHi;
+    int bzSafeJLo = safeJLo, bzSafeJHi = safeJHi;
+    const bool lowYPhysical = vct->getYleft_neighbor() == MPI_PROC_NULL;
+    const bool highYPhysical = vct->getYright_neighbor() == MPI_PROC_NULL;
+    if (isGemCase) {
+      if (lowYPhysical) {
+        bxSafeJLo = std::max(bxSafeJLo, 4);
+        bzSafeJLo = std::max(bzSafeJLo, 4);
+      }
+      if (highYPhysical) {
+        bxSafeJHi = std::min(bxSafeJHi, nyn - 5);
+        bzSafeJHi = std::min(bzSafeJHi, nyn - 5);
+      }
+    } else if (isForceFreeCase) {
+      if (lowYPhysical)
+        bzSafeJLo = std::max(bzSafeJLo, 4);
+      if (highYPhysical)
+        bzSafeJHi = std::min(bzSafeJHi, nyn - 5);
+    }
+
     cudaSolverType* bptrs[3] = {d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr()};
     gpuBatchedHaloBeginExchange(bptrs, 3, nxc, nyc, nzc, true, false, false,
-                                false, solverStream_);
+                                solverStream_);
 
-    // Interior interpC2N while MPI is in flight
-    gpuInterpC2N_interior(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn,
-                          solverStream_);
-    gpuInterpC2N_interior(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn,
-                          solverStream_);
-    gpuInterpC2N_interior(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn,
-                          solverStream_);
+    // This safe core reads neither in-flight halo cells nor center layers that
+    // the open/SAL or case-specific fixups below will change.
+    gpuInterpC2N_range(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn, safeILo,
+                       safeIHi, bxSafeJLo, bxSafeJHi, safeKLo, safeKHi,
+                       solverStream_);
+    gpuInterpC2N_range(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn, safeILo,
+                       safeIHi, bySafeJLo, bySafeJHi, safeKLo, safeKHi,
+                       solverStream_);
+    gpuInterpC2N_range(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn, safeILo,
+                       safeIHi, bzSafeJLo, bzSafeJHi, safeKLo, safeKHi,
+                       solverStream_);
 
-    gpuBatchedHaloEndExchange(bptrs, 3, nxc, nyc, nzc, true, false, false,
-                              false, solverStream_);
+    gpuBatchedHaloEndExchange();
 
     // Mixed BC face application
     gpuBCface(nxc, nyc, nzc, d_Bxc, col->bcBx[0], col->bcBx[1], col->bcBx[2],
@@ -2228,29 +2422,30 @@ void EMfields3D::gpuCalculateB(int cycle) {
               col->bcBy[3], col->bcBy[4], col->bcBy[5], &_vct, solverStream_);
     gpuBCface(nxc, nyc, nzc, d_Bzc, col->bcBz[0], col->bcBz[1], col->bcBz[2],
               col->bcBz[3], col->bcBz[4], col->bcBz[5], &_vct, solverStream_);
-  }
 
-  // Open boundary conditions on center-based B
-  gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
-                         nyc, nzc);
+    // Open boundary conditions on center-based B
+    gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
+                           nyc, nzc);
 
-  // Case-specific fixes on center-based B
-  {
-    const string& simCase = col->getCase();
-    if (simCase == "GEM" || simCase == "GEMnoPert" ||
-        simCase == "GEMDoubleHarris")
+    // Case-specific fixes on center-based B
+    if (isGemCase)
       gpuFixBcGEM();
-    if (simCase == "ForceFree")
+    if (isForceFreeCase)
       gpuFixBforcefree();
-  }
 
-  // Boundary interpC2N (ghost + BC + fixup data now available)
-  gpuInterpC2N_boundary(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn,
-                        solverStream_);
-  gpuInterpC2N_boundary(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn,
-                        solverStream_);
-  gpuInterpC2N_boundary(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn,
-                        solverStream_);
+    // Complete exactly the nodes excluded above after halo data and every
+    // center-B fixup are visible.  The range and complement phases are
+    // disjoint and together cover the same domain as a full gpuInterpC2N call.
+    gpuInterpC2N_complement(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn,
+                            safeILo, safeIHi, bxSafeJLo, bxSafeJHi, safeKLo,
+                            safeKHi, solverStream_);
+    gpuInterpC2N_complement(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn,
+                            safeILo, safeIHi, bySafeJLo, bySafeJHi, safeKLo,
+                            safeKHi, solverStream_);
+    gpuInterpC2N_complement(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn,
+                            safeILo, safeIHi, bzSafeJLo, bzSafeJHi, safeKLo,
+                            safeKHi, solverStream_);
+  }
 #else
   gpuCommunicateCenterBC_3mixed(nxc, nyc, nzc, d_Bxc, col->bcBx, d_Byc,
                                 col->bcBy, d_Bzc, col->bcBz);
@@ -2260,14 +2455,10 @@ void EMfields3D::gpuCalculateB(int cycle) {
                          nyc, nzc);
 
   // Case-specific fixes on center-based B
-  {
-    const string& simCase = col->getCase();
-    if (simCase == "GEM" || simCase == "GEMnoPert" ||
-        simCase == "GEMDoubleHarris")
-      gpuFixBcGEM();
-    if (simCase == "ForceFree")
-      gpuFixBforcefree();
-  }
+  if (isGemCase)
+    gpuFixBcGEM();
+  if (isForceFreeCase)
+    gpuFixBforcefree();
 
   // Interpolate center → node
   gpuInterpC2N(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn, solverStream_);
@@ -2280,12 +2471,8 @@ void EMfields3D::gpuCalculateB(int cycle) {
                               d_Bzn, col->bcBz);
 
   // Case-specific fixes on node-based B
-  {
-    const string& simCase = col->getCase();
-    if (simCase == "GEM" || simCase == "GEMnoPert" ||
-        simCase == "GEMDoubleHarris")
-      gpuFixBnGEM();
-  }
+  if (isGemCase)
+    gpuFixBnGEM();
 
   // Divergence cleaning: lap(PSI) = div(B), B = B - grad(PSI)
   if (divBCorrection && cycle % divBCorrectionCycle == 0)
@@ -2328,10 +2515,9 @@ void EMfields3D::gpuCalculateHatFunctions() {
     // --- overlap: begin face exchange for 3 centre fields ---
     cudaSolverType* hatPtrs[3] = {d_tempXC.devPtr(), d_tempYC.devPtr(),
                                   d_tempZC.devPtr()};
-    int hatReqs = gpuBatchedHaloBeginExchange(
-        hatPtrs, 3, nxc, nyc, nzc,
-        /*isCenter=*/true, /*faceOnly=*/false,
-        /*needInterp=*/false, /*isParticle=*/true, solverStream_);
+    gpuBatchedHaloBeginExchange(hatPtrs, 3, nxc, nyc, nzc,
+                                /*offsetZero=*/true, /*faceOnly=*/false,
+                                /*isParticle=*/true, solverStream_);
     // --- interior interpC2N while faces in flight ---
     gpuInterpC2N_interior(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn,
                           solverStream_);
@@ -2340,10 +2526,7 @@ void EMfields3D::gpuCalculateHatFunctions() {
     gpuInterpC2N_interior(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn,
                           solverStream_);
     // --- end exchange: wait + unpack + edges + corners ---
-    gpuBatchedHaloEndExchange(hatPtrs, 3, nxc, nyc, nzc,
-                              /*isCenter=*/true, /*faceOnly=*/false,
-                              /*needInterp=*/false, /*isParticle=*/true,
-                              solverStream_);
+    gpuBatchedHaloEndExchange();
     // BC
     gpuBCface_P(nxc, nyc, nzc, d_tempXC, 2, 2, 2, 2, 2, 2, &get_vct(),
                 solverStream_);
@@ -2473,7 +2656,7 @@ void EMfields3D::gpuCommunicateGhostP2G_AllSpecies() {
     // Phase 1: Batched additive (interpolating) halo exchange — ghost → shared
     // nodes
     gpuBatchedHaloExchange(ptrs, nFields, nxn, nyn, nzn,
-                           /*isCenterFlag=*/true, /*isFaceOnly=*/false,
+                           /*offsetZero=*/true, /*isFaceOnly=*/false,
                            /*needInterp=*/true, /*isParticle=*/true,
                            solverStream_);
 
@@ -2489,7 +2672,7 @@ void EMfields3D::gpuCommunicateGhostP2G_AllSpecies() {
 
     // Phase 3: Batched copy-style node halo exchange — shared → ghost nodes
     gpuBatchedHaloExchange(ptrs, nFields, nxn, nyn, nzn,
-                           /*isCenterFlag=*/false, /*isFaceOnly=*/false,
+                           /*offsetZero=*/false, /*isFaceOnly=*/false,
                            /*needInterp=*/false, /*isParticle=*/true,
                            solverStream_);
   }
@@ -2875,7 +3058,7 @@ void EMfields3D::gpuPoissonImageLocal(cudaSolverType* d_im,
   double _invdy = grid->get_invdy();
   double _invdz = grid->get_invdz();
 
-  const int nPoisson = (nxc - 2) * (nyc - 2) * (nzc - 2);
+  const int nPoisson = poissonKrylovSize_;
 
   d_poissonTemp.setAll(0.0, solverStream_);
   d_poissonIm.setAll(0.0, solverStream_);
@@ -2960,7 +3143,7 @@ void EMfields3D::computePoissonChebyshevEigenvalues() {
 
 void EMfields3D::gpuChebyshevPrecondPoisson(cudaSolverType* d_x,
                                             cudaSolverType* d_b) {
-  const int n = (nxc - 2) * (nyc - 2) * (nzc - 2);
+  const int n = poissonKrylovSize_;
 
   // ---- Lazy workspace allocation (shared with Maxwell Chebyshev) ----
   if (chebAlloc < n) {
@@ -3053,7 +3236,7 @@ void EMfields3D::gpuPoissonCorrection(int cycle) {
   double _invdy = grid->get_invdy();
   double _invdz = grid->get_invdz();
 
-  const int nPoisson = (nxc - 2) * (nyc - 2) * (nzc - 2);
+  const int nPoisson = poissonKrylovSize_;
   size_t nodeSize = (size_t)nxn * nyn * nzn;
   size_t centSize = (size_t)nxc * nyc * nzc;
 
@@ -3118,7 +3301,7 @@ void EMfields3D::gpuApplyDivBCleaning() {
   double _invdy = grid->get_invdy();
   double _invdz = grid->get_invdz();
 
-  const int nPoisson = (nxc - 2) * (nyc - 2) * (nzc - 2);
+  const int nPoisson = poissonKrylovSize_;
 
   // Zero work arrays
   d_divBwork.setAll(0.0, solverStream_);

@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+strong/results_*/
+weak/results_*/
+strong/stdout_*
+strong/stderr_*
+strong/select_gpu_*
+weak/stdout_*
+weak/stderr_*
+weak/select_gpu_*

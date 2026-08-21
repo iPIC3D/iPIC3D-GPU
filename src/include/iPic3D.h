@@ -51,6 +51,9 @@ using std::string;
 #include "particleExchange.cuh"
 #include "planetKernel.cuh"
 #include "threadPool.hpp"
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+#include "GPUCycleDiagnostics.cuh"
+#endif
 
 #include <fstream>
 #include <future>
@@ -175,7 +178,11 @@ public:
    * @param cycle Current simulation cycle.
    */
   void CalculateB(int cycle);
-  void MomentsAwait();
+  /**
+   * @brief Finish moment communication and form the derived hat quantities.
+   * @param cycle Current simulation cycle, or -1 for pre-loop initialization.
+   */
+  void MomentsAwait(int cycle = -1);
 
   // ======= Output and diagnostics =======
   /**
@@ -376,6 +383,11 @@ private:
   cudaTypeArray1<cudaFieldType> fieldForPclCUDAPtr; // for all species
 
   cudaTypeArray1<cudaFieldType> fieldForPclHostPtr;
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  // Lazily allocated, persistent bounded buffers for opt-in cycle tracing.
+  GPUCycleDiagnostics gpuCycleDiagnostics_;
+#endif
 
   ThreadPool* threadPoolPtr;
 

@@ -105,7 +105,7 @@ static int runSimulation(int argc, char** argv) {
     KCode.CalculateB(i);
     auto t_bfield = std::chrono::high_resolution_clock::now();
 
-    KCode.MomentsAwait();
+    KCode.MomentsAwait(i);
     auto t_moments = std::chrono::high_resolution_clock::now();
 
 #if IPIC3D_COMPILE_DISK_OUTPUT

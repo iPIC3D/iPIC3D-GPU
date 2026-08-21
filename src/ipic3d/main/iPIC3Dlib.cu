@@ -1457,7 +1457,7 @@ void c_Solver::CalculateMoments() {
 
   // Synchronize all species before the field-side ghost exchange and
   // reductions.
-  MomentsAwait();
+  MomentsAwait(-1);
 }
 
 /**
@@ -2434,7 +2434,26 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
   // pointers.
   if (sortThisCycle_) {
     for (int i = 0; i < ns; i++) {
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+      // Stages 1-3 have completed logically on this stream, and all their
+      // independent buffers are still intact.  This collective diagnostic
+      // synchronizes/reduces them and arms exact Stage-4 scratch poisoning.
+      // Every rank participates, including ranks with no local particles.
+      if (gpuCycleDiagnosticsStateCycle(cycle))
+        gpuCycleDiagnostics_.reportCellSorterBeforeScatter(
+            cycle, i, cellSorters[i], *pclsArrayHostPtr[i], *grid3DCUDAHostPtr,
+            grid3DCUDACUDAPtr, true, streams[i], vct->getParticleComm());
+#endif
       cellSorters[i].finishSort(streams[i]);
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+      // Runs on the same stream after every real scatter kernel.  Reports
+      // untouched poisoned slots, validates pointer rotation, and checks that
+      // each sorted cell range contains particles classified to that cell.
+      if (gpuCycleDiagnosticsStateCycle(cycle))
+        gpuCycleDiagnostics_.reportCellSorterAfterScatter(
+            cycle, i, cellSorters[i], *pclsArrayHostPtr[i], *grid3DCUDAHostPtr,
+            grid3DCUDACUDAPtr, streams[i], vct->getParticleComm());
+#endif
       // Re-sync the device-side metadata after the host-side pointer swap.
       cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
                                  sizeof(particleArrayCUDA), cudaMemcpyDefault,
@@ -2510,6 +2529,29 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
           (uint32_t)sortedCount, (uint32_t)incomingCount,
           particlesHost[i]->getParticleIDGenerator());
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+    if (gpuCycleDiagnosticsStateCycle(cycle)) {
+      const GPUCycleDiagnosticParticleBounds diagnosticBounds = {
+          {grid->getXstart(), grid->getYstart(), grid->getZstart()},
+          {grid->getXend(), grid->getYend(), grid->getZend()},
+          {0.0, 0.0, 0.0},
+          {col->getLx(), col->getLy(), col->getLz()}};
+
+      // These calls are collective even when a rank has an empty range.  The
+      // shared species stream makes the incoming AoS scatter visible before
+      // the tail is inspected, and both inspections finish before deposition.
+      gpuCycleDiagnostics_.reportParticleRange(
+          "post_incoming_scatter_pre_moments", cycle, i, "sorted_prefix",
+          *pclsArrayHostPtr[i], 0, static_cast<std::uint32_t>(sortedCount),
+          diagnosticBounds, streams[i], vct->getParticleComm());
+      gpuCycleDiagnostics_.reportParticleRange(
+          "post_incoming_scatter_pre_moments", cycle, i, "incoming_tail",
+          *pclsArrayHostPtr[i], static_cast<std::uint32_t>(sortedCount),
+          static_cast<std::uint32_t>(incomingCount), diagnosticBounds,
+          streams[i], vct->getParticleComm());
+    }
+#endif
+
     // Finalize moments according to the active sorted/unsorted pipeline.
     if (sortThisCycle_) {
       // Sorted path: cell-aware moments for the stayed prefix, flat kernel for
@@ -2565,8 +2607,36 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
 #endif
   for (int i = 0; i < ns; i++) {
 #ifdef GPU_SOLVER
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+    if (gpuCycleDiagnosticsStateCycle(cycle)) {
+      static const char* const momentNames[10] = {
+          "rho", "Jx", "Jy", "Jz", "Pxx", "Pxy", "Pxz", "Pyy", "Pyz", "Pzz"};
+      const cudaSolverType* packedMoments[10];
+      for (int component = 0; component < 10; ++component)
+        packedMoments[component] =
+            momentsCUDAPtr[i] + component * momentGridSize;
+      const double scales[10] = {1.0, 1.0, 1.0, 1.0, 1.0,
+                                 1.0, 1.0, 1.0, 1.0, 1.0};
+      const GPUCycleDiagnosticRegion nodeRegion = {
+          grid->getNXN(),
+          grid->getNYN(),
+          grid->getNZN(),
+          {0, 0, 0},
+          {grid->getNXN(), grid->getNYN(), grid->getNZN()},
+          {grid->getXN(0), grid->getYN(0), grid->getZN(0)},
+          {grid->getDX(), grid->getDY(), grid->getDZ()}};
+      gpuCycleDiagnostics_.reportArraySet(
+          "moments_before_d2d_scatter", cycle, i, momentNames, packedMoments,
+          scales, 10, nodeRegion, streams[i], vct->getParticleComm());
+    }
+#endif
     // D2D scatter: packed moments → per-field GPU solver arrays (no host touch)
     EMf->gpuScatterMomentsD2D(momentsCUDAPtr[i], i, streams[i]);
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+    if (gpuCycleDiagnosticsStateCycle(cycle))
+      EMf->gpuDiagnosticReportSpeciesMoments("moments_after_d2d_scatter", cycle,
+                                             i, streams[i]);
+#endif
 #else
     copyMomentsD2H(i, streams[i]);
 #endif
@@ -2633,7 +2703,7 @@ void c_Solver::CalculateB(int cycle) {
  * particle merging, communicates ghost moments, applies special boundary
  * charge sources, and computes the field-solver derived moment quantities.
  */
-void c_Solver::MomentsAwait() {
+void c_Solver::MomentsAwait(int cycle) {
 
   timeTasks_set_main_task(TimeTasks::MOMENTS);
 
@@ -2681,7 +2751,7 @@ void c_Solver::MomentsAwait() {
   // Phase 1: all-species ghost exchange batched (2 halo exchanges instead of
   // 2*ns)
   auto tGhostStart = std::chrono::high_resolution_clock::now();
-  EMf->gpuCommunicateGhostP2G_AllSpecies();
+  EMf->gpuCommunicateGhostP2G_AllSpecies(cycle);
   auto tGhostEnd = std::chrono::high_resolution_clock::now();
   // if (myrank == 0) {
   //   double ms = std::chrono::duration<double, std::milli>(tGhostEnd -
@@ -2709,7 +2779,7 @@ void c_Solver::MomentsAwait() {
   EMf->gpuInterpDensitiesN2C();
 
   // Phase 3: hat functions (Jhat, rhohat) — already GPU-implemented
-  EMf->gpuCalculateHatFunctions();
+  EMf->gpuCalculateHatFunctions(cycle);
 
   // Record momentsPipelineDoneEvt at the tail of the solver stream so that
   // ScheduleHeatFlux() (next cycle, step 2) can gate its D2D copy of

@@ -42,6 +42,9 @@
 #ifdef GPU_SOLVER
 #include "GPUFieldArray.cuh"
 #include "GPUHaloComm.cuh"
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+#include "GPUCycleDiagnostics.cuh"
+#endif
 #endif
 
 // dimension of vectors used in fieldForPcls
@@ -704,8 +707,8 @@ public:
   void gpuCalculateE(int cycle);
   /** GPU version of calculateB. */
   void gpuCalculateB(int cycle);
-  /** GPU version of calculateHatFunctions. */
-  void gpuCalculateHatFunctions();
+  /** GPU version of calculateHatFunctions; cycle=-1 denotes initialization. */
+  void gpuCalculateHatFunctions(int cycle = -1);
   /** GPU MaxwellImage: A*x callback for GMRES (operates on device Krylov
    * vectors). */
   void gpuMaxwellImage(cudaSolverType* d_im, cudaSolverType* d_vector);
@@ -715,8 +718,8 @@ public:
    * Maxwell image. */
   void gpuMaxwellImageLocal(cudaSolverType* d_im, cudaSolverType* d_vector);
   /** GPU MaxwellSource: build RHS of Maxwell system (result in device Krylov
-   * vector). */
-  void gpuMaxwellSource(cudaSolverType* d_bkrylov);
+   * vector); cycle=-1 is used by direct/unit-test callers. */
+  void gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle = -1);
 
   // ---- GPU Chebyshev Semi-Iterative Solver ----
   /** Full Chebyshev solver (with MPI communication).
@@ -803,8 +806,14 @@ public:
   void gpuScatterMomentsD2D(cudaMomentType* momentsSrc, int species,
                             cudaStream_t stream = 0);
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  /** Report the ten resident per-species moment arrays at one checkpoint. */
+  void gpuDiagnosticReportSpeciesMoments(const char* stage, int cycle,
+                                         int species, cudaStream_t stream);
+#endif
+
   /** Batched ghost exchange: all species at once (reduces MPI barriers). */
-  void gpuCommunicateGhostP2G_AllSpecies();
+  void gpuCommunicateGhostP2G_AllSpecies(int cycle = -1);
 
   /** Batched GPU halo exchange: exchanges nFields 3D arrays in a single set
    *  of MPI messages per direction, using explicit CUDA pack/unpack into
@@ -1525,6 +1534,10 @@ private:
 
   // Flag tracking whether GPU solver arrays have been allocated
   bool gpuSolverAllocated_ = false;
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  // Persistent bounded reductions; allocated only if an enabled cycle runs.
+  GPUCycleDiagnostics gpuCycleDiagnostics_;
+#endif
 #endif // GPU_SOLVER
 };
 

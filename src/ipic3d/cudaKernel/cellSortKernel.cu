@@ -428,6 +428,150 @@ __host__ inline void launch_cell_sort_sorted_indices(
 
 // ======= Stage 4: Scatter =======
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+
+// An unusual signaling-NaN payload used as a bit pattern, never as a floating
+// value.  Comparing the raw bits distinguishes an untouched scatter slot from
+// an ordinary NaN already present in the source particles.
+static constexpr std::uint64_t CELL_SORT_DIAGNOSTIC_POISON =
+    UINT64_C(0x7ff4deadbeefcafe);
+
+__host__ __device__ CellSortStage4DiagnosticPartial
+empty_stage4_diagnostic_partial() {
+  CellSortStage4DiagnosticPartial result{};
+  result.firstPrefixPoison = UINT64_MAX;
+  result.firstTailPoison = UINT64_MAX;
+  result.firstPrefixValueMismatchSource = UINT64_MAX;
+  result.firstPrefixValueMismatchDestination = UINT64_MAX;
+  result.firstTailValueMismatch = UINT64_MAX;
+  return result;
+}
+
+__host__ __device__ void
+combine_stage4_diagnostic_partial(CellSortStage4DiagnosticPartial& dst,
+                                  const CellSortStage4DiagnosticPartial& src) {
+  dst.prefixPoisonCount += src.prefixPoisonCount;
+  dst.tailPoisonCount += src.tailPoisonCount;
+  dst.prefixValueMismatchCount += src.prefixValueMismatchCount;
+  dst.tailValueMismatchCount += src.tailValueMismatchCount;
+  dst.firstPrefixPoison = src.firstPrefixPoison < dst.firstPrefixPoison
+                              ? src.firstPrefixPoison
+                              : dst.firstPrefixPoison;
+  dst.firstTailPoison = src.firstTailPoison < dst.firstTailPoison
+                            ? src.firstTailPoison
+                            : dst.firstTailPoison;
+  if (src.prefixPoisonCount > 0 &&
+      (dst.prefixPoisonCount == src.prefixPoisonCount ||
+       src.lastPrefixPoison > dst.lastPrefixPoison))
+    dst.lastPrefixPoison = src.lastPrefixPoison;
+  if (src.tailPoisonCount > 0 && (dst.tailPoisonCount == src.tailPoisonCount ||
+                                  src.lastTailPoison > dst.lastTailPoison))
+    dst.lastTailPoison = src.lastTailPoison;
+  if (src.firstPrefixValueMismatchSource < dst.firstPrefixValueMismatchSource) {
+    dst.firstPrefixValueMismatchSource = src.firstPrefixValueMismatchSource;
+    dst.firstPrefixValueMismatchDestination =
+        src.firstPrefixValueMismatchDestination;
+  }
+  if (src.firstTailValueMismatch < dst.firstTailValueMismatch)
+    dst.firstTailValueMismatch = src.firstTailValueMismatch;
+}
+
+/** Fill one actual Stage-4 destination allocation with the exact poison. */
+__global__ void cell_sort_fill_poison_kernel(std::uint64_t* destination,
+                                             std::uint32_t nop) {
+  const std::size_t stride = std::size_t(gridDim.x) * blockDim.x;
+  for (std::size_t i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < nop; i += stride)
+    destination[i] = CELL_SORT_DIAGNOSTIC_POISON;
+}
+
+/** Reduce untouched poison separately in the sorted prefix and copied tail. */
+__global__ void cell_sort_check_poison_kernel(
+    const std::uint64_t* destination, const std::uint64_t* source,
+    const unsigned int* sorted_indices, std::uint32_t num_to_sort,
+    std::uint32_t nop, CellSortStage4DiagnosticPartial* block_results) {
+  __shared__ CellSortStage4DiagnosticPartial shared[SORT_BLOCK_SIZE];
+  CellSortStage4DiagnosticPartial local = empty_stage4_diagnostic_partial();
+  const std::size_t stride = std::size_t(gridDim.x) * blockDim.x;
+
+  for (std::size_t i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < nop; i += stride) {
+    if (destination[i] == CELL_SORT_DIAGNOSTIC_POISON) {
+      if (i < num_to_sort) {
+        ++local.prefixPoisonCount;
+        if (i < local.firstPrefixPoison)
+          local.firstPrefixPoison = i;
+        if (i > local.lastPrefixPoison)
+          local.lastPrefixPoison = i;
+      } else {
+        ++local.tailPoisonCount;
+        if (i < local.firstTailPoison)
+          local.firstTailPoison = i;
+        if (i > local.lastTailPoison)
+          local.lastTailPoison = i;
+      }
+    }
+
+    if (i < num_to_sort) {
+      const unsigned long long mapped = sorted_indices[i];
+      // Invalid permutation destinations are reported by the Stage-3 check.
+      // Avoid a second out-of-bounds read here while still checking any
+      // destination that the scatter legitimately could have addressed.
+      if (mapped < nop && destination[mapped] != source[i]) {
+        ++local.prefixValueMismatchCount;
+        if (i < local.firstPrefixValueMismatchSource) {
+          local.firstPrefixValueMismatchSource = i;
+          local.firstPrefixValueMismatchDestination = mapped;
+        }
+      }
+    } else {
+      if (destination[i] != source[i]) {
+        ++local.tailValueMismatchCount;
+        if (i < local.firstTailValueMismatch)
+          local.firstTailValueMismatch = i;
+      }
+    }
+  }
+
+  shared[threadIdx.x] = local;
+  __syncthreads();
+  for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+    if (threadIdx.x < offset)
+      combine_stage4_diagnostic_partial(shared[threadIdx.x],
+                                        shared[threadIdx.x + offset]);
+    __syncthreads();
+  }
+  if (threadIdx.x == 0)
+    block_results[blockIdx.x] = shared[0];
+}
+
+__host__ inline void launch_cell_sort_fill_poison(void* destination,
+                                                  std::uint32_t nop, int blocks,
+                                                  cudaStream_t stream) {
+  if (nop == 0)
+    return;
+  cell_sort_fill_poison_kernel<<<blocks, SORT_BLOCK_SIZE, 0, stream>>>(
+      static_cast<std::uint64_t*>(destination), nop);
+  cudaErrChk(cudaGetLastError());
+}
+
+__host__ inline void
+launch_cell_sort_check_poison(const void* destination, const void* source,
+                              const unsigned int* sorted_indices,
+                              std::uint32_t num_to_sort, std::uint32_t nop,
+                              CellSortStage4DiagnosticPartial* block_results,
+                              int blocks, cudaStream_t stream) {
+  if (nop == 0)
+    return;
+  cell_sort_check_poison_kernel<<<blocks, SORT_BLOCK_SIZE, 0, stream>>>(
+      static_cast<const std::uint64_t*>(destination),
+      static_cast<const std::uint64_t*>(source), sorted_indices, num_to_sort,
+      nop, block_results);
+  cudaErrChk(cudaGetLastError());
+}
+
+#endif // IPIC3D_GPU_CYCLE_DIAGNOSTICS
+
 /**
  * @brief Scatter the sorted prefix and copy the unsorted tail unchanged.
  *
@@ -464,6 +608,92 @@ __host__ inline void launch_cell_sort_scatter_partial(
 }
 
 // ======= CellSorter buffer preparation =======
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+
+// These out-of-line values prove which cellSortKernel translation unit was
+// linked.  This is useful on systems where a partial rebuild could otherwise
+// combine a new diagnostic caller with an old wave32 sorter object.
+__host__ int CellSorter::diagnosticCompiledWarpSize() const {
+  return WARP_SIZE;
+}
+
+__host__ int CellSorter::diagnosticCompiledWarpMaskBytes() const {
+  return sizeof(warp_mask_t);
+}
+
+__host__ int CellSorter::diagnosticAlgorithmVersion() const { return 1; }
+
+__host__ int CellSorter::diagnosticEnqueuePointerMutationMask(
+    const particleArrayCUDA& particles) const {
+  if (!sort_pending)
+    return 0;
+  if (!diagnostic_enqueue_snapshot_valid)
+    return 1 << 14;
+  const ParticleSoADevice* soa = particles.getSoA();
+  const void* current[CELL_SORT_DIAGNOSTIC_MAX_FIELDS] = {
+      soa->u, soa->v, soa->w, soa->q, soa->x, soa->y, soa->z, soa->id};
+  const int currentFieldCount = soa->trackParticleID ? 8 : 7;
+  int mask = 0;
+  if (currentFieldCount != diagnostic_enqueue_field_count)
+    mask |= 1 << 15;
+  const int comparable =
+      std::min(currentFieldCount, diagnostic_enqueue_field_count);
+  for (int field = 0; field < comparable; ++field)
+    if (reinterpret_cast<std::uintptr_t>(current[field]) !=
+        diagnostic_enqueue_pointers[field])
+      mask |= 1 << field;
+  if (reinterpret_cast<std::uintptr_t>(scratch.ptr) !=
+      diagnostic_enqueue_scratch)
+    mask |= 1 << 8;
+  return mask;
+}
+
+__host__ int CellSorter::diagnosticEnqueueSortBufferMutationMask() const {
+  if (!sort_pending)
+    return 0;
+  if (!diagnostic_enqueue_snapshot_valid)
+    return 1 << 14;
+  const void* current[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT] = {
+      buffers.cell_counts, buffers.cell_offsets, buffers.cell_start_offsets,
+      buffers.sorted_indices, buffers.block_sums};
+  int mask = 0;
+  for (int buffer = 0; buffer < CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT;
+       ++buffer)
+    if (reinterpret_cast<std::uintptr_t>(current[buffer]) !=
+        diagnostic_enqueue_sort_buffers[buffer])
+      mask |= 1 << buffer;
+  return mask;
+}
+
+__host__ std::uint64_t CellSorter::diagnosticCurrentAllocationMetadata(
+    int field, const particleArrayCUDA& particles) const {
+  const std::uint64_t current[CELL_SORT_DIAGNOSTIC_ALLOCATION_METADATA_COUNT] =
+      {particles.getCapacity(),
+       scratch.capacity_bytes,
+       buffers.max_particles,
+       static_cast<std::uint64_t>(num_cells),
+       static_cast<std::uint64_t>(buffers.num_cells),
+       static_cast<std::uint64_t>(buffers.num_scan_blocks)};
+  return current[field];
+}
+
+__host__ int CellSorter::diagnosticEnqueueAllocationMetadataMutationMask(
+    const particleArrayCUDA& particles) const {
+  if (!sort_pending)
+    return 0;
+  if (!diagnostic_enqueue_snapshot_valid)
+    return 1 << 14;
+  int mask = 0;
+  for (int field = 0; field < CELL_SORT_DIAGNOSTIC_ALLOCATION_METADATA_COUNT;
+       ++field)
+    if (diagnosticCurrentAllocationMetadata(field, particles) !=
+        diagnostic_enqueue_allocation_metadata[field])
+      mask |= 1 << field;
+  return mask;
+}
+
+#endif // IPIC3D_GPU_CYCLE_DIAGNOSTICS
 
 /**
  * @brief Host phase A: ensure all temporary sort buffers are large enough.
@@ -502,8 +732,17 @@ __host__ void CellSorter::enqueueSortAsync(particleArrayCUDA* hostPtr,
     return;
 
   const uint32_t nop = hostPtr->getNOP();
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  // Preserve the caller's request before the production safety clamp so a
+  // wrong full-sort count cannot masquerade as a valid partial sort.
+  diagnostic_requested_num_to_sort = num_to_sort;
+  diagnostic_num_to_sort_was_clamped = num_to_sort > nop;
+#endif
   if (num_to_sort == 0 || nop == 0) {
     sort_pending = false;
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+    diagnostic_enqueue_snapshot_valid = false;
+#endif
     return;
   }
   if (num_to_sort > nop)
@@ -516,6 +755,28 @@ __host__ void CellSorter::enqueueSortAsync(particleArrayCUDA* hostPtr,
   sort_pending = true;
 
   ParticleSoADevice* soa = hostPtr->getSoA();
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  const void* enqueuePointers[CELL_SORT_DIAGNOSTIC_MAX_FIELDS] = {
+      soa->u, soa->v, soa->w, soa->q, soa->x, soa->y, soa->z, soa->id};
+  diagnostic_enqueue_field_count = soa->trackParticleID ? 8 : 7;
+  for (int field = 0; field < diagnostic_enqueue_field_count; ++field)
+    diagnostic_enqueue_pointers[field] =
+        reinterpret_cast<std::uintptr_t>(enqueuePointers[field]);
+  diagnostic_enqueue_scratch = reinterpret_cast<std::uintptr_t>(scratch.ptr);
+  const void* enqueueSortBuffers[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT] = {
+      buffers.cell_counts, buffers.cell_offsets, buffers.cell_start_offsets,
+      buffers.sorted_indices, buffers.block_sums};
+  for (int buffer = 0; buffer < CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT;
+       ++buffer)
+    diagnostic_enqueue_sort_buffers[buffer] =
+        reinterpret_cast<std::uintptr_t>(enqueueSortBuffers[buffer]);
+  for (int field = 0; field < CELL_SORT_DIAGNOSTIC_ALLOCATION_METADATA_COUNT;
+       ++field)
+    diagnostic_enqueue_allocation_metadata[field] =
+        diagnosticCurrentAllocationMetadata(field, *hostPtr);
+  diagnostic_enqueue_snapshot_valid = true;
+#endif
 
   // ======= Stage 1: Histogram =======
   buffers.zero_async(s);
@@ -558,6 +819,16 @@ __host__ void CellSorter::finishSort(cudaStream_t s) {
 
   const unsigned int* idx = buffers.sorted_indices;
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  int diagnostic_field = 0;
+  if (diagnostic_stage4_armed) {
+    const int required_blocks =
+        getGridSize(nop, static_cast<std::uint32_t>(SORT_BLOCK_SIZE));
+    diagnostic_stage4_blocks =
+        std::min(required_blocks, diagnostic_stage4_partial_stride);
+  }
+#endif
+
   // ======= Stage 4: Scatter one field at a time and swap pointers =======
   // Scatter field_ptr -> scratch, then swap the two pointers so that
   // scratch now points to the old (unsorted) allocation and field_ptr
@@ -565,8 +836,26 @@ __host__ void CellSorter::finishSort(cudaStream_t s) {
   auto scatter_and_swap = [&](auto*& field_ptr) {
     using FT =
         std::remove_pointer_t<std::remove_reference_t<decltype(*field_ptr)>>;
-    launch_cell_sort_scatter_partial<FT>(static_cast<FT*>(scratch.ptr),
-                                         field_ptr, idx, num_to_sort, nop, s);
+    FT* const destination = static_cast<FT*>(scratch.ptr);
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+    static_assert(sizeof(FT) == sizeof(std::uint64_t),
+                  "Stage-4 poison diagnostics require 64-bit SoA fields");
+    if (diagnostic_stage4_armed)
+      launch_cell_sort_fill_poison(destination, nop, diagnostic_stage4_blocks,
+                                   s);
+#endif
+    launch_cell_sort_scatter_partial<FT>(destination, field_ptr, idx,
+                                         num_to_sort, nop, s);
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+    if (diagnostic_stage4_armed) {
+      launch_cell_sort_check_poison(
+          destination, field_ptr, idx, num_to_sort, nop,
+          diagnostic_stage4_partials +
+              diagnostic_field * diagnostic_stage4_partial_stride,
+          diagnostic_stage4_blocks, s);
+    }
+    ++diagnostic_field;
+#endif
     // Exchange: field_ptr <- scratch (sorted), scratch <- field_ptr (old)
     field_ptr = static_cast<FT*>(
         std::exchange(scratch.ptr, static_cast<void*>(field_ptr)));
@@ -581,6 +870,12 @@ __host__ void CellSorter::finishSort(cudaStream_t s) {
   scatter_and_swap(soa->z);
   if (soa->trackParticleID)
     scatter_and_swap(soa->id);
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  if (diagnostic_stage4_armed)
+    diagnostic_stage4_field_count = diagnostic_field;
+  diagnostic_stage4_armed = false;
+#endif
 }
 
 // ======= CellSorter convenience wrapper =======

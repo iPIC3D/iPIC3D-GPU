@@ -36,6 +36,37 @@ static constexpr int SORT_SCAN_BLOCK_SIZE = 256;
 static constexpr int SORT_SCAN_ELEMENTS_PER_BLOCK =
     2 * SORT_SCAN_BLOCK_SIZE; // 512
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+
+/** Maximum number of bounded reduction blocks used by sorter diagnostics. */
+inline constexpr int CELL_SORT_DIAGNOSTIC_MAX_BLOCKS = 256;
+
+/** Number of sortable SoA fields, including the optional particle ID. */
+inline constexpr int CELL_SORT_DIAGNOSTIC_MAX_FIELDS = 8;
+inline constexpr int CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT = 5;
+inline constexpr int CELL_SORT_DIAGNOSTIC_ALLOCATION_METADATA_COUNT = 6;
+
+/**
+ * One block-local Stage-4 result.  The actual scatter destination is filled
+ * with a diagnostic bit pattern before each field is scattered; any matching
+ * entries afterward were not written by the scatter kernel.
+ */
+struct CellSortStage4DiagnosticPartial {
+  std::uint64_t prefixPoisonCount;
+  std::uint64_t firstPrefixPoison;
+  std::uint64_t lastPrefixPoison;
+  std::uint64_t tailPoisonCount;
+  std::uint64_t firstTailPoison;
+  std::uint64_t lastTailPoison;
+  std::uint64_t prefixValueMismatchCount;
+  std::uint64_t firstPrefixValueMismatchSource;
+  std::uint64_t firstPrefixValueMismatchDestination;
+  std::uint64_t tailValueMismatchCount;
+  std::uint64_t firstTailValueMismatch;
+};
+
+#endif // IPIC3D_GPU_CYCLE_DIAGNOSTICS
+
 // ======= Per-species temporary sort buffers =======
 
 /**
@@ -190,6 +221,26 @@ struct CellSorter {
   particleArrayCUDA* pending_hostPtr = nullptr;
   bool sort_pending = false;
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  // The diagnostic reducer owns this bounded output allocation.  It is armed
+  // only for the selected cycle, immediately before finishSort().
+  CellSortStage4DiagnosticPartial* diagnostic_stage4_partials = nullptr;
+  int diagnostic_stage4_partial_stride = 0;
+  int diagnostic_stage4_blocks = 0;
+  int diagnostic_stage4_field_count = 0;
+  bool diagnostic_stage4_armed = false;
+  std::uintptr_t diagnostic_enqueue_pointers[CELL_SORT_DIAGNOSTIC_MAX_FIELDS]{};
+  std::uintptr_t diagnostic_enqueue_scratch = 0;
+  int diagnostic_enqueue_field_count = 0;
+  bool diagnostic_enqueue_snapshot_valid = false;
+  std::uintptr_t
+      diagnostic_enqueue_sort_buffers[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT]{};
+  std::uint64_t diagnostic_enqueue_allocation_metadata
+      [CELL_SORT_DIAGNOSTIC_ALLOCATION_METADATA_COUNT]{};
+  std::uint32_t diagnostic_requested_num_to_sort = 0;
+  bool diagnostic_num_to_sort_was_clamped = false;
+#endif
+
   /**
    * @brief Allocate the per-species sort state shared by all later sort calls.
    */
@@ -246,6 +297,86 @@ struct CellSorter {
   }
   __host__ int* getCellCounts() const { return buffers.cell_counts; }
   __host__ int getNumCells() const { return num_cells; }
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  // Raw diagnostic access is intentionally unavailable in production builds.
+  __host__ const int* diagnosticCellOffsets() const {
+    return buffers.cell_offsets;
+  }
+  __host__ const unsigned int* diagnosticSortedIndices() const {
+    return buffers.sorted_indices;
+  }
+  __host__ const int* diagnosticBlockSums() const { return buffers.block_sums; }
+  __host__ int diagnosticNumScanBlocks() const {
+    return buffers.num_scan_blocks;
+  }
+  __host__ std::uint32_t diagnosticIndexCapacity() const {
+    return buffers.max_particles;
+  }
+  __host__ void* diagnosticScratchPointer() const { return scratch.ptr; }
+  __host__ std::size_t diagnosticScratchBytes() const {
+    return scratch.capacity_bytes;
+  }
+  __host__ bool diagnosticSortPending() const { return sort_pending; }
+  __host__ std::uint32_t diagnosticPendingNumToSort() const {
+    return pending_num_to_sort;
+  }
+  __host__ std::uint32_t diagnosticPendingNOP() const { return pending_nop; }
+  __host__ const particleArrayCUDA* diagnosticPendingHostPointer() const {
+    return pending_hostPtr;
+  }
+  __host__ std::uint32_t diagnosticRequestedNumToSort() const {
+    return diagnostic_requested_num_to_sort;
+  }
+  __host__ bool diagnosticNumToSortWasClamped() const {
+    return diagnostic_num_to_sort_was_clamped;
+  }
+
+  // Implemented in cellSortKernel.cu so the report describes the translation
+  // unit that actually contains the histogram kernel, not merely its caller.
+  __host__ int diagnosticCompiledWarpSize() const;
+  __host__ int diagnosticCompiledWarpMaskBytes() const;
+  __host__ int diagnosticAlgorithmVersion() const;
+  __host__ int diagnosticEnqueuePointerMutationMask(
+      const particleArrayCUDA& particles) const;
+  __host__ int diagnosticEnqueueSortBufferMutationMask() const;
+  __host__ int diagnosticEnqueueAllocationMetadataMutationMask(
+      const particleArrayCUDA& particles) const;
+  __host__ std::uint64_t
+  diagnosticCurrentAllocationMetadata(int field,
+                                      const particleArrayCUDA& particles) const;
+  __host__ std::uintptr_t diagnosticEnqueuePointer(int field) const {
+    return diagnostic_enqueue_pointers[field];
+  }
+  __host__ std::uintptr_t diagnosticEnqueueScratchPointer() const {
+    return diagnostic_enqueue_scratch;
+  }
+  __host__ std::uintptr_t diagnosticEnqueueSortBufferPointer(int buffer) const {
+    return diagnostic_enqueue_sort_buffers[buffer];
+  }
+  __host__ std::uint64_t diagnosticEnqueueAllocationMetadata(int field) const {
+    return diagnostic_enqueue_allocation_metadata[field];
+  }
+
+  /** Arm exact per-field scratch coverage checks for the pending Stage 4. */
+  __host__ void
+  armStage4Diagnostics(CellSortStage4DiagnosticPartial* devicePartials,
+                       int partialStride) {
+    diagnostic_stage4_partials = devicePartials;
+    diagnostic_stage4_partial_stride = partialStride;
+    diagnostic_stage4_blocks = 0;
+    diagnostic_stage4_field_count = 0;
+    diagnostic_stage4_armed =
+        sort_pending && devicePartials != nullptr && partialStride > 0;
+  }
+
+  __host__ int diagnosticStage4Blocks() const {
+    return diagnostic_stage4_blocks;
+  }
+  __host__ int diagnosticStage4FieldCount() const {
+    return diagnostic_stage4_field_count;
+  }
+#endif
 
   /**
    * @brief Release all GPU memory owned by this per-species sorter.

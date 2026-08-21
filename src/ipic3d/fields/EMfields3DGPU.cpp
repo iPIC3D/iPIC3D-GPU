@@ -1519,7 +1519,7 @@ void EMfields3D::gpuChebyshevSolve(
 //  GPU MaxwellSource:  build RHS of Maxwell system
 // =========================================================================
 
-void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov) {
+void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
   const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
@@ -1589,6 +1589,49 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov) {
   gpuGradC2N(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
              d_rhoh.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
              solverStream_);
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  if (gpuCycleDiagnosticsSourceCycle(cycle)) {
+    // Only interior nodes enter the Krylov RHS.  Scratch ghost layers from
+    // curl/grad stencils are intentionally excluded from this comparison.
+    const GPUCycleDiagnosticRegion rhsRegion = {
+        nxn,
+        nyn,
+        nzn,
+        {1, 1, 1},
+        {nxn - 1, nyn - 1, nzn - 1},
+        {grid->getXN(0), grid->getYN(0), grid->getZN(0)},
+        {grid->getDX(), grid->getDY(), grid->getDZ()}};
+    static const char* const xyzNames[3] = {"x", "y", "z"};
+    const cudaSolverType* electric[3] = {d_Ex.devPtr(), d_Ey.devPtr(),
+                                         d_Ez.devPtr()};
+    const cudaSolverType* curlB[3] = {d_tempXN.devPtr(), d_tempYN.devPtr(),
+                                      d_tempZN.devPtr()};
+    const cudaSolverType* jhat[3] = {d_Jxh.devPtr(), d_Jyh.devPtr(),
+                                     d_Jzh.devPtr()};
+    const cudaSolverType* gradRhohat[3] = {d_tempX.devPtr(), d_tempY.devPtr(),
+                                           d_tempZ.devPtr()};
+    const double electricScale[3] = {1.0, 1.0, 1.0};
+    const double curlScale[3] = {delt, delt, delt};
+    const double jhatScale[3] = {-delt * FourPI / c, -delt * FourPI / c,
+                                 -delt * FourPI / c};
+    const double gradScale[3] = {-delt * delt * FourPI, -delt * delt * FourPI,
+                                 -delt * delt * FourPI};
+    gpuCycleDiagnostics_.reportArraySet(
+        "maxwell_source_E_contribution", cycle, -1, xyzNames, electric,
+        electricScale, 3, rhsRegion, solverStream_, vct->getFieldComm());
+    gpuCycleDiagnostics_.reportArraySet(
+        "maxwell_source_curlB_contribution", cycle, -1, xyzNames, curlB,
+        curlScale, 3, rhsRegion, solverStream_, vct->getFieldComm());
+    gpuCycleDiagnostics_.reportArraySet(
+        "maxwell_source_Jhat_contribution", cycle, -1, xyzNames, jhat,
+        jhatScale, 3, rhsRegion, solverStream_, vct->getFieldComm());
+    gpuCycleDiagnostics_.reportArraySet(
+        "maxwell_source_grad_rhohat_contribution", cycle, -1, xyzNames,
+        gradRhohat, gradScale, 3, rhsRegion, solverStream_,
+        vct->getFieldComm());
+  }
+#endif
 
   // temp *= -delt² * 4π  (fused triple)
   gpuScale3(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
@@ -2245,6 +2288,30 @@ void EMfields3D::gpuCalculateE(int cycle) {
   const int nMaxwell = maxwellKrylovSize_;
   size_t nodeSize = (size_t)nxn * nyn * nzn;
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  auto reportElectricField = [&](const char* stage, bool includeGhosts) {
+    if (!gpuCycleDiagnosticsStateCycle(cycle))
+      return;
+    const Grid& grid = get_grid();
+    const GPUCycleDiagnosticRegion region = {
+        nxn,
+        nyn,
+        nzn,
+        {includeGhosts ? 0 : 1, includeGhosts ? 0 : 1, includeGhosts ? 0 : 1},
+        {includeGhosts ? nxn : nxn - 1, includeGhosts ? nyn : nyn - 1,
+         includeGhosts ? nzn : nzn - 1},
+        {grid.getXN(0), grid.getYN(0), grid.getZN(0)},
+        {grid.getDX(), grid.getDY(), grid.getDZ()}};
+    static const char* const names[3] = {"Ex", "Ey", "Ez"};
+    const cudaSolverType* arrays[3] = {d_Ex.devPtr(), d_Ey.devPtr(),
+                                       d_Ez.devPtr()};
+    const double scales[3] = {1.0, 1.0, 1.0};
+    gpuCycleDiagnostics_.reportArraySet(stage, cycle, -1, names, arrays, scales,
+                                        3, region, solverStream_,
+                                        vct->getFieldComm());
+  };
+#endif
+
   // Divergence cleaning on E (Poisson correction)
   gpuPoissonCorrection(cycle);
 
@@ -2252,7 +2319,7 @@ void EMfields3D::gpuCalculateE(int cycle) {
     cout << "*** MAXWELL SOLVER [GPU] ***" << endl;
 
   // Build RHS
-  gpuMaxwellSource(d_bkrylovMaxwell.devPtr());
+  gpuMaxwellSource(d_bkrylovMaxwell.devPtr(), cycle);
 
   // Initial guess: pack current E into x
   gpuPhys2Solver3(d_xkrylovMaxwell.devPtr(), d_Ex.devPtr(), d_Ey.devPtr(),
@@ -2290,13 +2357,42 @@ void EMfields3D::gpuCalculateE(int cycle) {
   gpuSolver2Phys3(d_Exth.devPtr(), d_Eyth.devPtr(), d_Ezth.devPtr(),
                   d_xkrylovMaxwell.devPtr(), nxn, nyn, nzn, solverStream_);
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  if (gpuCycleDiagnosticsStateCycle(cycle)) {
+    const Grid& grid = get_grid();
+    const GPUCycleDiagnosticRegion activeNodes = {
+        nxn,
+        nyn,
+        nzn,
+        {1, 1, 1},
+        {nxn - 1, nyn - 1, nzn - 1},
+        {grid.getXN(0), grid.getYN(0), grid.getZN(0)},
+        {grid.getDX(), grid.getDY(), grid.getDZ()}};
+    static const char* const names[3] = {"Exth", "Eyth", "Ezth"};
+    const cudaSolverType* arrays[3] = {d_Exth.devPtr(), d_Eyth.devPtr(),
+                                       d_Ezth.devPtr()};
+    const double scales[3] = {1.0, 1.0, 1.0};
+    gpuCycleDiagnostics_.reportArraySet("Eth_after_solver_unpack", cycle, -1,
+                                        names, arrays, scales, 3, activeNodes,
+                                        solverStream_, vct->getFieldComm());
+  }
+#endif
+
   // E^{n+1} = beta*E + alfa*Eth  where alfa=1/th, beta=-(1-th)/th
   gpuAddscale2_3(1.0 / th, -(1.0 - th) / th, d_Ex.devPtr(), d_Exth.devPtr(),
                  d_Ey.devPtr(), d_Eyth.devPtr(), d_Ez.devPtr(), d_Ezth.devPtr(),
                  nodeSize, solverStream_);
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  reportElectricField("E_after_cycle_solve", false);
+#endif
+
   // Smooth E
   gpuSmoothE();
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  reportElectricField("E_after_smoothing", false);
+#endif
 
   // Communicate final E fields (batched: 2 × 3 fields in 1 MPI round each)
   gpuCommunicateNodeBC_3mixed(nxn, nyn, nzn, d_Exth, col->bcEx, d_Eyth,
@@ -2304,11 +2400,19 @@ void EMfields3D::gpuCalculateE(int cycle) {
   gpuCommunicateNodeBC_3mixed(nxn, nyn, nzn, d_Ex, col->bcEx, d_Ey, col->bcEy,
                               d_Ez, col->bcEz);
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  reportElectricField("E_after_halo_exchange", true);
+#endif
+
   // OpenBC Inflow on solved E fields
   gpuOpenBoundaryInflowE(d_Exth.devPtr(), d_Eyth.devPtr(), d_Ezth.devPtr(), nxn,
                          nyn, nzn);
   gpuOpenBoundaryInflowE(d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr(), nxn, nyn,
                          nzn);
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  reportElectricField("E_after_inflow_boundary", true);
+#endif
 }
 
 // =========================================================================
@@ -2332,6 +2436,29 @@ void EMfields3D::gpuCalculateB(int cycle) {
 
   size_t centSize = (size_t)nxc * nyc * nzc;
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  auto reportMagneticField = [&](const char* stage) {
+    if (!gpuCycleDiagnosticsStateCycle(cycle))
+      return;
+    const GPUCycleDiagnosticRegion activeCenters = {
+        nxc,
+        nyc,
+        nzc,
+        {1, 1, 1},
+        {nxc - 1, nyc - 1, nzc - 1},
+        {grid->getXC(0), grid->getYC(0), grid->getZC(0)},
+        {grid->getDX(), grid->getDY(), grid->getDZ()}};
+    static const char* const names[3] = {"Bx", "By", "Bz"};
+    const cudaSolverType* arrays[3] = {d_Bxc.devPtr(), d_Byc.devPtr(),
+                                       d_Bzc.devPtr()};
+    const double scales[3] = {1.0, 1.0, 1.0};
+    gpuCycleDiagnostics_.reportArraySet(stage, cycle, -1, names, arrays, scales,
+                                        3, activeCenters, solverStream_,
+                                        vct->getFieldComm());
+  };
+  reportMagneticField("B_before_faraday_update");
+#endif
+
   // curl(Eth) → tempXC/YC/ZC
   gpuCurlN2C(d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
              d_Exth.devPtr(), d_Eyth.devPtr(), d_Ezth.devPtr(), nxc, nyc, nzc,
@@ -2341,6 +2468,10 @@ void EMfields3D::gpuCalculateB(int cycle) {
   gpuAddscale3(-c * dt, d_Bxc.devPtr(), d_tempXC.devPtr(), d_Byc.devPtr(),
                d_tempYC.devPtr(), d_Bzc.devPtr(), d_tempZC.devPtr(), centSize,
                solverStream_);
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  reportMagneticField("B_after_faraday_update");
+#endif
 
   // Communicate center B ghost cells (batched: 3 fields in 1 MPI round)
 #ifdef HALO_OVERLAP
@@ -2483,7 +2614,7 @@ void EMfields3D::gpuCalculateB(int cycle) {
 //  GPU calculateHatFunctions: compute Jhat and rhohat
 // =========================================================================
 
-void EMfields3D::gpuCalculateHatFunctions() {
+void EMfields3D::gpuCalculateHatFunctions(int cycle) {
   const Grid* grid = &get_grid();
   double _invdx = grid->get_invdx();
   double _invdy = grid->get_invdy();
@@ -2564,8 +2695,35 @@ void EMfields3D::gpuCalculateHatFunctions() {
     gpuPIdot(d_Jxh, d_Jyh, d_Jzh, d_tempXN, d_tempYN, d_tempZN, is);
   }
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  auto reportJhat = [&](const char* stage) {
+    if (!gpuCycleDiagnosticsStateCycle(cycle))
+      return;
+    static const char* const jhatNames[3] = {"Jhat_x", "Jhat_y", "Jhat_z"};
+    const cudaSolverType* jhatArrays[3] = {d_Jxh.devPtr(), d_Jyh.devPtr(),
+                                           d_Jzh.devPtr()};
+    const double scales[3] = {1.0, 1.0, 1.0};
+    const GPUCycleDiagnosticRegion activeNodes = {
+        nxn,
+        nyn,
+        nzn,
+        {1, 1, 1},
+        {nxn - 1, nyn - 1, nzn - 1},
+        {grid->getXN(0), grid->getYN(0), grid->getZN(0)},
+        {grid->getDX(), grid->getDY(), grid->getDZ()}};
+    gpuCycleDiagnostics_.reportArraySet(stage, cycle, -1, jhatNames, jhatArrays,
+                                        scales, 3, activeNodes, solverStream_,
+                                        get_vct().getParticleComm());
+  };
+  reportJhat("Jhat_after_forming");
+#endif
+
   // Smooth Jhat (batched: 3 fields in 1 MPI round per iteration)
   gpuSmooth3(d_Jxh, d_Jyh, d_Jzh, 1);
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  reportJhat("Jhat_after_smoothing");
+#endif
 
   // rhohat = rhoc - dt*theta*div(Jhat)
   gpuDivN2C(d_tempXC.devPtr(), d_Jxh.devPtr(), d_Jyh.devPtr(), d_Jzh.devPtr(),
@@ -2574,6 +2732,25 @@ void EMfields3D::gpuCalculateHatFunctions() {
   gpuSum(d_tempXC.devPtr(), d_rhoc.devPtr(), centSize, solverStream_);
   gpuEq(d_rhoh.devPtr(), d_tempXC.devPtr(), centSize, solverStream_);
 
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  if (gpuCycleDiagnosticsStateCycle(cycle)) {
+    static const char* const rhohatName[1] = {"rhohat"};
+    const cudaSolverType* rhohatArray[1] = {d_rhoh.devPtr()};
+    const double scale[1] = {1.0};
+    const GPUCycleDiagnosticRegion activeCenters = {
+        nxc,
+        nyc,
+        nzc,
+        {1, 1, 1},
+        {nxc - 1, nyc - 1, nzc - 1},
+        {grid->getXC(0), grid->getYC(0), grid->getZC(0)},
+        {grid->getDX(), grid->getDY(), grid->getDZ()}};
+    gpuCycleDiagnostics_.reportArraySet(
+        "rhohat_after_forming", cycle, -1, rhohatName, rhohatArray, scale, 1,
+        activeCenters, solverStream_, get_vct().getParticleComm());
+  }
+#endif
+
   // Communicate rhoh
   gpuCommunicateCenterBC_P(nxc, nyc, nzc, d_rhoh, 2, 2, 2, 2, 2, 2);
 }
@@ -2581,6 +2758,34 @@ void EMfields3D::gpuCalculateHatFunctions() {
 // =========================================================================
 //  GPU moment-processing: D2D scatter from packed moment buffer
 // =========================================================================
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+void EMfields3D::gpuDiagnosticReportSpeciesMoments(const char* stage, int cycle,
+                                                   int species,
+                                                   cudaStream_t stream) {
+  static const char* const momentNames[10] = {
+      "rho", "Jx", "Jy", "Jz", "Pxx", "Pxy", "Pxz", "Pyy", "Pyz", "Pzz"};
+  const cudaSolverType* momentArrays[10] = {
+      d_rhons.speciesPtr(species), d_Jxs.speciesPtr(species),
+      d_Jys.speciesPtr(species),   d_Jzs.speciesPtr(species),
+      d_pXXsn.speciesPtr(species), d_pXYsn.speciesPtr(species),
+      d_pXZsn.speciesPtr(species), d_pYYsn.speciesPtr(species),
+      d_pYZsn.speciesPtr(species), d_pZZsn.speciesPtr(species)};
+  const double scales[10] = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
+  const Grid& grid = get_grid();
+  const GPUCycleDiagnosticRegion nodeRegion = {
+      nxn,
+      nyn,
+      nzn,
+      {0, 0, 0},
+      {nxn, nyn, nzn},
+      {grid.getXN(0), grid.getYN(0), grid.getZN(0)},
+      {grid.getDX(), grid.getDY(), grid.getDZ()}};
+  gpuCycleDiagnostics_.reportArraySet(stage, cycle, species, momentNames,
+                                      momentArrays, scales, 10, nodeRegion,
+                                      stream, get_vct().getParticleComm());
+}
+#endif
 
 void EMfields3D::gpuScatterMomentsD2D(cudaMomentType* momentsSrc, int species,
                                       cudaStream_t stream) {
@@ -2626,7 +2831,7 @@ void EMfields3D::gpuScatterMomentsD2D(cudaMomentType* momentsSrc, int species,
 //  independently.
 // =========================================================================
 
-void EMfields3D::gpuCommunicateGhostP2G_AllSpecies() {
+void EMfields3D::gpuCommunicateGhostP2G_AllSpecies(int cycle) {
   const VirtualTopology3D* vct = &get_vct();
   const int nFieldsPerSpecies = 10;
   const int speciesPerBatch = HALO_MAX_BATCH / nFieldsPerSpecies; // floor
@@ -2659,6 +2864,16 @@ void EMfields3D::gpuCommunicateGhostP2G_AllSpecies() {
                            /*offsetZero=*/true, /*isFaceOnly=*/false,
                            /*needInterp=*/true, /*isParticle=*/true,
                            solverStream_);
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+    if (gpuCycleDiagnosticsStateCycle(cycle)) {
+      // This is deliberately before boundary-density adjustment and the
+      // copy-style halo: it isolates the additive ghost-to-shared operation.
+      for (int is = isStart; is < isEnd; ++is)
+        gpuDiagnosticReportSpeciesMoments("moments_after_additive_halo", cycle,
+                                          is, solverStream_);
+    }
+#endif
 
     // Phase 2: adjust non-periodic boundary densities
     gpuAdjustNonPeriodicDensities(nFields, d_ptrArray_, nxn, nyn, nzn,

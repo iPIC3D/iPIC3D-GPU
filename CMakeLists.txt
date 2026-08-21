@@ -78,10 +78,28 @@ endif()
 option(USE_OPENMP "Use OpenMP in supported loops" ON) # must delete all cmake cache if you change this option
 option(GPU_SOLVER "Run the entire field solver on GPU (requires CUDA-aware MPI)" OFF)
 option(HALO_OVERLAP "Enable halo-computation overlap in the GPU field solver (requires GPU_SOLVER)" OFF)
+option(GPU_CYCLE_DIAGNOSTICS
+       "Instrument one GPU timestep and the Maxwell RHS that consumes it"
+       OFF)
+set(GPU_DIAGNOSTIC_CYCLE "1" CACHE STRING
+    "Producer cycle instrumented by GPU_CYCLE_DIAGNOSTICS (-1 means every cycle)")
 option(BUILD_UTESTS "Build unit tests" OFF)
 
 if(HALO_OVERLAP AND NOT GPU_SOLVER)
   message(FATAL_ERROR "HALO_OVERLAP requires GPU_SOLVER=ON")
+endif()
+
+if(GPU_CYCLE_DIAGNOSTICS AND NOT GPU_SOLVER)
+  message(FATAL_ERROR "GPU_CYCLE_DIAGNOSTICS requires GPU_SOLVER=ON")
+endif()
+
+if(NOT "${GPU_DIAGNOSTIC_CYCLE}" MATCHES "^-?[0-9]+$")
+  message(FATAL_ERROR
+          "GPU_DIAGNOSTIC_CYCLE must be an integer; got '${GPU_DIAGNOSTIC_CYCLE}'")
+endif()
+if(GPU_DIAGNOSTIC_CYCLE LESS -1 OR GPU_DIAGNOSTIC_CYCLE GREATER 2147483646)
+  message(FATAL_ERROR
+          "GPU_DIAGNOSTIC_CYCLE must be -1 or in [0,2147483646]; got '${GPU_DIAGNOSTIC_CYCLE}'")
 endif()
 
 include(GNUInstallDirs)
@@ -246,6 +264,11 @@ file(
   )
 # CUDA source files
 file(GLOB cuda_src_files ${SOURCE_CODE_DIR}/cudaKernel/*.cu ${SOURCE_CODE_DIR}/main/*.cu)
+if(NOT GPU_CYCLE_DIAGNOSTICS)
+  # Keep even the empty diagnostic CUDA translation unit out of production
+  # builds when tracing is disabled.
+  list(FILTER cuda_src_files EXCLUDE REGEX "/GPUCycleDiagnostics\\.cu$")
+endif()
 if(BENCHMARK_MODE LESS 2)
   file(GLOB data_analysis_src_files ${SOURCE_CODE_DIR}/dataAnalysis/*.cu)
   list(APPEND cuda_src_files ${data_analysis_src_files})
@@ -394,6 +417,15 @@ if(GPU_SOLVER)
   message(STATUS "GPU field solver enabled – requires CUDA-aware MPI at runtime")
 endif()
 
+if(GPU_CYCLE_DIAGNOSTICS)
+  target_compile_definitions(
+    iPIC3Dlib PUBLIC
+    IPIC3D_GPU_CYCLE_DIAGNOSTICS=1
+    IPIC3D_GPU_DIAGNOSTIC_CYCLE=${GPU_DIAGNOSTIC_CYCLE})
+  message(STATUS
+          "GPU cycle diagnostics enabled for producer cycle ${GPU_DIAGNOSTIC_CYCLE}")
+endif()
+
 if(HALO_OVERLAP)
   target_compile_definitions(iPIC3Dlib PUBLIC HALO_OVERLAP)
   message(STATUS "Halo-computation overlap enabled for GPU field solver")
@@ -478,6 +510,7 @@ else()
 endif()
 message(STATUS "  GPU solver                  : ${GPU_SOLVER}  (entire field solver on GPU, requires CUDA-aware MPI at runtime)")
 message(STATUS "  GPU halo overlap            : ${HALO_OVERLAP}  (overlap halo communication with computation in GPU field solver, requires GPU_SOLVER=ON)")
+message(STATUS "  GPU cycle diagnostics       : ${GPU_CYCLE_DIAGNOSTICS}  (producer cycle=${GPU_DIAGNOSTIC_CYCLE})")
 message(STATUS "  HDF5 output                 : ${USE_HDF5}")
 message(STATUS "  HDF5_INCLUDE_DIRS           : ${HDF5_INCLUDE_DIRS}")
 message(STATUS "  HDF5_LIBRARIES              : ${HDF5_LIBRARIES}")

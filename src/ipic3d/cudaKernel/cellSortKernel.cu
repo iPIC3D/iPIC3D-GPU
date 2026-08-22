@@ -158,39 +158,49 @@ launch_cell_sort_histogram(const cudaPclType_X* x, const cudaPclType_Y* y,
  * The algorithm has two tree passes:
  *   1. up-sweep: accumulate subtree sums toward the root
  *   2. down-sweep: propagate exclusive prefixes back to every leaf
+ * The `volatile` accesses forbid caching/sinking of
+ * shared-memory values in registers across levels, and the explicit
+ * `__threadfence_block()` forces all outstanding LDS traffic to complete
+ * before each barrier releases the other wavefronts.
  */
 __device__ __forceinline__ void blelloch_scan_shared(int* data, int n) {
+  volatile int* vdata = data;
   const int tid = threadIdx.x;
   const int nthreads = blockDim.x;
 
   // Up-sweep (reduce)
   int offset = 1;
   for (int d = n >> 1; d > 0; d >>= 1) {
+    __threadfence_block();
     __syncthreads();
     for (int i = tid; i < d; i += nthreads) {
       int ai = offset * (2 * i + 1) - 1;
       int bi = offset * (2 * i + 2) - 1;
-      data[bi] += data[ai];
+      vdata[bi] += vdata[ai];
     }
     offset *= 2;
   }
 
   // Clear last for exclusive scan
+  __threadfence_block();
+  __syncthreads();
   if (tid == 0)
-    data[n - 1] = 0;
+    vdata[n - 1] = 0;
 
   // Down-sweep
   for (int d = 1; d < n; d *= 2) {
     offset >>= 1;
+    __threadfence_block();
     __syncthreads();
     for (int i = tid; i < d; i += nthreads) {
       int ai = offset * (2 * i + 1) - 1;
       int bi = offset * (2 * i + 2) - 1;
-      int t = data[ai];
-      data[ai] = data[bi];
-      data[bi] += t;
+      int t = vdata[ai];
+      vdata[ai] = vdata[bi];
+      vdata[bi] += t;
     }
   }
+  __threadfence_block();
   __syncthreads();
 }
 
@@ -292,6 +302,9 @@ cell_sort_prefix_sum_phase3_kernel(int* __restrict__ data,
   __shared__ int prefix;
   if (threadIdx.x == 0)
     prefix = block_sums[blockIdx.x];
+  // Same cross-wave LDS write->barrier->read shape hardened in
+  // blelloch_scan_shared: fence before releasing the other wavefronts.
+  __threadfence_block();
   __syncthreads();
 
   const int idx1 = blockIdx.x * SORT_SCAN_ELEMENTS_PER_BLOCK + threadIdx.x;

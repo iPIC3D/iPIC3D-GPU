@@ -554,18 +554,24 @@ __device__ uint32_t deleteAppendOpenBCOutflow(
       if (newPos[0] > delBdry[0] && newPos[0] < delBdry[1] &&
           newPos[1] > delBdry[2] && newPos[1] < delBdry[3] &&
           newPos[2] > delBdry[4] && newPos[2] < delBdry[5]) {
-        departureArrayElementType element;
-        const auto index =
-            pclsArray->getNOP() + atomicAdd(&moverParam->appendCountAtomic, 1);
-        // check memory overflow
-        if (index >= pclsArray->getSize()) {
-          printf(
-              "Memory overflow in open boundary outflow (index=%u, size=%u)\n",
-              index, pclsArray->getSize());
-          // Cannot append: drop this duplicate and mark the original
-          // particle for deletion so it doesn't corrupt hashed sums.
+        const uint32_t appendBase = pclsArray->getNOP();
+        const uint32_t capacity = pclsArray->getCapacity();
+        const uint32_t appendCapacity =
+            appendBase < capacity ? capacity - appendBase : 0u;
+        const uint32_t appendOffset =
+            atomicAdd(&moverParam->openBCAppendCounters.accepted, 1u);
+
+        if (appendOffset >= appendCapacity) {
+          // Keep the final accepted count equal to the dense initialized
+          // append prefix. The rejected ticket is necessarily outside that
+          // prefix, so rollback cannot make a valid slot available twice.
+          atomicSub(&moverParam->openBCAppendCounters.accepted, 1u);
+          atomicAdd(&moverParam->openBCAppendCounters.rejected, 1u);
           return departureArrayElementType::DELETE;
         }
+
+        const uint32_t index = appendBase + appendOffset;
+        departureArrayElementType element;
         // Write new particle to SoA arrays
         pclsArray->getX()[index] = newPos[0];
         pclsArray->getY()[index] = newPos[1];

@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <future>
 #include <iostream>
@@ -693,7 +694,6 @@ int c_Solver::initCUDA() {
         &moverParamHostPtr[i]->doOpenBC, moverParamHostPtr[i]->applyOpenBC,
         moverParamHostPtr[i]->deleteBoundary,
         moverParamHostPtr[i]->openBoundary);
-    moverParamHostPtr[i]->appendCountAtomic = 0;
 
     // GPU-side EXIT BC: particles exiting via an EXIT face are marked DELETE
     // on the GPU to avoid sending them through MPI exchange at all.
@@ -1768,15 +1768,16 @@ int c_Solver::cudaLauncherAsync(const int species,
     if (nop > 0)
       momentKernelStayed<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE),
                            DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
-          &(moverParamCUDAPtr[species]->appendCountAtomic),
+          &(moverParamCUDAPtr[species]->openBCAppendCounters.accepted),
           momentParamCUDAPtr[species], grid3DCUDACUDAPtr,
           momentsCUDAPtr[species]);
   }
-  // Mark that momentKernelStayed has finished reading appendCountAtomic and
-  // pclsArrayCUDAPtr->nop_. This event is consumed below before the OpenBC
-  // path resets the device counter and rewrites the particle metadata; it is
-  // recorded unconditionally so the wait is well-defined on every cycle (in
-  // the sorted path it just chains the empty cycle's mover, which is cheap).
+  // Mark that momentKernelStayed has finished reading the accepted OpenBC
+  // append count and pclsArrayCUDAPtr->nop_. This event is consumed below
+  // before the OpenBC path resets the counters and rewrites particle metadata.
+  // It is recorded unconditionally so the wait is well-defined on every cycle
+  // (in the sorted path it just chains the empty cycle's mover, which is
+  // cheap).
   cudaErrChk(cudaEventRecord(stayedMomentsDoneEvt[species], streams[species]));
 
   // Copy 8 hashedSums to host: 6 directions + delete + planet (XLOW..PLANET)
@@ -1787,17 +1788,17 @@ int c_Solver::cudaLauncherAsync(const int species,
           sizeof(hashedSum),
       cudaMemcpyDefault, streams[species + ns]));
 
-  // Copy OpenBC appended particle number to host
+  // Copy OpenBC append accounting to host.
   if (moverParamHostPtr[species]->doOpenBC) {
-    // The D->H read of appendCountAtomic is non-destructive; it only needs
-    // mover ordering (event1 wait above) and may run in parallel with
-    // momentKernelStayed.
-    cudaErrChk(cudaMemcpyAsync(&moverParamHostPtr[species]->appendCountAtomic,
-                               &moverParamCUDAPtr[species]->appendCountAtomic,
-                               sizeof(uint32_t), cudaMemcpyDefault,
-                               streams[species + ns]));
+    // This D->H read is non-destructive; it only needs mover ordering (event1
+    // wait above) and may run in parallel with momentKernelStayed.
+    cudaErrChk(
+        cudaMemcpyAsync(&moverParamHostPtr[species]->openBCAppendCounters,
+                        &moverParamCUDAPtr[species]->openBCAppendCounters,
+                        sizeof(OpenBCAppendCounters), cudaMemcpyDefault,
+                        streams[species + ns]));
     // The next two operations are destructive for momentKernelStayed:
-    //   - cudaMemsetAsync zeros appendCountAtomic, which the kernel reads as
+    //   - cudaMemsetAsync zeros the accepted count, which the kernel reads as
     //     `*appendCount` to compute totPcl = nop + appendCount.
     //   - The H->D rewrite of pclsArrayCUDAPtr below mutates pclsArray->nop_,
     //     which the kernel reads via momentParam->pclsArray->getNOP().
@@ -1806,13 +1807,14 @@ int c_Solver::cudaLauncherAsync(const int species,
     // wins) the OpenBC-appended particles in the moment deposition.
     cudaErrChk(cudaStreamWaitEvent(streams[species + ns],
                                    stayedMomentsDoneEvt[species], 0));
-    cudaErrChk(cudaMemsetAsync(&moverParamCUDAPtr[species]->appendCountAtomic,
-                               0, sizeof(uint32_t), streams[species + ns]));
+    cudaErrChk(
+        cudaMemsetAsync(&moverParamCUDAPtr[species]->openBCAppendCounters, 0,
+                        sizeof(OpenBCAppendCounters), streams[species + ns]));
     cudaErrChk(cudaStreamSynchronize(streams[species + ns]));
 
     const uint32_t newPclAfterOBC =
         pclsArrayHostPtr[species]->getNOP() +
-        moverParamHostPtr[species]->appendCountAtomic;
+        moverParamHostPtr[species]->openBCAppendCounters.accepted;
     pclsArrayHostPtr[species]->setNOE(newPclAfterOBC);
     cudaErrChk(cudaMemcpyAsync(
         pclsArrayCUDAPtr[species], pclsArrayHostPtr[species],
@@ -2282,11 +2284,24 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
 #endif
 
   // ======= Phase 3A: await mover and compaction futures =======
+  bool openBCAppendRejected = false;
   for (int i = 0; i < ns; i++) {
 #if ENABLE_SOA_TIMING
     auto _ta = std::chrono::high_resolution_clock::now();
 #endif
     auto x = exitingResults[i].get(); // holes
+    const auto& appendCounters = moverParamHostPtr[i]->openBCAppendCounters;
+    if (appendCounters.rejected != 0) {
+      openBCAppendRejected = true;
+      const uint32_t postAppendNOP = pclsArrayHostPtr[i]->getNOP();
+      const uint32_t appendBase = postAppendNOP - appendCounters.accepted;
+      std::cerr << "[OpenBC append overflow] rank=" << MPIdata::get_rank()
+                << " cycle=" << cycle << " species=" << i
+                << " base_nop=" << appendBase
+                << " capacity=" << pclsArrayHostPtr[i]->getCapacity()
+                << " accepted=" << appendCounters.accepted
+                << " rejected=" << appendCounters.rejected << std::endl;
+    }
 #if ENABLE_SOA_TIMING
     auto _tb = std::chrono::high_resolution_clock::now();
 #endif
@@ -2297,6 +2312,13 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
              std::chrono::duration<double, std::milli>(_tb - _ta).count(), x,
              stayedParticle[i]);
 #endif
+  }
+
+  if (openBCAppendRejected) {
+#ifndef NO_MPI
+    MPI_Abort(MPIdata::get_PicGlobalComm(), EXIT_FAILURE);
+#endif
+    std::abort();
   }
 #if ENABLE_SOA_TIMING
   auto _t1 = std::chrono::high_resolution_clock::now();

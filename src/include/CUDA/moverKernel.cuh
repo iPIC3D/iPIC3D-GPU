@@ -10,6 +10,12 @@
 #include "particleArrayCUDA.cuh"
 #include "particleExchange.cuh"
 
+/** Per-cycle OpenBC append accounting shared by the mover and host pipeline. */
+struct OpenBCAppendCounters {
+  uint32_t accepted = 0; ///< Dense initialized prefix at mover completion.
+  uint32_t rejected = 0; ///< Reservations rejected because the tail was full.
+};
+
 /**
  * @brief Device-side parameter bundle consumed by the GPU mover kernels.
  *
@@ -46,8 +52,7 @@ public: // common parameter
   bool applyOpenBC[6];
   cudaCommonType deleteBoundary[6];
   cudaCommonType openBoundary[6];
-  uint32_t appendCountAtomic; // the number of duplicated particles to be
-                              // appended to the array, just in time
+  OpenBCAppendCounters openBCAppendCounters;
   ParticleIDGenerator particleIDGenerator;
 
   // For repopulate injection, XLeft, XRight, YLeft, YRight, ZLeft, ZRight

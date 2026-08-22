@@ -416,11 +416,11 @@ private:
                                     // exitingKernel completes
   // Per-species event recorded on streams[i] right AFTER momentKernelStayed
   // (unsorted pipeline only). Used by the OpenBC append-count handling on
-  // streams[i+ns] to ensure the device-side memset of appendCountAtomic and
-  // the H->D rewrite of particleArrayCUDA metadata happen-after the kernel
-  // that reads them. Without this edge, momentKernelStayed can observe a
-  // reset counter or a torn nop_ value, dropping or double-counting OpenBC-
-  // appended particles in the moment deposition.
+  // streams[i+ns] to ensure the device-side counter reset and H->D rewrite of
+  // particleArrayCUDA metadata happen-after the kernel that reads them.
+  // Without this edge, momentKernelStayed can observe a reset accepted count
+  // or a torn nop_ value, dropping or double-counting OpenBC-appended particles
+  // in the moment deposition.
   cudaEvent_t* stayedMomentsDoneEvt; // [ns]
   cudaEvent_t*
       heatFluxReadDoneEvt; // [ns] : heat kernel has finished reading particles

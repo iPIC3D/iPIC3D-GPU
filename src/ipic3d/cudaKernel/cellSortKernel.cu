@@ -244,30 +244,6 @@ __global__ void cell_sort_prefix_sum_phase1_kernel(
   sdata[tid] = val1;
   sdata[tid + SORT_SCAN_BLOCK_SIZE] = val2;
   __syncthreads();
-
-  // Block total via warp reduction
-  int local_sum = val1 + val2;
-  local_sum = warp_reduce_sum(local_sum);
-
-  constexpr int num_warps = SORT_SCAN_BLOCK_SIZE / WARP_SIZE;
-  __shared__ int warp_sums[num_warps];
-  int warp_id = tid / WARP_SIZE;
-  int lane = tid & (WARP_SIZE - 1);
-  if (lane == 0)
-    warp_sums[warp_id] = local_sum;
-  __syncthreads();
-
-  __shared__ int block_total;
-  if (tid < num_warps) {
-    local_sum = warp_sums[tid];
-    for (int off = num_warps / 2; off > 0; off >>= 1)
-      local_sum += __shfl_down_sync(
-          static_cast<warp_mask_t>((1ull << num_warps) - 1), local_sum, off);
-    if (tid == 0)
-      block_total = local_sum;
-  }
-  __syncthreads();
-
   // Blelloch scan
   blelloch_scan_shared(sdata, SORT_SCAN_ELEMENTS_PER_BLOCK);
 
@@ -276,8 +252,14 @@ __global__ void cell_sort_prefix_sum_phase1_kernel(
   if (idx2 < num_elements)
     output[idx2] = sdata[tid + SORT_SCAN_BLOCK_SIZE];
 
-  if (tid == 0)
-    block_sums[blockIdx.x] = block_total;
+  // The scan is exclusive, so its final entry contains the sum of every tile
+  // value except the last.  Thread 255 originally loaded that final value into
+  // val2; adding it recovers the exact tile total without a non-portable
+  // partial-warp reduction.  Zero padding makes this valid for the final
+  // partially filled tile as well.
+  if (tid == SORT_SCAN_BLOCK_SIZE - 1)
+    block_sums[blockIdx.x] =
+        sdata[SORT_SCAN_ELEMENTS_PER_BLOCK - 1] + val2;
 }
 
 /**
@@ -622,7 +604,7 @@ __host__ int CellSorter::diagnosticCompiledWarpMaskBytes() const {
   return sizeof(warp_mask_t);
 }
 
-__host__ int CellSorter::diagnosticAlgorithmVersion() const { return 1; }
+__host__ int CellSorter::diagnosticAlgorithmVersion() const { return 2; }
 
 __host__ int CellSorter::diagnosticEnqueuePointerMutationMask(
     const particleArrayCUDA& particles) const {

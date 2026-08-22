@@ -390,8 +390,7 @@ __global__ void k_dotReduce(const T* __restrict__ a, const T* __restrict__ b,
   }
 
   // Warp-level reduction
-  for (int offset = warpSize / 2; offset > 0; offset >>= 1)
-    sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+  sum = warp_reduce_sum(sum);
 
   // First lane of each warp writes to shared memory
   __shared__ T warpSums[MAX_WARPS];
@@ -404,8 +403,7 @@ __global__ void k_dotReduce(const T* __restrict__ a, const T* __restrict__ b,
   // First warp reduces warp sums
   if (warpId == 0) {
     sum = (lane < MAX_WARPS) ? warpSums[lane] : 0.0;
-    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
-      sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+    sum = warp_reduce_sum(sum);
     if (lane == 0)
       atomicAdd(d_result, sum);
   }
@@ -422,8 +420,7 @@ __global__ void k_norm2Reduce(const T* __restrict__ a, size_t n,
     sum += v * v;
   }
 
-  for (int offset = warpSize / 2; offset > 0; offset >>= 1)
-    sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+  sum = warp_reduce_sum(sum);
 
   __shared__ T warpSums[MAX_WARPS];
   int lane = threadIdx.x % WARP_SIZE;
@@ -434,8 +431,7 @@ __global__ void k_norm2Reduce(const T* __restrict__ a, size_t n,
 
   if (warpId == 0) {
     sum = (lane < MAX_WARPS) ? warpSums[lane] : 0.0;
-    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
-      sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+    sum = warp_reduce_sum(sum);
     if (lane == 0)
       atomicAdd(d_result, sum);
   }
@@ -552,8 +548,7 @@ __global__ void k_batchedDotNorm(const T* __restrict__ w,
 
   // Warp-level reduction for ALL accumulators
   for (int j = 0; j < total; j++) {
-    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
-      sums[j] += __shfl_down_sync(0xFFFFFFFF, sums[j], offset);
+    sums[j] = warp_reduce_sum(sums[j]);
   }
 
   // Per-warp partial sums to shared memory
@@ -571,8 +566,7 @@ __global__ void k_batchedDotNorm(const T* __restrict__ w,
   if (warpId == 0) {
     for (int j = 0; j < total; j++) {
       T val = (lane < MAX_WARPS) ? smem[lane * total + j] : 0.0;
-      for (int offset = warpSize / 2; offset > 0; offset >>= 1)
-        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+      val = warp_reduce_sum(val);
       if (lane == 0)
         atomicAdd(&d_out[j], val);
     }

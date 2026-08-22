@@ -91,8 +91,9 @@ public:
                       cudaStream_t stream, MPI_Comm comm);
 
   /**
-   * Validate the preserved Stage 1 histogram, Stage 2 scan, Stage 3 counters
-   * and permutation, then arm exact poison checks for the pending Stage 4.
+   * Validate the preserved Stage 1 histogram, raw Phase-1 tile totals, the
+   * completed Stage 2 scan, Stage 3 counters and permutation, then arm exact
+   * poison checks for the pending Stage 4.
    */
   void reportCellSorterBeforeScatter(int cycle, int species, CellSorter& sorter,
                                      const particleArrayCUDA& particles,

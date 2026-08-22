@@ -230,6 +230,57 @@ __host__ __device__ void combineSortTilePartial(SortTilePartial& dst,
   }
 }
 
+struct SortPhase1TotalPartial {
+  unsigned long long checkedCount;
+  unsigned long long checkedCellCount;
+  unsigned long long mismatchCount;
+  long long rawSum;
+  long long expectedSum;
+  unsigned long long expectedOutOfIntRangeCount;
+  unsigned long long firstBlock;
+  long long firstRaw;
+  long long firstExpected;
+  long long firstDelta;
+  unsigned long long maxError;
+  unsigned long long worstBlock;
+  long long worstRaw;
+  long long worstExpected;
+  long long worstDelta;
+};
+
+__host__ __device__ SortPhase1TotalPartial emptySortPhase1TotalPartial() {
+  SortPhase1TotalPartial p{};
+  p.firstBlock = DIAG_INVALID_INDEX;
+  p.worstBlock = DIAG_INVALID_INDEX;
+  return p;
+}
+
+__host__ __device__ void
+combineSortPhase1TotalPartial(SortPhase1TotalPartial& dst,
+                              const SortPhase1TotalPartial& src) {
+  dst.checkedCount += src.checkedCount;
+  dst.checkedCellCount += src.checkedCellCount;
+  dst.mismatchCount += src.mismatchCount;
+  dst.rawSum += src.rawSum;
+  dst.expectedSum += src.expectedSum;
+  dst.expectedOutOfIntRangeCount += src.expectedOutOfIntRangeCount;
+  if (src.firstBlock < dst.firstBlock) {
+    dst.firstBlock = src.firstBlock;
+    dst.firstRaw = src.firstRaw;
+    dst.firstExpected = src.firstExpected;
+    dst.firstDelta = src.firstDelta;
+  }
+  if (src.worstBlock != DIAG_INVALID_INDEX &&
+      (dst.worstBlock == DIAG_INVALID_INDEX || src.maxError > dst.maxError ||
+       (src.maxError == dst.maxError && src.worstBlock < dst.worstBlock))) {
+    dst.maxError = src.maxError;
+    dst.worstBlock = src.worstBlock;
+    dst.worstRaw = src.worstRaw;
+    dst.worstExpected = src.worstExpected;
+    dst.worstDelta = src.worstDelta;
+  }
+}
+
 struct SortBlockPrefixPartial {
   unsigned long long mismatchCount;
   unsigned long long firstBlock;
@@ -444,6 +495,7 @@ struct CellSortBlockReport {
   SortPrefixPartial prefix;
   SortReservationPartial reservation;
   SortTilePartial tiles;
+  SortPhase1TotalPartial phase1Totals;
   SortBlockPrefixPartial blockPrefix;
   SortPermutationPartial permutation;
   SortOccupancyPartial occupancy;
@@ -455,6 +507,7 @@ struct CellSortLocalReport {
   SortPrefixPartial prefix;
   SortReservationPartial reservation;
   SortTilePartial tiles;
+  SortPhase1TotalPartial phase1Totals;
   SortBlockPrefixPartial blockPrefix;
   SortPermutationPartial permutation;
   SortOccupancyPartial occupancy;
@@ -480,6 +533,7 @@ struct CellSortLocalReport {
   int sorterWarpMaskBytes;
   int sorterAlgorithmVersion;
   int invariantsChecked;
+  int phase1TotalsChecked;
   int permutationChecked;
   int occupancyChecked;
   int pendingHostMatches;
@@ -755,6 +809,68 @@ __global__ void reduceSortTiles(const int* starts, const int* counts,
   }
   if (threadIdx.x == 0)
     results[blockIdx.x].tiles = shared[0];
+}
+
+/** Compare every preserved raw Phase-1 tile total with its 512-bin sum. */
+__global__ void reduceSortPhase1Totals(const int* rawBlockTotals,
+                                       const int* counts, int numCells,
+                                       int numBlocks,
+                                       CellSortBlockReport* results) {
+  __shared__ SortPhase1TotalPartial shared[DIAG_THREADS];
+  SortPhase1TotalPartial local = emptySortPhase1TotalPartial();
+  const unsigned long long stride =
+      static_cast<unsigned long long>(gridDim.x) * blockDim.x;
+  for (unsigned long long block =
+           static_cast<unsigned long long>(blockIdx.x) * blockDim.x +
+           threadIdx.x;
+       block < static_cast<unsigned long long>(numBlocks); block += stride) {
+    const int tileStart =
+        static_cast<int>(block) * SORT_SCAN_ELEMENTS_PER_BLOCK;
+    const int uncappedTileEnd = tileStart + SORT_SCAN_ELEMENTS_PER_BLOCK;
+    const int tileEnd = uncappedTileEnd < numCells ? uncappedTileEnd : numCells;
+    long long expected = 0;
+    for (int cell = tileStart; cell < tileEnd; ++cell)
+      expected += static_cast<long long>(counts[cell]);
+
+    const long long raw = rawBlockTotals[block];
+    const long long delta = raw - expected;
+    ++local.checkedCount;
+    local.checkedCellCount +=
+        static_cast<unsigned long long>(tileEnd - tileStart);
+    local.rawSum += raw;
+    local.expectedSum += expected;
+    if (expected < INT_MIN || expected > INT_MAX)
+      ++local.expectedOutOfIntRangeCount;
+    if (delta == 0)
+      continue;
+
+    const unsigned long long error = magnitude(delta);
+    ++local.mismatchCount;
+    if (block < local.firstBlock) {
+      local.firstBlock = block;
+      local.firstRaw = raw;
+      local.firstExpected = expected;
+      local.firstDelta = delta;
+    }
+    if (local.worstBlock == DIAG_INVALID_INDEX || error > local.maxError ||
+        (error == local.maxError && block < local.worstBlock)) {
+      local.maxError = error;
+      local.worstBlock = block;
+      local.worstRaw = raw;
+      local.worstExpected = expected;
+      local.worstDelta = delta;
+    }
+  }
+  shared[threadIdx.x] = local;
+  __syncthreads();
+  for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+    if (threadIdx.x < offset)
+      combineSortPhase1TotalPartial(shared[threadIdx.x],
+                                   shared[threadIdx.x + offset]);
+    __syncthreads();
+  }
+  if (threadIdx.x == 0)
+    results[blockIdx.x].phase1Totals = shared[0];
 }
 
 __global__ void reduceSortBlockPrefixes(const int* blockPrefixes,
@@ -1354,6 +1470,7 @@ CellSortLocalReport foldCellSortPartials(const CellSortBlockReport* partials,
   result.prefix = emptySortPrefixPartial();
   result.reservation = emptySortReservationPartial();
   result.tiles = emptySortTilePartial();
+  result.phase1Totals = emptySortPhase1TotalPartial();
   result.blockPrefix = emptySortBlockPrefixPartial();
   result.permutation = emptySortPermutationPartial();
   result.occupancy = emptySortOccupancyPartial();
@@ -1364,8 +1481,11 @@ CellSortLocalReport foldCellSortPartials(const CellSortBlockReport* partials,
   }
   for (int i = 0; i < tileBlocks; ++i)
     combineSortTilePartial(result.tiles, partials[i].tiles);
-  for (int i = 0; i < blockBlocks; ++i)
+  for (int i = 0; i < blockBlocks; ++i) {
+    combineSortPhase1TotalPartial(result.phase1Totals,
+                                  partials[i].phase1Totals);
     combineSortBlockPrefixPartial(result.blockPrefix, partials[i].blockPrefix);
+  }
   for (int i = 0; i < permutationBlocks; ++i)
     combineSortPermutationPartial(result.permutation, partials[i].permutation);
   for (int i = 0; i < occupancyBlocks; ++i)
@@ -1452,7 +1572,7 @@ bool findSorterPointerAlias(
     const void* const sorterBuffers[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT],
     int& firstA, int& firstB) {
   // Stable indices are shared with the metadata names below:
-  // u..id = 0..7, scratch = 8, sorter buffers = 9..13.
+  // u..id = 0..7, scratch = 8, sorter buffers = 9..14.
   constexpr int pointerCount = CELL_SORT_DIAGNOSTIC_MAX_FIELDS + 1 +
                                CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT;
   const void* pointers[pointerCount] = {
@@ -1470,6 +1590,7 @@ bool findSorterPointerAlias(
       sorterBuffers[2],
       sorterBuffers[3],
       sorterBuffers[4],
+      sorterBuffers[5],
   };
   firstA = firstB = -1;
   for (int i = 0; i < pointerCount; ++i) {
@@ -2043,6 +2164,7 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
   local.prefix = emptySortPrefixPartial();
   local.reservation = emptySortReservationPartial();
   local.tiles = emptySortTilePartial();
+  local.phase1Totals = emptySortPhase1TotalPartial();
   local.blockPrefix = emptySortBlockPrefixPartial();
   local.permutation = emptySortPermutationPartial();
   local.occupancy = emptySortOccupancyPartial();
@@ -2142,7 +2264,7 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
   const void* currentSortBuffers[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT] = {
       sorter.getCellCounts(), sorter.diagnosticCellOffsets(),
       sorter.getCellStartOffsets(), sorter.diagnosticSortedIndices(),
-      sorter.diagnosticBlockSums()};
+      sorter.diagnosticBlockSums(), sorter.diagnosticPhase1BlockSums()};
   for (int buffer = 0; buffer < CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT;
        ++buffer) {
     if (!(local.enqueueSortBufferMutationMask & (1 << buffer)))
@@ -2192,6 +2314,9 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
   if (local.numCells > SORT_SCAN_ELEMENTS_PER_BLOCK &&
       !sorter.diagnosticBlockSums())
     local.sorterPointerNullMask |= 1 << 4;
+  if (local.numCells > SORT_SCAN_ELEMENTS_PER_BLOCK &&
+      !sorter.diagnosticPhase1BlockSums())
+    local.sorterPointerNullMask |= 1 << 5;
   local.sorterPointerAlias =
       findSorterPointerAlias(*soa, sorter.diagnosticScratchPointer(),
                              currentSortBuffers, local.firstAliasPointerA,
@@ -2255,6 +2380,11 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
           impl_->dCellSortPartials);
       cudaErrChk(cudaGetLastError());
       blockBlocks = reductionBlocks(local.numScanBlocks);
+      reduceSortPhase1Totals<<<blockBlocks, DIAG_THREADS, 0, stream>>>(
+          sorter.diagnosticPhase1BlockSums(), sorter.getCellCounts(),
+          local.numCells, local.numScanBlocks, impl_->dCellSortPartials);
+      cudaErrChk(cudaGetLastError());
+      local.phase1TotalsChecked = 1;
       reduceSortBlockPrefixes<<<blockBlocks, DIAG_THREADS, 0, stream>>>(
           sorter.diagnosticBlockSums(), sorter.getCellCounts(), local.numCells,
           local.numScanBlocks, impl_->dCellSortPartials);
@@ -2308,6 +2438,7 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
     local.prefix = folded.prefix;
     local.reservation = folded.reservation;
     local.tiles = folded.tiles;
+    local.phase1Totals = folded.phase1Totals;
     local.blockPrefix = folded.blockPrefix;
     local.permutation = folded.permutation;
     local.occupancy = folded.occupancy;
@@ -2533,7 +2664,7 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
       static const char* const
           bufferNames[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT] = {
               "cell_counts", "cell_offsets", "cell_start_offsets",
-              "sorted_indices", "block_sums"};
+              "sorted_indices", "block_sums", "phase1_block_sums"};
       const auto& mutation = reports[enqueueSortBufferMutationOwner];
       int cart[3];
       cartesianCoordinates(comm, enqueueSortBufferMutationOwner, cart);
@@ -2623,14 +2754,19 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
                                                  "cell_offsets",
                                                  "cell_starts",
                                                  "sorted_indices",
-                                                 "block_sums"};
+                                                 "block_sums",
+                                                 "phase1_block_sums"};
       const auto& alias = reports[sorterAliasOwner];
       int cart[3];
       cartesianCoordinates(comm, sorterAliasOwner, cart);
       metadata << " first_sorter_alias_rank=" << sorterAliasOwner << " cart=("
                << cart[0] << ',' << cart[1] << ',' << cart[2] << ')';
-      if (alias.firstAliasPointerA >= 0 && alias.firstAliasPointerA < 14 &&
-          alias.firstAliasPointerB >= 0 && alias.firstAliasPointerB < 14)
+      constexpr int pointerNameCount =
+          sizeof(pointerNames) / sizeof(pointerNames[0]);
+      if (alias.firstAliasPointerA >= 0 &&
+          alias.firstAliasPointerA < pointerNameCount &&
+          alias.firstAliasPointerB >= 0 &&
+          alias.firstAliasPointerB < pointerNameCount)
         metadata << " pointer_a=" << pointerNames[alias.firstAliasPointerA]
                  << " pointer_b=" << pointerNames[alias.firstAliasPointerB];
     }
@@ -2662,6 +2798,121 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
     }
     std::cout << histogram.str() << std::endl;
 
+    int phase1ExpectedRanks = 0;
+    int phase1CheckedRanks = 0;
+    int phase1CoverageMismatchRanks = 0;
+    int phase1MismatchRanks = 0;
+    int firstPhase1MismatchOwner = -1;
+    int worstPhase1MismatchOwner = -1;
+    unsigned long long phase1ExpectedTiles = 0;
+    unsigned long long phase1CheckedTiles = 0;
+    unsigned long long phase1ExpectedCells = 0;
+    unsigned long long phase1CheckedCells = 0;
+    unsigned long long phase1RawMismatch = 0;
+    unsigned long long phase1ExpectedOutOfIntRange = 0;
+    long long phase1RawSum = 0;
+    long long phase1ExpectedSum = 0;
+    for (int r = 0; r < ranks; ++r) {
+      if (reports[r].sortPending &&
+          reports[r].numCells > SORT_SCAN_ELEMENTS_PER_BLOCK) {
+        ++phase1ExpectedRanks;
+        phase1ExpectedTiles += reports[r].numScanBlocks;
+        phase1ExpectedCells += reports[r].numCells;
+      }
+      if (!reports[r].phase1TotalsChecked)
+        continue;
+
+      ++phase1CheckedRanks;
+      phase1CheckedTiles += reports[r].phase1Totals.checkedCount;
+      phase1CheckedCells += reports[r].phase1Totals.checkedCellCount;
+      if (reports[r].phase1Totals.checkedCount !=
+              static_cast<unsigned long long>(reports[r].numScanBlocks) ||
+          reports[r].phase1Totals.checkedCellCount !=
+              static_cast<unsigned long long>(reports[r].numCells))
+        ++phase1CoverageMismatchRanks;
+      phase1RawMismatch += reports[r].phase1Totals.mismatchCount;
+      phase1RawSum += reports[r].phase1Totals.rawSum;
+      phase1ExpectedSum += reports[r].phase1Totals.expectedSum;
+      phase1ExpectedOutOfIntRange +=
+          reports[r].phase1Totals.expectedOutOfIntRangeCount;
+      if (reports[r].phase1Totals.mismatchCount) {
+        ++phase1MismatchRanks;
+        if (firstPhase1MismatchOwner < 0)
+          firstPhase1MismatchOwner = r;
+      }
+      if (reports[r].phase1Totals.worstBlock == DIAG_INVALID_INDEX)
+        continue;
+      if (worstPhase1MismatchOwner < 0 ||
+          reports[r].phase1Totals.maxError >
+              reports[worstPhase1MismatchOwner].phase1Totals.maxError)
+        worstPhase1MismatchOwner = r;
+    }
+
+    std::ostringstream phase1Totals;
+    phase1Totals
+        << "[GPU-CYCLE-DIAG] cycle=" << cycle
+        << " stage=cell_sort_stage2_phase1_raw_totals species=" << species
+        << " path="
+        << (reports[0].numCells > SORT_SCAN_ELEMENTS_PER_BLOCK ? "multi_block"
+                                                               : "single_block")
+        << " expected_ranks=" << phase1ExpectedRanks
+        << " checked_ranks=" << phase1CheckedRanks
+        << " skipped_ranks=" << (phase1ExpectedRanks - phase1CheckedRanks)
+        << " expected_tiles=" << phase1ExpectedTiles
+        << " checked_tiles=" << phase1CheckedTiles
+        << " expected_histogram_cells=" << phase1ExpectedCells
+        << " checked_histogram_cells=" << phase1CheckedCells
+        << " coverage_mismatch_ranks=" << phase1CoverageMismatchRanks
+        << " mismatching_ranks=" << phase1MismatchRanks
+        << " mismatching_tiles=" << phase1RawMismatch
+        << " raw_sum=" << phase1RawSum
+        << " expected_sum=" << phase1ExpectedSum
+        << " delta=" << (phase1RawSum - phase1ExpectedSum)
+        << " expected_out_of_int_range_tiles="
+        << phase1ExpectedOutOfIntRange << " max_abs_delta="
+        << (worstPhase1MismatchOwner >= 0
+                ? reports[worstPhase1MismatchOwner].phase1Totals.maxError
+                : 0);
+    if (firstPhase1MismatchOwner >= 0) {
+      const auto& first =
+          reports[firstPhase1MismatchOwner].phase1Totals;
+      int cart[3];
+      cartesianCoordinates(comm, firstPhase1MismatchOwner, cart);
+      const unsigned long long firstCell =
+          first.firstBlock * SORT_SCAN_ELEMENTS_PER_BLOCK;
+      const unsigned long long firstCellEnd = std::min<unsigned long long>(
+          firstCell + SORT_SCAN_ELEMENTS_PER_BLOCK,
+          reports[firstPhase1MismatchOwner].numCells);
+      phase1Totals << " first_mismatch_rank=" << firstPhase1MismatchOwner
+                   << " first_mismatch_cart=(" << cart[0] << ',' << cart[1]
+                   << ',' << cart[2] << ") first_mismatch_block="
+                   << first.firstBlock << " first_mismatch_cell_range=["
+                   << firstCell << ':' << firstCellEnd << ") first_raw="
+                   << first.firstRaw << " first_expected="
+                   << first.firstExpected << " first_delta="
+                   << first.firstDelta;
+    }
+    if (worstPhase1MismatchOwner >= 0) {
+      const auto& worst =
+          reports[worstPhase1MismatchOwner].phase1Totals;
+      int cart[3];
+      cartesianCoordinates(comm, worstPhase1MismatchOwner, cart);
+      const unsigned long long worstCell =
+          worst.worstBlock * SORT_SCAN_ELEMENTS_PER_BLOCK;
+      const unsigned long long worstCellEnd = std::min<unsigned long long>(
+          worstCell + SORT_SCAN_ELEMENTS_PER_BLOCK,
+          reports[worstPhase1MismatchOwner].numCells);
+      phase1Totals << " worst_mismatch_rank=" << worstPhase1MismatchOwner
+                   << " worst_mismatch_cart=(" << cart[0] << ',' << cart[1]
+                   << ',' << cart[2] << ") worst_mismatch_block="
+                   << worst.worstBlock << " worst_mismatch_cell_range=["
+                   << worstCell << ':' << worstCellEnd << ") worst_raw="
+                   << worst.worstRaw << " worst_expected="
+                   << worst.worstExpected << " worst_delta="
+                   << worst.worstDelta;
+    }
+    std::cout << phase1Totals.str() << std::endl;
+
     unsigned long long tileBase = 0, tileLocal = 0, tileTerminal = 0;
     unsigned long long blockMismatch = 0;
     for (int r = 0; r < ranks; ++r) {
@@ -2686,7 +2937,9 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
            << " tile_base_mismatches=" << tileBase
            << " tile_local_mismatches=" << tileLocal
            << " tile_terminal_mismatches=" << tileTerminal
-           << " block_prefix_mismatches=" << blockMismatch;
+           << " phase1_raw_total_mismatches=" << phase1RawMismatch
+           << " block_prefix_mismatches=" << blockMismatch
+           << " phase2_block_prefix_mismatches=" << blockMismatch;
     if (owner >= 0) {
       if (reports[owner].tiles.baseMismatchCount) {
         appendRankCell(phases, "first_tile_base", owner,

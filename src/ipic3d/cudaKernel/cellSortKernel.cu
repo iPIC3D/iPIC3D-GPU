@@ -325,7 +325,11 @@ __host__ inline int next_power_of_2(int v) {
  */
 __host__ inline void launch_cell_sort_prefix_sum(int* cell_offsets,
                                                  const int* cell_counts,
-                                                 int* block_sums, int num_cells,
+                                                 int* block_sums,
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+                                                 int* phase1_block_sums,
+#endif
+                                                 int num_cells,
                                                  cudaStream_t stream) {
   if (num_cells == 0)
     return;
@@ -347,6 +351,18 @@ __host__ inline void launch_cell_sort_prefix_sum(int* cell_offsets,
   cell_sort_prefix_sum_phase1_kernel<<<nblocks, SORT_SCAN_BLOCK_SIZE,
                                        phase1_shmem, stream>>>(
       cell_offsets, block_sums, cell_counts, num_cells);
+
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  // Phase 2 scans `block_sums` in place.  Preserve the exact Phase-1 output
+  // first so diagnostics can compare every raw tile total with a direct sum
+  // of the corresponding histogram cells.  The same stream orders
+  // Phase 1 -> snapshot -> Phase 2 without adding a synchronization point.
+  cudaErrChk(cudaGetLastError());
+  if (phase1_block_sums)
+    cudaErrChk(cudaMemcpyAsync(phase1_block_sums, block_sums,
+                               nblocks * sizeof(int), cudaMemcpyDeviceToDevice,
+                               stream));
+#endif
 
   // ======= Phase 2: Scan the tile totals in one block =======
   int phase2_padded = next_power_of_2(nblocks);
@@ -604,7 +620,7 @@ __host__ int CellSorter::diagnosticCompiledWarpMaskBytes() const {
   return sizeof(warp_mask_t);
 }
 
-__host__ int CellSorter::diagnosticAlgorithmVersion() const { return 2; }
+__host__ int CellSorter::diagnosticAlgorithmVersion() const { return 3; }
 
 __host__ int CellSorter::diagnosticEnqueuePointerMutationMask(
     const particleArrayCUDA& particles) const {
@@ -638,7 +654,8 @@ __host__ int CellSorter::diagnosticEnqueueSortBufferMutationMask() const {
     return 1 << 14;
   const void* current[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT] = {
       buffers.cell_counts, buffers.cell_offsets, buffers.cell_start_offsets,
-      buffers.sorted_indices, buffers.block_sums};
+      buffers.sorted_indices, buffers.block_sums,
+      buffers.diagnostic_phase1_block_sums};
   int mask = 0;
   for (int buffer = 0; buffer < CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT;
        ++buffer)
@@ -748,7 +765,8 @@ __host__ void CellSorter::enqueueSortAsync(particleArrayCUDA* hostPtr,
   diagnostic_enqueue_scratch = reinterpret_cast<std::uintptr_t>(scratch.ptr);
   const void* enqueueSortBuffers[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT] = {
       buffers.cell_counts, buffers.cell_offsets, buffers.cell_start_offsets,
-      buffers.sorted_indices, buffers.block_sums};
+      buffers.sorted_indices, buffers.block_sums,
+      buffers.diagnostic_phase1_block_sums};
   for (int buffer = 0; buffer < CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT;
        ++buffer)
     diagnostic_enqueue_sort_buffers[buffer] =
@@ -767,7 +785,11 @@ __host__ void CellSorter::enqueueSortAsync(particleArrayCUDA* hostPtr,
 
   // ======= Stage 2: Prefix sum =======
   launch_cell_sort_prefix_sum(buffers.cell_offsets, buffers.cell_counts,
-                              buffers.block_sums, num_cells, s);
+                              buffers.block_sums,
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+                              buffers.diagnostic_phase1_block_sums,
+#endif
+                              num_cells, s);
 
   // Preserve the Stage 2 output before Stage 3 mutates `cell_offsets`.
   cudaErrChk(cudaMemcpyAsync(buffers.cell_start_offsets, buffers.cell_offsets,

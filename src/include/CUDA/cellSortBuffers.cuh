@@ -43,7 +43,7 @@ inline constexpr int CELL_SORT_DIAGNOSTIC_MAX_BLOCKS = 256;
 
 /** Number of sortable SoA fields, including the optional particle ID. */
 inline constexpr int CELL_SORT_DIAGNOSTIC_MAX_FIELDS = 8;
-inline constexpr int CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT = 5;
+inline constexpr int CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT = 6;
 inline constexpr int CELL_SORT_DIAGNOSTIC_ALLOCATION_METADATA_COUNT = 6;
 
 /**
@@ -87,6 +87,11 @@ struct CellSortBuffers {
                                 // 4 scatter.
   int* block_sums; // [num_scan_blocks] Stage 2 temporary storage for block
                    // totals.
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+  // Immutable snapshot of the raw Phase-1 tile totals, captured before the
+  // in-place Phase-2 scan destroys `block_sums`.
+  int* diagnostic_phase1_block_sums = nullptr; // [num_scan_blocks]
+#endif
 
   int num_cells = 0;
   int num_scan_blocks = 0;
@@ -110,6 +115,10 @@ struct CellSortBuffers {
     cudaErrChk(cudaMalloc(&cell_start_offsets, ncells * sizeof(int)));
     cudaErrChk(cudaMalloc(&sorted_indices, max_pcl * sizeof(unsigned int)));
     cudaErrChk(cudaMalloc(&block_sums, num_scan_blocks * sizeof(int)));
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+    cudaErrChk(cudaMalloc(&diagnostic_phase1_block_sums,
+                          num_scan_blocks * sizeof(int)));
+#endif
 
     allocated = true;
   }
@@ -125,6 +134,10 @@ struct CellSortBuffers {
     cudaFree(cell_start_offsets);
     cudaFree(sorted_indices);
     cudaFree(block_sums);
+#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
+    cudaFree(diagnostic_phase1_block_sums);
+    diagnostic_phase1_block_sums = nullptr;
+#endif
     cell_counts = cell_offsets = cell_start_offsets = block_sums = nullptr;
     sorted_indices = nullptr;
     allocated = false;
@@ -307,6 +320,9 @@ struct CellSorter {
     return buffers.sorted_indices;
   }
   __host__ const int* diagnosticBlockSums() const { return buffers.block_sums; }
+  __host__ const int* diagnosticPhase1BlockSums() const {
+    return buffers.diagnostic_phase1_block_sums;
+  }
   __host__ int diagnosticNumScanBlocks() const {
     return buffers.num_scan_blocks;
   }

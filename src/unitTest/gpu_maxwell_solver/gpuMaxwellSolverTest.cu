@@ -1,7 +1,7 @@
 /**
  * Run with mpirun -n 8 ./gpuMaxwellSolverTest --case all
- * to execute all test cases, or with --case periodic, --case reflective, or
- * --case manufactured to run a single case.
+ * to execute all test cases, or with --case periodic, --case reflective,
+ * --case manufactured, or --case oblique-wave to run a single case.
  */
 
 #include <mpi.h>
@@ -17,10 +17,12 @@
 #include "VCtopology3D.h"
 #include "cudaTypeDef.cuh"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -32,6 +34,21 @@ namespace {
 constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr const char* kZeros12 = "0 0 0 0 0 0 0 0 0 0 0 0";
 constexpr const char* kOnes12 = "1 1 1 1 1 1 1 1 1 1 1 1";
+// At th=1 the coupled Maxwell update is backward Euler.  The two references
+// below separate its second-order spatial error from the first-order temporal
+// error of a fixed-final-time dt ~ h refinement.
+constexpr std::array<int, 3> kObliqueWaveCells = {16, 32, 64};
+constexpr double kObliqueWaveLength = 1.0;
+constexpr double kObliqueWaveFinalTime = 0.05;
+constexpr double kObliqueWaveCourant = 0.2;
+constexpr double kMinimumSpatialOrder = 1.8;
+constexpr double kMaximumSpatialOrder = 2.2;
+constexpr double kMaximumFineSpatialL2 = 0.005;
+constexpr double kMaximumFineSpatialLinf = 0.005;
+constexpr double kMinimumSpaceTimeOrder = 0.8;
+constexpr double kMaximumSpaceTimeOrder = 1.2;
+constexpr double kMaximumFineSpaceTimeL2 = 0.02;
+constexpr double kMaximumFineSpaceTimeLinf = 0.02;
 
 constexpr size_t kComponentCount = 3;
 
@@ -68,10 +85,11 @@ constexpr std::array<const char*, 4> kDisabledOutputCycleKeys = {
     "FieldOutputCycle", "ParticlesOutputCycle", "RestartOutputCycle",
     "DiagnosticsOutputCycle"};
 
-enum class TestCase { Periodic, Reflective, Manufactured };
+enum class TestCase { Periodic, Reflective, Manufactured, ObliqueWave };
 
-constexpr std::array<TestCase, 3> kAllTestCases = {
-    TestCase::Periodic, TestCase::Reflective, TestCase::Manufactured};
+constexpr std::array<TestCase, 4> kAllTestCases = {
+    TestCase::Periodic, TestCase::Reflective, TestCase::Manufactured,
+    TestCase::ObliqueWave};
 
 struct TestSelection {
   bool runAll = true;
@@ -99,6 +117,47 @@ struct WaveNumbers {
   double z;
 };
 
+struct ObliqueWave {
+  WaveNumbers waveVector;
+  Vec3 electricPolarization;
+  Vec3 magneticPolarization;
+  double angularFrequency;
+};
+
+struct WaveState {
+  double amplitude;
+  double phaseAdvance;
+};
+
+struct WaveError {
+  double electricL2;
+  double magneticL2;
+  double combinedL2;
+  double electricLinf;
+  double magneticLinf;
+  unsigned long long nodeCount;
+  unsigned long long centerCount;
+};
+
+struct WaveLevelResult {
+  int cells = 0;
+  int steps = 0;
+  double dt = 0.0;
+  WaveError spatialError = {};
+  WaveError spaceTimeError = {};
+};
+
+struct WaveStudyCriteria {
+  const char* name;
+  const char* reference;
+  double expectedOrder;
+  double minimumOrder;
+  double maximumOrder;
+  double maximumFineL2;
+  double maximumFineLinf;
+  WaveError WaveLevelResult::* errorMember;
+};
+
 template <size_t N, typename Value>
 void addConfigValues(ConfigFile& cfg, const std::array<const char*, N>& keys,
                      const Value& value) {
@@ -124,6 +183,7 @@ struct TestInput {
   double delta = 0.5;
   double gmresTolerance = 1.0e-11;
   double comparisonTolerance = 1.0e-9;
+  int cycles = 1;
 
   double exUniform = 1.25;
   double eyPeriodic = -0.5;
@@ -158,7 +218,7 @@ struct TestInput {
     cfg.add("B0z", 0.0);
     cfg.add("delta", delta);
     cfg.add("dt", dt);
-    cfg.add("ncycles", 1);
+    cfg.add("ncycles", cycles);
     cfg.add("th", th);
     cfg.add("c", c);
     cfg.add("Smooth", 1.0);
@@ -338,6 +398,8 @@ const char* caseName(TestCase testCase) {
     return "reflective";
   case TestCase::Manufactured:
     return "manufactured";
+  case TestCase::ObliqueWave:
+    return "oblique-wave";
   }
   return "unknown";
 }
@@ -347,8 +409,8 @@ TestSelection parseSelection(int argc, char** argv) {
     if (std::strcmp(argv[i], "--case") == 0) {
       if (i + 1 >= argc) {
         throw std::runtime_error(
-            "missing value for --case; expected all, periodic, reflective, or "
-            "manufactured");
+            "missing value for --case; expected all, periodic, reflective, "
+            "manufactured, or oblique-wave");
       }
       const char* value = argv[i + 1];
       if (std::strcmp(value, "all") == 0)
@@ -362,9 +424,12 @@ TestSelection parseSelection(int argc, char** argv) {
       if (std::strcmp(value, "manufactured") == 0) {
         return {false, TestCase::Manufactured};
       }
+      if (std::strcmp(value, "oblique-wave") == 0) {
+        return {false, TestCase::ObliqueWave};
+      }
       throw std::runtime_error(std::string("unknown --case '") + value +
-                               "'; expected all, periodic, reflective, or "
-                               "manufactured");
+                               "'; expected all, periodic, reflective, "
+                               "manufactured, or oblique-wave");
     }
   }
   return {};
@@ -443,6 +508,13 @@ FieldBounds fullBounds(const arr3_double& field) {
 
 FieldBounds interiorBounds(const arr3_double& field) {
   return {1, field.dim1() - 1, 1, field.dim2() - 1, 1, field.dim3() - 1};
+}
+
+FieldBounds ownedPeriodicNodeBounds(const arr3_double& field) {
+  // The high proper node of each subdomain is the low proper node of its
+  // periodic neighbor.  Excluding all local high faces counts each global node
+  // exactly once, including edges and corners.
+  return {1, field.dim1() - 2, 1, field.dim2() - 2, 1, field.dim3() - 2};
 }
 
 FieldBounds xFaceBounds(const arr3_double& field, size_t i) {
@@ -560,6 +632,142 @@ GridPoint nodePoint(const Grid3DCU& grid, size_t i, size_t j, size_t k) {
 GridPoint centerPoint(const Grid3DCU& grid, size_t i, size_t j, size_t k) {
   return {grid.getXC(static_cast<int>(i)), grid.getYC(static_cast<int>(j)),
           grid.getZC(static_cast<int>(k))};
+}
+
+ObliqueWave makeObliqueWave(const TestInput& input) {
+  const WaveNumbers waveVector = {2.0 * kPi / input.Lx, 2.0 * kPi / input.Ly,
+                                  2.0 * kPi / input.Lz};
+  const double magnitude =
+      std::sqrt(waveVector.x * waveVector.x + waveVector.y * waveVector.y +
+                waveVector.z * waveVector.z);
+
+  // For a cubic domain k is parallel to (1,1,1).  Both polarization vectors
+  // are unit length, perpendicular to k, and have no zero component.  The
+  // magnetic polarization is khat x electricPolarization, matching the
+  // production signs dE/dt = c curl(B), dB/dt = -c curl(E).
+  return {
+      waveVector,
+      {1.0 / std::sqrt(14.0), 2.0 / std::sqrt(14.0), -3.0 / std::sqrt(14.0)},
+      {-5.0 / std::sqrt(42.0), 4.0 / std::sqrt(42.0), 1.0 / std::sqrt(42.0)},
+      input.c * magnitude};
+}
+
+WaveState continuumWaveState(const ObliqueWave& wave, double time) {
+  return {1.0, wave.angularFrequency * time};
+}
+
+WaveState backwardEulerWaveState(const ObliqueWave& wave, double dt,
+                                 int steps) {
+  // Exact continuous-space backward-Euler amplification
+  // (1 + i*omega*dt)^(-steps), expressed as decay and phase advance.
+  const double scaledFrequency = wave.angularFrequency * dt;
+  return {
+      std::exp(-0.5 * steps * std::log1p(scaledFrequency * scaledFrequency)),
+      steps * std::atan(scaledFrequency)};
+}
+
+Vec3 obliqueWaveField(const GridPoint& point, const ObliqueWave& wave,
+                      const WaveState& state, const Vec3& polarization) {
+  const double phase = wave.waveVector.x * point.x +
+                       wave.waveVector.y * point.y +
+                       wave.waveVector.z * point.z - state.phaseAdvance;
+  const double value = state.amplitude * std::cos(phase);
+  return {polarization[0] * value, polarization[1] * value,
+          polarization[2] * value};
+}
+
+Vec3 obliqueElectric(const GridPoint& point, const ObliqueWave& wave,
+                     const WaveState& state) {
+  return obliqueWaveField(point, wave, state, wave.electricPolarization);
+}
+
+Vec3 obliqueMagnetic(const GridPoint& point, const ObliqueWave& wave,
+                     const WaveState& state) {
+  return obliqueWaveField(point, wave, state, wave.magneticPolarization);
+}
+
+void initializeObliqueWave(EMfields3D& fields, const Grid3DCU& grid,
+                           const ObliqueWave& wave) {
+  zeroFields(fields);
+
+  constexpr WaveState initialState = {1.0, 0.0};
+  FieldArray electric = electricFields(fields);
+  FieldArray magneticNode = magneticNodeFields(fields);
+  forEachIndex(fullBounds(electric[0]), [&](size_t i, size_t j, size_t k) {
+    const GridPoint point = nodePoint(grid, i, j, k);
+    setFieldPoint(electric, i, j, k,
+                  obliqueElectric(point, wave, initialState));
+    setFieldPoint(magneticNode, i, j, k,
+                  obliqueMagnetic(point, wave, initialState));
+  });
+
+  FieldArray magneticCenter = magneticCenterFields(fields);
+  forEachIndex(fullBounds(magneticCenter[0]),
+               [&](size_t i, size_t j, size_t k) {
+                 setFieldPoint(magneticCenter, i, j, k,
+                               obliqueMagnetic(centerPoint(grid, i, j, k), wave,
+                                               initialState));
+               });
+}
+
+void accumulatePointError(const FieldArray& numerical, const Vec3& exact,
+                          size_t i, size_t j, size_t k, double& error2,
+                          double& reference2, double& maxError) {
+  for (size_t component = 0; component < kComponentCount; component++) {
+    const double difference =
+        numerical[component].get(i, j, k) - exact[component];
+    error2 += difference * difference;
+    reference2 += exact[component] * exact[component];
+    maxError = std::max(maxError, std::fabs(difference));
+  }
+}
+
+WaveError measureObliqueWaveError(EMfields3D& fields, const Grid3DCU& grid,
+                                  const ObliqueWave& wave,
+                                  const WaveState& reference) {
+  const FieldArray electric = electricFields(fields);
+  const FieldArray magneticCenter = magneticCenterFields(fields);
+
+  std::array<double, 4> localSums = {0.0, 0.0, 0.0, 0.0};
+  std::array<double, 2> localMaxima = {0.0, 0.0};
+  std::array<unsigned long long, 2> localCounts = {0, 0};
+
+  forEachIndex(ownedPeriodicNodeBounds(electric[0]), [&](size_t i, size_t j,
+                                                         size_t k) {
+    accumulatePointError(
+        electric, obliqueElectric(nodePoint(grid, i, j, k), wave, reference), i,
+        j, k, localSums[0], localSums[1], localMaxima[0]);
+    localCounts[0]++;
+  });
+
+  forEachIndex(
+      interiorBounds(magneticCenter[0]), [&](size_t i, size_t j, size_t k) {
+        accumulatePointError(
+            magneticCenter,
+            obliqueMagnetic(centerPoint(grid, i, j, k), wave, reference), i, j,
+            k, localSums[2], localSums[3], localMaxima[1]);
+        localCounts[1]++;
+      });
+
+  std::array<double, 4> globalSums = {};
+  std::array<double, 2> globalMaxima = {};
+  std::array<unsigned long long, 2> globalCounts = {};
+  MPI_Allreduce(localSums.data(), globalSums.data(),
+                static_cast<int>(localSums.size()), MPI_DOUBLE, MPI_SUM,
+                MPIdata::get_PicGlobalComm());
+  MPI_Allreduce(localMaxima.data(), globalMaxima.data(),
+                static_cast<int>(localMaxima.size()), MPI_DOUBLE, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
+  MPI_Allreduce(localCounts.data(), globalCounts.data(),
+                static_cast<int>(localCounts.size()), MPI_UNSIGNED_LONG_LONG,
+                MPI_SUM, MPIdata::get_PicGlobalComm());
+
+  const double electricL2 = std::sqrt(globalSums[0] / globalSums[1]);
+  const double magneticL2 = std::sqrt(globalSums[2] / globalSums[3]);
+  const double combinedL2 = std::sqrt((globalSums[0] + globalSums[2]) /
+                                      (globalSums[1] + globalSums[3]));
+  return {electricL2,      magneticL2,      combinedL2,     globalMaxima[0],
+          globalMaxima[1], globalCounts[0], globalCounts[1]};
 }
 
 void initializeManufacturedFields(EMfields3D& fields, const Grid3DCU& grid,
@@ -742,6 +950,242 @@ void runManufacturedCase(EMfields3D& fields, Grid3DCU& grid,
   checkManufactured(fields, check, grid, input);
 }
 
+WaveLevelResult runObliqueWaveLevel(int cells, const TestInput& baseInput,
+                                    int nprocs) {
+  TestInput input = baseInput;
+  input.Lx = kObliqueWaveLength;
+  input.Ly = kObliqueWaveLength;
+  input.Lz = kObliqueWaveLength;
+  input.nxc = cells;
+  input.nyc = cells;
+  input.nzc = cells;
+  input.th = 1.0;
+  input.gmresTolerance = 1.0e-12;
+
+  const double spacing = kObliqueWaveLength / cells;
+  const int steps = static_cast<int>(std::lround(
+      kObliqueWaveFinalTime * input.c / (kObliqueWaveCourant * spacing)));
+  if (steps <= 0) {
+    throw std::runtime_error("oblique-wave refinement produced no time steps");
+  }
+  input.dt = kObliqueWaveFinalTime / steps;
+  input.cycles = steps;
+
+  ConfigFile config = input.config(TestCase::ObliqueWave);
+  Collective col(config, "gpuMaxwellSolverTest");
+  VCtopology3D vct(col);
+  if (nprocs != vct.getNprocs()) {
+    throw std::runtime_error("MPI size does not match generated topology");
+  }
+  vct.setup_vctopology(MPIdata::get_PicGlobalComm());
+
+  Grid3DCU grid(&col, &vct);
+  EMfields3D fields(&col, &grid, &vct);
+  fields.gpuSolverAllocate();
+
+  const ObliqueWave wave = makeObliqueWave(input);
+  initializeObliqueWave(fields, grid, wave);
+  const cudaStream_t stream = fields.gpuSolverStream();
+  fields.gpuSolverSyncH2D(stream);
+  // Corrections are disabled and the first E solve overwrites Eth; initialize
+  // its device mirrors anyway so the complete starting state is deterministic.
+  fields.gpuExth().setAll(0.0, stream);
+  fields.gpuEyth().setAll(0.0, stream);
+  fields.gpuEzth().setAll(0.0, stream);
+
+  for (int cycle = 0; cycle < steps; cycle++) {
+    fields.gpuCalculateE(cycle);
+    fields.gpuCalculateB(cycle);
+  }
+
+  fields.gpuSolverSyncD2H(stream);
+  const WaveState backwardEulerReference =
+      backwardEulerWaveState(wave, input.dt, steps);
+  const WaveState continuumReference =
+      continuumWaveState(wave, kObliqueWaveFinalTime);
+  return {cells, steps, input.dt,
+          measureObliqueWaveError(fields, grid, wave, backwardEulerReference),
+          measureObliqueWaveError(fields, grid, wave, continuumReference)};
+}
+
+double observedOrder(double coarseError, double fineError, int coarseCells,
+                     int fineCells) {
+  return std::log(coarseError / fineError) /
+         std::log(static_cast<double>(fineCells) / coarseCells);
+}
+
+void requireWaveCondition(Check& check, bool condition,
+                          const std::string& message) {
+  if (!condition) {
+    check.fail(message.c_str());
+  }
+}
+
+int assessWaveStudy(
+    int rank,
+    const std::array<WaveLevelResult, kObliqueWaveCells.size()>& levels,
+    const WaveStudyCriteria& study) {
+  Check check;
+  check.rank = rank;
+  std::array<double, kObliqueWaveCells.size() - 1> electricOrders = {};
+  std::array<double, kObliqueWaveCells.size() - 1> magneticOrders = {};
+  std::array<double, kObliqueWaveCells.size() - 1> combinedOrders = {};
+
+  for (size_t level = 0; level < levels.size(); level++) {
+    const WaveLevelResult& result = levels[level];
+    const WaveError& error = result.*study.errorMember;
+    const unsigned long long expectedCount =
+        static_cast<unsigned long long>(result.cells) * result.cells *
+        result.cells;
+
+    std::ostringstream countMessage;
+    countMessage << "oblique-wave " << study.name << " N=" << result.cells
+                 << " ownership count mismatch: nodes=" << error.nodeCount
+                 << ", centers=" << error.centerCount
+                 << ", expected=" << expectedCount;
+    requireWaveCondition(check,
+                         error.nodeCount == expectedCount &&
+                             error.centerCount == expectedCount,
+                         countMessage.str());
+
+    const bool validErrors =
+        std::isfinite(error.electricL2) && error.electricL2 > 0.0 &&
+        std::isfinite(error.magneticL2) && error.magneticL2 > 0.0 &&
+        std::isfinite(error.combinedL2) && error.combinedL2 > 0.0 &&
+        std::isfinite(error.electricLinf) && error.electricLinf > 0.0 &&
+        std::isfinite(error.magneticLinf) && error.magneticLinf > 0.0;
+    std::ostringstream validityMessage;
+    validityMessage << "oblique-wave " << study.name << " N=" << result.cells
+                    << " produced a non-finite or non-positive error";
+    requireWaveCondition(check, validErrors, validityMessage.str());
+
+    if (level == 0) {
+      continue;
+    }
+
+    const WaveLevelResult& coarse = levels[level - 1];
+    const WaveError& coarseError = coarse.*study.errorMember;
+    electricOrders[level - 1] = observedOrder(
+        coarseError.electricL2, error.electricL2, coarse.cells, result.cells);
+    magneticOrders[level - 1] = observedOrder(
+        coarseError.magneticL2, error.magneticL2, coarse.cells, result.cells);
+    combinedOrders[level - 1] = observedOrder(
+        coarseError.combinedL2, error.combinedL2, coarse.cells, result.cells);
+
+    std::ostringstream monotonicityMessage;
+    monotonicityMessage << "oblique-wave " << study.name
+                        << " errors did not all decrease from N="
+                        << coarse.cells << " to N=" << result.cells;
+    requireWaveCondition(check,
+                         error.electricL2 < coarseError.electricL2 &&
+                             error.magneticL2 < coarseError.magneticL2 &&
+                             error.combinedL2 < coarseError.combinedL2 &&
+                             error.electricLinf < coarseError.electricLinf &&
+                             error.magneticLinf < coarseError.magneticLinf,
+                         monotonicityMessage.str());
+
+    std::ostringstream orderMessage;
+    orderMessage << "oblique-wave " << study.name
+                 << " orders from N=" << coarse.cells
+                 << " to N=" << result.cells
+                 << " are E=" << electricOrders[level - 1]
+                 << ", B=" << magneticOrders[level - 1]
+                 << ", combined=" << combinedOrders[level - 1]
+                 << "; expected each in [" << study.minimumOrder << ", "
+                 << study.maximumOrder << "] for th=1";
+    requireWaveCondition(check,
+                         std::isfinite(electricOrders[level - 1]) &&
+                             std::isfinite(magneticOrders[level - 1]) &&
+                             std::isfinite(combinedOrders[level - 1]) &&
+                             electricOrders[level - 1] >= study.minimumOrder &&
+                             electricOrders[level - 1] <= study.maximumOrder &&
+                             magneticOrders[level - 1] >= study.minimumOrder &&
+                             magneticOrders[level - 1] <= study.maximumOrder &&
+                             combinedOrders[level - 1] >= study.minimumOrder &&
+                             combinedOrders[level - 1] <= study.maximumOrder,
+                         orderMessage.str());
+  }
+
+  const WaveError& fineError = levels.back().*study.errorMember;
+  std::ostringstream fineMessage;
+  fineMessage << "oblique-wave " << study.name << " finest combined error "
+              << fineError.combinedL2 << " exceeds " << study.maximumFineL2;
+  requireWaveCondition(check, fineError.combinedL2 < study.maximumFineL2,
+                       fineMessage.str());
+
+  std::ostringstream fineMaxMessage;
+  fineMaxMessage << "oblique-wave " << study.name
+                 << " finest Linf errors E=" << fineError.electricLinf
+                 << ", B=" << fineError.magneticLinf << " exceed "
+                 << study.maximumFineLinf;
+  requireWaveCondition(check,
+                       fineError.electricLinf < study.maximumFineLinf &&
+                           fineError.magneticLinf < study.maximumFineLinf,
+                       fineMaxMessage.str());
+
+  std::cout << "Oblique-wave " << study.name << " convergence ("
+            << study.reference << ", th=1, expected order "
+            << study.expectedOrder << "):\n"
+            << "  N      dt  steps       relL2(E)       relL2(B)"
+               "    relL2(E,B)      p(E)      p(B)    p(E,B)"
+               "     Linf(E)     Linf(B)\n";
+  for (size_t level = 0; level < levels.size(); level++) {
+    const WaveLevelResult& result = levels[level];
+    const WaveError& error = result.*study.errorMember;
+    std::cout << std::scientific << std::setprecision(6) << std::setw(4)
+              << result.cells << "  " << std::setw(10) << result.dt << "  "
+              << std::setw(5) << result.steps << "  " << std::setw(13)
+              << error.electricL2 << "  " << std::setw(13) << error.magneticL2
+              << "  " << std::setw(13) << error.combinedL2 << "  ";
+    if (level == 0) {
+      std::cout << "         -         -         -";
+    } else {
+      std::cout << std::setw(10) << electricOrders[level - 1] << "  "
+                << std::setw(8) << magneticOrders[level - 1] << "  "
+                << std::setw(8) << combinedOrders[level - 1];
+    }
+    std::cout << "  " << std::setw(11) << error.electricLinf << "  "
+              << std::setw(11) << error.magneticLinf << "\n";
+  }
+  std::cout << std::defaultfloat;
+
+  return check.failures;
+}
+
+int runObliqueWaveConvergence(int rank, int nprocs,
+                              const TestInput& baseInput) {
+  std::array<WaveLevelResult, kObliqueWaveCells.size()> levels;
+  for (size_t level = 0; level < levels.size(); level++) {
+    levels[level] =
+        runObliqueWaveLevel(kObliqueWaveCells[level], baseInput, nprocs);
+  }
+
+  if (rank != 0) {
+    return 0;
+  }
+
+  const WaveStudyCriteria spatialStudy = {
+      "spatial-only",
+      "continuous-space backward-Euler reference",
+      2.0,
+      kMinimumSpatialOrder,
+      kMaximumSpatialOrder,
+      kMaximumFineSpatialL2,
+      kMaximumFineSpatialLinf,
+      &WaveLevelResult::spatialError};
+  const WaveStudyCriteria spaceTimeStudy = {"space-time",
+                                            "continuous Maxwell reference",
+                                            1.0,
+                                            kMinimumSpaceTimeOrder,
+                                            kMaximumSpaceTimeOrder,
+                                            kMaximumFineSpaceTimeL2,
+                                            kMaximumFineSpaceTimeLinf,
+                                            &WaveLevelResult::spaceTimeError};
+
+  return assessWaveStudy(rank, levels, spatialStudy) +
+         assessWaveStudy(rank, levels, spaceTimeStudy);
+}
+
 int runOnFields(TestCase testCase, EMfields3D& fields, Grid3DCU& grid,
                 const TestInput& input, int rank) {
   Check check;
@@ -762,12 +1206,24 @@ int runOnFields(TestCase testCase, EMfields3D& fields, Grid3DCU& grid,
   case TestCase::Manufactured:
     runManufacturedCase(fields, grid, input, rank, check);
     break;
+
+  case TestCase::ObliqueWave:
+    throw std::logic_error(
+        "oblique-wave refinement must run through its multi-grid driver");
   }
 
   return check.failures;
 }
 
 int runCase(TestCase testCase, int rank, int nprocs, const TestInput& input) {
+  if (testCase == TestCase::ObliqueWave) {
+    const int localFailures = runObliqueWaveConvergence(rank, nprocs, input);
+    int globalFailures = 0;
+    MPI_Allreduce(&localFailures, &globalFailures, 1, MPI_INT, MPI_SUM,
+                  MPIdata::get_PicGlobalComm());
+    return globalFailures;
+  }
+
   ConfigFile config = input.config(testCase);
   Collective col(config, "gpuMaxwellSolverTest");
   VCtopology3D vct(col);

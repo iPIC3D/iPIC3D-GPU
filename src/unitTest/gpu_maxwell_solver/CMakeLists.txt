@@ -130,3 +130,16 @@ set_tests_properties(
   PROPERTIES
     TIMEOUT 90
   )
+
+add_test(
+  NAME gpuMaxwellSolverObliqueWaveConvergence
+  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
+          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
+          --case oblique-wave ${MPIEXEC_POSTFLAGS})
+set_tests_properties(
+  gpuMaxwellSolverObliqueWaveConvergence
+  PROPERTIES
+    PROCESSORS ${GPU_MAXWELL_MPI_PROCS}
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+  )

@@ -1,159 +1,178 @@
-#Input file for Test Particle 
+# Publications that use results from iPIC3D need to properly cite
+# 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+# plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+#
+# Copyright 2015 KTH Royal Institute of Technology
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#         http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-# DIRECTORIES
-SaveDirName = data
-RestartDirName = data
+# Runtime input options configured for this test-particle run.
+# Controls for other cases or disabled features are kept at inert defaults.
+# Compile-time constants in iPIC3Dlib.cu are not input-file options.
+# Brackets show the value used when a key is omitted; required keys have no default.
+# WARNING: Case RamNew is not a recognized case; the default initialization runs.
+# WARNING: test particles are initialized and written but not pushed by the GPU mover.
 
-# set the maximum number of particles allocated  
-NpMaxNpRatio = 2.0
+# %%%%%%%%%%%%%%%%%%%% RUN AND I/O %%%%%%%%%%%%%%%%%%%%
+SaveDirName    = data                   # Fresh-run output directory [default: data]
+RestartDirName = data                   # Checkpoint directory [default: data]
+Case           = RamNew                 # Case-sensitive initialization case [required]
+SimulationName = RamNew1TestParticle    # Output dataset name [required]
+# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, H5hut, adios2.
+WriteMethod    = shdf5                  # [required]
 
+# %%%%%%%%%%%%%%%%%%%% TIME INTEGRATION %%%%%%%%%%%%%%%%%%%%
+dt      = 0.26                          # Time step [required]
+ncycles = 10                            # Cycles in this run [required]
+th      = 0.5                           # Implicit decentering parameter [default: 1.0]
+c       = 1.0                           # Normalized light speed [default: 1.0]
 
-Case              = RamNew 
-PoissonCorrection = no        	  # Poisson correction
-WriteMethod       = shdf5   	  # Output method [ H5hut, phdf5, shdf5, pvtk ]
-SimulationName    = RamNew1TestParticle  # Simulation name for the output
+# %%%%%%%%%%%%%%%%%%%% INITIAL FIELDS %%%%%%%%%%%%%%%%%%%%
+# Uniform background magnetic field.
+B0x = 0.00                              # [default: 0.0]
+B0y = 0.00                              # [default: 0.0]
+B0z = 0.00                              # [default: 0.0]
 
+Smooth      = 1.0                       # Smoothing coefficient; 1 disables [default: 1.0]
+SmoothNiter = 6                         # Smoothing passes [default: 6]
 
-#  Initial Magnetic Field
-B0x = 0.00
-B0y = 0.00
-B0z = 0.00
-delta = 0.5
+PoissonCorrection      = no             # Exact "yes" enables div(E) cleaning [default: no]
+PoissonCorrectionCycle = 10             # div(E) cleaning interval [default: 10]
+divBCorrection         = no             # Exact "yes" enables div(B) cleaning [default: no]
+divBCorrectionCycle    = 10             # div(B) cleaning interval [default: 10]
 
-#  %%%%%%%%%%%%%%%%%%% TIME %%%%%%%%%%%%%%%%%%
-dt = 0.26                    # dt = time step  
-ncycles = 10		     # cycles
-th = 0.5                     # th = decentering parameter
-c = 1.0                      # c = light speed 
+# %%%%%%%%%%%%%%%%%%%% DOMAIN AND TOPOLOGY %%%%%%%%%%%%%%%%%%%%
+Lx = 1.0                                # Global x length [default: 10.0]
+Ly = 51.32                              # Global y length [default: 10.0]
+Lz = 51.32                              # Global z length [default: 10.0]
 
+nxc = 1                                 # Global x cells [default: 64]
+nyc = 512                               # Global y cells [default: 64]
+nzc = 512                               # Global z cells [default: 64]
 
-#  %%%%%%%%%%%%%%%%%%% SMOOTH %%%%%%%%%%%%%%%%%%
-Smooth = 1.0                  # Smoothing value (5-points stencil) 1.0means NO SMOOTHING
+# XLEN*YLEN*ZLEN must equal the MPI process count.
+XLEN = 1                                # MPI subdomains in x [default: 1]
+YLEN = 32                               # MPI subdomains in y [default: 1]
+ZLEN = 32                               # MPI subdomains in z [default: 1]
 
+# Periodicity; omitted particle flags inherit these values. 1=periodic, 0=nonperiodic.
+PERIODICX = 1                           # [default: true]
+PERIODICY = 1                           # [default: true]
+PERIODICZ = 1                           # [default: true]
 
-# %%%%%%%%%%%%%%%%%% BOX SIZE %%%%%%%%%%%%%%%
-Lx =   1.0	                  # Lx = simulation box length - x direction   
-Ly =   51.32	                  # Ly = simulation box length - y direction
-Lz =   51.32	  	          # Lz = simulation box length - z direction   
+# %%%%%%%%%%%%%%%%%%%% PARTICLES %%%%%%%%%%%%%%%%%%%%
+# Species: e-, i+; test particle e- (index 2).
+ns         = 2                          # Regular species count [required]
+nsTestPart = 1                          # Test-particle species, indexed after ns [default: 0]
 
-x_center =   1.                  # Lx = simulation box length - x direction in m  
-y_center =   1.                  # Ly = simulation box length - y direction in m
-z_center =   1.                  # Lz = simulation box length - z direction in m  
-Planet_radius =   .1
+# Initial density
+rhoINIT   = 1.0  1.0                    # Initial densities [required]
+rhoINJECT = 1.0  1.0                    # Boundary injection densities [required]
 
-nxc =  1                     # nxc = number of cells - x direction        
-nyc =  512                   # nyc = number of cells - y direction
-nzc =  512                   # nzc = number of cells - z direction        
+npcelx = 1   1  1                       # Particles per cell in x [required]
+npcely = 40  1  1                       # Particles per cell in y [required]
+npcelz = 40  1  1                       # Particles per cell in z [required]
 
+# qom = charge to mass ratio for different species
+#     e     i          e_test
+qom = -1.0  0.0005447  -1.0             # [required]
 
-# %%%%%%%%%%%%%% MPI TOPOLOGY %%%%%%%%%%%%%%
-# number of MPI subdomains in each direction
-XLEN = 1
-YLEN = 32
-ZLEN = 32
-# topology (1=true, 0=false): USE PERIODIC IN ALL DIRECTIONS
-PERIODICX = 1
-PERIODICY = 1
-PERIODICZ = 1
+# Thermal velocity
+uth = 0.088332  0.0                     # x thermal speeds [required]
+vth = 0.088332  0.0                     # y thermal speeds [required]
+wth = 0.044166  0.0                     # z thermal speeds [required]
 
+# Drift velocity
+u0 = 0.0  0.0                           # x drift speeds [required]
+v0 = 0.0  0.0                           # y drift speeds [required]
+w0 = 0.0  0.0                           # z drift speeds [required]
 
-# %%%%%%%%%%%%%% PARTICLES %%%%%%%%%%%%%%%%%
-#    ns = number of species
-#    nsTestPartSpec = number of species used as test particles,only specify after normal particles 
-#    0 = electrons
-#    1 = protons
-#    2,3,4,5,... = ions
-ns = 2 
-nsTestPart = 1
+TrackParticleID = 1  0  0               # Per-species ID mask [default: all 0]
 
-# Initial density (make sure you are neutral)
-rhoINIT 	=  1.0		1.0
-# Injection density (make sure you are neutral)
-rhoINJECT =        1.0          1.0
-# TrackParticleID[species] = 1=true, 0=false, only track selected species
-TrackParticleID =  1		0          
-# uth = thermal velocity for different species - Direction X  
-uth  = 		   0.088332 	0.0	  
-# vth = thermal velocity for different species - Direction Y 
-vth  = 		   0.088332	0.0	  
-# wth = thermal velocity for different species - Direction Z 
-wth  = 		   0.044166	0.0	   
-# u0 = drift velocity   - Direction X    
-u0 = 		   0.0		0.0	   
-# v0 = drift velocity   - Direction Y    
-v0 = 		   0.0		0.0	   
-# w0 = drift velocity   - Direction Z    
-w0 = 		   0.0		0.0	   
+# Test-particle initial pitch angle and energy, one entry per test species.
+pitch_angle = 0.17453293                # [required if nsTestPart > 0]
+energy      = 0.00020                   # [required if nsTestPart > 0]
 
-# pitch_angle_energy, only for test particles
-pitch_angle = 	   0.17453293
-energy	    = 	   0.00020
+SortingCycle = 1                        # GPU cell-sort interval; 0 disables [default: 0]
 
-# npcelx = number of particles per cell - Direction X 
-npcelx =   	   1		1          1
-# npcely = number of particles per cell - Direction Y 
-npcely =  	   40		1          1
-# npcelz = number of particles per cell - Direction Z 
-npcelz =   	   40		1          1
-# qom = charge to mass ratio for different species 
-qom =  		  -1.0		0.0005447 -1.0
+# %%%%%%%%%%%%%%%%%%%% VELOCITY SPECTRA %%%%%%%%%%%%%%%%%%%%
+# Generates 2D (v_par, v_perp with respect to B field) velocity spectra
+# Spectra are generated per macrocell
+# Requires compile-time MACROCELL_SPECTRA_ENABLE switch = True in /src/include/dataAnalysis/dataAnalysisConfig.cuh
+# Default MACROCELL_SPECTRA_ENABLE = True
+# Runs only when VelocitySpectra = 1 and all three macrocell sizes are > 0.
+VelocitySpectra        = 0              # Runtime master switch; 0 disables [default: 0]
+MacrocellNx            = 0              # Macrocell x size in local cells [default: 0]
+MacrocellNy            = 0              # Macrocell y size in local cells [default: 0]
+MacrocellNz            = 0              # Macrocell z size in local cells [default: 0]
+VelocitySpectraSpecies = 0 0            # Per-species enable mask [default: all 0]
 
+# %%%%%%%%%%%%%%%%%%%% BOUNDARY CONDITIONS %%%%%%%%%%%%%%%%%%%%
+# Phi BC: 0/1=Dirichlet, 2=Neumann; periodicity overrides face values.
+bcPHIfaceXright = 1                     # [default: 1]
+bcPHIfaceXleft  = 1                     # [default: 1]
+bcPHIfaceYright = 1                     # [default: 1]
+bcPHIfaceYleft  = 1                     # [default: 1]
+bcPHIfaceZright = 1                     # [default: 1]
+bcPHIfaceZleft  = 1                     # [default: 1]
 
+# EM BC: 0=conductor, 1=magnetic mirror, 2=open/inflow.
+bcEMfaceXright = 0                      # [required]
+bcEMfaceXleft  = 0                      # [required]
+bcEMfaceYright = 0                      # [required]
+bcEMfaceYleft  = 0                      # [required]
+bcEMfaceZright = 0                      # [required]
+bcEMfaceZleft  = 0                      # [required]
 
-# &&&&&&&&&&&& boundary conditions &&&&&&&&&&&&&&&
-# PHI Electrostatic Potential     
-# 0,1 = Dirichilet boundary condition ;     
-# 2   = Neumann boundary condition
-# Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
-    bcPHIfaceXright = 1
-    bcPHIfaceXleft  = 1
-    bcPHIfaceYright = 1
-    bcPHIfaceYleft  = 1
-    bcPHIfaceZright = 1
-    bcPHIfaceZleft  = 1
-    
-#    EM field boundary condition
-#    0 = perfect conductor
-#    1 = magnetic mirror
-#    Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
-    bcEMfaceXright = 0
-    bcEMfaceXleft =  0
-    bcEMfaceYright = 0
-    bcEMfaceYleft =  0
-    bcEMfaceZright = 0
-    bcEMfaceZleft =  0
-    
-#    Particles Boundary condition
-#    0 = exit
-#    1 = perfect mirror
-#    2 = riemission
-#    Caveat: if your processor topology is set to be periodic in a direction, automatically the boundary condition in that direction will be periodic
-    bcPfaceXright = 1
-    bcPfaceXleft =  1
-    bcPfaceYright = 1
-    bcPfaceYleft =  1
-    bcPfaceZright = 1
-    bcPfaceZleft =  1
+yes_sal      = 0                        # Enable absorbing layers [default: 0]
+n_layers_sal = 3                        # Layer thickness in cells [default: 3]
 
+# Particle BC: 0=exit, 1=mirror, 2=reemit, 3=open outflow, 4=open inflow.
+bcPfaceXright = 1                       # [default: 1]
+bcPfaceXleft  = 1                       # [default: 1]
+bcPfaceYright = 1                       # [default: 1]
+bcPfaceYleft  = 1                       # [default: 1]
+bcPfaceZright = 1                       # [default: 1]
+bcPfaceZleft  = 1                       # [default: 1]
 
-#  print to video results 
-    verbose = 1
-# velocity of the injection from the wall
-    Vinj= 0.0
+ApplyInflowBcsEImage = 1                # Include inflow E terms [default: 1]
 
-# CG solver stopping criterium tolerance
-    CGtol = 1E-4
-# GMRES solver stopping criterium tolerance
-    GMREStol = 1E-4
-# mover predictor corrector iteration
-    NiterMover = 3
-# Output for field
-   FieldOutputCycle = 100
-# Output for particles if 1 it doesnt save particles data
-   ParticlesOutputCycle  = 0
-# Output for test particles
-   TestParticlesOutputCycle = 50
-# restart cycle
-   RestartOutputCycle = 5000
-# Output for diagnostic
-   DiagnosticsOutputCycle = 10
+# %%%%%%%%%%%%%%%%%%%% NUMERICAL SOLVERS %%%%%%%%%%%%%%%%%%%%
+CGtol      = 1E-4                       # CG tolerance; current call disabled [default: 1e-3]
+GMREStol   = 1E-4                       # Maxwell GMRES/FGMRES tolerance [default: 1e-3]
+NiterMover = 3                          # Predictor-corrector iterations [default: 3]
+
+# GPU Maxwell solver:
+SolverType = GMRES                      # [default: GMRES]
+
+# GPU Chebyshev preconditioner for
+# Poisson problems div(E)/div(B) cleaning.
+PoissonChebMaxIter       = 10           # Preconditioner iterations [default: 10]
+PoissonChebRescaleEigMin = 1.0          # Lower-bound multiplier [default: 1.0]
+PoissonChebRescaleEigMax = 1.0          # Upper-bound multiplier [default: 1.0]
+
+# %%%%%%%%%%%%%%%%%%%% OUTPUT AND RESTART %%%%%%%%%%%%%%%%%%%%
+# Tags are joined with +; an empty tag writes nothing.
+# FieldOutputTag: B, E.
+# MomentsOutputTag: rho, J, P (PXX..PZZ), Q (heat flux) or one component
+# (PXX, Qxyz, ...) for all species; append a species index (rho0, J1, P2)
+# for one species or _tot (rho_tot, J_tot, P_tot, Q_tot) for the sum.
+# ParticlesOutputTag: position, velocity, q, ID.
+FieldOutputCycle       = 100            # Field/moment interval; <=0 disables [default: 100]
+FieldOutputTag         =                # Grid fields [default: empty]
+MomentsOutputTag       =                # Species moments [default: empty]
+ParticlesOutputCycle   = 0              # Particle interval; <=0 disables [default: 0]
+ParticlesOutputTag     =                # Particle fields [default: empty]
+TestPartOutputCycle    = 50             # Test-particle interval; <=0 disables [default: 0]
+DiagnosticsOutputCycle = 10             # Scalar interval [default: FieldOutputCycle]
+RestartOutputCycle     = 5000           # Checkpoint interval; <=0 disables [default: 5000]
+CallFinalize           = 1              # Final checkpoint if restart output enabled [default: true]

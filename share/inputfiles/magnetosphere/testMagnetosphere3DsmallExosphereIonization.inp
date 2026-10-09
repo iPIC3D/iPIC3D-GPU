@@ -117,6 +117,7 @@ SortingCycle     = 1                     # GPU cell-sort interval; 0 disables [d
 # Spectra are generated per macrocell
 # Requires compile-time MACROCELL_SPECTRA_ENABLE switch = True in /src/include/dataAnalysis/dataAnalysisConfig.cuh
 # Default MACROCELL_SPECTRA_ENABLE = True
+# Runs only when VelocitySpectra = 1 and all three macrocell sizes are > 0.
 VelocitySpectra = 1                      # Runtime master switch; 0 disables [default: 0]
 MacrocellNx     = 10                     # Macrocell x size in local cells [default: 0]
 MacrocellNy     = 10                     # Macrocell y size in local cells [default: 0]
@@ -181,9 +182,15 @@ PoissonChebRescaleEigMin = 1.0            # Lower-bound multiplier [default: 1.0
 PoissonChebRescaleEigMax = 1.0            # Upper-bound multiplier [default: 1.0]
 
 # %%%%%%%%%%%%%%%%%%%% OUTPUT AND RESTART %%%%%%%%%%%%%%%%%%%%
+# Tags are joined with +; an empty tag writes nothing.
+# FieldOutputTag: B, E.
+# MomentsOutputTag: rho, J, P (PXX..PZZ), Q (heat flux) or one component
+# (PXX, Qxyz, ...) for all species; append a species index (rho0, J1, P2)
+# for one species or _tot (rho_tot, J_tot, P_tot, Q_tot) for the sum.
+# ParticlesOutputTag: position, velocity, q, ID.
 FieldOutputCycle       = 100              # Field/moment interval; <=0 disables [default: 100]
-FieldOutputTag         = B+E+rho          # B/E and total rho, joined with + [default: empty]
-MomentsOutputTag       = rho              # Species moments joined with + [default: empty]
+FieldOutputTag         = B+E              # Grid fields [default: empty]
+MomentsOutputTag       = rho+rho_tot      # Species moments [default: empty]
 ParticlesOutputCycle   = 0                # Particle interval; <=0 disables [default: 0]
 ParticlesOutputTag     = position+velocity+q  # Particle fields [default: empty]
 DiagnosticsOutputCycle = 100              # Scalar interval [default: FieldOutputCycle]

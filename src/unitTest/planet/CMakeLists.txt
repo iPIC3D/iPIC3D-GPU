@@ -122,7 +122,6 @@ target_compile_definitions(planetTest PUBLIC NO_HDF5)
 
 # ── CTest ─────────────────────────────────────────────────────
 
-include(CTest)
 enable_testing()
 
 # Test cases

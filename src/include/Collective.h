@@ -89,8 +89,9 @@ public:
   void init_derived_parameters();
   /*! Print physical parameters */
   void Print();
-  /*! save setting in a file */
-  void save();
+  /*! save settings in SaveDirName/SimulationData.txt, after header (the
+   * build and run report of c_Solver::Init) */
+  void save(const std::string& header = "");
 
   // accessors
   //

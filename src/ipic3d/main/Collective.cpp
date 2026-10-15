@@ -1203,10 +1203,11 @@ void Collective::Print() {
   cout << "---------------------" << endl;
 }
 /*! Print Simulation Parameters */
-void Collective::save() {
+void Collective::save(const std::string& header) {
   string temp;
   temp = SaveDirName + "/SimulationData.txt";
   ofstream my_file(temp.c_str());
+  my_file << header;
   my_file << "---------------------------" << endl;
   my_file << "-  Simulation Parameters  -" << endl;
   my_file << "---------------------------" << endl;

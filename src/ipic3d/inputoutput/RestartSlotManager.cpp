@@ -1,5 +1,6 @@
 #include "RestartSlotManager.h"
 
+#include "BuildInfo.h"
 #include "debug.h"
 
 #include <filesystem>
@@ -176,6 +177,9 @@ bool parseCheckpointBlock(const std::string& block, const std::string& rootDir,
   extractLongLong(block, "generation", generation);
   extractLongLong(block, "nranks", nranks);
   extractString(block, "backend", savedBackend);
+  std::string buildVersion, buildSignature;
+  extractString(block, "ipic3d_version", buildVersion);
+  extractString(block, "build_signature", buildSignature);
 
   if (slot != "A" && slot != "B")
     return false;
@@ -190,6 +194,8 @@ bool parseCheckpointBlock(const std::string& block, const std::string& rootDir,
   checkpoint.cycle = static_cast<int>(cycle);
   checkpoint.nranks = static_cast<int>(nranks);
   checkpoint.generation = generation;
+  checkpoint.buildVersion = buildVersion;
+  checkpoint.buildSignature = buildSignature;
   if (!parseMeshMetadata(block, checkpoint.mesh)) {
     eprintf("ERROR: restart checkpoint restart_%s is missing or has "
             "invalid mesh metadata",
@@ -326,6 +332,8 @@ std::string checkpointJson(const RestartWriteTarget& target) {
       << "  \"cycle\": " << target.cycle << ",\n"
       << "  \"backend\": \"" << target.backend << "\",\n"
       << "  \"nranks\": " << target.nranks << ",\n"
+      << "  \"ipic3d_version\": \"" << target.buildVersion << "\",\n"
+      << "  \"build_signature\": \"" << target.buildSignature << "\",\n"
       << "  \"mesh\": ";
   writeMeshObject(out, target.mesh, "  ");
   out << "\n"
@@ -342,6 +350,10 @@ void writeCheckpointObject(std::ostream& out,
       << indent << "  \"cycle\": " << checkpoint.cycle << ",\n"
       << indent << "  \"backend\": \"" << checkpoint.backend << "\",\n"
       << indent << "  \"nranks\": " << checkpoint.nranks << ",\n"
+      << indent << "  \"ipic3d_version\": \"" << checkpoint.buildVersion
+      << "\",\n"
+      << indent << "  \"build_signature\": \"" << checkpoint.buildSignature
+      << "\",\n"
       << indent << "  \"mesh\": ";
   writeMeshObject(out, checkpoint.mesh, indent + "  ");
   out << "\n";
@@ -359,6 +371,8 @@ std::string latestJson(const RestartWriteTarget& target) {
   latest.nranks = target.nranks;
   latest.generation = target.generation;
   latest.mesh = target.mesh;
+  latest.buildVersion = target.buildVersion;
+  latest.buildSignature = target.buildSignature;
 
   std::ostringstream out;
   out << "{\n"
@@ -403,6 +417,8 @@ RestartWriteTarget RestartSlotManager::beginWrite(int cycle) {
   target.nranks = nranks_;
   target.previous = latest_;
   target.mesh = mesh_;
+  target.buildVersion = iPic3D::build::version();
+  target.buildSignature = iPic3D::build::signature();
 
   if (!latest_.found) {
     target.slot = "A";
@@ -447,6 +463,8 @@ void RestartSlotManager::completeLocal(const RestartWriteTarget& target) {
   latest_.nranks = target.nranks;
   latest_.generation = target.generation;
   latest_.mesh = target.mesh;
+  latest_.buildVersion = target.buildVersion;
+  latest_.buildSignature = target.buildSignature;
 }
 
 RestartCheckpoint

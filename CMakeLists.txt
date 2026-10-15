@@ -103,7 +103,6 @@ if(GPU_DIAGNOSTIC_CYCLE LESS -1 OR GPU_DIAGNOSTIC_CYCLE GREATER 2147483646)
 endif()
 
 include(GNUInstallDirs)
-include(CTest)
 
 # set directories
 set(SOURCE_CODE_DIR src/ipic3d)
@@ -431,6 +430,49 @@ if(HALO_OVERLAP)
   message(STATUS "Halo-computation overlap enabled for GPU field solver")
 endif()
 
+#
+# Build identity (git commit, uncommitted changes, options, compilers), written
+# to the run log, SimulationData.txt, restart metadata and output files. The
+# header is regenerated before every build; see cmake/GenerateBuildInfo.cmake.
+#
+set(IPIC3D_BUILD_INFO_DIR "${CMAKE_BINARY_DIR}/generated")
+set(IPIC3D_BUILD_INFO_HEADER "${IPIC3D_BUILD_INFO_DIR}/ipic3d_build_info.h")
+if(HIP_ON)
+  set(ipic3d_device_option "HIP_ARCH=${HIP_ARCH}")
+  set(ipic3d_device_compiler
+      "HIP ${CMAKE_HIP_COMPILER_ID} ${CMAKE_HIP_COMPILER_VERSION}")
+else()
+  set(ipic3d_device_option "CUDA_ARCH=${CUDA_ARCH}")
+  set(ipic3d_device_compiler
+      "CUDA ${CMAKE_CUDA_COMPILER_ID} ${CMAKE_CUDA_COMPILER_VERSION}")
+endif()
+set(ipic3d_build_options "${ipic3d_device_option}")
+foreach(opt GPU_SOLVER HALO_OVERLAP BENCHMARK_MODE USE_OPENMP USE_HDF5
+            USE_PHDF5 USE_ADIOS2 USE_CATALYST USE_BATSRUS TIME_TASKS
+            GPU_CYCLE_DIAGNOSTICS)
+  string(APPEND ipic3d_build_options " ${opt}=${${opt}}")
+endforeach()
+set(ipic3d_build_info_args
+    "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+    "-DBINARY_DIR=${CMAKE_BINARY_DIR}"
+    "-DOUTPUT=${IPIC3D_BUILD_INFO_HEADER}"
+    "-DBUILD_TYPE=${CMAKE_BUILD_TYPE}"
+    "-DBUILD_OPTIONS=${ipic3d_build_options}"
+    "-DCOMPILERS=CXX ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}, ${ipic3d_device_compiler}")
+file(MAKE_DIRECTORY "${IPIC3D_BUILD_INFO_DIR}")
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" ${ipic3d_build_info_args}
+          -P "${CMAKE_SOURCE_DIR}/cmake/GenerateBuildInfo.cmake")
+add_custom_target(
+  ipic3d_build_info ALL
+  COMMAND "${CMAKE_COMMAND}" ${ipic3d_build_info_args}
+          -P "${CMAKE_SOURCE_DIR}/cmake/GenerateBuildInfo.cmake"
+  BYPRODUCTS "${IPIC3D_BUILD_INFO_HEADER}"
+  COMMENT "Recording the iPIC3D build identity"
+  VERBATIM)
+add_dependencies(iPIC3Dlib ipic3d_build_info)
+target_include_directories(iPIC3Dlib PRIVATE "${IPIC3D_BUILD_INFO_DIR}")
+
 
 #
 # Executable declaration
@@ -481,6 +523,7 @@ add_install_libdir_to_rpath(iPIC3D)
 install(TARGETS iPIC3D)
 
 if(BUILD_UTESTS)
+  enable_testing()
   add_subdirectory(src/unitTest/reduction)
   add_subdirectory(src/unitTest/histogram/2D)
   add_subdirectory(src/unitTest/histogram/3D)

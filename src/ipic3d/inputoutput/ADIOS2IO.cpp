@@ -1,6 +1,7 @@
 #ifdef USE_ADIOS2
 
 #include "ADIOS2IO.hpp"
+#include "BuildInfo.h"
 #include "Collective.h"
 #include "EMfields3D.h"
 #include "Grid3DCU.h"
@@ -18,6 +19,16 @@
 namespace ADIOS2IO {
 
 using namespace std;
+
+namespace {
+
+/** Build identity (BuildInfo.h) as attributes of every file written by io. */
+void defineBuildAttributes(adios2::IO& io) {
+  io.DefineAttribute<string>("ipic3d_version", iPic3D::build::version());
+  io.DefineAttribute<string>("ipic3d_build", iPic3D::build::signature());
+}
+
+} // namespace
 
 void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag,
                                     int sample, Collective* col_in,
@@ -78,6 +89,7 @@ void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag,
   if (!particleTag.empty()) {
     this->ioParticle = adios.DeclareIO("ParticleOutput");
     this->ioParticle.SetEngine("BP5");
+    defineBuildAttributes(ioParticle);
     auto filePath =
         saveDirName + "/particle_" + to_string(cartisianRank) + ".bp";
     engineParticle =
@@ -166,6 +178,7 @@ void ADIOS2Manager::writeRestartOutput(int cycle, const string& restartDir) {
                         to_string(restartWriteCount++);
   adios2::IO ioRestart = adios.DeclareIO(ioName);
   ioRestart.SetEngine("BP5");
+  defineBuildAttributes(ioRestart);
 
   const string filePath =
       restartDir + "/restart_" + to_string(cartisianRank) + ".bp";

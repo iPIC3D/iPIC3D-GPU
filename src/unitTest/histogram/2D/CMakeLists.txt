@@ -116,7 +116,6 @@ target_compile_definitions(histogram2DTest PUBLIC NO_HDF5)
 
 # TEST
 
-include(CTest)
 enable_testing()
 
 # Test cases

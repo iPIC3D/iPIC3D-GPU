@@ -1,6 +1,7 @@
 #ifndef VELOCITY_HISTOGRAM_CUH
 #define VELOCITY_HISTOGRAM_CUH
 
+#include "BuildInfo.h"
 #include "cudaTypeDef.cuh"
 
 #include "Particle.h"
@@ -357,6 +358,7 @@ public:
     vtkFile << "SPACING " << histogramHostPtr->getResolution(0) << " "
             << histogramHostPtr->getResolution(1) << " "
             << histogramHostPtr->getResolution(2) << "\n";
+    vtkFile << iPic3D::build::vtkFieldData(); // build identity (BuildInfo.h)
     vtkFile << "POINT_DATA " << histogramHostPtr->getLogicSize() << "\n";
     vtkFile << "SCALARS scalars " << vtkType << " 1\n";
     vtkFile << "LOOKUP_TABLE default\n";

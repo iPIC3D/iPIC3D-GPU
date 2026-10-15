@@ -6,6 +6,7 @@
  */
 
 #include "RestartReader.h"
+#include "BuildInfo.h"
 
 #include "CUDA/cudaTypeDef.cuh" // cudaCommonType, cudaPclType_ID
 #include "Grid3DCU.h"
@@ -1063,6 +1064,41 @@ void readHdf5ParticlesRemapped(RestartReadContext& context, int species,
 
 } // namespace
 
+namespace {
+
+/** Restarting with a binary other than the one that wrote the checkpoint is
+ *  allowed but breaks reproducibility, so say so (rank 0, no abort). */
+void warnIfDifferentBuild(const RestartCheckpoint& checkpoint) {
+  const std::string current = iPic3D::build::signature();
+  if (checkpoint.buildSignature == current)
+    return;
+  std::cout
+      << "\n"
+      << "=================================================================="
+         "=======\n";
+  if (checkpoint.buildSignature.empty()) {
+    std::cout << "  WARNING: the restart checkpoint does not record the build "
+                 "that wrote it\n"
+              << "  (older iPIC3D); cannot check that this binary is the "
+                 "same.\n";
+  } else {
+    std::cout << "  WARNING: restarting with a different iPIC3D build than "
+                 "the one that wrote\n"
+              << "  the checkpoint; the continued run is not reproducible with "
+                 "a single binary.\n"
+              << "  checkpoint  : " << checkpoint.buildVersion << "\n"
+              << "                " << checkpoint.buildSignature << "\n"
+              << "  this binary : " << iPic3D::build::version() << "\n"
+              << "                " << current << "\n";
+  }
+  std::cout
+      << "=================================================================="
+         "=======\n"
+      << std::endl;
+}
+
+} // namespace
+
 RestartCheckpoint
 RestartReader::resolveLatestCheckpoint(const std::string& restartDir) {
   const std::string backend = RestartSlotManager::backendName();
@@ -1091,6 +1127,7 @@ RestartReader::resolveLatestCheckpoint(const std::string& restartDir) {
                 << restartBackendLabel(checkpoint.backend) << ") = restart_"
                 << checkpoint.slot << ", cycle label = " << checkpoint.cycle
                 << std::endl;
+      warnIfDifferentBuild(checkpoint);
     }
     return checkpoint;
   }

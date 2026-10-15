@@ -21,6 +21,7 @@
 
 #ifndef NO_HDF5
 #include "PSKhdf5adaptor.h"
+#include "BuildInfoHDF5.h"
 #include "errors.h"
 #include <mpi.h>
 
@@ -155,6 +156,8 @@ void HDF5OutputAdaptor::open(const std::string& name) {
     // e.push( "Using H5F_ACC_EXCL: Check if file " +name + " already exists" );
 
     // throw e;
+  } else {
+    iPic3D::build::writeHDF5Attributes(_hdf5_file_id);
   }
 
   _hdf5_file_name = name;
@@ -179,6 +182,11 @@ void HDF5OutputAdaptor::open_append(const std::string& name) {
 
   /* Restore previous error handler */
   H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // HDF 1.8
+
+  // A new file records the build; an existing one keeps the build that
+  // created it.
+  if (_hdf5_file_id >= 0)
+    iPic3D::build::writeHDF5Attributes(_hdf5_file_id);
 
   if (_hdf5_file_id < 0) {
 

@@ -95,7 +95,6 @@ else()
   target_compile_definitions(gpuMaxwellSolverTest PUBLIC HIPIFLY)
 endif()
 
-include(CTest)
 enable_testing()
 
 add_test(

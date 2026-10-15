@@ -20,6 +20,7 @@
  */
 
 #include "BenchmarkMode.h"
+#include "BuildInfo.h"
 #include "Collective.h"
 #include "EMfields3D.h"
 #include "Grid3DCU.h"
@@ -44,12 +45,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <iostream>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 // ======= Timing Debugging =======
@@ -136,6 +140,88 @@ static CaseType parseCaseType(const std::string& s) {
   if (s == "GEMHarris")
     return CaseType::GEMHarris;
   return CaseType::Default;
+}
+
+/**
+ * @brief Copy the input file into the output folder, so the folder holds the
+ *        input next to the build identity of the run. A fresh run keeps the
+ *        input's name; a restart adds ".restart<cycle>" so every run segment
+ *        keeps its own input. A failure is reported, not fatal.
+ * @return The copy's path, or an empty string if nothing was copied.
+ */
+static std::string copyInputToOutput(const std::string& input,
+                                     const std::string& outputDir, bool restart,
+                                     int firstCycle) {
+  namespace fs = std::filesystem;
+  const fs::path src(input);
+  fs::path name = src.filename();
+  if (restart)
+    name = src.stem().string() + ".restart" + std::to_string(firstCycle) +
+           src.extension().string();
+  const fs::path dst = fs::path(outputDir) / name;
+  std::error_code ec;
+  if (fs::exists(dst) && fs::equivalent(src, dst, ec))
+    return dst.string();
+  fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+  if (ec) {
+    cerr << "WARNING: could not copy the input file " << input << " to "
+         << dst.string() << ": " << ec.message() << endl;
+    return std::string();
+  }
+  return dst.string();
+}
+
+/**
+ * @brief Build identity (BuildInfo.h) and run environment, as printed at
+ *        startup and written at the top of SimulationData.txt.
+ */
+static std::string provenanceReport(const std::string& input,
+                                    const std::string& inputCopy, int nprocs,
+                                    bool restart, int firstCycle) {
+  std::ostringstream out;
+  out << "---------------------------\n"
+      << "-  Build and run          -\n"
+      << "---------------------------\n";
+  iPic3D::build::describe(out);
+
+  char when[64] = "unknown";
+  const std::time_t now = std::time(nullptr);
+  std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S %z",
+                std::localtime(&now));
+  char host[256] = "unknown";
+  gethostname(host, sizeof(host) - 1);
+  char mpiVersion[MPI_MAX_LIBRARY_VERSION_STRING] = "unknown";
+  int mpiVersionLength = 0;
+  MPI_Get_library_version(mpiVersion, &mpiVersionLength);
+  std::string mpiLibrary(mpiVersion);
+  mpiLibrary = mpiLibrary.substr(0, mpiLibrary.find_first_of("\r\n,"));
+
+  out << "Run started    : " << when << "\n"
+      << "Host (rank 0)  : " << host << "\n"
+      << "MPI ranks      : " << nprocs << " (" << mpiLibrary << ")\n";
+  if (iPic3D::build::openmpThreads() > 0)
+    out << "OpenMP threads : " << iPic3D::build::openmpThreads()
+        << " per rank\n";
+  int deviceCount = 0;
+  if (cudaGetDeviceCount(&deviceCount) == cudaSuccess && deviceCount > 0) {
+    cudaDeviceProp prop;
+    int runtime = 0, driver = 0;
+    cudaGetDeviceProperties(&prop, 0);
+    cudaRuntimeGetVersion(&runtime);
+    cudaDriverGetVersion(&driver);
+    out << "GPUs (rank 0)  : " << deviceCount << " x " << prop.name
+        << ", runtime " << runtime << ", driver " << driver << "\n";
+  }
+  out << "Input file     : " << input;
+  if (!inputCopy.empty())
+    out << " (copy: " << inputCopy << ")";
+  out << "\n"
+      << "Start          : ";
+  if (restart)
+    out << "restart at cycle " << firstCycle << "\n";
+  else
+    out << "fresh run\n";
+  return out.str();
 }
 // MPIdata* iPic3D::c_Solver::mpi=0;
 /**
@@ -286,11 +372,21 @@ int c_Solver::Init(int argc, char** argv) {
     }
 #endif
 
+    std::string inputCopy;
+#if IPIC3D_COMPILE_DISK_OUTPUT
+    inputCopy = copyInputToOutput(col->getinputfile(), SaveDirName,
+                                  restart_status != 0, first_cycle);
+#endif
+    const std::string provenance =
+        provenanceReport(col->getinputfile(), inputCopy, nprocs,
+                         restart_status != 0, first_cycle);
+    cout << provenance;
+
     MPIdata::instance().Print();
     vct->Print();
     col->Print();
 #if IPIC3D_COMPILE_DISK_OUTPUT
-    col->save();
+    col->save(provenance);
 #else
     cout << "Benchmark mode " << BENCHMARK_MODE
          << ": disk output and output-related device-to-host copies are "
@@ -462,7 +558,8 @@ int c_Solver::Init(int argc, char** argv) {
   momentum = new double[ns];
   Qtot = new double[ns];
   cq = SaveDirName + "/ConservedQuantities.txt";
-  if (myrank == 0) {
+  // Restarts append to the existing file; fresh runs start a new one.
+  if (myrank == 0 && restart_status == 0) {
     ofstream my_file(cq.c_str());
     my_file.close();
   }
@@ -3322,9 +3419,14 @@ void c_Solver::WriteConserved(int cycle) {
     }
     if (myrank == (nprocs - 1)) {
       const int cw = 16; // column width
+      // Header in a new file: a fresh run, or a restart without the file.
+      std::ifstream existing(cq);
+      const bool writeHeader =
+          existing.peek() == std::ifstream::traits_type::eof();
+      existing.close();
       ofstream my_file(cq.c_str(), fstream::app);
       my_file << std::scientific << std::setprecision(6);
-      if (cycle == 0) {
+      if (writeHeader) {
         my_file << std::left << std::setw(8) << "Cycle" << std::setw(cw)
                 << "Total_Energy" << std::setw(cw) << "Momentum"
                 << std::setw(cw) << "Eenergy" << std::setw(cw) << "Benergy"

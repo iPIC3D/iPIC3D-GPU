@@ -112,7 +112,6 @@ endif()
 
 # TEST
 
-include(CTest)
 enable_testing()
 
 # Test cases

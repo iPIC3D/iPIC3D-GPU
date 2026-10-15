@@ -22,6 +22,7 @@
 #include <fstream>
 #include <mpi.h>
 
+#include "BuildInfo.h"
 #include "Collective.h"
 #include "EMfields3D.h"
 #include "Grid3DCU.h"
@@ -298,6 +299,47 @@ static VTKGridInfo getVTKGridInfo(Grid3DCU* grid, CollectiveIO* col,
 }
 
 /**
+ * @brief Header of a BINARY STRUCTURED_POINTS legacy VTK file, with the build
+ *        identity as dataset field data (BuildInfo.h) between the geometry and
+ *        POINT_DATA. The binary strings can contain any byte, so callers use
+ *        size() as the data offset, not strlen().
+ * @param pointData The lines after POINT_DATA (VECTORS/SCALARS ...).
+ */
+static std::string vtkHeader(const std::string& description,
+                             const VTKGridInfo& g,
+                             const std::string& pointData) {
+  char geometry[512];
+  snprintf(geometry, sizeof(geometry),
+           "# vtk DataFile Version 2.0\n"
+           "%s from iPIC3D\n"
+           "BINARY\n"
+           "DATASET STRUCTURED_POINTS\n"
+           "DIMENSIONS %d %d %d\n"
+           "ORIGIN 0 0 0\n"
+           "SPACING %f %f %f\n",
+           description.c_str(), g.dimX, g.dimY, g.dimZ, g.spaceX, g.spaceY,
+           g.spaceZ);
+  return std::string(geometry) + iPic3D::build::vtkFieldData() + "POINT_DATA " +
+         std::to_string(g.nPoints) + "\n" + pointData;
+}
+
+/**
+ * @brief Collective open of a new VTK file. A file of the same name (from an
+ *        earlier run segment) is removed first: its header, which holds the
+ *        build identity, can be longer, and its last bytes would stay at the
+ *        end of the new file.
+ */
+static void openNewVTK(MPI_Comm comm, const std::string& path, MPI_File* fh) {
+  int rank = 0;
+  MPI_Comm_rank(comm, &rank);
+  if (rank == 0)
+    MPI_File_delete(path.c_str(), MPI_INFO_NULL); // no such file: ignored
+  MPI_Barrier(comm);
+  MPI_File_open(comm, path.c_str(), MPI_MODE_CREATE | MPI_MODE_WRONLY,
+                MPI_INFO_NULL, fh);
+}
+
+/**
  * @brief Write a 3-component vector VTK file via MPI-IO.
  */
 static void
@@ -320,29 +362,17 @@ writeVectorVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
         }
   }
 
-  char header[1024];
-  sprintf(header,
-          "# vtk DataFile Version 2.0\n"
-          "%s from iPIC3D\n"
-          "BINARY\n"
-          "DATASET STRUCTURED_POINTS\n"
-          "DIMENSIONS %d %d %d\n"
-          "ORIGIN 0 0 0\n"
-          "SPACING %f %f %f\n"
-          "POINT_DATA %d\n"
-          "VECTORS %s float\n",
-          description.c_str(), g.dimX, g.dimY, g.dimZ, g.spaceX, g.spaceY,
-          g.spaceZ, g.nPoints, vectorName.c_str());
-
-  int nelem = strlen(header);
-  MPI_Offset disp = nelem * sizeof(char);
+  const std::string header =
+      vtkHeader(description, g, "VECTORS " + vectorName + " float\n");
+  const int nelem = static_cast<int>(header.size());
+  MPI_Offset disp = nelem;
   MPI_File fh;
   MPI_Status status;
 
-  MPI_File_open(vct->getFieldComm(), filepath.c_str(),
-                MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+  openNewVTK(vct->getFieldComm(), filepath, &fh);
   if (vct->getCartesian_rank() == 0)
-    MPI_File_write(fh, header, nelem, MPI_BYTE, &status);
+    MPI_File_write(fh, const_cast<char*>(header.data()), nelem, MPI_BYTE,
+                   &status);
 
   int ec = MPI_File_set_view(fh, disp, EMf->getXYZeType(),
                              EMf->getProcviewXYZ(), "native", MPI_INFO_NULL);
@@ -385,30 +415,18 @@ writeScalarVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
           ByteSwap((unsigned char*)&buf[iz][iy][ix], 4);
   }
 
-  char header[1024];
-  sprintf(header,
-          "# vtk DataFile Version 2.0\n"
-          "%s from iPIC3D\n"
-          "BINARY\n"
-          "DATASET STRUCTURED_POINTS\n"
-          "DIMENSIONS %d %d %d\n"
-          "ORIGIN 0 0 0\n"
-          "SPACING %f %f %f\n"
-          "POINT_DATA %d\n"
-          "SCALARS %s float\n"
-          "LOOKUP_TABLE default\n",
-          description.c_str(), g.dimX, g.dimY, g.dimZ, g.spaceX, g.spaceY,
-          g.spaceZ, g.nPoints, scalarName.c_str());
-
-  int nelem = strlen(header);
-  MPI_Offset disp = nelem * sizeof(char);
+  const std::string header =
+      vtkHeader(description, g,
+                "SCALARS " + scalarName + " float\nLOOKUP_TABLE default\n");
+  const int nelem = static_cast<int>(header.size());
+  MPI_Offset disp = nelem;
   MPI_File fh;
   MPI_Status status;
 
-  MPI_File_open(vct->getFieldComm(), filepath.c_str(),
-                MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+  openNewVTK(vct->getFieldComm(), filepath, &fh);
   if (vct->getCartesian_rank() == 0)
-    MPI_File_write(fh, header, nelem, MPI_BYTE, &status);
+    MPI_File_write(fh, const_cast<char*>(header.data()), nelem, MPI_BYTE,
+                   &status);
 
   int ec = MPI_File_set_view(fh, disp, MPI_FLOAT, EMf->getProcview(), "native",
                              MPI_INFO_NULL);
@@ -684,22 +702,9 @@ static void nbcVectorWrite(EMfields3D* EMf, CollectiveIO* col,
         }
   }
 
-  char header[1024];
-  sprintf(header,
-          "# vtk DataFile Version 2.0\n"
-          "%s from iPIC3D\n"
-          "BINARY\n"
-          "DATASET STRUCTURED_POINTS\n"
-          "DIMENSIONS %d %d %d\n"
-          "ORIGIN 0 0 0\n"
-          "SPACING %f %f %f\n"
-          "POINT_DATA %d\n"
-          "VECTORS %s float\n",
-          desc.c_str(), g.dimX, g.dimY, g.dimZ, g.spaceX, g.spaceY, g.spaceZ,
-          g.nPoints, tag.c_str());
-
-  int nelem = strlen(header);
-  MPI_Offset disp = nelem * sizeof(char);
+  const std::string header = vtkHeader(desc, g, "VECTORS " + tag + " float\n");
+  const int nelem = static_cast<int>(header.size());
+  MPI_Offset disp = nelem;
 
   std::string filename = vtkPath(col, tag, 0); // cycle filled below
   {
@@ -709,13 +714,12 @@ static void nbcVectorWrite(EMfields3D* EMf, CollectiveIO* col,
     filename = ss.str();
   }
 
-  MPI_File_open(vct->getFieldComm(), filename.c_str(),
-                MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL,
-                &fhArr[counter]);
+  openNewVTK(vct->getFieldComm(), filename, &fhArr[counter]);
 
   if (vct->getCartesian_rank() == 0) {
     MPI_Status status;
-    MPI_File_write(fhArr[counter], header, nelem, MPI_BYTE, &status);
+    MPI_File_write(fhArr[counter], const_cast<char*>(header.data()), nelem,
+                   MPI_BYTE, &status);
   }
 
   int ec = MPI_File_set_view(fhArr[counter], disp, EMf->getXYZeType(),
@@ -755,35 +759,21 @@ static void nbcScalarWrite(EMfields3D* EMf, CollectiveIO* col,
           ByteSwap((unsigned char*)&buf[iz][iy][ix], 4);
   }
 
-  char header[1024];
-  sprintf(header,
-          "# vtk DataFile Version 2.0\n"
-          "%s from iPIC3D\n"
-          "BINARY\n"
-          "DATASET STRUCTURED_POINTS\n"
-          "DIMENSIONS %d %d %d\n"
-          "ORIGIN 0 0 0\n"
-          "SPACING %f %f %f\n"
-          "POINT_DATA %d\n"
-          "SCALARS %s float\n"
-          "LOOKUP_TABLE default\n",
-          desc.c_str(), g.dimX, g.dimY, g.dimZ, g.spaceX, g.spaceY, g.spaceZ,
-          g.nPoints, tag.c_str());
-
-  int nelem = strlen(header);
-  MPI_Offset disp = nelem * sizeof(char);
+  const std::string header =
+      vtkHeader(desc, g, "SCALARS " + tag + " float\nLOOKUP_TABLE default\n");
+  const int nelem = static_cast<int>(header.size());
+  MPI_Offset disp = nelem;
 
   std::ostringstream ss;
   ss << col->getSaveDirName() << "/" << col->getSimName() << "_" << tag << "_"
      << g.cycle << ".vtk";
 
-  MPI_File_open(vct->getFieldComm(), ss.str().c_str(),
-                MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL,
-                &fhArr[counter]);
+  openNewVTK(vct->getFieldComm(), ss.str(), &fhArr[counter]);
 
   if (vct->getCartesian_rank() == 0) {
     MPI_Status status;
-    MPI_File_write(fhArr[counter], header, nelem, MPI_BYTE, &status);
+    MPI_File_write(fhArr[counter], const_cast<char*>(header.data()), nelem,
+                   MPI_BYTE, &status);
   }
 
   int ec = MPI_File_set_view(fhArr[counter], disp, MPI_FLOAT,

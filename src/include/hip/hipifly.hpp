@@ -18,6 +18,10 @@
 #define cudaGetDevice hipGetDevice
 #define cudaGetDeviceCount hipGetDeviceCount
 #define cudaDeviceGetStreamPriorityRange hipDeviceGetStreamPriorityRange
+#define cudaDeviceProp hipDeviceProp_t
+#define cudaGetDeviceProperties hipGetDeviceProperties
+#define cudaRuntimeGetVersion hipRuntimeGetVersion
+#define cudaDriverGetVersion hipDriverGetVersion
 
 // Memory Management
 #define cudaMalloc hipMalloc

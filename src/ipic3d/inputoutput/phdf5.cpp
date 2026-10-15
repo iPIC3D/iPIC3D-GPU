@@ -28,6 +28,7 @@
 #include <mpi.h>
 
 #ifdef PHDF5
+#include "BuildInfoHDF5.h"
 
 PHDF5fileClass::PHDF5fileClass(string filestr, int nd, const int* coord,
                                MPI_Comm mpicomm) {
@@ -137,6 +138,7 @@ void PHDF5fileClass::CreatePHDF5file(double* L, int* dglob, int* dlocl,
 
   file_id = H5Fcreate(filename.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, acc_t);
   H5Pclose(acc_t);
+  iPic3D::build::writeHDF5Attributes(file_id);
 
   /* -------------------- */
   /* 4- Set up the groups */

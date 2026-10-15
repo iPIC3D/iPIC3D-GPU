@@ -94,7 +94,6 @@ else()
   target_compile_definitions(haloCommunicationTest PUBLIC HIPIFLY)
 endif()
 
-include(CTest)
 enable_testing()
 
 function(add_halo_communication_test name mpi_ranks exchange_case suite backend)

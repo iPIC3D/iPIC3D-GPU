@@ -15,6 +15,9 @@ struct RestartCheckpoint {
   int nranks = 0;
   long long generation = 0;
   RestartMeshMetadata mesh;
+  /** Build that wrote the checkpoint (BuildInfo.h); empty if not recorded. */
+  std::string buildVersion;
+  std::string buildSignature;
 };
 
 struct RestartWriteTarget {
@@ -29,6 +32,9 @@ struct RestartWriteTarget {
   long long generation = 1;
   RestartCheckpoint previous;
   RestartMeshMetadata mesh;
+  /** Build writing the checkpoint (BuildInfo.h). */
+  std::string buildVersion;
+  std::string buildSignature;
 };
 
 class RestartSlotManager {

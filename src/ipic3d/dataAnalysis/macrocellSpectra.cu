@@ -1,5 +1,6 @@
 #include "macrocellSpectra.cuh"
 
+#include "BuildInfo.h"
 #include "VCtopology3D.h"
 #include "cudaTypeDef.cuh"
 #include "gridCUDA.cuh"
@@ -213,6 +214,8 @@ void macrocellSpectra2D::writeJson_(const SpeciesFileContext& ctx) const {
     << "  \"topology\": [" << ctx.topology[0] << "," << ctx.topology[1] << ","
     << ctx.topology[2] << "],\n"
     << "  \"species\": " << ctx.species << ",\n"
+    << "  \"ipic3d_version\": \"" << iPic3D::build::version() << "\",\n"
+    << "  \"ipic3d_build\": \"" << iPic3D::build::signature() << "\",\n"
     << "  \"vmax\": " << ctx.vmax << ",\n"
     << "  \"subdomain_interior_cells\": [" << part_.Nx_int << ","
     << part_.Ny_int << "," << part_.Nz_int << "],\n"

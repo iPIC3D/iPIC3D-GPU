@@ -327,6 +327,16 @@ With `bcEMfaceXright = 2` and `bcPfaceXright = 3` (and `PERIODICX = 0`), the las
 
 The written `rho`, `J` and pressure on the layer are these neutralized or copied values; the written E and B are the copied or the solved fields.
 
+### Planet surface (`Dipole`, `Dipole2D`)
+
+Particles that enter the planet (`Planet_radius`) are processed on the GPU every cycle, on each rank:
+
+- All ions are absorbed.
+- Electrons of all species are ranked together by the kinetic energy of one physical electron (relativistic, independent of the macroparticle weight) and absorbed from the most energetic down, until the absorbed charge best matches the charge to neutralise: the ions absorbed in this cycle plus the imbalance carried from earlier cycles. What is left, at most half an electron macroparticle unless too few electrons hit, is carried to the next cycle. The carried charge is not written to restart files; a restart starts it from zero.
+- The other electrons are reflected, specularly or diffusely (`planetReflectionType = 0` or `1`), and placed on the surface.
+
+Every `PlanetDiagnosticsCycle` cycles (default `DiagnosticsOutputCycle`; `<= 0` disables), rank 0 appends the surface balance to `PlanetBC.txt` in `SaveDirName`: per species, the macroparticles and charge that hit the planet and that were absorbed; the carried charge, summed over ranks and its extremes; the mean energy separating absorbed from reflected electrons; and the rank-cycles with hits and with too few electrons to balance the ions. A row labelled N covers the hits since the previous row, up to cycle N-1; a last row at the end of the run, labelled with the resume cycle like the final restart checkpoint, covers the rest.
+
 ### Setting the case
 
 In the input file, add or modify:
@@ -365,6 +375,7 @@ Output is controlled through **cycle parameters** (how often to write) and **tag
 | `ParticlesOutputCycle` | `0` | Write particle data every N cycles. `0` disables particle output. |
 | `RestartOutputCycle` | `5000` | Write restart checkpoint every N cycles. `0` disables periodic checkpoints. |
 | `DiagnosticsOutputCycle` | `FieldOutputCycle` | Write scalar diagnostics (energy, etc.) every N cycles. Defaults to `FieldOutputCycle` if not set. |
+| `PlanetDiagnosticsCycle` | `DiagnosticsOutputCycle` | Append the planet surface balance to `PlanetBC.txt` every N cycles and at the end of the run (`Dipole`, `Dipole2D`). `<= 0` disables. |
 | `TestPartOutputCycle` | `0` | Write test-particle trajectory data every N cycles. |
 | `SortingCycle` | `0` | Re-sort particles by cell every N cycles for cache efficiency. `0` disables. |
 

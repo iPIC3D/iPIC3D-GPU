@@ -54,13 +54,16 @@ __global__ void planetExtractionKernel(particleArrayCUDA* pclsArray,
 
 /**
  * @brief Sum |q| of all particles in one species' planet SoA buffer.
- *        Block-level reduction then atomicAdd into *chargeOut.
+ *        Block-level reduction then atomicAdd into *chargeOut and
+ *        *chargeAccum (each skipped when nullptr).
  * @param planetArr Device buffer holding the extracted planet particles.
  * @param count Number of valid entries in `planetArr`.
  * @param chargeOut Device scalar accumulating the total absolute charge.
+ * @param chargeAccum Optional second device scalar (diagnostics).
  */
 __global__ void planetChargeReductionKernel(planetArray* planetArr, int count,
-                                            cudaParticleType* chargeOut) {
+                                            cudaParticleType* chargeOut,
+                                            cudaParticleType* chargeAccum) {
   extern __shared__ cudaParticleType sdata[];
 
   uint tid = threadIdx.x;
@@ -81,43 +84,85 @@ __global__ void planetChargeReductionKernel(planetArray* planetArr, int count,
     __syncthreads();
   }
 
-  if (tid == 0)
-    atomicAdd(chargeOut, sdata[0]);
+  if (tid == 0) {
+    if (chargeOut != nullptr)
+      atomicAdd(chargeOut, sdata[0]);
+    if (chargeAccum != nullptr)
+      atomicAdd(chargeAccum, sdata[0]);
+  }
 }
 
 // ======= Electron energy staging =======
 
 /**
- * @brief For each electron planet particle compute kinetic energy and write
- *        into merged buffers at position (speciesOffset + localIndex).
- *        Energy: Ek = |q| / (2 * |qom|) * (u^2 + v^2 + w^2)
+ * @brief Relativistic kinetic energy of one physical particle of unit charge,
+ *        (gamma - 1) m c^2 with m = 1/|qom|. Evaluated as
+ *        beta^2 gamma^2 / (gamma + 1) c^2 to avoid cancellation at low speed;
+ *        reduces to v^2 / (2 |qom|) for v << c.
+ * @param u X velocity.
+ * @param v Y velocity.
+ * @param w Z velocity.
+ * @param qom Charge-to-mass ratio of the species.
+ * @param c Speed of light in code units.
+ * @return Kinetic energy per physical particle in code units.
+ */
+__device__ inline cudaParticleType
+planetParticleEnergy(cudaParticleType u, cudaParticleType v, cudaParticleType w,
+                     cudaParticleType qom, cudaParticleType c) {
+  const cudaParticleType c2 = c * c;
+  const cudaParticleType beta2 = (u * u + v * v + w * w) / c2;
+  // The subcycling mover deletes particles with v >= c; the floor only keeps
+  // gamma finite should one slip through.
+  const cudaParticleType oneMinusBeta2 =
+      fmax((cudaParticleType)1.0 - beta2, (cudaParticleType)1e-12);
+  const cudaParticleType gamma = (cudaParticleType)1.0 / sqrt(oneMinusBeta2);
+  return beta2 / (oneMinusBeta2 * (gamma + (cudaParticleType)1.0)) * c2 /
+         fabs(qom);
+}
+
+/**
+ * @brief For each electron planet particle compute the kinetic energy of one
+ *        physical electron and write it into merged buffers at position
+ *        (speciesOffset + localIndex). The macroparticle weight |q| does not
+ *        enter the energy, so electron species with different weights (solar
+ *        wind vs exosphere, merged particles) are ranked by the energy that
+ *        decides whether an electron reaches the surface.
+ *        Optionally accumulates the species' total |q| for diagnostics with
+ *        one atomic per warp.
  * @param planetArr Device buffer holding one electron species' planet
  * particles.
  * @param count Number of valid entries in `planetArr`.
  * @param qom Charge-to-mass ratio of the species.
+ * @param c Speed of light in code units.
  * @param energyBuf Merged output buffer for kinetic-energy keys.
  * @param globalIdxBuf Merged output buffer for global particle indices.
  * @param speciesOffset Prefix offset of this species in the merged buffers.
+ * @param hitChargeAccum Optional device scalar accumulating the total |q|.
  */
 __global__ void planetEnergyKernel(planetArray* planetArr, int count,
-                                   cudaParticleType qom,
+                                   cudaParticleType qom, cudaParticleType c,
                                    cudaParticleType* energyBuf,
-                                   uint32_t* globalIdxBuf, int speciesOffset) {
-  uint gid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (gid >= (uint)count)
-    return;
+                                   uint32_t* globalIdxBuf, int speciesOffset,
+                                   cudaParticleType* hitChargeAccum) {
+  const uint gid = blockIdx.x * blockDim.x + threadIdx.x;
 
-  const SpeciesParticle& pcl = planetArr->getArray()[gid];
+  // No early return: every lane must reach the warp reduction below.
+  cudaParticleType absq = 0;
+  if (gid < (uint)count) {
+    const SpeciesParticle& pcl = planetArr->getArray()[gid];
+    absq = fabs(pcl.get_q());
 
-  const cudaParticleType u = pcl.get_u();
-  const cudaParticleType v = pcl.get_v();
-  const cudaParticleType w = pcl.get_w();
-  const cudaParticleType absq = fabs(pcl.get_q());
-  const cudaParticleType mass = absq / fabs(qom); // |q| / |q/m| = m
+    const int idx = speciesOffset + gid;
+    energyBuf[idx] =
+        planetParticleEnergy(pcl.get_u(), pcl.get_v(), pcl.get_w(), qom, c);
+    globalIdxBuf[idx] = (uint32_t)idx;
+  }
 
-  const int idx = speciesOffset + gid;
-  energyBuf[idx] = (cudaParticleType)0.5 * mass * (u * u + v * v + w * w);
-  globalIdxBuf[idx] = (uint32_t)idx;
+  if (hitChargeAccum != nullptr) {
+    absq = warp_reduce_sum(absq);
+    if ((threadIdx.x & (WARP_SIZE - 1)) == 0 && absq != 0)
+      atomicAdd(hitChargeAccum, absq);
+  }
 }
 
 // ======= Bitonic energy sort =======
@@ -178,10 +223,26 @@ __global__ void bitonicSortStepKernel(cudaParticleType* __restrict__ keys,
 
 // ======= Charge cutoff =======
 
+// Electron species whose absorbed charge is accumulated in thread-local storage
+// by chargeCutoffKernel; any further species go straight to global memory.
+constexpr int PLANET_LOCAL_ELEC_SPECIES = 16;
+
+// Relative tolerance below which a positive residual counts as balanced when
+// flagging electron-limited cycles (absorbs summation round-off).
+constexpr cudaParticleType PLANET_RESIDUAL_REL_TOL = (cudaParticleType)1e-12;
+
 /**
  * @brief Sequential prefix-sum of |q| in sorted (descending energy) order.
  *        Finds the cutoff index: electrons [0..cutoff-1] are deleted,
  *        electrons [cutoff..n-1] survive and will be reflected.
+ *
+ *        The target is the charge the surface still has to neutralise: the
+ *        ions absorbed this cycle plus the residual carried from previous
+ *        cycles. The next most energetic electron is absorbed only while it
+ *        brings the absorbed charge closer to the target, so the per-cycle
+ *        mismatch is at most half an electron macroparticle, whatever the
+ *        weights of the species involved. The remaining mismatch, of either
+ *        sign, is carried to the next cycle.
  *
  *        Single-thread kernel: planet particle counts are small (typically
  *        <100K), so a sequential scan is fast enough and avoids complexity.
@@ -191,29 +252,33 @@ __global__ void bitonicSortStepKernel(cudaParticleType* __restrict__ keys,
  * @param speciesOffsets  prefix offsets into the merged buffers per electron
  * species
  * @param sortedGlobalIdx  sorted global indices (reordered by energy)
- * @param n  total number of electron planet particles
- * @param ionChargeTarget  device pointer to total |Q_ion| to match
+ * @param sortedEnergy  per-electron energies in descending order
+ * @param n  total number of electron planet particles (may be 0)
+ * @param state  persistent charge carry-over and scalar diagnostics
+ * @param absorbedChargeAccum  optional per-electron-species absorbed |q|
+ * accumulator (diagnostics)
  * @param cutoffIndex  output: first sorted index that SURVIVES (reflects)
  */
 __global__ void chargeCutoffKernel(planetArray** planetArrs, int nSpecies,
                                    const int* speciesOffsets,
-                                   const uint32_t* sortedGlobalIdx, int n,
-                                   const cudaParticleType* ionChargeTarget,
+                                   const uint32_t* sortedGlobalIdx,
+                                   const cudaParticleType* sortedEnergy, int n,
+                                   PlanetBCState* state,
+                                   cudaParticleType* absorbedChargeAccum,
                                    int* cutoffIndex) {
   if (threadIdx.x != 0 || blockIdx.x != 0)
     return;
 
-  const cudaParticleType ionCharge = *ionChargeTarget;
+  const cudaParticleType target = state->residualCharge + state->ionChargeCycle;
 
-  // If no ion charge to match, all electrons survive (reflect all)
-  if (ionCharge <= 0) {
-    *cutoffIndex = 0;
-    return;
-  }
+  cudaParticleType absorbedLocal[PLANET_LOCAL_ELEC_SPECIES];
+  for (int s = 0; s < PLANET_LOCAL_ELEC_SPECIES; s++)
+    absorbedLocal[s] = 0;
 
-  cudaParticleType cumQ = 0;
-  for (int i = 0; i < n; i++) {
-    uint32_t gidx = sortedGlobalIdx[i];
+  cudaParticleType absorbed = 0;
+  int cutoff = 0;
+  for (; cutoff < n; cutoff++) {
+    uint32_t gidx = sortedGlobalIdx[cutoff];
 
     // Decode which species and local index from gidx
     int localIdx = (int)gidx;
@@ -230,16 +295,42 @@ __global__ void chargeCutoffKernel(planetArray** planetArrs, int nSpecies,
     if (speciesIdx < 0)
       continue; // should not happen
 
-    cudaParticleType absq =
+    const cudaParticleType absq =
         fabs(planetArrs[speciesIdx]->getArray()[localIdx].get_q());
-    cumQ += absq;
 
-    if (cumQ >= ionCharge) {
-      *cutoffIndex = i + 1; // delete [0..i], reflect [i+1..n-1]
-      return;
+    // Stop once absorbing this electron would move away from the target
+    // (ties are reflected).
+    if (absorbed + (cudaParticleType)0.5 * absq >= target)
+      break;
+    absorbed += absq;
+
+    if (absorbedChargeAccum != nullptr) {
+      if (speciesIdx < PLANET_LOCAL_ELEC_SPECIES)
+        absorbedLocal[speciesIdx] += absq;
+      else
+        absorbedChargeAccum[speciesIdx] += absq;
     }
   }
-  *cutoffIndex = n; // not enough electrons; delete all
+  *cutoffIndex = cutoff; // delete [0..cutoff-1], reflect [cutoff..n-1]
+
+  const cudaParticleType residual = target - absorbed;
+  state->residualCharge = residual;
+  state->ionChargeCycle = 0;
+
+  // ======= Diagnostics =======
+  if (absorbedChargeAccum != nullptr) {
+    const int nLocal = min(nSpecies, PLANET_LOCAL_ELEC_SPECIES);
+    for (int s = 0; s < nLocal; s++)
+      absorbedChargeAccum[s] += absorbedLocal[s];
+  }
+  if (cutoff == n && residual > PLANET_RESIDUAL_REL_TOL * fabs(target))
+    state->electronLimitedCycles++;
+  if (cutoff > 0 && cutoff < n) {
+    // Energy separating the absorbed from the reflected electrons.
+    state->cutoffEnergySum += (cudaParticleType)0.5 *
+                              (sortedEnergy[cutoff - 1] + sortedEnergy[cutoff]);
+    state->cutoffSamples++;
+  }
 }
 
 // ======= Specular reflection and compaction =======

@@ -166,6 +166,7 @@ bcPfaceZleft  = 2                       # [default: 1]
 
 ApplyInflowBcsEImage = 1                # Include inflow E terms [default: 1]
 planetReflectionType = 1                # 0=specular, 1=diffuse [default: 0]
+PlanetDiagnosticsCycle = 100            # Planet BC balance (data/PlanetBC.txt); <=0 disables [default: DiagnosticsOutputCycle]
 
 # %%%%%%%%%%%%%%%%%%%% NUMERICAL SOLVERS %%%%%%%%%%%%%%%%%%%%
 CGtol      = 1E-3                       # CG tolerance; current call disabled [default: 1e-3]

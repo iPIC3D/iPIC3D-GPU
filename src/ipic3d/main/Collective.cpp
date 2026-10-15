@@ -279,6 +279,8 @@ void Collective::ReadInput(const ConfigFile& config) {
     RestartOutputCycle = config.read<int>("RestartOutputCycle", 5000);
     DiagnosticsOutputCycle =
         config.read<int>("DiagnosticsOutputCycle", FieldOutputCycle);
+    PlanetDiagnosticsCycle =
+        config.read<int>("PlanetDiagnosticsCycle", DiagnosticsOutputCycle);
     SortingCycle = config.read<int>("SortingCycle", 0);
     ParaviewScriptPath = config.read<string>("ParaviewScriptPath", "");
     CallFinalize = config.read<bool>("CallFinalize", true);
@@ -961,6 +963,9 @@ void Collective::Print() {
   cout << "---------------------" << endl;
   cout << "Reflection type            : " << planetReflectionType
        << (planetReflectionType == 0 ? " (specular)" : " (diffuse/isotropic)")
+       << endl;
+  cout << "Diagnostics cycle          : " << PlanetDiagnosticsCycle
+       << (PlanetDiagnosticsCycle > 0 ? " (PlanetBC.txt)" : " (disabled)")
        << endl;
   cout << "---------------------" << endl;
   cout << "Exosphere Ionization" << endl;

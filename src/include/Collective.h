@@ -290,6 +290,7 @@ public:
   int getTestParticlesOutputCycle() const { return (TestParticlesOutputCycle); }
   int getRestartOutputCycle() const { return (RestartOutputCycle); }
   int getDiagnosticsOutputCycle() const { return (DiagnosticsOutputCycle); }
+  int getPlanetDiagnosticsCycle() const { return (PlanetDiagnosticsCycle); }
   int getSortingCycle() const { return (SortingCycle); }
   bool getCallFinalize() const { return (CallFinalize); }
   bool particle_output_is_off() const;
@@ -618,6 +619,8 @@ private:
   int RestartOutputCycle;
   /*! Output for diagnostics */
   int DiagnosticsOutputCycle;
+  /*! planet boundary diagnostics cycle (0 disables) */
+  int PlanetDiagnosticsCycle;
   /*! Call Finalize() at end of program execution (true by default) */
   bool CallFinalize;
 };

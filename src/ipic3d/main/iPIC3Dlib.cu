@@ -47,6 +47,7 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -951,7 +952,10 @@ int c_Solver::initCUDA() {
                             planetBufCapacity * sizeof(cudaParticleType)));
       cudaErrChk(cudaMalloc(&planetGlobalIdxBuf,
                             planetBufCapacity * sizeof(uint32_t)));
-      cudaErrChk(cudaMalloc(&planetIonChargeDevice, sizeof(cudaParticleType)));
+      cudaErrChk(cudaMalloc(&planetBCStateDevice, sizeof(PlanetBCState)));
+      cudaErrChk(cudaMemset(planetBCStateDevice, 0, sizeof(PlanetBCState)));
+      cudaErrChk(
+          cudaEventCreateWithFlags(&planetDoneEvent, cudaEventDisableTiming));
       cudaErrChk(cudaMalloc(&planetCutoffDevice, sizeof(int)));
 
       // Device array of per-electron-species planetArray device pointers.
@@ -970,7 +974,7 @@ int c_Solver::initCUDA() {
     } else {
       planetEnergyBuf = nullptr;
       planetGlobalIdxBuf = nullptr;
-      planetIonChargeDevice = nullptr;
+      planetBCStateDevice = nullptr;
       planetCutoffDevice = nullptr;
       planetArrayCUDAPtrDevice = nullptr;
       planetElecOffsetsDevice = nullptr;
@@ -998,6 +1002,60 @@ int c_Solver::initCUDA() {
       planetReflectedBufCapacity = 0;
     }
     planetRngCycleCounter = 0;
+
+    // Planet BC diagnostics: accumulated on the device by the planet kernels
+    // and written every planetDiagCycle cycles by WritePlanetDiagnostics().
+#if IPIC3D_COMPILE_DISK_OUTPUT
+    planetDiagCycle =
+        doPlanet_ ? std::max(col->getPlanetDiagnosticsCycle(), 0) : 0;
+#else
+    planetDiagCycle = 0;
+#endif
+    planetDiagChargeDevice = nullptr;
+    planetDiagChargeHost = nullptr;
+    planetBCStateHost = nullptr;
+    planetDiagChargePrev.assign(ns + planetElecSpeciesCount, 0.0);
+    planetBCStatePrev = PlanetBCState{};
+    planetDiagHitCount.assign(ns, 0.0);
+    planetDiagAbsorbedCount.assign(ns, 0.0);
+    planetDiagRankCycles = 0.0;
+    planetDiagCyclesAccumulated = 0;
+    if (planetDiagCycle > 0) {
+      const int nCharge = ns + planetElecSpeciesCount;
+      cudaErrChk(cudaMalloc(&planetDiagChargeDevice,
+                            nCharge * sizeof(cudaParticleType)));
+      cudaErrChk(cudaMemset(planetDiagChargeDevice, 0,
+                            nCharge * sizeof(cudaParticleType)));
+      cudaErrChk(cudaHostAlloc(&planetDiagChargeHost,
+                               nCharge * sizeof(cudaParticleType),
+                               cudaHostAllocDefault));
+      cudaErrChk(cudaHostAlloc(&planetBCStateHost, sizeof(PlanetBCState),
+                               cudaHostAllocDefault));
+
+      planetDiagFile = SaveDirName + "/PlanetBC.txt";
+      if (myrank == 0) {
+        // Restarts append to an existing file; fresh runs start a new one.
+        std::ifstream existing(planetDiagFile);
+        const bool appendToExisting =
+            restart_status != 0 &&
+            existing.peek() != std::ifstream::traits_type::eof();
+        existing.close();
+        if (!appendToExisting) {
+          const int cw = 16; // column width
+          ofstream my_file(planetDiagFile.c_str());
+          my_file << std::left << std::setw(8) << "Cycle" << std::setw(10)
+                  << "NCycles";
+          for (const char* name : {"Nhit", "Nabs", "Qhit", "Qabs"})
+            for (int is = 0; is < ns; is++)
+              my_file << std::setw(cw)
+                      << (std::string(name) + "[" + std::to_string(is) + "]");
+          my_file << std::setw(cw) << "Qres_sum" << std::setw(cw) << "Qres_max"
+                  << std::setw(cw) << "Qres_min" << std::setw(cw) << "Ecut_mean"
+                  << std::setw(cw) << "RankCycles" << std::setw(cw)
+                  << "ElecLimited" << endl;
+        }
+      }
+    }
   }
 
   cudaErrChk(cudaDeviceSynchronize());
@@ -1130,8 +1188,16 @@ int c_Solver::deInitCUDA() {
     cudaFree(planetEnergyBuf);
   if (planetGlobalIdxBuf)
     cudaFree(planetGlobalIdxBuf);
-  if (planetIonChargeDevice)
-    cudaFree(planetIonChargeDevice);
+  if (planetBCStateDevice)
+    cudaFree(planetBCStateDevice);
+  if (doPlanet_)
+    cudaEventDestroy(planetDoneEvent);
+  if (planetDiagChargeDevice)
+    cudaFree(planetDiagChargeDevice);
+  if (planetDiagChargeHost)
+    cudaFreeHost(planetDiagChargeHost);
+  if (planetBCStateHost)
+    cudaFreeHost(planetBCStateHost);
   if (planetCutoffDevice)
     cudaFree(planetCutoffDevice);
   if (planetArrayCUDAPtrDevice)
@@ -1872,6 +1938,9 @@ int c_Solver::cudaLauncherAsync(const int species,
   // planetExtractionKernel needs the original PLANET hashedId to scatter
   // correctly.
   if (count_removed_planet > 0) {
+    // Previous-cycle planet work that was not followed by a host sync (see
+    // processPlanetParticles) may still be reading this buffer.
+    cudaErrChk(cudaStreamWaitEvent(streams[species + ns], planetDoneEvent, 0));
     if ((uint32_t)count_removed_planet >
         planetArrayHostPtr[species]->getSize()) {
       planetArrayHostPtr[species]->expand(
@@ -2052,15 +2121,23 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle) {
  * @brief Process planet-hit particles across all species on the dedicated
  * planet stream.
  *
- * Ions are reduced to a total removed charge, electrons are energy-ranked, and
- * only the charge-balanced survivor subset is reflected back into the outgoing
- * communication buffers. Intermediate work stays on the GPU until the final
- * small host-side synchronization needed for reflected-particle counts.
+ * Ions are always absorbed and their charge is reduced on the GPU. Electrons of
+ * all species are ranked together by the kinetic energy of one physical
+ * electron and absorbed from the most energetic down, until the absorbed charge
+ * best matches the ion charge plus the imbalance carried from previous cycles;
+ * the rest are reflected back into the outgoing communication buffers. The
+ * leftover imbalance stays on the GPU for the next cycle. Intermediate work
+ * stays on the GPU until the final small host-side synchronization needed for
+ * reflected-particle counts.
  */
 void c_Solver::processPlanetParticles() {
 #if ENABLE_SOA_TIMING
   auto _tP0 = std::chrono::high_resolution_clock::now();
 #endif
+  const bool doDiag = planetDiagCycle > 0;
+  if (doDiag)
+    planetDiagCyclesAccumulated++;
+
   // ======= Step 1: Check whether any planet particles were collected =======
   int totalIonPlanet = 0;
   int totalElecPlanet = 0;
@@ -2069,13 +2146,14 @@ void c_Solver::processPlanetParticles() {
       continue;
     if (col->getQOM(i) > 0)
       totalIonPlanet += planetPclCount[i];
-    else
+    else if (col->getQOM(i) < 0)
       totalElecPlanet += planetPclCount[i];
   }
-  if (totalElecPlanet == 0) {
+  // Nothing hit the surface: the carried charge is unchanged.
+  if (totalIonPlanet == 0 && totalElecPlanet == 0) {
 #if ENABLE_SOA_TIMING
     if (MPIdata::get_rank() == 0)
-      printf("  [SoA planet: skip (0 elec) %.2f ms]\n",
+      printf("  [SoA planet: skip (no hits) %.2f ms]\n",
              std::chrono::duration<double, std::milli>(
                  std::chrono::high_resolution_clock::now() - _tP0)
                  .count());
@@ -2083,12 +2161,28 @@ void c_Solver::processPlanetParticles() {
     return;
   }
 
+  if (doDiag) {
+    planetDiagRankCycles += 1.0;
+    for (int i = 0; i < ns; i++) {
+      planetDiagHitCount[i] += planetPclCount[i];
+      // Ions are always absorbed; electrons are added after the cutoff.
+      if (col->getQOM(i) > 0)
+        planetDiagAbsorbedCount[i] += planetPclCount[i];
+    }
+  }
+  // Device addresses of the two sections of planetDiagChargeDevice: hit |Q|
+  // per species [0, ns) and absorbed |Q| per electron species [ns, ...).
+  // nullptr (diagnostics off) makes the kernels skip the atomics.
+  cudaParticleType* const diagHitChargeDevice =
+      doDiag ? planetDiagChargeDevice : nullptr;
+  cudaParticleType* const diagAbsorbedElecChargeDevice =
+      doDiag ? planetDiagChargeDevice + ns : nullptr;
+
 #if ENABLE_SOA_TIMING
   auto _tP1 = std::chrono::high_resolution_clock::now();
 #endif
   // ======= Step 2: Reduce removed ion charge on the GPU =======
-  cudaErrChk(cudaMemsetAsync(planetIonChargeDevice, 0, sizeof(cudaParticleType),
-                             planetStream));
+  // ionChargeCycle is zero here: chargeCutoffKernel consumes and clears it.
   for (int i = 0; i < ns; i++) {
     if (col->getQOM(i) <= 0 || planetPclCount[i] == 0)
       continue;
@@ -2097,10 +2191,32 @@ void c_Solver::processPlanetParticles() {
     planetChargeReductionKernel<<<gridSz, blockSize,
                                   blockSize * sizeof(cudaParticleType),
                                   planetStream>>>(
-        planetArrayCUDAPtr[i], planetPclCount[i], planetIonChargeDevice);
+        planetArrayCUDAPtr[i], planetPclCount[i],
+        &planetBCStateDevice->ionChargeCycle,
+        diagHitChargeDevice ? diagHitChargeDevice + i : nullptr);
   }
-  // No host sync is needed here: later kernels consume planetIonChargeDevice
+  // No host sync is needed here: later kernels consume ionChargeCycle
   // directly.
+
+  if (totalElecPlanet == 0) {
+    // No electron to balance against: carry the absorbed ion charge over.
+    chargeCutoffKernel<<<1, 1, 0, planetStream>>>(
+        planetArrayCUDAPtrDevice, planetElecSpeciesCount,
+        planetElecOffsetsDevice, planetGlobalIdxBuf, planetEnergyBuf, 0,
+        planetBCStateDevice, diagAbsorbedElecChargeDevice, planetCutoffDevice);
+    // No host sync on this path: the next cycle's planet extraction waits on
+    // this event before overwriting the planet buffers.
+    cudaErrChk(cudaEventRecord(planetDoneEvent, planetStream));
+#if ENABLE_SOA_TIMING
+    if (MPIdata::get_rank() == 0)
+      printf("  [SoA planet: ions only, charge carried %.2f ms  ions=%d]\n",
+             std::chrono::duration<double, std::milli>(
+                 std::chrono::high_resolution_clock::now() - _tP0)
+                 .count(),
+             totalIonPlanet);
+#endif
+    return;
+  }
 
   // ======= Step 3: Resize shared work buffers as needed =======
   // Round up to the next power of 2 for bitonic sort.
@@ -2140,8 +2256,9 @@ void c_Solver::processPlanetParticles() {
                                        DEFAULT_BLOCK_SIZE),
                            DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
           planetArrayCUDAPtr[specIdx], planetPclCount[specIdx],
-          (cudaParticleType)col->getQOM(specIdx), planetEnergyBuf,
-          planetGlobalIdxBuf, offset);
+          (cudaParticleType)col->getQOM(specIdx), (cudaParticleType)col->getC(),
+          planetEnergyBuf, planetGlobalIdxBuf, offset,
+          diagHitChargeDevice ? diagHitChargeDevice + specIdx : nullptr);
     }
     offset += planetPclCount[specIdx];
   }
@@ -2177,13 +2294,13 @@ void c_Solver::processPlanetParticles() {
     }
   }
 
-  // ======= Step 6: Find the energy cutoff that matches the removed ion charge
+  // ======= Step 6: Find the energy cutoff that balances the absorbed charge
   // =======
-  cudaErrChk(cudaMemsetAsync(planetCutoffDevice, 0, sizeof(int), planetStream));
+  // The kernel always writes planetCutoffDevice and updates the carried charge.
   chargeCutoffKernel<<<1, 1, 0, planetStream>>>(
       planetArrayCUDAPtrDevice, planetElecSpeciesCount, planetElecOffsetsDevice,
-      planetGlobalIdxBuf, totalElecPlanet, planetIonChargeDevice,
-      planetCutoffDevice);
+      planetGlobalIdxBuf, planetEnergyBuf, totalElecPlanet, planetBCStateDevice,
+      diagAbsorbedElecChargeDevice, planetCutoffDevice);
   // No host sync is needed here: the reflection kernel reads planetCutoffDevice
   // directly.
 
@@ -2233,6 +2350,13 @@ void c_Solver::processPlanetParticles() {
 #if ENABLE_SOA_TIMING
   auto _tP2 = std::chrono::high_resolution_clock::now();
 #endif
+  if (doDiag) {
+    for (int e = 0; e < planetElecSpeciesCount; e++) {
+      const int specIdx = planetElecSpeciesMap[e];
+      planetDiagAbsorbedCount[specIdx] +=
+          planetPclCount[specIdx] - planetSurvivorCount[e];
+    }
+  }
 
   // ======= Step 9: Copy reflected particles into the per-species comm buffers
   // =======
@@ -2946,6 +3070,7 @@ void c_Solver::WriteOutput(int cycle) {
 #endif
 
   WriteConserved(cycle);
+  WritePlanetDiagnostics(cycle);
 
   // ======= Restart checkpoint =======
   if (restartOutputDue) {
@@ -3238,6 +3363,135 @@ void c_Solver::WriteConserved(int cycle) {
 }
 
 /**
+ * @brief Append planet boundary-condition diagnostics to PlanetBC.txt.
+ *
+ * The planet kernels accumulate the diagnostics on the device as they run, so
+ * the per-cycle cost is a few extra atomics. Everything else is paid here,
+ * once every planetDiagCycle cycles: one small D2H copy, two MPI reductions
+ * and one line written by rank 0. This runs from WriteOutput(), while the
+ * mover kernels of the cycle are in flight; the device accumulators are
+ * cumulative and differenced on the host, so no kernel (memset) has to queue
+ * behind the mover. A row written at cycle N covers the planet hits processed
+ * since the previous row, up to cycle N-1. At the end of the run Finalize()
+ * writes the hits not yet reported in one more row, labelled with the resume
+ * cycle (last cycle + 1) like the final restart checkpoint.
+ *
+ * Columns, per species s (charges are |q| sums in code units, as Q[s] in
+ * ConservedQuantities.txt):
+ *  - Nhit[s], Qhit[s]: macroparticles / charge that entered the planet;
+ *  - Nabs[s], Qabs[s]: absorbed by the surface (all ions; electrons above the
+ *    energy cutoff); the difference was reflected.
+ * Global columns:
+ *  - Qres_sum/max/min: charge carried to the next cycle, summed over ranks and
+ *    its extremes over ranks (> 0: ion charge not yet neutralised);
+ *  - Ecut_mean: mean per-electron energy separating absorbed from reflected
+ *    electrons, an estimate of the surface potential barrier (nan if none);
+ *  - RankCycles: rank-cycles in which something hit the planet;
+ *  - ElecLimited: rank-cycles in which every electron that hit was absorbed
+ *    and positive charge was still left.
+ * @param cycle Simulation cycle being written.
+ * @param endOfRun Write regardless of the cadence (end of the run).
+ */
+void c_Solver::WritePlanetDiagnostics(int cycle, bool endOfRun) {
+#if IPIC3D_COMPILE_DISK_OUTPUT
+  // planetDiagCyclesAccumulated is identical on all ranks, so every rank takes
+  // the same branch before the collective calls below.
+  if (planetDiagCycle <= 0 || planetDiagCyclesAccumulated == 0 ||
+      (!endOfRun && cycle % planetDiagCycle != 0))
+    return;
+
+  // ======= Snapshot the cumulative device accumulators =======
+  const int nCharge = ns + planetElecSpeciesCount;
+  cudaErrChk(cudaMemcpyAsync(planetDiagChargeHost, planetDiagChargeDevice,
+                             nCharge * sizeof(cudaParticleType),
+                             cudaMemcpyDeviceToHost, planetStream));
+  cudaErrChk(cudaMemcpyAsync(planetBCStateHost, planetBCStateDevice,
+                             sizeof(PlanetBCState), cudaMemcpyDeviceToHost,
+                             planetStream));
+  cudaErrChk(cudaStreamSynchronize(planetStream));
+
+  // Window values = current snapshot - previous snapshot.
+  std::vector<double> charge(nCharge);
+  for (int k = 0; k < nCharge; k++) {
+    charge[k] = planetDiagChargeHost[k] - planetDiagChargePrev[k];
+    planetDiagChargePrev[k] = planetDiagChargeHost[k];
+  }
+  const PlanetBCState& cur = *planetBCStateHost;
+  const double cutoffEnergySum =
+      cur.cutoffEnergySum - planetBCStatePrev.cutoffEnergySum;
+  // Unsigned differences stay correct across a counter wrap-around.
+  const uint32_t cutoffSamples =
+      cur.cutoffSamples - planetBCStatePrev.cutoffSamples;
+  const uint32_t electronLimitedCycles =
+      cur.electronLimitedCycles - planetBCStatePrev.electronLimitedCycles;
+  planetBCStatePrev = cur;
+
+  // ======= Pack the local values and reduce them over ranks =======
+  // Layout: [Nhit(ns) | Nabs(ns) | Qhit(ns) | Qabs(ns) | Qres, EcutSum,
+  //          EcutSamples, RankCycles, ElecLimited]
+  const int nTail = 5;
+  std::vector<double> local(4 * ns + nTail, 0.0);
+  std::vector<double> global(4 * ns + nTail, 0.0);
+  for (int is = 0; is < ns; is++) {
+    local[is] = planetDiagHitCount[is];
+    local[ns + is] = planetDiagAbsorbedCount[is];
+    local[2 * ns + is] = charge[is];
+    if (col->getQOM(is) > 0) // ions are always absorbed
+      local[3 * ns + is] = charge[is];
+  }
+  for (int e = 0; e < planetElecSpeciesCount; e++)
+    local[3 * ns + planetElecSpeciesMap[e]] = charge[ns + e];
+  const double residual = cur.residualCharge;
+  double* tail = local.data() + 4 * ns;
+  tail[0] = residual;
+  tail[1] = cutoffEnergySum;
+  tail[2] = cutoffSamples;
+  tail[3] = planetDiagRankCycles;
+  tail[4] = electronLimitedCycles;
+  double residualExtremes[2] = {residual, -residual};
+  double globalExtremes[2] = {residual, -residual};
+#ifndef NO_MPI
+  MPI_Reduce(local.data(), global.data(), (int)local.size(), MPI_DOUBLE,
+             MPI_SUM, 0, MPIdata::get_PicGlobalComm());
+  MPI_Reduce(residualExtremes, globalExtremes, 2, MPI_DOUBLE, MPI_MAX, 0,
+             MPIdata::get_PicGlobalComm());
+#else
+  global = local;
+#endif
+
+  const int nCycles = planetDiagCyclesAccumulated;
+  std::fill(planetDiagHitCount.begin(), planetDiagHitCount.end(), 0.0);
+  std::fill(planetDiagAbsorbedCount.begin(), planetDiagAbsorbedCount.end(),
+            0.0);
+  planetDiagRankCycles = 0.0;
+  planetDiagCyclesAccumulated = 0;
+
+  // ======= Rank 0 appends one row =======
+  if (myrank == 0) {
+    const int cw = 16; // column width
+    const double* gtail = global.data() + 4 * ns;
+    const double cutoffMean = gtail[2] > 0
+                                  ? gtail[1] / gtail[2]
+                                  : std::numeric_limits<double>::quiet_NaN();
+    ofstream my_file(planetDiagFile.c_str(), fstream::app);
+    my_file << std::left << std::setw(8) << cycle << std::setw(10) << nCycles;
+    for (int k = 0; k < 2 * ns; k++) // counts
+      my_file << std::setw(cw) << static_cast<long long>(global[k]);
+    my_file << std::scientific << std::setprecision(6);
+    for (int k = 2 * ns; k < 4 * ns; k++) // charges
+      my_file << std::setw(cw) << global[k];
+    my_file << std::setw(cw) << gtail[0] << std::setw(cw) << globalExtremes[0]
+            << std::setw(cw) << -globalExtremes[1] << std::setw(cw)
+            << cutoffMean << std::setw(cw) << static_cast<long long>(gtail[3])
+            << std::setw(cw) << static_cast<long long>(gtail[4]) << endl;
+  }
+#else
+  (void)cycle;
+  (void)endOfRun;
+#endif
+}
+
+/**
  * @brief Write one velocity-distribution snapshot for every species.
  *
  * Output cadence is controlled by the caller; this method only performs the
@@ -3337,6 +3591,10 @@ void c_Solver::Finalize() {
 
 #if IPIC3D_COMPILE_DISK_OUTPUT
   pclNumCSV.close();
+
+  // Planet hits processed since the last PlanetBC.txt row, the last cycle's
+  // included, labelled with the resume cycle like the final checkpoint.
+  WritePlanetDiagnostics(col->getNcycles() + first_cycle, true);
 
   if (ioManager &&
       ioManager->getRestartBackend() != IOManager::RestartBackend::NONE &&

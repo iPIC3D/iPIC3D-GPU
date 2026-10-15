@@ -198,6 +198,15 @@ public:
    */
   void WriteConserved(int cycle);
   /**
+   * @brief Write planet boundary-condition diagnostics for one cycle.
+   *
+   * @param cycle Current simulation cycle, or the resume label of the run
+   * (last cycle + 1) at the end of the run.
+   * @param endOfRun Write the hits not yet reported whatever the cadence
+   * (called from Finalize()).
+   */
+  void WritePlanetDiagnostics(int cycle, bool endOfRun = false);
+  /**
    * @brief Write the velocity-distribution diagnostic for one cycle.
    *
    * @param cycle Current simulation cycle.
@@ -462,8 +471,9 @@ private:
   // Cross-species planet processing buffers (device)
   cudaParticleType* planetEnergyBuf;       // merged electron energies
   uint32_t* planetGlobalIdxBuf;            // encodes species + local index
-  cudaParticleType* planetIonChargeDevice; // single-element device buffer for
-                                           // reduction output
+  PlanetBCState* planetBCStateDevice; // carried charge + scalar diagnostics
+  cudaEvent_t planetDoneEvent; // recorded on planetStream when its work is not
+                               // followed by a host sync
   int* planetCutoffDevice; // single-element device buffer for cutoff index
                            // output
   planetArray** planetArrayCUDAPtrDevice; // device array of device pointers
@@ -488,6 +498,23 @@ private:
                                   // planetReflectedBuf
   uint32_t planetRngCycleCounter; // incremented each cycle for diffuse-scatter
                                   // RNG seed
+
+  // Planet BC diagnostics, accumulated between writes (WritePlanetDiagnostics)
+  int planetDiagCycle; // write cadence in cycles, 0 disables accumulation
+  cudaParticleType* planetDiagChargeDevice; // [ns + planetElecSpeciesCount]:
+                                            // cumulative hit |Q| per species,
+                                            // then absorbed |Q| per electron
+                                            // species
+  cudaParticleType* planetDiagChargeHost;   // pinned mirror of the above
+  PlanetBCState* planetBCStateHost; // pinned mirror of planetBCStateDevice
+  std::vector<double> planetDiagChargePrev; // previous snapshot of the
+                                            // cumulative device charges
+  PlanetBCState planetBCStatePrev; // previous snapshot of the device state
+  std::vector<double> planetDiagHitCount;      // [ns] particles that hit
+  std::vector<double> planetDiagAbsorbedCount; // [ns] particles absorbed
+  double planetDiagRankCycles;     // cycles with planet hits on this rank
+  int planetDiagCyclesAccumulated; // cycles since the last write
+  string planetDiagFile;
 };
 
 } // namespace iPic3D

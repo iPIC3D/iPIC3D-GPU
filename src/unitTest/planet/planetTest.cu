@@ -5,29 +5,49 @@
  *
  * What is tested
  * ──────────────
- *  1. Energy computation  (planetEnergyKernel)
- *  2. Bitonic sort         (bitonicPadKernel + bitonicSortStepKernel)
- *     → particles are printed and verified to be in descending energy order
- *  3. Ion charge reduction (planetChargeReductionKernel)
- *  4. Charge cutoff        (chargeCutoffKernel)
- *     → quasi-neutrality: ∑|q_removed_elec| == ∑|q_ions|
+ *  1. Ion charge reduction (planetChargeReductionKernel)
+ *     → per-cycle ion charge and diagnostic accumulator
+ *  2. Energy computation  (planetEnergyKernel)
+ *     → energy of ONE physical electron, (gamma-1) c^2 / |qom|, independent of
+ *       the macroparticle weight |q|; diagnostic hit-charge accumulation
+ *       (including a multi-block launch)
+ *  3. Bitonic sort         (bitonicPadKernel + bitonicSortStepKernel)
+ *     → descending energy order; a light fast electron outranks a heavy slow
+ *       one
+ *  4. Charge cutoff        (chargeCutoffKernel) over four cycles
+ *     → nearest-match cutoff, charge carried across cycles (both signs),
+ *       ions-only cycle, conservation ∑|q_ion| - ∑|q_absorbed| == residual,
+ *       diagnostics
  *  5. Reflect + compact    (planetReflectCompactKernel)
  *     → surviving particles are outside the planet sphere after reflection
  *
- * Test data
- * ─────────
- *  • 1 ion  species   :  5 particles,  q = +2.0 each  → total |Q_ion| = 10.0
- *  • 2 electron species:
- *      – species 0: 4 particles  (various q < 0, various velocities)
- *      – species 1: 3 particles  (various q < 0, various velocities)
- *    Total electron |q| = 11.5 > 10.0, so some electrons must be removed.
+ * Test data (c = 1)
+ * ─────────────────
+ *  • ion species (global 0, qom = +1): 5 particles, q = +2.0 → |Q_ion| = 10
+ *  • electron species A (global 1, qom = -1): 4 particles
+ *  • electron species B (global 2, qom = -2): 3 particles
  *
- *  Expected sorted energies (descending):
- *    31.25  24.0  9.0  3.0  2.0  0.5  0.25
+ *    pcl   gidx   q      u      per-electron energy
+ *    A0     0   -0.25   0.40   0.0910895   (light and fast)
+ *    A1     1   -4.00   0.30   0.0482848   (heavy and slower)
+ *    A2     2   -1.00   0.20   0.0206207
+ *    A3     3   -0.50   0.10   0.0050378
+ *    B0     4   -2.50   0.50   0.0773503
+ *    B1     5   -1.50   0.35   0.0337606
+ *    B2     6   -1.00   0.05   0.0006262
  *
- *  Expected cutoff index = 5  (remove sorted indices 0..4,
- *                               survivors at sorted indices 5..6)
- *  Removed ∑|q| = 2.5 + 3.0 + 2.0 + 1.5 + 1.0 = 10.0 == ion charge ✓
+ *  Sorted (descending energy): A0 B0 A1 B1 A2 A3 B2
+ *  |q| in that order:          0.25 2.5 4 1.5 1 0.5 1   (prefix 0.25 2.75 6.75
+ *                                                         8.25 9.25 9.75 10.75)
+ *  Weighting the energy by |q| (the old key) would rank A1 above A0.
+ *
+ *  Cycles (an electron is absorbed while it brings the absorbed charge closer
+ *  to target = residual + ion charge):
+ *    1: ions 10, target 10    → absorb 6 (9.75),  residual +0.25
+ *       (the old ">= target" rule absorbed all 7: 10.75)
+ *    2: ions 3, no electrons  → absorb 0,         residual +3.25 (limited)
+ *    3: no ions, target 3.25  → absorb 2 (2.75),  residual +0.50
+ *    4: ions 2,  target 2.5   → absorb 2 (2.75),  residual -0.25
  */
 
 #include <algorithm>
@@ -56,14 +76,21 @@ static int nextPow2(int n) {
   return p;
 }
 
-/** Compute kinetic energy on host for verification */
+/** Reference per-electron kinetic energy (gamma - 1) c^2 / |qom|, computed
+ *  directly in long double. */
 static cudaParticleType hostEnergy(const SpeciesParticle& p,
-                                   cudaParticleType qom) {
-  cudaParticleType absq = fabs(p.get_q());
-  cudaParticleType mass = absq / fabs(qom);
-  cudaParticleType v2 =
-      p.get_u() * p.get_u() + p.get_v() * p.get_v() + p.get_w() * p.get_w();
-  return 0.5 * mass * v2;
+                                   cudaParticleType qom, cudaParticleType c) {
+  const long double v2 = (long double)p.get_u() * p.get_u() +
+                         (long double)p.get_v() * p.get_v() +
+                         (long double)p.get_w() * p.get_w();
+  const long double c2 = (long double)c * c;
+  const long double gamma = 1.0L / sqrtl(1.0L - v2 / c2);
+  return (cudaParticleType)((gamma - 1.0L) * c2 / fabsl((long double)qom));
+}
+
+static bool closeRel(cudaParticleType a, cudaParticleType b,
+                     cudaParticleType tol = 1e-12) {
+  return fabs(a - b) <= tol * std::max((cudaParticleType)1.0, fabs(b));
 }
 
 // ─── printing helpers ──────────────────────────────────────────
@@ -88,6 +115,27 @@ static void printSeparator(const char* title) {
             << "\n═══════════════════════════════════════════════════\n";
 }
 
+static void check(bool ok, const std::string& what, bool& allPassed) {
+  if (ok) {
+    std::cout << "  ok    " << what << "\n";
+  } else {
+    std::cerr << "  *** FAIL: " << what << " ***\n";
+    allPassed = false;
+  }
+}
+
+static PlanetBCState readState(const PlanetBCState* d_state) {
+  PlanetBCState h;
+  cudaErrChk(
+      cudaMemcpy(&h, d_state, sizeof(PlanetBCState), cudaMemcpyDeviceToHost));
+  return h;
+}
+
+static void setIonChargeCycle(PlanetBCState* d_state, cudaParticleType q) {
+  cudaErrChk(cudaMemcpy(&d_state->ionChargeCycle, &q, sizeof(cudaParticleType),
+                        cudaMemcpyHostToDevice));
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  MAIN
 // ═══════════════════════════════════════════════════════════════
@@ -103,95 +151,62 @@ static int runTest() {
   const int doSphere = 1; // 3-D
 
   // ─── Species parameters ────────────────────────────────────
-  const cudaParticleType qomIon = 1.0;   // ion   charge-to-mass ratio
-  const cudaParticleType qomElec = -1.0; // electron charge-to-mass ratio
-  const int nIonSpecies = 1;
+  const cudaParticleType c = 1.0;
+  const cudaParticleType qomElec[2] = {-1.0, -2.0};
+  const int ns = 3; // ion, electron A, electron B
+  const int elecGlobal[2] = {1, 2};
   const int nElecSpecies = 2;
 
   // ────────────────────────────────────────────────────────────
-  //  1. Create ion particles (inside the sphere)
+  //  Particles (all inside the sphere at (5.3, 5, 5), moving along +x)
   // ────────────────────────────────────────────────────────────
   const int nIonPlanet = 5;
   SpeciesParticle ionPcls[nIonPlanet];
-  for (int i = 0; i < nIonPlanet; i++) {
-    // All at (5.3, 5.0, 5.0), inside sphere (r=0.3 < 1.0)
-    // Velocity doesn't matter for ions in this test
-    ionPcls[i].set(
-        /*u*/ 1.0, /*v*/ 0.0, /*w*/ 0.0,
-        /*q*/ 2.0,
-        /*x*/ 5.3, /*y*/ 5.0, /*z*/ 5.0,
-        /*t*/ (cudaParticleType)i);
-  }
+  for (int i = 0; i < nIonPlanet; i++)
+    ionPcls[i].set(/*u*/ 0.01, /*v*/ 0.0, /*w*/ 0.0, /*q*/ 2.0,
+                   /*x*/ 5.3, /*y*/ 5.0, /*z*/ 5.0, (cudaParticleType)i);
 
-  // ────────────────────────────────────────────────────────────
-  //  2. Create electron particles (inside the sphere)
-  // ────────────────────────────────────────────────────────────
-  //  Electron species 0:  4 particles
-  //    idx  q       vel            mass=|q|/|qom|  E = 0.5*m*v²
-  //     0  -3.0    (4, 0, 0)      3.0              24.00
-  //     1  -2.0    (3, 0, 0)      2.0               9.00
-  //     2  -1.0    (2, 0, 0)      1.0               2.00
-  //     3  -0.5    (1, 0, 0)      0.5               0.25
   const int nElec0 = 4;
   SpeciesParticle elec0Pcls[nElec0];
   {
-    cudaParticleType qs[] = {-3.0, -2.0, -1.0, -0.5};
-    cudaParticleType us[] = {4.0, 3.0, 2.0, 1.0};
-    for (int i = 0; i < nElec0; i++) {
-      elec0Pcls[i].set(us[i], 0.0, 0.0, // velocity
-                       qs[i],           // charge
-                       5.3, 5.0, 5.0,   // position
+    const cudaParticleType qs[] = {-0.25, -4.0, -1.0, -0.5};
+    const cudaParticleType us[] = {0.40, 0.30, 0.20, 0.10};
+    for (int i = 0; i < nElec0; i++)
+      elec0Pcls[i].set(us[i], 0.0, 0.0, qs[i], 5.3, 5.0, 5.0,
                        (cudaParticleType)i);
-    }
   }
-
-  //  Electron species 1:  3 particles
-  //    idx  q       vel            mass=|q|/|qom|  E = 0.5*m*v²
-  //     0  -2.5    (5, 0, 0)      2.5              31.25
-  //     1  -1.5    (2, 0, 0)      1.5               3.00
-  //     2  -1.0    (1, 0, 0)      1.0               0.50
   const int nElec1 = 3;
   SpeciesParticle elec1Pcls[nElec1];
   {
-    cudaParticleType qs[] = {-2.5, -1.5, -1.0};
-    cudaParticleType us[] = {5.0, 2.0, 1.0};
-    for (int i = 0; i < nElec1; i++) {
+    const cudaParticleType qs[] = {-2.5, -1.5, -1.0};
+    const cudaParticleType us[] = {0.50, 0.35, 0.05};
+    for (int i = 0; i < nElec1; i++)
       elec1Pcls[i].set(us[i], 0.0, 0.0, qs[i], 5.3, 5.0, 5.0,
                        (cudaParticleType)i);
-    }
   }
-
   const int totalElecPlanet = nElec0 + nElec1; // 7
 
+  auto pclOf = [&](int gidx) -> const SpeciesParticle& {
+    return gidx < nElec0 ? elec0Pcls[gidx] : elec1Pcls[gidx - nElec0];
+  };
+
   // ─── Expected values ───────────────────────────────────────
-  // Merged energy buffer layout:  [E0_0, E0_1, E0_2, E0_3, E1_0, E1_1, E1_2]
-  //                                 24    9     2    0.25  31.25  3.0   0.5
-  // Descending sort:  31.25 24 9 3 2 0.5 0.25
-  // Sorted indices:    4    0  1 5 2  6   3
-  // Prefix-sum |q|:   2.5  5.5 7.5 9 10  --  --   → cutoff = 5
   const cudaParticleType expectedIonCharge = 10.0;
-  const int expectedCutoff = 5;
-  const cudaParticleType expectedRemovedQ = 10.0; // 2.5+3+2+1.5+1
-  const cudaParticleType expectedSortedEnergies[] = {31.25, 24.0, 9.0, 3.0,
-                                                     2.0,   0.5,  0.25};
+  const uint32_t expectedSortedGidx[] = {0, 4, 1, 5, 2, 3, 6};
+  std::vector<cudaParticleType> expectedEnergy(totalElecPlanet);
+  for (int g = 0; g < totalElecPlanet; g++)
+    expectedEnergy[g] = hostEnergy(pclOf(g), qomElec[g < nElec0 ? 0 : 1], c);
 
   // ════════════════════════════════════════════════════════════
-  //  Allocate device buffers via arrayCUDA (= planetArray)
+  //  Device buffers
   // ════════════════════════════════════════════════════════════
-
-  // Ion planetArray (1 species)
   planetArray ionPA(ionPcls, nIonPlanet);
   planetArray* d_ionPA = ionPA.copyToDevice();
-
-  // Electron planetArrays (2 species)
   planetArray elec0PA(elec0Pcls, nElec0);
   planetArray* d_elec0PA = elec0PA.copyToDevice();
-
   planetArray elec1PA(elec1Pcls, nElec1);
   planetArray* d_elec1PA = elec1PA.copyToDevice();
 
-  // Array of device pointers to electron planetArrays (for chargeCutoff /
-  // reflectCompact)
   planetArray* h_elecPtrs[2] = {d_elec0PA, d_elec1PA};
   planetArray** d_elecPtrs;
   cudaErrChk(cudaMalloc(&d_elecPtrs, nElecSpecies * sizeof(planetArray*)));
@@ -199,69 +214,65 @@ static int runTest() {
                         nElecSpecies * sizeof(planetArray*),
                         cudaMemcpyHostToDevice));
 
-  // Species offsets into merged buffers:  species0 starts at 0, species1 at
-  // nElec0
   int h_speciesOffsets[2] = {0, nElec0};
   int* d_speciesOffsets;
   cudaErrChk(cudaMalloc(&d_speciesOffsets, nElecSpecies * sizeof(int)));
   cudaErrChk(cudaMemcpy(d_speciesOffsets, h_speciesOffsets,
                         nElecSpecies * sizeof(int), cudaMemcpyHostToDevice));
 
+  PlanetBCState* d_state;
+  cudaErrChk(cudaMalloc(&d_state, sizeof(PlanetBCState)));
+  cudaErrChk(cudaMemset(d_state, 0, sizeof(PlanetBCState)));
+
+  // Diagnostics layout as in the solver: hit |Q| per global species, then
+  // absorbed |Q| per electron species.
+  cudaParticleType* d_diag;
+  cudaErrChk(
+      cudaMalloc(&d_diag, (ns + nElecSpecies) * sizeof(cudaParticleType)));
+  cudaErrChk(
+      cudaMemset(d_diag, 0, (ns + nElecSpecies) * sizeof(cudaParticleType)));
+
   // ════════════════════════════════════════════════════════════
   //  TEST 1: Ion charge reduction
   // ════════════════════════════════════════════════════════════
   printSeparator("TEST 1 — Ion charge reduction");
-
-  cudaParticleType* d_ionCharge;
-  cudaErrChk(cudaMalloc(&d_ionCharge, sizeof(cudaParticleType)));
-  cudaErrChk(cudaMemset(d_ionCharge, 0, sizeof(cudaParticleType)));
-
-  int gridIon = (nIonPlanet + BLOCK - 1) / BLOCK;
-  planetChargeReductionKernel<<<gridIon, BLOCK,
+  planetChargeReductionKernel<<<(nIonPlanet + BLOCK - 1) / BLOCK, BLOCK,
                                 BLOCK * sizeof(cudaParticleType)>>>(
-      d_ionPA, nIonPlanet, d_ionCharge);
+      d_ionPA, nIonPlanet, &d_state->ionChargeCycle, d_diag + 0);
   cudaErrChk(cudaDeviceSynchronize());
-
-  cudaParticleType h_ionCharge = 0;
-  cudaErrChk(cudaMemcpy(&h_ionCharge, d_ionCharge, sizeof(cudaParticleType),
-                        cudaMemcpyDeviceToHost));
-
-  std::cout << "  Total ion |Q|  = " << h_ionCharge << "  (expected "
-            << expectedIonCharge << ")\n";
-
-  if (fabs(h_ionCharge - expectedIonCharge) > 1e-10) {
-    std::cerr << "  *** FAIL: ion charge mismatch ***\n";
-    allPassed = false;
-  } else {
-    std::cout << "  PASS\n";
+  {
+    const PlanetBCState st = readState(d_state);
+    cudaParticleType diagIon = 0;
+    cudaErrChk(cudaMemcpy(&diagIon, d_diag, sizeof(cudaParticleType),
+                          cudaMemcpyDeviceToHost));
+    std::cout << "  ion |Q| this cycle = " << st.ionChargeCycle
+              << "  diagnostic = " << diagIon << "  (expected "
+              << expectedIonCharge << ")\n";
+    check(closeRel(st.ionChargeCycle, expectedIonCharge),
+          "ion charge reduced into state", allPassed);
+    check(closeRel(diagIon, expectedIonCharge),
+          "ion charge reduced into diagnostic accumulator", allPassed);
   }
 
   // ════════════════════════════════════════════════════════════
-  //  TEST 2: Electron energy computation
+  //  TEST 2: Per-electron energies + hit-charge accumulation
   // ════════════════════════════════════════════════════════════
-  printSeparator("TEST 2 — Electron energy computation");
+  printSeparator("TEST 2 — Per-electron energy (weight independent)");
 
+  const int paddedN = nextPow2(totalElecPlanet);
   cudaParticleType* d_energyBuf;
   uint32_t* d_globalIdxBuf;
-  cudaErrChk(
-      cudaMalloc(&d_energyBuf, totalElecPlanet * sizeof(cudaParticleType)));
-  cudaErrChk(cudaMalloc(&d_globalIdxBuf, totalElecPlanet * sizeof(uint32_t)));
+  cudaErrChk(cudaMalloc(&d_energyBuf, paddedN * sizeof(cudaParticleType)));
+  cudaErrChk(cudaMalloc(&d_globalIdxBuf, paddedN * sizeof(uint32_t)));
 
-  // Species 0
-  int grid0 = (nElec0 + BLOCK - 1) / BLOCK;
-  planetEnergyKernel<<<grid0, BLOCK>>>(d_elec0PA, nElec0, qomElec, d_energyBuf,
-                                       d_globalIdxBuf,
-                                       /*speciesOffset=*/0);
-
-  // Species 1
-  int grid1 = (nElec1 + BLOCK - 1) / BLOCK;
-  planetEnergyKernel<<<grid1, BLOCK>>>(d_elec1PA, nElec1, qomElec, d_energyBuf,
-                                       d_globalIdxBuf,
-                                       /*speciesOffset=*/nElec0);
-
+  planetEnergyKernel<<<(nElec0 + BLOCK - 1) / BLOCK, BLOCK>>>(
+      d_elec0PA, nElec0, qomElec[0], c, d_energyBuf, d_globalIdxBuf,
+      /*speciesOffset=*/0, d_diag + elecGlobal[0]);
+  planetEnergyKernel<<<(nElec1 + BLOCK - 1) / BLOCK, BLOCK>>>(
+      d_elec1PA, nElec1, qomElec[1], c, d_energyBuf, d_globalIdxBuf,
+      /*speciesOffset=*/nElec0, d_diag + elecGlobal[1]);
   cudaErrChk(cudaDeviceSynchronize());
 
-  // Copy back and verify
   std::vector<cudaParticleType> h_energy(totalElecPlanet);
   std::vector<uint32_t> h_gidx(totalElecPlanet);
   cudaErrChk(cudaMemcpy(h_energy.data(), d_energyBuf,
@@ -270,286 +281,263 @@ static int runTest() {
   cudaErrChk(cudaMemcpy(h_gidx.data(), d_globalIdxBuf,
                         totalElecPlanet * sizeof(uint32_t),
                         cudaMemcpyDeviceToHost));
-
-  std::cout << "  Merged energy buffer (before sort):\n";
-  // Also compute expected energies on host
-  std::vector<cudaParticleType> expectedEnergiesUnsorted(totalElecPlanet);
-  for (int i = 0; i < nElec0; i++)
-    expectedEnergiesUnsorted[i] = hostEnergy(elec0Pcls[i], qomElec);
-  for (int i = 0; i < nElec1; i++)
-    expectedEnergiesUnsorted[nElec0 + i] = hostEnergy(elec1Pcls[i], qomElec);
-
-  bool energyPass = true;
-  for (int i = 0; i < totalElecPlanet; i++) {
-    int species = (i < nElec0) ? 0 : 1;
-    int local = (i < nElec0) ? i : i - nElec0;
-    std::cout << "    gidx=" << std::setw(2) << h_gidx[i]
-              << "  species=" << species << "  local=" << local
-              << "  E=" << std::setw(10) << h_energy[i] << "  (expected "
-              << expectedEnergiesUnsorted[i] << ")\n";
-
-    if (fabs(h_energy[i] - expectedEnergiesUnsorted[i]) > 1e-10) {
-      std::cerr << "  *** FAIL: energy mismatch at index " << i << " ***\n";
-      energyPass = false;
+  {
+    bool energyPass = true;
+    for (int i = 0; i < totalElecPlanet; i++) {
+      std::cout << "    gidx=" << h_gidx[i] << "  q=" << std::setw(6)
+                << pclOf(i).get_q() << "  E=" << std::setw(12) << h_energy[i]
+                << "  (expected " << expectedEnergy[i] << ")\n";
+      energyPass &=
+          closeRel(h_energy[i], expectedEnergy[i]) && h_gidx[i] == (uint32_t)i;
     }
+    check(energyPass, "energies match (gamma-1) c^2 / |qom|", allPassed);
+
+    cudaParticleType diagElec[2];
+    cudaErrChk(cudaMemcpy(diagElec, d_diag + elecGlobal[0],
+                          2 * sizeof(cudaParticleType),
+                          cudaMemcpyDeviceToHost));
+    std::cout << "  hit |Q|: A = " << diagElec[0]
+              << " (expected 5.75), B = " << diagElec[1] << " (expected 5)\n";
+    check(closeRel(diagElec[0], 5.75) && closeRel(diagElec[1], 5.0),
+          "electron hit charge accumulated per species", allPassed);
   }
-  if (energyPass)
-    std::cout << "  PASS\n";
-  else
-    allPassed = false;
+
+  // Same velocity, weights 40x apart → identical energy keys.
+  {
+    SpeciesParticle twin[2];
+    twin[0].set(0.3, 0.1, -0.2, -0.1, 5.3, 5.0, 5.0, 0.0);
+    twin[1].set(0.3, 0.1, -0.2, -4.0, 5.3, 5.0, 5.0, 1.0);
+    planetArray twinPA(twin, 2);
+    planetArray* d_twinPA = twinPA.copyToDevice();
+    cudaParticleType* d_twinE;
+    uint32_t* d_twinIdx;
+    cudaErrChk(cudaMalloc(&d_twinE, 2 * sizeof(cudaParticleType)));
+    cudaErrChk(cudaMalloc(&d_twinIdx, 2 * sizeof(uint32_t)));
+    planetEnergyKernel<<<1, BLOCK>>>(d_twinPA, 2, -1.0, c, d_twinE, d_twinIdx,
+                                     0, nullptr);
+    cudaErrChk(cudaDeviceSynchronize());
+    cudaParticleType twinE[2];
+    cudaErrChk(cudaMemcpy(twinE, d_twinE, 2 * sizeof(cudaParticleType),
+                          cudaMemcpyDeviceToHost));
+    check(twinE[0] == twinE[1],
+          "energy independent of macroparticle weight (|q| 0.1 vs 4)",
+          allPassed);
+    cudaFree(d_twinE);
+    cudaFree(d_twinIdx);
+    cudaFree(d_twinPA);
+  }
+
+  // Multi-block launch: hit charge summed over several blocks and warps.
+  {
+    const int nBig = 2000; // 8 blocks of 256, last one partial
+    std::vector<SpeciesParticle> big(nBig);
+    for (int i = 0; i < nBig; i++)
+      big[i].set(0.01 * (i % 7), 0.0, 0.0, -0.5, 5.3, 5.0, 5.0,
+                 (cudaParticleType)i);
+    planetArray bigPA(big.data(), nBig);
+    planetArray* d_bigPA = bigPA.copyToDevice();
+    cudaParticleType *d_bigE, *d_bigQ;
+    uint32_t* d_bigIdx;
+    cudaErrChk(cudaMalloc(&d_bigE, nBig * sizeof(cudaParticleType)));
+    cudaErrChk(cudaMalloc(&d_bigIdx, nBig * sizeof(uint32_t)));
+    cudaErrChk(cudaMalloc(&d_bigQ, sizeof(cudaParticleType)));
+    cudaErrChk(cudaMemset(d_bigQ, 0, sizeof(cudaParticleType)));
+    planetEnergyKernel<<<(nBig + BLOCK - 1) / BLOCK, BLOCK>>>(
+        d_bigPA, nBig, -1.0, c, d_bigE, d_bigIdx, 0, d_bigQ);
+    cudaErrChk(cudaDeviceSynchronize());
+    cudaParticleType bigQ = 0;
+    cudaErrChk(cudaMemcpy(&bigQ, d_bigQ, sizeof(cudaParticleType),
+                          cudaMemcpyDeviceToHost));
+    std::cout << "  multi-block hit |Q| = " << bigQ << "  (expected 1000)\n";
+    check(bigQ == 1000.0, "multi-block hit-charge accumulation", allPassed);
+    cudaFree(d_bigE);
+    cudaFree(d_bigIdx);
+    cudaFree(d_bigQ);
+    cudaFree(d_bigPA);
+  }
 
   // ════════════════════════════════════════════════════════════
   //  TEST 3: Bitonic sort (descending by energy)
   // ════════════════════════════════════════════════════════════
   printSeparator("TEST 3 — Bitonic sort (descending energy)");
-
-  int paddedN = nextPow2(totalElecPlanet);
-
-  // Pad
   if (paddedN > totalElecPlanet) {
-    int padGrid = (paddedN - totalElecPlanet + BLOCK - 1) / BLOCK;
-    bitonicPadKernel<<<padGrid, BLOCK>>>(d_energyBuf, d_globalIdxBuf,
-                                         totalElecPlanet, paddedN);
-    cudaErrChk(cudaDeviceSynchronize());
+    bitonicPadKernel<<<(paddedN - totalElecPlanet + BLOCK - 1) / BLOCK,
+                       BLOCK>>>(d_energyBuf, d_globalIdxBuf, totalElecPlanet,
+                                paddedN);
   }
+  for (int k = 2; k <= paddedN; k <<= 1)
+    for (int j = k >> 1; j > 0; j >>= 1)
+      bitonicSortStepKernel<<<(paddedN + BLOCK - 1) / BLOCK, BLOCK>>>(
+          d_energyBuf, d_globalIdxBuf, j, k, paddedN);
+  cudaErrChk(cudaDeviceSynchronize());
 
-  // Bitonic sort steps
-  for (int k = 2; k <= paddedN; k <<= 1) {
-    for (int j = k >> 1; j > 0; j >>= 1) {
-      int sortGrid = (paddedN + BLOCK - 1) / BLOCK;
-      bitonicSortStepKernel<<<sortGrid, BLOCK>>>(d_energyBuf, d_globalIdxBuf, j,
-                                                 k, paddedN);
-      cudaErrChk(cudaDeviceSynchronize());
-    }
-  }
-
-  // Copy sorted data back
   cudaErrChk(cudaMemcpy(h_energy.data(), d_energyBuf,
                         totalElecPlanet * sizeof(cudaParticleType),
                         cudaMemcpyDeviceToHost));
   cudaErrChk(cudaMemcpy(h_gidx.data(), d_globalIdxBuf,
                         totalElecPlanet * sizeof(uint32_t),
                         cudaMemcpyDeviceToHost));
-
-  std::cout << "  Sorted electron particles (descending energy):\n";
-  std::cout << "  " << std::setw(6) << "rank" << std::setw(8) << "gidx"
-            << std::setw(10) << "species" << std::setw(8) << "local"
-            << std::setw(14) << "energy" << std::setw(14) << "expected"
-            << std::setw(10) << "|q|" << "\n";
-  std::cout << "  " << std::string(70, '-') << "\n";
-
-  bool sortPass = true;
-  for (int i = 0; i < totalElecPlanet; i++) {
-    int gidx = (int)h_gidx[i];
-    int species = (gidx < nElec0) ? 0 : 1;
-    int local = (gidx < nElec0) ? gidx : gidx - nElec0;
-    cudaParticleType absq = (species == 0) ? fabs(elec0Pcls[local].get_q())
-                                           : fabs(elec1Pcls[local].get_q());
-
-    std::cout << "  " << std::setw(6) << i << std::setw(8) << gidx
-              << std::setw(10) << species << std::setw(8) << local
-              << std::setw(14) << h_energy[i] << std::setw(14)
-              << expectedSortedEnergies[i] << std::setw(10) << absq << "\n";
-
-    if (fabs(h_energy[i] - expectedSortedEnergies[i]) > 1e-10) {
-      std::cerr << "  *** FAIL: sort order mismatch at rank " << i << " ***\n";
-      sortPass = false;
+  {
+    bool sortPass = true;
+    for (int i = 0; i < totalElecPlanet; i++) {
+      std::cout << "    rank " << i << "  gidx=" << h_gidx[i]
+                << "  |q|=" << std::setw(5) << fabs(pclOf(h_gidx[i]).get_q())
+                << "  E=" << h_energy[i] << "\n";
+      sortPass &= h_gidx[i] == expectedSortedGidx[i];
+      if (i > 0)
+        sortPass &= h_energy[i] <= h_energy[i - 1];
     }
-    // Also check descending order
-    if (i > 0 && h_energy[i] > h_energy[i - 1]) {
-      std::cerr << "  *** FAIL: not descending at rank " << i << " ***\n";
-      sortPass = false;
-    }
+    check(sortPass, "descending order A0 B0 A1 B1 A2 A3 B2", allPassed);
+    check(h_gidx[0] == 0 && h_gidx[2] == 1,
+          "light fast electron (A0) outranks heavy slow one (A1)", allPassed);
   }
-  if (sortPass)
-    std::cout << "  PASS\n";
-  else
-    allPassed = false;
 
   // ════════════════════════════════════════════════════════════
-  //  TEST 4: Charge cutoff + quasi-neutrality
+  //  TEST 4: Charge cutoff with carry-over across cycles
   // ════════════════════════════════════════════════════════════
-  printSeparator("TEST 4 — Charge cutoff & quasi-neutrality");
+  printSeparator("TEST 4 — Charge cutoff & carry-over");
 
   int* d_cutoff;
   cudaErrChk(cudaMalloc(&d_cutoff, sizeof(int)));
-  cudaErrChk(cudaMemset(d_cutoff, 0, sizeof(int)));
 
-  chargeCutoffKernel<<<1, 1>>>(d_elecPtrs, nElecSpecies, d_speciesOffsets,
-                               d_globalIdxBuf, totalElecPlanet, d_ionCharge,
-                               d_cutoff);
-  cudaErrChk(cudaDeviceSynchronize());
+  struct CycleCase {
+    const char* label;
+    cudaParticleType ionCharge; // set before the cycle (cycle 1: from TEST 1)
+    int nElec;                  // electrons that hit this cycle
+    int expectedCutoff;
+    cudaParticleType expectedResidual;
+  };
+  const CycleCase cycles[] = {
+      {"cycle 1: ions 10, 7 electrons", -1.0, totalElecPlanet, 6, 0.25},
+      {"cycle 2: ions 3, no electrons", 3.0, 0, 0, 3.25},
+      {"cycle 3: no ions, 7 electrons", 0.0, totalElecPlanet, 2, 0.5},
+      {"cycle 4: ions 2, 7 electrons", 2.0, totalElecPlanet, 2, -0.25},
+  };
 
+  cudaParticleType totalIon = 0, totalAbsorbed = 0;
   int h_cutoff = 0;
-  cudaErrChk(
-      cudaMemcpy(&h_cutoff, d_cutoff, sizeof(int), cudaMemcpyDeviceToHost));
+  for (const CycleCase& cc : cycles) {
+    if (cc.ionCharge >= 0)
+      setIonChargeCycle(d_state, cc.ionCharge);
+    totalIon += readState(d_state).ionChargeCycle;
 
-  std::cout << "  Cutoff index  = " << h_cutoff << "  (expected "
-            << expectedCutoff << ")\n";
+    chargeCutoffKernel<<<1, 1>>>(d_elecPtrs, nElecSpecies, d_speciesOffsets,
+                                 d_globalIdxBuf, d_energyBuf, cc.nElec, d_state,
+                                 d_diag + ns, d_cutoff);
+    cudaErrChk(cudaDeviceSynchronize());
+    cudaErrChk(
+        cudaMemcpy(&h_cutoff, d_cutoff, sizeof(int), cudaMemcpyDeviceToHost));
+    const PlanetBCState st = readState(d_state);
 
-  // Compute removed charge from sorted order
-  cudaParticleType removedQ = 0;
-  std::cout << "\n  Particles REMOVED (highest energy, indices 0.."
-            << h_cutoff - 1 << "):\n";
-  for (int i = 0; i < h_cutoff && i < totalElecPlanet; i++) {
-    int gidx = (int)h_gidx[i];
-    int species = (gidx < nElec0) ? 0 : 1;
-    int local = (gidx < nElec0) ? gidx : gidx - nElec0;
-    const SpeciesParticle& p =
-        (species == 0) ? elec0Pcls[local] : elec1Pcls[local];
-    cudaParticleType absq = fabs(p.get_q());
-    removedQ += absq;
-    printParticle(species == 0 ? "elec0" : "elec1", local, p, h_energy[i]);
+    cudaParticleType absorbed = 0;
+    for (int i = 0; i < h_cutoff; i++)
+      absorbed += fabs(pclOf(h_gidx[i]).get_q());
+    totalAbsorbed += absorbed;
+
+    std::cout << "  " << cc.label << " → cutoff " << h_cutoff
+              << ", absorbed |q| " << absorbed << ", residual "
+              << st.residualCharge << "\n";
+    check(h_cutoff == cc.expectedCutoff &&
+              closeRel(st.residualCharge, cc.expectedResidual) &&
+              st.ionChargeCycle == 0,
+          std::string(cc.label) + ": cutoff, residual, ion charge cleared",
+          allPassed);
   }
 
-  std::cout << "\n  Particles in SPHERE (survivors, indices " << h_cutoff
-            << ".." << totalElecPlanet - 1 << "):\n";
-  for (int i = h_cutoff; i < totalElecPlanet; i++) {
-    int gidx = (int)h_gidx[i];
-    int species = (gidx < nElec0) ? 0 : 1;
-    int local = (gidx < nElec0) ? gidx : gidx - nElec0;
-    const SpeciesParticle& p =
-        (species == 0) ? elec0Pcls[local] : elec1Pcls[local];
-    printParticle(species == 0 ? "elec0" : "elec1", local, p, h_energy[i]);
-  }
+  {
+    const PlanetBCState st = readState(d_state);
+    std::cout << "  ∑|q_ion| = " << totalIon
+              << "  ∑|q_absorbed electrons| = " << totalAbsorbed
+              << "  residual = " << st.residualCharge << "\n";
+    check(closeRel(totalIon - totalAbsorbed, st.residualCharge),
+          "charge conserved: ∑ ion - ∑ absorbed electron == residual",
+          allPassed);
 
-  std::cout << "\n  ∑|q| removed electrons = " << removedQ << "  (expected "
-            << expectedRemovedQ << ")\n";
-  std::cout << "  ∑|q| ions              = " << h_ionCharge << "\n";
+    cudaParticleType absorbedBySpecies[2];
+    cudaErrChk(cudaMemcpy(absorbedBySpecies, d_diag + ns,
+                          2 * sizeof(cudaParticleType),
+                          cudaMemcpyDeviceToHost));
+    std::cout << "  absorbed |Q|: A = " << absorbedBySpecies[0]
+              << " (expected 6.25), B = " << absorbedBySpecies[1]
+              << " (expected 9)\n";
+    check(closeRel(absorbedBySpecies[0], 6.25) &&
+              closeRel(absorbedBySpecies[1], 9.0),
+          "absorbed charge per electron species", allPassed);
 
-  bool cutoffPass = (h_cutoff == expectedCutoff);
-  bool neutralityPass = (fabs(removedQ - h_ionCharge) < 1e-10);
-
-  if (!cutoffPass) {
-    std::cerr << "  *** FAIL: cutoff index mismatch ***\n";
-    allPassed = false;
-  }
-  if (!neutralityPass) {
-    std::cerr << "  *** FAIL: quasi-neutrality violated — "
-              << "removed |q|=" << removedQ << " != ion |Q|=" << h_ionCharge
-              << " ***\n";
-    allPassed = false;
-  }
-  if (cutoffPass && neutralityPass) {
-    std::cout << "  PASS — quasi-neutrality satisfied: "
-              << "removed electron charge matches ion charge\n";
+    // Cutoff energies: between A3/B2 (cycle 1) and B0/A1 (cycles 3 and 4).
+    const cudaParticleType expectedCutSum =
+        0.5 * (expectedEnergy[3] + expectedEnergy[6]) +
+        2 * 0.5 * (expectedEnergy[4] + expectedEnergy[1]);
+    std::cout << "  cutoff samples = " << st.cutoffSamples
+              << "  energy sum = " << st.cutoffEnergySum << " (expected "
+              << expectedCutSum
+              << ")  electron-limited cycles = " << st.electronLimitedCycles
+              << "\n";
+    check(st.cutoffSamples == 3 &&
+              closeRel(st.cutoffEnergySum, expectedCutSum) &&
+              st.electronLimitedCycles == 1,
+          "cutoff-energy and electron-limited diagnostics", allPassed);
   }
 
   // ════════════════════════════════════════════════════════════
-  //  TEST 5: Reflect + compact
+  //  TEST 5: Reflect + compact (cutoff from cycle 4: 2)
   // ════════════════════════════════════════════════════════════
   printSeparator("TEST 5 — Reflect & compact surviving electrons");
 
   SpeciesParticle* d_outputBuf;
   cudaErrChk(
       cudaMalloc(&d_outputBuf, totalElecPlanet * sizeof(SpeciesParticle)));
-
+  // Unused tail slots of each species segment are copied back below too.
+  cudaErrChk(
+      cudaMemset(d_outputBuf, 0, totalElecPlanet * sizeof(SpeciesParticle)));
   int* d_survivorCounters;
   cudaErrChk(cudaMalloc(&d_survivorCounters, nElecSpecies * sizeof(int)));
   cudaErrChk(cudaMemset(d_survivorCounters, 0, nElecSpecies * sizeof(int)));
 
-  int reflectGrid = (totalElecPlanet + BLOCK - 1) / BLOCK;
-  planetReflectCompactKernel<<<reflectGrid, BLOCK>>>(
+  planetReflectCompactKernel<<<(totalElecPlanet + BLOCK - 1) / BLOCK, BLOCK>>>(
       d_elecPtrs, nElecSpecies, d_speciesOffsets, d_globalIdxBuf, d_cutoff,
       totalElecPlanet, d_outputBuf, d_survivorCounters, originX, originY,
       originZ, sphereRadius, doSphere);
   cudaErrChk(cudaDeviceSynchronize());
 
-  // Read survivor counts
   int h_survivorCounters[2] = {0, 0};
   cudaErrChk(cudaMemcpy(h_survivorCounters, d_survivorCounters,
                         nElecSpecies * sizeof(int), cudaMemcpyDeviceToHost));
-
-  int totalSurvivors = h_survivorCounters[0] + h_survivorCounters[1];
-  std::cout << "  Survivors per species: s0=" << h_survivorCounters[0]
-            << "  s1=" << h_survivorCounters[1] << "  total=" << totalSurvivors
-            << "\n";
-
-  // Copy output buffer back
   std::vector<SpeciesParticle> h_outputBuf(totalElecPlanet);
   cudaErrChk(cudaMemcpy(h_outputBuf.data(), d_outputBuf,
                         totalElecPlanet * sizeof(SpeciesParticle),
                         cudaMemcpyDeviceToHost));
 
+  std::cout << "  Survivors per species: A=" << h_survivorCounters[0]
+            << "  B=" << h_survivorCounters[1] << "\n";
+  check(h_survivorCounters[0] == 3 && h_survivorCounters[1] == 2,
+        "survivors A1 A2 A3 and B1 B2", allPassed);
+
   bool reflectPass = true;
-  const cudaCommonType eps = sphereRadius * 1e-4;
-
-  // Check species 0 survivors
-  std::cout << "\n  Reflected survivors (species 0):\n";
-  for (int i = 0; i < h_survivorCounters[0]; i++) {
-    const SpeciesParticle& p = h_outputBuf[h_speciesOffsets[0] + i];
-    cudaCommonType dx = p.get_x() - originX;
-    cudaCommonType dy = p.get_y() - originY;
-    cudaCommonType dz = p.get_z() - originZ;
-    cudaCommonType r = sqrt(dx * dx + dy * dy + dz * dz);
-    std::cout << "    pos=(" << p.get_x() << ", " << p.get_y() << ", "
-              << p.get_z() << ")  vel=(" << p.get_u() << ", " << p.get_v()
-              << ", " << p.get_w() << ")  q=" << p.get_q() << "  r=" << r
-              << "\n";
-    if (r < sphereRadius) {
-      std::cerr << "    *** FAIL: reflected particle still inside sphere (r="
-                << r << " < " << sphereRadius << ") ***\n";
-      reflectPass = false;
-    }
-  }
-
-  // Check species 1 survivors
-  std::cout << "  Reflected survivors (species 1):\n";
-  for (int i = 0; i < h_survivorCounters[1]; i++) {
-    const SpeciesParticle& p = h_outputBuf[h_speciesOffsets[1] + i];
-    cudaCommonType dx = p.get_x() - originX;
-    cudaCommonType dy = p.get_y() - originY;
-    cudaCommonType dz = p.get_z() - originZ;
-    cudaCommonType r = sqrt(dx * dx + dy * dy + dz * dz);
-    std::cout << "    pos=(" << p.get_x() << ", " << p.get_y() << ", "
-              << p.get_z() << ")  vel=(" << p.get_u() << ", " << p.get_v()
-              << ", " << p.get_w() << ")  q=" << p.get_q() << "  r=" << r
-              << "\n";
-    if (r < sphereRadius) {
-      std::cerr << "    *** FAIL: reflected particle still inside sphere (r="
-                << r << " < " << sphereRadius << ") ***\n";
-      reflectPass = false;
-    }
-  }
-
-  // Verify reflected velocity is reversed along normal
-  // For particles originally at (5.3,5,5) the normal is (1,0,0)
-  // so velocity should have u -> -u, v and w unchanged.
-  std::cout << "\n  Velocity reflection check:\n";
   for (int s = 0; s < nElecSpecies; s++) {
     for (int i = 0; i < h_survivorCounters[s]; i++) {
       const SpeciesParticle& p = h_outputBuf[h_speciesOffsets[s] + i];
-      // The original velocity u was positive; after specular reflection
-      // along (1,0,0) it should be negative.
-      if (p.get_u() >= 0.0) {
-        std::cerr << "    *** FAIL: species " << s << " particle " << i
-                  << " has u=" << p.get_u()
-                  << " >= 0 — expected negative after reflection ***\n";
-        reflectPass = false;
-      } else {
-        std::cout << "    species " << s << " pcl " << i << ": u=" << p.get_u()
-                  << " (reflected, OK)\n";
-      }
+      const cudaCommonType dx = p.get_x() - originX;
+      const cudaCommonType dy = p.get_y() - originY;
+      const cudaCommonType dz = p.get_z() - originZ;
+      const cudaCommonType r = sqrt(dx * dx + dy * dy + dz * dz);
+      printParticle(s == 0 ? "reflected A" : "reflected B", i, p);
+      // Outside the sphere, and u reversed along the (1,0,0) normal.
+      reflectPass &= r >= sphereRadius && p.get_u() < 0.0;
     }
   }
-
-  if (reflectPass)
-    std::cout << "  PASS\n";
-  else
-    allPassed = false;
+  check(reflectPass, "survivors outside the sphere with u reversed", allPassed);
 
   // ════════════════════════════════════════════════════════════
   //  Summary
   // ════════════════════════════════════════════════════════════
   printSeparator("SUMMARY");
-  if (allPassed) {
-    std::cout << "  ALL TESTS PASSED\n\n";
-  } else {
-    std::cout << "  SOME TESTS FAILED\n\n";
-  }
+  std::cout << (allPassed ? "  ALL TESTS PASSED\n\n"
+                          : "  SOME TESTS FAILED\n\n");
 
   // ─── Cleanup ───────────────────────────────────────────────
-  cudaFree(d_ionCharge);
+  cudaFree(d_state);
+  cudaFree(d_diag);
   cudaFree(d_energyBuf);
   cudaFree(d_globalIdxBuf);
   cudaFree(d_cutoff);

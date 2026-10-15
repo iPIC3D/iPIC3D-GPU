@@ -286,6 +286,15 @@ void gpuLapC2CKernel(cudaSolverType* lapC, const cudaSolverType* fC, int nxc,
                      cudaSolverType invdy2, cudaSolverType invdz2,
                      cudaStream_t stream = 0);
 
+/** 7-point center Laplacian that never reads the ghost layer.  The value
+ *  beyond each face is ghostFactor[f] * (adjacent interior cell), with
+ *  f = Xleft, Xright, Yleft, Yright, Zleft, Zright and factor 0 (zero
+ *  ghost), +1 (copy) or -1 (antisymmetric). */
+void gpuLapC2CLocalKernel(cudaSolverType* lapC, const cudaSolverType* fC,
+                          int nxc, int nyc, int nzc, cudaSolverType invdx2,
+                          cudaSolverType invdy2, cudaSolverType invdz2,
+                          const int ghostFactor[6], cudaStream_t stream = 0);
+
 // =========================================================================
 //  Block-Jacobi preconditioner: solve D_i z_i = r_i per node
 // =========================================================================

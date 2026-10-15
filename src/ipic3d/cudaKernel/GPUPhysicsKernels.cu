@@ -1446,6 +1446,51 @@ void gpuLapC2CKernel(cudaSolverType* lapC, const cudaSolverType* fC, int nxc,
   cudaErrChk(cudaGetLastError());
 }
 
+/** 7-point center Laplacian with per-face ghost rules (no ghost reads).
+ *  A neighbour outside the interior is replaced by g * f(cell), g in
+ *  {0, +1, -1}.  With one interior cell both faces act on the same cell. */
+template <typename T>
+__global__ void k_lapC2CLocal(T* lapC, const T* fC, int nxc, int nyc, int nzc,
+                              T invdx2, T invdy2, T invdz2, T gXl, T gXr, T gYl,
+                              T gYr, T gZl, T gZr) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int ni = nxc - 2, nj = nyc - 2, nk = nzc - 2;
+  if (tid >= ni * nj * nk)
+    return;
+  int i = tid / (nj * nk) + 1;
+  int rem = tid % (nj * nk);
+  int j = rem / nk + 1;
+  int k = rem % nk + 1;
+  int idx = (i * nyc + j) * nzc + k;
+  int sX = nyc * nzc; // stride in X direction
+  int sY = nzc;       // stride in Y direction
+  T f = fC[idx];
+  T xm = (i > 1) ? fC[idx - sX] : gXl * f;
+  T xp = (i < ni) ? fC[idx + sX] : gXr * f;
+  T ym = (j > 1) ? fC[idx - sY] : gYl * f;
+  T yp = (j < nj) ? fC[idx + sY] : gYr * f;
+  T zm = (k > 1) ? fC[idx - 1] : gZl * f;
+  T zp = (k < nk) ? fC[idx + 1] : gZr * f;
+  lapC[idx] = (xm - 2.0 * f + xp) * invdx2 + (ym - 2.0 * f + yp) * invdy2 +
+              (zm - 2.0 * f + zp) * invdz2;
+}
+
+void gpuLapC2CLocalKernel(cudaSolverType* lapC, const cudaSolverType* fC,
+                          int nxc, int nyc, int nzc, cudaSolverType invdx2,
+                          cudaSolverType invdy2, cudaSolverType invdz2,
+                          const int ghostFactor[6], cudaStream_t stream) {
+  int total = (nxc - 2) * (nyc - 2) * (nzc - 2);
+  if (total <= 0)
+    return;
+  int blk = 256;
+  k_lapC2CLocal<<<(total + blk - 1) / blk, blk, 0, stream>>>(
+      lapC, fC, nxc, nyc, nzc, invdx2, invdy2, invdz2,
+      (cudaSolverType)ghostFactor[0], (cudaSolverType)ghostFactor[1],
+      (cudaSolverType)ghostFactor[2], (cudaSolverType)ghostFactor[3],
+      (cudaSolverType)ghostFactor[4], (cudaSolverType)ghostFactor[5]);
+  cudaErrChk(cudaGetLastError());
+}
+
 // =========================================================================
 //  Block-Jacobi preconditioner kernel
 //  Solves D_i * z_i = r_i at each interior node, where

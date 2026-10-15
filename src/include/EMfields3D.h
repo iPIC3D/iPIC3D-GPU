@@ -906,10 +906,12 @@ public:
   /** GPU Poisson image operator (laplacian on centers, with communication). */
   void gpuPoissonImage(cudaSolverType* d_im, cudaSolverType* d_vec);
   /** GPU Poisson image operator, communication-free (computes -∇², positive
-   * eigenvalues). */
+   * eigenvalues).  Physical faces use the ghost rule of gpuPoissonImage, a
+   * periodic direction with one cell is flat, rank interfaces are cut with
+   * zero ghosts (block Jacobi). */
   void gpuPoissonImageLocal(cudaSolverType* d_im, cudaSolverType* d_vec);
-  /** Compute analytic eigenvalue bounds of the local -∇² operator (once per
-   * simulation). */
+  /** Compute exact analytic eigenvalue bounds of the local -∇² operator
+   * (once per simulation). */
   void computePoissonChebyshevEigenvalues();
   /** Chebyshev preconditioner for Poisson (communication-free, analytic
    * eigenvalues). */

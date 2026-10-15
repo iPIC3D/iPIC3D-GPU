@@ -66,6 +66,7 @@ void gpuBCface_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 #include <vector>
 
 // =========================================================================
@@ -3233,6 +3234,17 @@ void EMfields3D::gpuConstantChargePlanet2DPlaneXZ(double R, double x_center,
 }
 
 // =========================================================================
+//  Ghost rule of the Poisson operator at physical (non-periodic) faces,
+//  in gpuBCface order: Xright, Xleft, Yright, Yleft, Zright, Zleft.
+//  0 = antisymmetric (ghost = -cell), 1 = zero ghost, 2 = copy (ghost = cell).
+//  Zero ghosts on every face, for both div(E) and div(B) cleaning, as in the
+//  CPU Grid3DCU::lapC2Cpoisson.  The communication-free operator of the
+//  Chebyshev preconditioner takes its physical-face rules from this table.
+// =========================================================================
+
+static constexpr int kPoissonBCface[6] = {1, 1, 1, 1, 1, 1};
+
+// =========================================================================
 //  GPU PoissonImage: A*x for Poisson solver (center Laplacian)
 // =========================================================================
 
@@ -3249,8 +3261,10 @@ void EMfields3D::gpuPoissonImage(cudaSolverType* d_im, cudaSolverType* d_vec) {
   gpuSolver2Phys1(d_poissonTemp.devPtr(), d_vec, nxc, nyc, nzc, solverStream_);
 
   // Communicate ghost cells (center box stencil)
-  gpuCommunicateCenterBoxStencilBC(nxc, nyc, nzc, d_poissonTemp, 1, 1, 1, 1, 1,
-                                   1);
+  gpuCommunicateCenterBoxStencilBC(nxc, nyc, nzc, d_poissonTemp,
+                                   kPoissonBCface[0], kPoissonBCface[1],
+                                   kPoissonBCface[2], kPoissonBCface[3],
+                                   kPoissonBCface[4], kPoissonBCface[5]);
 
   // Laplacian
   gpuLapC2CKernel(d_poissonIm.devPtr(), d_poissonTemp.devPtr(), nxc, nyc, nzc,
@@ -3262,8 +3276,68 @@ void EMfields3D::gpuPoissonImage(cudaSolverType* d_im, cudaSolverType* d_vec) {
 }
 
 // =========================================================================
+//  Ghost rules of the communication-free Poisson operator
+//
+//  The local operator of the Chebyshev preconditioner is the Laplacian of
+//  gpuPoissonImage restricted to this rank.  Beyond each face the value is
+//  factor × (adjacent interior cell), chosen to match the real operator
+//  wherever that is known locally:
+//    • physical face (no neighbour): the rule of gpuPoissonImage, from
+//      kPoissonBCface (code 0 → factor -1, 1 → 0, 2 → +1);
+//    • periodic wrap onto this rank with ONE cell along the direction: the
+//      real ghost is the cell itself (factor +1).  Both faces copy, so the
+//      direction contributes nothing ("flat", e.g. y of a 2D x-z run);
+//    • neighbouring rank, or periodic wrap onto this rank with more than
+//      one cell: factor 0, the block-Jacobi zero-Dirichlet cut.
+// =========================================================================
+
+enum PoissonLocalFaceKind {
+  kPoissonFaceBoundary, // physical face, rule of kPoissonBCface
+  kPoissonFaceSelf,     // periodic wrap of a single cell onto itself
+  kPoissonFaceWrap,     // periodic wrap onto this rank, cut (zero ghost)
+  kPoissonFaceRank      // neighbouring rank, cut (zero ghost)
+};
+
+struct PoissonLocalGhostRules {
+  int nCell[3];  // interior cells per direction on this rank
+  int factor[6]; // ghost = factor * cell: Xleft, Xright, Yleft, Yright, ...
+  PoissonLocalFaceKind kind[6];
+};
+
+static PoissonLocalGhostRules
+poissonLocalGhostRules(const VirtualTopology3D* vct, int nxc, int nyc,
+                       int nzc) {
+  PoissonLocalGhostRules rules;
+  rules.nCell[0] = nxc - 2;
+  rules.nCell[1] = nyc - 2;
+  rules.nCell[2] = nzc - 2;
+  const int rank = vct->getCartesian_rank();
+  const int neighbor[6] = {vct->getXleft_neighbor(), vct->getXright_neighbor(),
+                           vct->getYleft_neighbor(), vct->getYright_neighbor(),
+                           vct->getZleft_neighbor(), vct->getZright_neighbor()};
+  for (int f = 0; f < 6; f++) {
+    const int dir = f / 2;
+    if (neighbor[f] == MPI_PROC_NULL) {
+      // kPoissonBCface lists the right face of each direction first
+      const int bc = kPoissonBCface[2 * dir + (f % 2 == 0 ? 1 : 0)];
+      rules.kind[f] = kPoissonFaceBoundary;
+      rules.factor[f] = (bc == 0) ? -1 : (bc == 2) ? 1 : 0;
+    } else if (neighbor[f] == rank && rules.nCell[dir] == 1) {
+      rules.kind[f] = kPoissonFaceSelf;
+      rules.factor[f] = 1;
+    } else {
+      rules.kind[f] =
+          (neighbor[f] == rank) ? kPoissonFaceWrap : kPoissonFaceRank;
+      rules.factor[f] = 0;
+    }
+  }
+  return rules;
+}
+
+// =========================================================================
 //  GPU PoissonImageLocal: -∇²·x (positive eigenvalues, NO communication)
-//  Ghost cells remain zero → zero-Dirichlet local problem.
+//  The ghost layer is never read: gpuLapC2CLocalKernel applies the face
+//  rules of poissonLocalGhostRules instead.
 // =========================================================================
 
 void EMfields3D::gpuPoissonImageLocal(cudaSolverType* d_im,
@@ -3274,19 +3348,16 @@ void EMfields3D::gpuPoissonImageLocal(cudaSolverType* d_im,
   double _invdz = grid->get_invdz();
 
   const int nPoisson = poissonKrylovSize_;
+  const PoissonLocalGhostRules rules =
+      poissonLocalGhostRules(&get_vct(), nxc, nyc, nzc);
 
-  d_poissonTemp.setAll(0.0, solverStream_);
-  d_poissonIm.setAll(0.0, solverStream_);
-
-  // Krylov → physical (ghost cells stay zero)
+  // Krylov → physical (interior only; no communication, ghosts unused)
   gpuSolver2Phys1(d_poissonTemp.devPtr(), d_vec, nxc, nyc, nzc, solverStream_);
 
-  // NO communication — ghost cells remain zero (zero-Dirichlet BCs)
-
-  // Laplacian: d_poissonIm = ∇²·x
-  gpuLapC2CKernel(d_poissonIm.devPtr(), d_poissonTemp.devPtr(), nxc, nyc, nzc,
-                  _invdx * _invdx, _invdy * _invdy, _invdz * _invdz,
-                  solverStream_);
+  // Laplacian with the local face rules: d_poissonIm = ∇²·x (interior)
+  gpuLapC2CLocalKernel(d_poissonIm.devPtr(), d_poissonTemp.devPtr(), nxc, nyc,
+                       nzc, _invdx * _invdx, _invdy * _invdy, _invdz * _invdz,
+                       rules.factor, solverStream_);
 
   // Physical → Krylov, then negate to get -∇²·x (positive eigenvalues)
   gpuPhys2Solver1(d_im, d_poissonIm.devPtr(), nxc, nyc, nzc, solverStream_);
@@ -3294,43 +3365,84 @@ void EMfields3D::gpuPoissonImageLocal(cudaSolverType* d_im,
 }
 
 // =========================================================================
-//  Analytic eigenvalue bounds for local -∇² on center grid
-//  Formula: λ_k = 4 sin²(k π / (2(N+1))) / h²  for mode k=1..N
-//  Total eigenvalue = sum over x,y,z dimensions
-//  Computed once per simulation.
+//  Analytic eigenvalue bounds of the local -∇² (gpuPoissonImageLocal)
+//
+//  The operator is a Kronecker sum of three 1D operators, so its
+//  eigenvalues are sums of 1D eigenvalues: min = Σ 1D minima, max = Σ 1D
+//  maxima.  In 1D, -(u[j-1] - 2u[j] + u[j+1]) / h² on N cells with
+//  u[0] = gL·u[1] and u[N+1] = gR·u[N] has eigenvectors sin(θ j + φ): a zero
+//  ghost puts a node on the ghost centre, an antisymmetric ghost a node on
+//  the face, a copy an antinode on the face.  Hence
+//      λ_m = 4 sin²(θ_m / 2) / h²,   θ_m = (m - C/2) π / (N + 1 - S/2),
+//  m = 1..N, with C the number of copy ghosts and S the number of non-zero
+//  ghosts:
+//      zero-zero (Dirichlet-Dirichlet)   θ_m = m π / (N + 1)
+//      zero-copy (Dirichlet-Neumann)     θ_m = (2m - 1) π / (2N + 1)
+//      copy-copy (Neumann-Neumann)       θ_m = (m - 1) π / N,   λ_1 = 0
+//      anti-anti                         θ_m = m π / N
+//      zero-anti                         θ_m = 2m π / (2N + 1)
+//      anti-copy                         θ_m = (2m - 1) π / (2N)
+//  One cell with two copies has the single eigenvalue 0 (flat direction).
 // =========================================================================
+
+struct PoissonEig1D {
+  double min;        // smallest eigenvalue (0 for copy-copy)
+  double max;        // largest eigenvalue
+  double minNonZero; // smallest non-zero eigenvalue, 0 if there is none
+};
+
+// N cells, ghost factors gL and gR, h2inv = 1 / h².
+static PoissonEig1D poissonEigBounds1D(int N, int gL, int gR, double h2inv) {
+  const int C = (gL == 1) + (gR == 1);
+  const int S = (gL != 0) + (gR != 0);
+  const double L = N + 1 - 0.5 * S;
+  auto lambda = [&](int m) {
+    const double s = sin(0.5 * (m - 0.5 * C) * M_PI / L);
+    return 4.0 * s * s * h2inv;
+  };
+  PoissonEig1D e;
+  e.min = (C == 2) ? 0.0 : lambda(1);
+  e.max = lambda(N);
+  e.minNonZero = (C == 2) ? ((N > 1) ? lambda(2) : 0.0) : e.min;
+  return e;
+}
 
 void EMfields3D::computePoissonChebyshevEigenvalues() {
   if (poissonChebComputed)
     return;
 
   const Grid* grid = &get_grid();
-  double invdx = grid->get_invdx();
-  double invdy = grid->get_invdy();
-  double invdz = grid->get_invdz();
+  const VirtualTopology3D* vct = &get_vct();
+  const double h2inv[3] = {grid->get_invdx() * grid->get_invdx(),
+                           grid->get_invdy() * grid->get_invdy(),
+                           grid->get_invdz() * grid->get_invdz()};
+  const PoissonLocalGhostRules rules =
+      poissonLocalGhostRules(vct, nxc, nyc, nzc);
 
-  int Nx = nxc - 2; // interior center points in x
-  int Ny = nyc - 2;
-  int Nz = nzc - 2;
+  double rawEigMin = 0.0, rawEigMax = 0.0, minNonZero = 0.0;
+  bool singular = true;
+  for (int d = 0; d < 3; d++) {
+    const PoissonEig1D e = poissonEigBounds1D(
+        rules.nCell[d], rules.factor[2 * d], rules.factor[2 * d + 1], h2inv[d]);
+    rawEigMin += e.min;
+    rawEigMax += e.max;
+    singular = singular && e.min == 0.0;
+    if (e.minNonZero > 0.0 && (minNonZero == 0.0 || e.minNonZero < minNonZero))
+      minNonZero = e.minNonZero;
+  }
 
-  double hx2_inv = invdx * invdx;
-  double hy2_inv = invdy * invdy;
-  double hz2_inv = invdz * invdz;
-
-  auto eigBounds = [](int N, double h2_inv, double& eMin, double& eMax) {
-    double sMin = sin(M_PI / (2.0 * (N + 1)));
-    double sMax = sin(N * M_PI / (2.0 * (N + 1)));
-    eMin = 4.0 * sMin * sMin * h2_inv;
-    eMax = 4.0 * sMax * sMax * h2_inv;
-  };
-
-  double eMinX, eMaxX, eMinY, eMaxY, eMinZ, eMaxZ;
-  eigBounds(Nx, hx2_inv, eMinX, eMaxX);
-  eigBounds(Ny, hy2_inv, eMinY, eMaxY);
-  eigBounds(Nz, hz2_inv, eMinZ, eMaxZ);
-
-  double rawEigMin = eMinX + eMinY + eMinZ;
-  double rawEigMax = eMaxX + eMaxY + eMaxZ;
+  // Singular local operator: copy ghosts on both faces of every direction
+  // (Neumann or flat).  That needs a single rank, so the global operator is
+  // singular too.  Chebyshev needs eigMin > 0, so target the smallest
+  // non-zero eigenvalue (the other directions sit at 0 there, so it is the
+  // smallest non-zero 1D one).  The Chebyshev polynomial p(λ) ≈ 1/λ is
+  // positive on [0, eigMax], with p(0) = T_k'(σ) / (δ T_k(σ)), so the null
+  // space (constants) is only scaled: the preconditioner stays symmetric,
+  // definite and non-singular, as flexible GMRES requires.  If every
+  // direction is flat the operator is zero and the preconditioner is the
+  // identity (gpuChebyshevPrecondPoisson).
+  if (singular)
+    rawEigMin = minNonZero;
 
   // Apply rescaling (as in chebyshevIterationAlpaka.hpp)
   poissonChebEigMin = rawEigMin * poissonChebRescaleEigMin;
@@ -3338,15 +3450,49 @@ void EMfields3D::computePoissonChebyshevEigenvalues() {
 
   poissonChebComputed = true;
 
-  const VirtualTopology3D* vct = &get_vct();
-  if (vct->getCartesian_rank() == 0)
+  // Bounds differ between ranks (subdomain size, physical faces): report
+  // their range next to the detailed line of rank 0.
+  double range[4] = {rawEigMin, -rawEigMin, rawEigMax, -rawEigMax};
+  MPI_Allreduce(MPI_IN_PLACE, range, 4, MPI_DOUBLE, MPI_MIN,
+                vct->getFieldComm());
+
+  if (vct->getCartesian_rank() == 0) {
+    static const char* const dirName[3] = {"x", "y", "z"};
+    static const char* const kindName[4] = {"bnd", "self", "wrap", "rank"};
+    auto ruleName = [](int factor) {
+      return factor == 0 ? "zero" : (factor > 0 ? "copy" : "anti");
+    };
+    std::string faces;
+    for (int d = 0; d < 3; d++) {
+      char buf[96];
+      if (rules.nCell[d] == 1 && rules.factor[2 * d] == 1 &&
+          rules.factor[2 * d + 1] == 1)
+        snprintf(buf, sizeof(buf), "%s%s flat", d ? ", " : "", dirName[d]);
+      else
+        snprintf(buf, sizeof(buf), "%s%s- %s(%s) %s+ %s(%s)", d ? ", " : "",
+                 dirName[d], ruleName(rules.factor[2 * d]),
+                 kindName[rules.kind[2 * d]], dirName[d],
+                 ruleName(rules.factor[2 * d + 1]),
+                 kindName[rules.kind[2 * d + 1]]);
+      faces += buf;
+    }
     printf(
         "  [Poisson Chebyshev] Analytic eigenvalue bounds of local -nabla^2: "
         "raw [%.6g, %.6g], rescaled [%.6g, %.6g]  (rescaleMin=%.4g, "
         "rescaleMax=%.4g, "
-        "interior grid %d x %d x %d)\n",
+        "interior grid %d x %d x %d, ghost rules %s)%s\n",
         rawEigMin, rawEigMax, poissonChebEigMin, poissonChebEigMax,
-        poissonChebRescaleEigMin, poissonChebRescaleEigMax, Nx, Ny, Nz);
+        poissonChebRescaleEigMin, poissonChebRescaleEigMax, rules.nCell[0],
+        rules.nCell[1], rules.nCell[2], faces.c_str(),
+        rawEigMax == 0.0
+            ? "  [zero operator: identity preconditioner]"
+            : (singular ? "  [singular: eigMin = smallest non-zero eigenvalue]"
+                        : ""));
+    if (range[0] != -range[1] || range[2] != -range[3])
+      printf("  [Poisson Chebyshev] raw bounds over all ranks: min in "
+             "[%.6g, %.6g], max in [%.6g, %.6g]\n",
+             range[0], -range[1], range[2], -range[3]);
+  }
 }
 
 // =========================================================================
@@ -3388,6 +3534,19 @@ void EMfields3D::gpuChebyshevPrecondPoisson(cudaSolverType* d_x,
   double eigMax = poissonChebEigMax;
   double theta = (eigMin + eigMax) * 0.5;
   double delta = (eigMax - eigMin) * 0.5;
+
+  // Degenerate spectra (see computePoissonChebyshevEigenvalues): a zero
+  // operator (every direction flat) gets the identity; a single eigenvalue
+  // (one cell in every direction) gets the exact inverse b / θ, which is
+  // the first Chebyshev iterate.
+  if (!(eigMax > 0.0)) {
+    gpuScaleCopy(d_x, d_b, -1.0, n, solverStream_);
+    return;
+  }
+  if (delta <= 1e-12 * theta) {
+    gpuScaleCopy(d_x, d_b, -1.0 / theta, n, solverStream_);
+    return;
+  }
   double sigma = theta / delta;
 
   double rhoOld = 1.0 / sigma;

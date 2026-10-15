@@ -19,7 +19,6 @@ setenv CXXFLAGS "-mmic"
 setenv CC icc
 setenv CXX icpc
 setenv I_MPI_CC icc
-setenv H5HUT_DIR $env(HOME)/install-mic
 
 prepend-path PATH /opt/intel/composer_xe_2013_sp1.1.106/bin/intel64_mic:/opt/intel/impi/4.1.3/mic/bin:/opt/intel/composer_xe_2013_sp1.1.106/mpirt/bin/mic
 # can we change this to prepend-path? that is indeed what I have below
@@ -45,30 +44,5 @@ prepend-path LD_LIBRARY_PATH /opt/intel/composer_xe_2013_sp1.1.106/compiler/lib/
 # taken from /opt/modules/impi/4.1.2.040
 setenv I_MPI_ROOT /opt/intel/impi/4.1.2.040
 setenv I_MPI_MIC 1
-
-# commands I used to compile H5hut on MIC:
-#
-#  cd ~
-#  export CC=mpiicc
-#  export FC=mpiifort
-#  export CXX=mpiicpc
-#  export CFLAGS="-mmic"
-#  export FFLAGS="-mmic"
-#  export CXXFLAGS="-mmic"
-#  module unload hdf5
-#  module load knc/hdf5/1.8.10-patch1-mic-parallel
-#  export PATH="$PATH:/opt/hdf5/1.8.10-patch1-mic-parallel"
-#  export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/intel/composer_xe_2013_sp1.1.106/compiler/lib/mic"
-#  
-#  mkdir install-mic
-#  cd H5hut-1.99.12
-#  ./configure --enable-parallel --enable-large-indices --prefix=$HOME/install-mic
-#  make
-#  make install
-#
-# Jorge used the equivalent of:
-#   CC=mpicc CXX=mpicxx CXXFLAGS=-mmic CFLAGS=-mmic \
-#      ./configure --enable-parallel --enable-large-indices --prefix=$HOME/install-mic --with-hdf5=$HDF5_ROOT
-# but I don't know what path he used for mpicc and mpicxx
 
 prepend-path PATH $env(IPIC_HOME)/scripts

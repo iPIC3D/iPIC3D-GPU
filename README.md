@@ -65,7 +65,7 @@ cmake -DHIP_ON=ON .. # use HIP
 | `CUDA_ARCH` | `75` | CUDA compute capability (minimum `75` for double-precision `atomicAdd`). Example: `-DCUDA_ARCH=80` for A100 |
 | `HIP_ON` | `OFF` | Set `ON` to compile with HIP instead of CUDA |
 | `HIP_ARCH` | `gfx90a` | HIP GPU architecture (e.g. `gfx90a` for MI250X, `gfx940` for MI300). Example: `-DHIP_ARCH=gfx940` |
-| `USE_HDF5` | `ON` | Compile HDF5-based I/O backends (serial HDF5, parallel HDF5, H5hut) |
+| `USE_HDF5` | `ON` | Compile HDF5-based I/O backends (serial HDF5, parallel HDF5) |
 | `USE_PHDF5` | `ON` | Enable parallel HDF5 field output (requires `USE_HDF5=ON` and MPI-enabled HDF5). Auto-disabled when `USE_HDF5=OFF` |
 | `USE_ADIOS2` | `ON` | Compile ADIOS2 backend for particles and restarts |
 | `USE_CATALYST` | `OFF` | Enable ParaView Catalyst in-situ visualization (requires ParaView ≥ 5.7) |
@@ -461,7 +461,7 @@ iPIC3D-GPU writes three categories of data: **fields** (E, B, J, rho, moments), 
 
 | Option | Default | Effect |
 |--------|---------|--------|
-| `USE_HDF5` | `ON` | Compile HDF5-based backends (serial HDF5, parallel HDF5, H5hut) |
+| `USE_HDF5` | `ON` | Compile HDF5-based backends (serial HDF5, parallel HDF5) |
 | `USE_PHDF5` | `ON` | Enable the parallel HDF5 field backend (requires `USE_HDF5=ON` and an MPI-enabled HDF5 library) |
 | `USE_ADIOS2` | `ON` | Compile the ADIOS2 backend for particles and restarts |
 
@@ -480,19 +480,20 @@ The `WriteMethod` parameter in the input file controls the **field output** back
 | `phdf5` | Parallel HDF5 | All ranks write collectively into a single HDF5 file (requires `USE_PHDF5=ON`) |
 | `pvtk` | Blocking VTK | Collective MPI-IO into VTK files |
 | `nbcvtk` | Non-blocking VTK | Non-blocking collective MPI-IO into VTK files; writes overlap with computation of the next cycle |
-| `H5hut` | H5hut | Collective I/O through the H5hut library |
 | `adios2` | ADIOS2 | **Not implemented yet** — will throw a runtime error |
+
+Any other value stops the run at startup with an error.
 
 ### Particle and restart backend selection
 
 Particle and restart backends are **not** controlled by `WriteMethod`. They are selected at **compile time** based on the CMake flags:
 
-| | `USE_ADIOS2=ON` | `USE_ADIOS2=OFF`, `WriteMethod=H5hut` | `USE_ADIOS2=OFF` (other) |
-|---|---|---|---|
-| **Particles** | ADIOS2 (file-per-process, BP5) | H5hut (collective) | Serial HDF5 (file-per-process) |
-| **Restarts** | ADIOS2 (file-per-process, BP5) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |
+| | `USE_ADIOS2=ON` | `USE_ADIOS2=OFF` |
+|---|---|---|
+| **Particles** | ADIOS2 (file-per-process, BP5) | Serial HDF5 (file-per-process) |
+| **Restarts** | ADIOS2 (file-per-process, BP5) | Serial HDF5 (file-per-process) |
 
-When `USE_ADIOS2=ON`, ADIOS2 always takes priority for particles and restarts, regardless of `WriteMethod`.
+When `USE_ADIOS2=ON`, ADIOS2 is used for particles and restarts, regardless of `WriteMethod`.
 
 ### Available combinations summary
 
@@ -504,7 +505,6 @@ With the default CMake settings (`USE_HDF5=ON`, `USE_PHDF5=ON`, `USE_ADIOS2=ON`)
 | `nbcvtk` | Non-blocking VTK (collective, overlapped) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
 | `shdf5` | Serial HDF5 (file-per-process) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
 | `phdf5` | Parallel HDF5 (collective, single file) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
-| `H5hut` | H5hut (collective) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
 
 With `USE_ADIOS2=OFF` and `USE_HDF5=ON`:
 
@@ -514,7 +514,6 @@ With `USE_ADIOS2=OFF` and `USE_HDF5=ON`:
 | `nbcvtk` | Non-blocking VTK (collective, overlapped) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |
 | `shdf5` | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |
 | `phdf5` | Parallel HDF5 (collective, single file) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |
-| `H5hut` | H5hut (collective) | H5hut (collective) | Serial HDF5 (file-per-process) |
 
 ### Notes
 

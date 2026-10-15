@@ -11,7 +11,7 @@
 #include "Grid3DCU.h"
 #include "MPIdata.h"
 #include "OutputTagConfig.h"
-#include "ParallelIO.h" // free VTK/H5hut/PHDF5 write functions
+#include "ParallelIO.h" // free VTK/PHDF5 write functions
 #include "Parameters.h"
 #include "ParticleSoAHost.h"
 #include "RestartMeshMetadata.h"
@@ -95,25 +95,20 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
     fieldBackend_ = FieldBackend::NBCVTK;
   else if (writeMethod == "phdf5")
     fieldBackend_ = FieldBackend::PARALLEL_HDF5;
-  else if (writeMethod == "H5hut")
-    fieldBackend_ = FieldBackend::H5HUT;
   else if (writeMethod == "adios2")
     fieldBackend_ = FieldBackend::ADIOS2;
   else {
-    warning_printf("Unknown WriteMethod '%s'. "
-                   "Valid options: shdf5, pvtk, nbcvtk, phdf5, H5hut, adios2",
-                   writeMethod.c_str());
-    fieldBackend_ = FieldBackend::NONE;
+    // Fatal: carrying on would silently drop all field output.
+    eprintf("Unknown WriteMethod '%s' in the input file. "
+            "Valid options: shdf5, pvtk, nbcvtk, phdf5, adios2",
+            writeMethod.c_str());
   }
 
   // Step 2: determine the particle backend.
 #ifdef USE_ADIOS2
   particleBackend_ = ParticleBackend::ADIOS2;
 #else
-  if (writeMethod == "H5hut")
-    particleBackend_ = ParticleBackend::H5HUT;
-  else
-    particleBackend_ = ParticleBackend::SHDF5;
+  particleBackend_ = ParticleBackend::SHDF5;
 #endif
 
   // Step 3: determine the restart backend.
@@ -126,13 +121,11 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
   // Step 4: validate backend availability against compile flags.
 #ifdef NO_HDF5
   if (fieldBackend_ == FieldBackend::SHDF5 ||
-      fieldBackend_ == FieldBackend::PARALLEL_HDF5 ||
-      fieldBackend_ == FieldBackend::H5HUT) {
+      fieldBackend_ == FieldBackend::PARALLEL_HDF5) {
     eprintf("WriteMethod '%s' requires HDF5 (compile with USE_HDF5=ON)",
             writeMethod.c_str());
   }
-  if (particleBackend_ == ParticleBackend::SHDF5 ||
-      particleBackend_ == ParticleBackend::H5HUT) {
+  if (particleBackend_ == ParticleBackend::SHDF5) {
     warning_printf(
         "Selected particle backend requires HDF5 (compile with USE_HDF5=ON). "
         "Particle output disabled.");
@@ -179,7 +172,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
       needHDF5 = true;
     if (restartBackend_ == RestartBackend::SHDF5)
       needHDF5 = true;
-    // PHDF5 and H5hut use free functions; no OutputWrapperFPP is needed.
+    // PHDF5 uses free functions; no OutputWrapperFPP is needed.
 
     if (needHDF5) {
       outputWrapperFPP_ = new OutputWrapperFPP;
@@ -338,13 +331,6 @@ void IOManager::writeFields(int cycle) {
 #endif
     break;
 
-  // H5hut.
-  case FieldBackend::H5HUT:
-#ifndef NO_HDF5
-    WriteFieldsH5hut(ns_, grid_, EMf_, col_, vct_, cycle, cfg);
-#endif
-    break;
-
   // ADIOS2 field output.
   case FieldBackend::ADIOS2:
 #ifdef USE_ADIOS2
@@ -376,12 +362,6 @@ void IOManager::writeParticles(int cycle) {
     if (outputWrapperFPP_)
       outputWrapperFPP_->append_output(col_->getPclOutputTag().c_str(), cycle,
                                        0);
-#endif
-    break;
-
-  case ParticleBackend::H5HUT:
-#ifndef NO_HDF5
-    WritePartclH5hut(ns_, grid_, outputPart_, col_, vct_, cycle);
 #endif
     break;
 
@@ -529,16 +509,15 @@ bool IOManager::needsParticleOutput(int cycle) const {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return false;
 
-  // H5hut always writes the full particle record.  The tag-driven SHDF5 and
-  // ADIOS2 paths have no particle consumer when their tag is empty.
+  // The tag-driven SHDF5 and ADIOS2 paths have no particle consumer when
+  // their tag is empty.
   const string particleTag = col_->getPclOutputTag();
   const bool hasParticleTag =
       particleTag.find_first_not_of(" \t\r\n") != string::npos;
   const bool backendConsumesData =
-      particleBackend_ == ParticleBackend::H5HUT ||
-      ((particleBackend_ == ParticleBackend::SHDF5 ||
-        particleBackend_ == ParticleBackend::ADIOS2) &&
-       hasParticleTag);
+      (particleBackend_ == ParticleBackend::SHDF5 ||
+       particleBackend_ == ParticleBackend::ADIOS2) &&
+      hasParticleTag;
   return backendConsumesData && Parameters::get_doWriteOutput() &&
          !col_->particle_output_is_off() &&
          cycle % col_->getParticlesOutputCycle() == 0;

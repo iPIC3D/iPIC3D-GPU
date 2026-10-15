@@ -194,7 +194,6 @@ def construct_run_command(args,mpirun):
 
 def ipic_run(args,mpirun):
     # clear the data directory
-    # (currently by H5hut, i.e. when setting WriteMethod=Parallel)
     outputdir, inputfile, command = construct_run_command(args,mpirun)
     # issue_command(['rm', '-rf', outputdir])
     issue_shell_command('rm -rf ' + outputdir + '/*')

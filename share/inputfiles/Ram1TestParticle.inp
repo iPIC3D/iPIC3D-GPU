@@ -27,7 +27,7 @@ SaveDirName    = data                   # Fresh-run output directory [default: d
 RestartDirName = data                   # Checkpoint directory [default: data]
 Case           = RamNew                 # Case-sensitive initialization case [required]
 SimulationName = RamNew1TestParticle    # Output dataset name [required]
-# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, H5hut, adios2.
+# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, adios2.
 WriteMethod    = shdf5                  # [required]
 
 # %%%%%%%%%%%%%%%%%%%% TIME INTEGRATION %%%%%%%%%%%%%%%%%%%%

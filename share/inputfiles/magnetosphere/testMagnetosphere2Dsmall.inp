@@ -25,7 +25,7 @@ SaveDirName    = data                   # Fresh-run output directory [default: d
 RestartDirName = data                   # Checkpoint directory [default: data]
 Case           = Dipole2D               # Case-sensitive initialization case [required]
 SimulationName = Dipole2DTest           # Output dataset name [required]
-# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, H5hut, adios2.
+# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, adios2.
 WriteMethod    = nbcvtk                 # [required]
 
 # %%%%%%%%%%%%%%%%%%%% TIME INTEGRATION %%%%%%%%%%%%%%%%%%%%

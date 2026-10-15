@@ -18,6 +18,5 @@ setenv I_MPI_FABRICS shm:tcp
 #setenv CXX mpiicpc
 #setenv CC mpiicc
 #setenv FC mpiifort
-#setenv H5HUT_DIR $env(HOME)/install
 set-alias "ipic-cmake-mic" "cmake -DCMAKE_TOOLCHAIN_FILE=src/cmake/cmake_template.cmake.XeonPhi src"
 

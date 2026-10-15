@@ -26,7 +26,7 @@ SaveDirName    = data                   # Fresh-run output directory [default: d
 RestartDirName = data                   # Checkpoint directory [default: data]
 Case           = GEMDoubleHarris        # Case-sensitive initialization case [required]
 SimulationName = DebyeScaleTurbulence   # Output dataset name [required]
-# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, H5hut, adios2.
+# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, adios2.
 WriteMethod    = pvtk                   # [required]
 
 # %%%%%%%%%%%%%%%%%%%% TIME INTEGRATION %%%%%%%%%%%%%%%%%%%%

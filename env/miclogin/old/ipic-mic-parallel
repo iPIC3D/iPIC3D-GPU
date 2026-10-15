@@ -12,6 +12,6 @@ proc ModulesHelp { } {
 module-whatis   "set environment to run iPic3D on MIC"
 
 setenv HDF5_ROOT "/opt/hdf5/1.8.10-patch1-mic-parallel"
-setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-O3 -openmp -fno-exceptions -fp-model fast=2 -vec-report -mmic' -DIPIC_H5HUT_OUTPUT=ON"
+setenv IPIC_CMAKE_ARGS "-DCMAKE_CXX_FLAGS='-O3 -openmp -fno-exceptions -fp-model fast=2 -vec-report -mmic'"
 module load ipic-mic-base
 prepend-path PATH $env(HDF5_ROOT)

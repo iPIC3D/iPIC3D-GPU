@@ -33,16 +33,8 @@ class ADIOS2Manager;
 class IOManager {
 public:
   // ======= Backend enums =======
-  enum class FieldBackend {
-    NONE,
-    SHDF5,
-    PVTK,
-    NBCVTK,
-    PARALLEL_HDF5,
-    H5HUT,
-    ADIOS2
-  };
-  enum class ParticleBackend { NONE, SHDF5, H5HUT, ADIOS2 };
+  enum class FieldBackend { NONE, SHDF5, PVTK, NBCVTK, PARALLEL_HDF5, ADIOS2 };
+  enum class ParticleBackend { NONE, SHDF5, ADIOS2 };
   enum class RestartBackend { NONE, SHDF5, ADIOS2 };
 
   IOManager();

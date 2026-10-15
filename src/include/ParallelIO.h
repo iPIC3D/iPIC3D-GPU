@@ -22,10 +22,6 @@
 #ifndef PARALLEL_IO_H
 #define PARALLEL_IO_H
 
-#ifdef USEH5HUT
-#include "H5hut-io.h"
-#endif
-
 #ifdef PHDF5
 #include "phdf5.h"
 #endif
@@ -36,12 +32,6 @@
 using std::string;
 
 struct OutputTagConfig;
-
-void WriteFieldsH5hut(int nspec, Grid3DCU* grid, EMfields3D* EMf,
-                      CollectiveIO* col, VCtopology3D* vct, int cycle,
-                      const OutputTagConfig& cfg);
-void WritePartclH5hut(int nspec, Grid3DCU* grid, ParticleSoAHost** part,
-                      CollectiveIO* col, VCtopology3D* vct, int cycle);
 
 void WriteOutputParallel(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
                          VCtopology3D* vct, int cycle,

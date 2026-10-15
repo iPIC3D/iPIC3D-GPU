@@ -545,7 +545,7 @@ public:
            HeatFlux::componentIndex(is, 0) * nxn * nyn * nzn;
   }
 
-  // per-species 3D slice accessors (node grid) for parallel HDF5 / H5hut output
+  // per-species 3D slice accessors (node grid) for parallel HDF5 output
   arr3_double getpXXsn(int is) {
     return arr3_double(pXXsn.fetch_arr4()[is], nxn, nyn, nzn);
   }

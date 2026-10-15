@@ -25,7 +25,7 @@ SaveDirName    = data                  # Fresh-run output directory [default: da
 RestartDirName = data                  # Checkpoint directory [default: data]
 Case           = Dipole                # Case-sensitive initialization case [required]
 SimulationName = Dipole3D_Exosphere    # Output dataset name [required]
-# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, H5hut, adios2.
+# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, adios2.
 WriteMethod    = pvtk                  # [required]
 
 # %%%%%%%%%%%%%%%%%%%% TIME INTEGRATION %%%%%%%%%%%%%%%%%%%%

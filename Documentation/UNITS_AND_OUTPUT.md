@@ -216,7 +216,6 @@ input file:
 | `nbcvtk`     | Non-blocking VTK (MPI-IO) | ✓             | ✓             | ✗       |
 | `phdf5`      | Parallel HDF5             | ✓             | (in Fields)   | ✗       |
 | `shdf5`      | Serial HDF5 (per-process) | ✓             | ✓             | ✗       |
-| `H5hut`      | H5hut format              | ✓             | ✗             | ✗       |
 | `adios2`     | ADIOS2 format             | ✓             | ✗             | ✗       |
 
 Output is controlled by two tag strings in the input file:

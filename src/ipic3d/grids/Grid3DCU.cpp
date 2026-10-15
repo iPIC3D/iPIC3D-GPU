@@ -252,9 +252,11 @@ void Grid3DCU::gradC2N(arr3_double gradXN, arr3_double gradYN,
 /** calculate gradient on nodes, given a scalar field defined on central points
  */
 void Grid3DCU::gradN2C(arr3_double gradXC, arr3_double gradYC,
-                       arr3_double gradZC, const_arr3_double scFieldN) const {
+                       arr3_double gradZC, const_arr3_double scFieldN,
+                       int iHi) const {
+  const int iEnd = iHi < 0 ? nxc - 2 : iHi;
 #pragma omp parallel for collapse(2)
-  for (int i = 1; i < nxc - 1; i++)
+  for (int i = 1; i <= iEnd; i++)
     for (int j = 1; j < nyc - 1; j++)
       for (int k = 1; k < nzc - 1; k++) {
         gradXC[i][j][k] =
@@ -282,12 +284,13 @@ void Grid3DCU::gradN2C(arr3_double gradXC, arr3_double gradYC,
  * nodes  */
 void Grid3DCU::divN2C(arr3_double divC, const_arr3_double vecFieldXN,
                       const_arr3_double vecFieldYN,
-                      const_arr3_double vecFieldZN) const {
+                      const_arr3_double vecFieldZN, int iHi) const {
   double compX;
   double compY;
   double compZ;
+  const int iEnd = iHi < 0 ? nxc - 2 : iHi;
 #pragma omp parallel for collapse(2) private(compX, compY, compZ)
-  for (int i = 1; i < nxc - 1; i++)
+  for (int i = 1; i <= iEnd; i++)
     for (int j = 1; j < nyc - 1; j++)
       for (int k = 1; k < nzc - 1; k++) {
         compX = .25 * (vecFieldXN[i + 1][j][k] - vecFieldXN[i][j][k]) * invdx +
@@ -601,46 +604,6 @@ void Grid3DCU::curlN2C(arr3_double curlXC, arr3_double curlYC,
         curlYC[i][j][k] = compXDZ - compZDX;
         curlZC[i][j][k] = compYDX - compXDY;
       }
-}
-
-/** calculate laplacian on nodes, given a scalar field defined on nodes */
-void Grid3DCU::lapN2N(arr3_double lapN, const_arr3_double scFieldN,
-                      EMfields3D* EMf) const {
-  const VirtualTopology3D* vct = &get_vct();
-  // calculate laplacian as divercence of gradient
-  // allocate 3 gradients: defined on central points
-  static array3_double gradXC(nxc, nyc, nzc);
-  static array3_double gradYC(nxc, nyc, nzc);
-  static array3_double gradZC(nxc, nyc, nzc);
-
-  gradN2C(gradXC, gradYC, gradZC, scFieldN);
-  // communicate with BC
-  communicateCenterBC(nxc, nyc, nzc, gradXC, 1, 1, 1, 1, 1, 1, vct, EMf);
-  communicateCenterBC(nxc, nyc, nzc, gradYC, 1, 1, 1, 1, 1, 1, vct, EMf);
-  communicateCenterBC(nxc, nyc, nzc, gradZC, 1, 1, 1, 1, 1, 1, vct, EMf);
-  divC2N(lapN, gradXC, gradYC, gradZC);
-}
-
-/** calculate laplacian on nodes without communication (for solver
- * preconditioner), given a scalar field defined on nodes */
-void Grid3DCU::lapN2NLocal(arr3_double lapN, const_arr3_double scFieldN,
-                           EMfields3D* EMf) const {
-  // const VirtualTopology3D *vct = &get_vct();
-  //  calculate laplacian as divercence of gradient
-  //  allocate 3 gradients: defined on central points
-  static array3_double gradXC(nxc, nyc, nzc);
-  static array3_double gradYC(nxc, nyc, nzc);
-  static array3_double gradZC(nxc, nyc, nzc);
-  eqValue(0.0, gradXC, nxc, nyc, nzc);
-  eqValue(0.0, gradYC, nxc, nyc, nzc);
-  eqValue(0.0, gradZC, nxc, nyc, nzc);
-
-  gradN2C(gradXC, gradYC, gradZC, scFieldN);
-  // communicate with BC
-  // communicateCenterBC(nxc, nyc, nzc, gradXC, 1, 1, 1, 1, 1, 1, vct, EMf);
-  // communicateCenterBC(nxc, nyc, nzc, gradYC, 1, 1, 1, 1, 1, 1, vct, EMf);
-  // communicateCenterBC(nxc, nyc, nzc, gradZC, 1, 1, 1, 1, 1, 1, vct, EMf);
-  divC2N(lapN, gradXC, gradYC, gradZC);
 }
 
 /** calculate laplacian on central points, given a scalar field defined on

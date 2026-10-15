@@ -28,7 +28,9 @@ developers           : Stefano Markidis, Giovanni Lapenta
 
 #include "BcFields3D.h"
 
-/** set the boundary condition on boundaries */
+/** set the boundary condition on boundaries; face codes 0 (Dirichlet 0,
+ * second order), 1 (Dirichlet 0, first order), 2 (Neumann 0, first order);
+ * any other code, e.g. BC_FACE_KEEP (-1), leaves that ghost layer unchanged */
 void BCface(int nx, int ny, int nz, double*** vector, int bcFaceXright,
             int bcFaceXleft, int bcFaceYright, int bcFaceYleft,
             int bcFaceZright, int bcFaceZleft, const VirtualTopology3D* vct) {

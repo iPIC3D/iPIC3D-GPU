@@ -12,6 +12,7 @@
 #ifndef GPU_PHYSICS_KERNELS_CUH
 #define GPU_PHYSICS_KERNELS_CUH
 
+#include "OutflowBoundary.h"
 #include "cudaTypeDef.cuh"
 #include <cstddef>
 
@@ -213,6 +214,33 @@ void gpuExtrapolateLayers3(cudaSolverType* X, cudaSolverType* Y,
                            cudaSolverType* Z, int dir, int layerStart,
                            int layerEnd, int refLayer, int nx, int ny, int nz,
                            cudaStream_t stream = 0);
+
+/** Neutralize species node densities on X layers [layerStart, layerEnd]:
+ *  every layer takes the densities of reference plane refLayer, with the
+ *  positive and the negative species rescaled to the same magnitude
+ *  0.5*(rho_+ + |rho_-|). rhons: [ns][nx][ny][nz]; qom: [ns]. */
+void gpuNeutralizeLayersX(cudaSolverType* rhons, const cudaSolverType* qom,
+                          int ns, int layerStart, int layerEnd, int refLayer,
+                          int nx, int ny, int nz, cudaStream_t stream = 0);
+
+// =========================================================================
+//  Ghost rows of the X-right ghost cell plane (outflow face closure of the
+//  Maxwell operator, see OutflowBoundary.h)
+// =========================================================================
+
+/** Up to kMax cell arrays handled by one gpuGhostRowsXright call. */
+struct CellArrayBatch {
+  static constexpr int kMax = 10;
+  cudaSolverType* p[kMax];
+  int n;
+};
+
+/** Fill the y and z ghost rows of the X-right ghost cell plane i = nxc-1 of
+ *  every array in the batch. rule[0..3] = y-left, y-right, z-left, z-right.
+ *  The y rows are filled first, then the z rows over the full y range, so
+ *  the corners follow both rules. */
+void gpuGhostRowsXright(const CellArrayBatch& batch, int nxc, int nyc, int nzc,
+                        const int rule[4], cudaStream_t stream = 0);
 
 // =========================================================================
 //  Fix B kernels for GEM / ForceFree

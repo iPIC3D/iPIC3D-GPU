@@ -30,6 +30,7 @@ __device__ __forceinline__ int idx3(int i, int j, int k, int ny, int nz) {
 //  bcType  0 = Dirichlet 0 second-order  ghost = -interior
 //          1 = Dirichlet 0 first-order   ghost = 0
 //          2 = Neumann   0 first-order   ghost = interior
+//         -1 = ghost layer left unchanged (BC_FACE_KEEP)
 // =========================================================================
 
 __global__ void gpuBCfaceXleft(cudaSolverType* __restrict__ arr, int nx, int ny,

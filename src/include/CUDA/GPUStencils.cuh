@@ -36,13 +36,16 @@ void gpuGradC2N(cudaSolverType* gradXN, cudaSolverType* gradYN,
 
 /**
  * Gradient node→center:  gradX/Y/Z_C = ∇(scFieldN).
- * Output on center grid [nxc][nyc][nzc], interior i=1..nxc-2.
+ * Output on center grid [nxc][nyc][nzc]: i=iLo..iHi (iHi < 0: nxc-2, i.e.
+ * the interior), j and k interior. iHi = nxc-1 also evaluates the X-right
+ * ghost cell plane from the ghost node plane.
  * Input on node grid [nxn][nyn][nzn] (nxn=nxc+1, etc.).
  */
 void gpuGradN2C(cudaSolverType* gradXC, cudaSolverType* gradYC,
                 cudaSolverType* gradZC, const cudaSolverType* scFieldN, int nxc,
                 int nyc, int nzc, cudaSolverType invdx, cudaSolverType invdy,
-                cudaSolverType invdz, cudaStream_t stream = 0);
+                cudaSolverType invdz, cudaStream_t stream = 0, int iLo = 1,
+                int iHi = -1);
 
 // =========================================================================
 //  Divergence operations
@@ -50,14 +53,14 @@ void gpuGradN2C(cudaSolverType* gradXC, cudaSolverType* gradYC,
 
 /**
  * Divergence node→center:  divC = ∇·(vecX_N, vecY_N, vecZ_N).
- * Output on center grid [nxc][nyc][nzc], interior i=1..nxc-2.
+ * Output on center grid [nxc][nyc][nzc]: i=iLo..iHi as for gpuGradN2C.
  * Input on node grid [nxn][nyn][nzn].
  */
 void gpuDivN2C(cudaSolverType* divC, const cudaSolverType* vecXN,
                const cudaSolverType* vecYN, const cudaSolverType* vecZN,
                int nxc, int nyc, int nzc, cudaSolverType invdx,
                cudaSolverType invdy, cudaSolverType invdz,
-               cudaStream_t stream = 0);
+               cudaStream_t stream = 0, int iLo = 1, int iHi = -1);
 
 /**
  * Divergence center→node:  divN = ∇·(vecX_C, vecY_C, vecZ_C).

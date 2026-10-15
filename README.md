@@ -71,6 +71,11 @@ cmake -DHIP_ON=ON .. # use HIP
 | `USE_CATALYST` | `OFF` | Enable ParaView Catalyst in-situ visualization (requires ParaView ≥ 5.7) |
 | `USE_BATSRUS` | `OFF` | Enable BATS-R-US MHD coupling (adds `BATSRUS` compile definition) |
 | `USE_OPENMP` | `ON` | Enable OpenMP in the CPU solver. **Delete CMake cache when changing this.** |
+| `GPU_SOLVER` | `OFF` | Run the whole field solver on the GPU (requires CUDA-aware MPI); `OFF` uses the CPU field solver |
+| `HALO_OVERLAP` | `OFF` | Overlap halo exchanges with computation in the GPU field solver (requires `GPU_SOLVER=ON`) |
+| `GPU_CYCLE_DIAGNOSTICS` | `OFF` | Instrument one GPU timestep and the Maxwell right-hand side that consumes it (requires `GPU_SOLVER=ON`) |
+| `GPU_DIAGNOSTIC_CYCLE` | `1` | Cycle instrumented by `GPU_CYCLE_DIAGNOSTICS` (`-1`: every cycle) |
+| `BUILD_UTESTS` | `OFF` | Build the unit tests (run with `ctest` in the build directory) |
 | `TIME_TASKS` | `OFF` | Print per-cycle and cumulative task timings (`LOG_TASKS_TOTAL_TIME`) |
 | `BENCHMARK_MODE` | `0` | Compile-time benchmark level: `0` normal; `1` disables disk output and output-related device-to-host copies; `2` additionally disables data analysis, macrocell spectra, and heat-flux calculations |
 | `BUILD_SHARED_LIBS` | `ON` | Build shared libraries (`OFF` for static) |
@@ -307,6 +312,20 @@ Some cases apply additional boundary-condition fixes during the time loop:
 | `Dipole2D` | `ConstantChargePlanet2DPlaneXZ` — 2-D variant of the above (every cycle) |
 | `GEMHarris` | None |
 | `HumpPert` | None |
+
+### Open outflow boundary (X-right)
+
+With `bcEMfaceXright = 2` and `bcPfaceXright = 3` (and `PERIODICX = 0`), the last L = max(3, `n_layers_sal`) cells before the X-right face form the outflow layer, beyond the reference plane x_s, L cells inside the face. The field solve sees the layer as neutral, with the current and pressure of x_s. This is always on, in the GPU and the CPU field solver (`GPU_SOLVER`):
+
+- `OutflowLayerFields` sets what happens to the fields on the layer after each field solve:
+  - `solved` (default): the solver's E and B are kept, so on the layer they satisfy Faraday's and Ampère's laws as inside, with the layer's neutral charge and copied current; only the ghost node and the ghost cell beyond the face are copied from the face, the zero-gradient continuation the solver assumes.
+  - `copy`: E and B on the layer are copied from x_s, a flat continuation of x_s. This holds the field at the face at its value at x_s, which removes the outward push of a tangential field that weakens toward the face; where slow plasma drains through the face along field lines tied elsewhere, the flux then piles up behind x_s.
+- Before each solve, the species densities on the layer are set to the x_s values, rescaled to equal positive and negative charge, (ρ₊ + |ρ₋|)/2 each; where a node of x_s holds charge of one sign only, the layer nodes in its line are emptied. J_s and the pressure tensors on the layer are copied from x_s.
+- The predicted charge ρ̂ is zero on every cell beyond x_s, including the cell between x_s and the first layer node, so the solver's neutral exterior starts at x_s (where the field copy starts with `OutflowLayerFields = copy`).
+- Inside the field solver, the face is closed with a zero-gradient ghost node (the Krylov vector is unchanged), and the E smoothing continues all components with zero gradient.
+- With `divBCorrection`, the ∇·B cleaning, which corrects B on the open-face boundary layers, covers the whole outflow layer.
+
+The written `rho`, `J` and pressure on the layer are these neutralized or copied values; the written E and B are the copied or the solved fields.
 
 ### Setting the case
 

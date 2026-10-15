@@ -1108,6 +1108,116 @@ void gpuExtrapolateLayers3(cudaSolverType* X, cudaSolverType* Y,
   cudaErrChk(cudaGetLastError());
 }
 
+/** One thread per (j,k) line: rescale the reference-plane species densities
+ *  to a neutral pair and write them on every layer. A line where one sign
+ *  is missing is emptied, which is the only neutral choice left. */
+template <typename T>
+__global__ void k_neutralizeLayersX(T* rhons, const T* qom, int ns,
+                                    int layerStart, int layerEnd, int refLayer,
+                                    int nx, int ny, int nz) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= ny * nz)
+    return;
+  int j = tid / nz;
+  int k = tid % nz;
+  size_t nodeSize = (size_t)nx * ny * nz;
+  size_t ref = ((size_t)refLayer * ny + j) * nz + k;
+  T pos = 0, neg = 0;
+  for (int is = 0; is < ns; is++) {
+    T r = rhons[is * nodeSize + ref];
+    if (qom[is] > 0)
+      pos += r;
+    else
+      neg -= r;
+  }
+  T target = (T)0.5 * (pos + neg);
+  bool both = pos > 0 && neg > 0;
+  T scalePos = both ? target / pos : (T)0;
+  T scaleNeg = both ? target / neg : (T)0;
+  for (int is = 0; is < ns; is++) {
+    T r = rhons[is * nodeSize + ref] * (qom[is] > 0 ? scalePos : scaleNeg);
+    for (int i = layerStart; i <= layerEnd; i++)
+      rhons[is * nodeSize + ((size_t)i * ny + j) * nz + k] = r;
+  }
+}
+
+void gpuNeutralizeLayersX(cudaSolverType* rhons, const cudaSolverType* qom,
+                          int ns, int layerStart, int layerEnd, int refLayer,
+                          int nx, int ny, int nz, cudaStream_t stream) {
+  int total = ny * nz;
+  if (total <= 0 || layerEnd < layerStart)
+    return;
+  int blk = 256;
+  k_neutralizeLayersX<<<(total + blk - 1) / blk, blk, 0, stream>>>(
+      rhons, qom, ns, layerStart, layerEnd, refLayer, nx, ny, nz);
+  cudaErrChk(cudaGetLastError());
+}
+
+// =========================================================================
+//  Ghost rows of the X-right ghost cell plane (outflow face)
+// =========================================================================
+
+__device__ __forceinline__ size_t ghostIdx(int i, int j, int k, int ny,
+                                           int nz) {
+  return ((size_t)i * ny + j) * nz + k;
+}
+
+/** Source row of a ghost row under rule r: partner (periodic) or adjacent. */
+__device__ __forceinline__ int ghostRowSource(int r, int ghost, int n) {
+  if (r == GHOST_ROW_PERIODIC)
+    return ghost == 0 ? n - 2 : 1;
+  return ghost == 0 ? 1 : n - 2;
+}
+
+/** axis 1: rows j = 0, nyc-1 over k in [1, nzc-2]; axis 2: rows k = 0, nzc-1
+ *  over all j. blockIdx.y selects the array. */
+__global__ void k_ghostRowsXright(CellArrayBatch batch, int nxc, int nyc,
+                                  int nzc, int axis, int ruleLo, int ruleHi) {
+  cudaSolverType* a = batch.p[blockIdx.y];
+  const int t = blockIdx.x * blockDim.x + threadIdx.x;
+  const int i = nxc - 1;
+  if (axis == 1) {
+    const int k = t + 1;
+    if (k > nzc - 2)
+      return;
+    if (ruleLo != GHOST_ROW_KEEP)
+      a[ghostIdx(i, 0, k, nyc, nzc)] =
+          a[ghostIdx(i, ghostRowSource(ruleLo, 0, nyc), k, nyc, nzc)];
+    if (ruleHi != GHOST_ROW_KEEP)
+      a[ghostIdx(i, nyc - 1, k, nyc, nzc)] =
+          a[ghostIdx(i, ghostRowSource(ruleHi, nyc - 1, nyc), k, nyc, nzc)];
+  } else {
+    const int j = t;
+    if (j > nyc - 1)
+      return;
+    if (ruleLo != GHOST_ROW_KEEP)
+      a[ghostIdx(i, j, 0, nyc, nzc)] =
+          a[ghostIdx(i, j, ghostRowSource(ruleLo, 0, nzc), nyc, nzc)];
+    if (ruleHi != GHOST_ROW_KEEP)
+      a[ghostIdx(i, j, nzc - 1, nyc, nzc)] =
+          a[ghostIdx(i, j, ghostRowSource(ruleHi, nzc - 1, nzc), nyc, nzc)];
+  }
+}
+
+void gpuGhostRowsXright(const CellArrayBatch& batch, int nxc, int nyc, int nzc,
+                        const int rule[4], cudaStream_t stream) {
+  if (batch.n <= 0)
+    return;
+  const int blk = 128;
+  if (rule[0] != GHOST_ROW_KEEP || rule[1] != GHOST_ROW_KEEP) {
+    dim3 grid((nzc - 2 + blk - 1) / blk, batch.n);
+    k_ghostRowsXright<<<grid, blk, 0, stream>>>(batch, nxc, nyc, nzc, 1,
+                                                rule[0], rule[1]);
+    cudaErrChk(cudaGetLastError());
+  }
+  if (rule[2] != GHOST_ROW_KEEP || rule[3] != GHOST_ROW_KEEP) {
+    dim3 grid((nyc + blk - 1) / blk, batch.n);
+    k_ghostRowsXright<<<grid, blk, 0, stream>>>(batch, nxc, nyc, nzc, 2,
+                                                rule[2], rule[3]);
+    cudaErrChk(cudaGetLastError());
+  }
+}
+
 // =========================================================================
 //  Fix B kernels for GEM / ForceFree
 // =========================================================================

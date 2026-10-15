@@ -151,7 +151,7 @@ bcEMfaceZright = 2                      # [required]
 bcEMfaceZleft  = 2                      # [required]
 
 yes_sal      = 0                        # Enable absorbing layers [default: 0]
-n_layers_sal = 3                        # Layer thickness in cells [default: 3]
+n_layers_sal = 3                        # Layer thickness in cells; X-right outflow uses max(3, n_layers_sal) [default: 3]
 
 # Particle BC: 0=exit, 1=mirror, 2=reemit, 3=open outflow, 4=open inflow.
 bcPfaceXright = 3                       # [default: 1]

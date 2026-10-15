@@ -65,14 +65,16 @@ public:
    * points  */
   void gradC2N(arr3_double gradXN, arr3_double gradYN, arr3_double gradZN,
                const_arr3_double scFieldC) const;
-  /** calculate gradient on nodes, given a scalar field defined on central
-   * points  */
+  /** calculate gradient on central points, given a scalar field defined on
+   * nodes: cells i = 1..iHi (iHi < 0: nxc-2, the interior), j and k interior;
+   * iHi = nxc-1 also evaluates the X-right ghost cell plane */
   void gradN2C(arr3_double gradXC, arr3_double gradYC, arr3_double gradZC,
-               const_arr3_double scFieldN) const;
+               const_arr3_double scFieldN, int iHi = -1) const;
   /** calculate divergence on central points, given a vector field defined on
-   * nodes  */
+   * nodes: cells i = 1..iHi as for gradN2C */
   void divN2C(arr3_double divC, const_arr3_double vecFieldXN,
-              const_arr3_double vecFieldYN, const_arr3_double vecFieldZN) const;
+              const_arr3_double vecFieldYN, const_arr3_double vecFieldZN,
+              int iHi = -1) const;
   /** calculate divergence on nodes, given a vector field defined on central
    * points  */
   void divC2N(arr3_double divN, const_arr3_double vecFieldXC,
@@ -94,13 +96,6 @@ public:
                         const_arr4_double pYZ, const_arr4_double pZZ,
                         int ns) const;
 
-  /** calculate laplacian on nodes, given a scalar field defined on nodes */
-  void lapN2N(arr3_double lapN, const_arr3_double scFieldN,
-              EMfields3D* EMf) const;
-  /** calculate laplacian on nodes without ghost nodes (for solver
-   * preconditioner), given a scalar field defined on nodes */
-  void lapN2NLocal(arr3_double lapN, const_arr3_double scFieldN,
-                   EMfields3D* EMf) const;
   /** calculate laplacian on central points, given a scalar field defined on
    * central points for Poisson */
   // void lapC2Cpoisson(arr3_double lapC, arr3_double scFieldC)const;

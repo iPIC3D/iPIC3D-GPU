@@ -37,6 +37,7 @@
 #include <cstddef>
 
 #include "HeatFluxComponents.h"
+#include "OutflowBoundary.h"
 #include "cudaTypeDef.cuh"
 
 #ifdef GPU_SOLVER
@@ -198,7 +199,9 @@ public:
    */
   void MaxwellImage(double* im, double* vector);
   /**
-   * @brief Apply the local Maxwell image operator used by the preconditioner.
+   * @brief Apply the communication-free local Maxwell image operator, meant
+   * for a preconditioner. Not called at present: the CPU solver runs GMRES
+   * without a preconditioner (calculateE).
    *
    * @param im Output image vector.
    * @param vector Input Krylov vector.
@@ -239,7 +242,9 @@ public:
    * @param cycle Current simulation cycle.
    */
   void calculateB(int cycle);
-  /** @brief Apply divergence cleaning to the magnetic field. */
+  /** @brief Divergence cleaning of B: solve lap(PSI) = div(B) and correct
+   * the node B on the open-face boundary layers (on an X-right outflow face
+   * the whole outflow layer). */
   void applyDivBCleaning();
   /** @brief Fix magnetic-field boundary values for the GEM challenge. */
   void fixBcGEM();
@@ -287,6 +292,44 @@ public:
   void setZeroPrimaryMoments();
   /** @brief Zero the aggregate moments derived from the primary moments. */
   void setZeroDerivedMoments();
+  /**
+   * @brief Neutralize the species charge on the X-right open outflow layer.
+   *
+   * The field solve sees the outflow layer (layersXright()) as neutral. With
+   * OutflowLayerFields = copy, E and B are copied over it from a reference
+   * plane after every solve, so it carries no field gradient and, by Gauss's
+   * law, must carry no net charge; with OutflowLayerFields = solved the
+   * solver's field, that of a neutral layer, is kept there.  The species
+   * densities on the layer's node planes are replaced by those of the
+   * reference plane, rescaled to a neutral pair of magnitude
+   * (rho_+ + |rho_-|)/2.  Call after the planet charge fix and before
+   * sumOverSpecies().  Does nothing on ranks that do not own an outflow face.
+   * GPU form: gpuNeutralizeOutflowLayer().
+   */
+  void neutralizeOutflowLayer();
+  /**
+   * @brief Copy J_s and the second moments P_s over the X-right outflow layer
+   * from the reference plane (zero-gradient continuation, in both
+   * OutflowLayerFields modes), so the solver's current is flat across the
+   * layer and the
+   * smoothing of J-hat no longer carries the currents of the layer particles
+   * into the kept nodes. Call
+   * next to neutralizeOutflowLayer(); output moments on the layer are these
+   * copies. GPU form: gpuCopyOutflowLayerMoments().
+   */
+  void copyOutflowLayerMoments();
+  /**
+   * @brief rhohat = 0 on every cell beyond the reference node x_s of the
+   * X-right outflow face (the cell straddling x_s, the layer cells and the
+   * ghost cell), so the solver's charge exterior starts at x_s like the
+   * post-solve field copy. Without it the solve builds the field of the
+   * straddling half cell (half the charge of node x_s), the copy removes it
+   * every cycle, and the Gauss residual left behind is spread inward by the
+   * solver's cleaning. With OutflowLayerFields = solved nothing is copied,
+   * and the kept layer field is that of a neutral layer. Called where rhohat
+   * is formed. GPU form: gpuZeroOutflowRhohat().
+   */
+  void zeroOutflowRhohat();
   /** @brief Sum nodal charge density over all species. */
   void sumOverSpecies();
   /** @brief Sum nodal current density over all species. */
@@ -713,7 +756,9 @@ public:
    * vectors). */
   void gpuMaxwellImage(cudaSolverType* d_im, cudaSolverType* d_vector);
   /** GPU MaxwellImage (local): communication-free A*x for use as
-   * preconditioner. Ghost cells are treated as zero and physical boundary image
+   * preconditioner (the Richardson sweeps of gpuBlockJacobiPrecond, run when
+   * BlockJacobiSweeps > 1). Ghost cells are treated as zero, apart from the
+   * X-right ghost cell plane on an outflow face, and physical boundary image
    * corrections are enforced locally so the operator better matches the full
    * Maxwell image. */
   void gpuMaxwellImageLocal(cudaSolverType* d_im, cudaSolverType* d_vector);
@@ -793,7 +838,8 @@ public:
                                 GPUFieldArray3& imZ, GPUFieldArray3& vX,
                                 GPUFieldArray3& vY, GPUFieldArray3& vZ,
                                 int dir);
-  /** Fused triple Laplacian: 3× lapN2N with ONE batched halo exchange. */
+  /** Fused triple Laplacian, the GPU form of 3x operatorLapN2N (X-right
+   * outflow closure included), with ONE batched halo exchange. */
   void gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
                    GPUFieldArray3& lapB, GPUFieldArray3& fieldB,
                    GPUFieldArray3& lapC, GPUFieldArray3& fieldC);
@@ -859,6 +905,18 @@ public:
    * device. */
   void gpuSetZeroDerivedMoments();
 
+  /** GPU neutralizeOutflowLayer: neutral d_rhons on the X-right outflow
+   * layer; call before gpuSumOverSpecies(). */
+  void gpuNeutralizeOutflowLayer();
+
+  /** GPU copyOutflowLayerMoments: J_s, P_s on the X-right outflow layer
+   * from the reference plane; call next to gpuNeutralizeOutflowLayer(). */
+  void gpuCopyOutflowLayerMoments();
+
+  /** GPU zeroOutflowRhohat: rhohat = 0 beyond the X-right outflow reference
+   * node; called in gpuCalculateHatFunctions(). */
+  void gpuZeroOutflowRhohat();
+
   /** GPU sumOverSpecies: rhon += sum_s(rhons_s) on device. */
   void gpuSumOverSpecies();
 
@@ -879,12 +937,32 @@ public:
                                    const cudaSolverType* vY,
                                    const cudaSolverType* vZ, int nx, int ny,
                                    int nz);
-  /** GPU open BC: SAL blend / Dirichlet on E inflow faces (post-solve). */
+  /** GPU open BC (post-solve): SAL blend / Dirichlet on E inflow faces, and
+   * on an X-right outflow face the copy over fieldCopyLayersXright() node
+   * planes (gpuOutflowCopyE). */
   void gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY,
                               cudaSolverType* dZ, int nx, int ny, int nz);
-  /** GPU open BC: SAL blend / extrapolation on center B inflow faces. */
+  /** GPU open BC: SAL blend / extrapolation on center B inflow faces; an
+   * open X-right face copies the plane before them over
+   * fieldCopyLayersXright() cell planes. */
   void gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
                               cudaSolverType* dZ, int nx, int ny, int nz);
+
+  // ---- GPU Solver: ghost node on the X-right outflow face ----
+  // GPU forms of outflowGhostNodes / outflowGhostRows (see the X-right open
+  // boundary layer section below).
+  /** Ghost node plane of the node arrays a[0..2] := their face plane on an
+   * outflow face; no-op elsewhere. */
+  void gpuOutflowGhostNodes(GPUFieldArray3* const a[3]);
+  /** Fill the y/z ghost rows of the X-right ghost cell plane of the cell
+   * arrays a[0..n-1] on an outflow face; no-op elsewhere. */
+  void gpuOutflowGhostRows(cudaSolverType* const a[], int n);
+  /** Copy E (dX, dY, dZ, node arrays) over fieldCopyLayersXright() node
+   * planes of the X-right outflow face and its ghost node from the plane
+   * before them: the reference plane, or with OutflowLayerFields = solved
+   * the face; no-op elsewhere. */
+  void gpuOutflowCopyE(cudaSolverType* dX, cudaSolverType* dY,
+                       cudaSolverType* dZ);
 
   // ---- GPU Solver: case-specific B fixes ----
   /** GPU fix center B for GEM case. */
@@ -923,8 +1001,8 @@ public:
                                   cudaSolverType tol, MPI_Comm fieldcomm);
   /** GPU Poisson correction for div(E) cleaning. */
   void gpuPoissonCorrection(int cycle);
-  /** GPU div(B) cleaning: solve lap(PSI)=div(B), correct B on boundary layers.
-   */
+  /** GPU div(B) cleaning: solve lap(PSI)=div(B), correct B on boundary layers
+   * (on an X-right outflow face the whole outflow layer). */
   void gpuApplyDivBCleaning();
 
   // ---- GPU Solver: additional halo exchange ----
@@ -968,6 +1046,55 @@ public: // accessors
   const Collective& get_col() const { return _col; }
   const Grid& get_grid() const { return _grid; };
   const VirtualTopology3D& get_vct() const { return _vct; }
+
+private: // X-right open boundary layer
+  /** True on ranks owning an X-right open outflow face (bcEMfaceXright = 2,
+   *  bcPfaceXright = 3). */
+  bool ownsOutflowFaceXright() const;
+  /** Layers L of the X-right open face: node planes nxn-1-L..nxn-1
+   *  (centers nxc-1-L..nxc-1) take the values of plane nxn-2-L (nxc-2-L).
+   *  On an outflow face the neutralized charge, the copied moments and, with
+   *  OutflowLayerFields = copy, E and B share L = max(3, n_layers_sal), so
+   *  the L cells between the reference plane and the face contain the 3-cell
+   *  particle open layer; otherwise L = n_layers_sal. */
+  int layersXright() const;
+  /** Layers over which E and B are copied after a solve on the X-right open
+   *  face: layersXright(), except on an outflow face with
+   *  OutflowLayerFields = solved, where it is 0: only the ghost node plane
+   *  nxn-1 and the ghost cell plane nxc-1 take the face values, the
+   *  zero-gradient continuation the Maxwell operator assumes. */
+  int fieldCopyLayersXright() const;
+
+  // Maxwell-operator closure of the outflow face: see OutflowBoundary.h.
+  /** Last cell plane of the operator's node-to-cell stencils: the ghost
+   *  plane nxc-1 on an outflow face, the interior nxc-2 elsewhere. */
+  int operatorCellEnd() const;
+  /** Face code for the X-right face of the operator's cell arrays:
+   *  BC_FACE_KEEP on an outflow face, where the stencils fill the ghost
+   *  plane, otherwise code. */
+  int operatorBCXright(int code) const;
+  /** Ghost-row rules of the X-right ghost cell plane, rule[0..3] = y-left,
+   *  y-right, z-left, z-right: a physical face keeps its own BC, a periodic
+   *  image on this rank gives the exact partner row, and a neighbour rank's
+   *  row, whose face-plane nodes the operator does not exchange, is stood in
+   *  for by the adjacent row. */
+  void outflowGhostRowRules(int rule[4]) const;
+  /** CPU: ghost node plane of a, b, c := their face plane on an outflow face;
+   *  no-op elsewhere. */
+  void outflowGhostNodes(arr3_double a, arr3_double b, arr3_double c);
+  /** CPU: fill the y/z ghost rows of the X-right ghost cell plane of a by
+   *  outflowGhostRowRules(); no-op elsewhere. */
+  void outflowGhostRows(arr3_double a);
+  /** CPU Laplacian of the Maxwell operator for one component: div(grad),
+   *  node -> cell -> node, with the cell gradients exchanged between ranks
+   *  and set to 0 in physical ghost cells (BC code 1). On an outflow face the
+   *  gradient also covers the X-right ghost cell plane (operatorCellEnd()),
+   *  its ghost rows are filled and the halo BC keeps it. */
+  void operatorLapN2N(arr3_double lapN, const_arr3_double field);
+  /** As operatorLapN2N without communication, for MaxwellImageLocal: ghost
+   *  cells zero apart from the X-right ghost plane. */
+  void operatorLapN2NLocal(arr3_double lapN, const_arr3_double field);
+
   /* ********************************* // VARIABLES
    * ********************************* */
 

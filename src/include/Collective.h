@@ -202,6 +202,7 @@ public:
   int getBcPfaceZright() const { return (bcPfaceZright); }
   int getBcPfaceZleft() const { return (bcPfaceZleft); }
   bool getApplyInflowBcsEImage() const { return applyInflowBcsEImage; }
+  bool getOutflowLayerSolved() const { return outflowLayerSolved; }
   int getBcPHIfaceXright() const { return (bcPHIfaceXright); }
   int getBcPHIfaceXleft() const { return (bcPHIfaceXleft); }
   int getBcPHIfaceYright() const { return (bcPHIfaceYright); }
@@ -498,6 +499,12 @@ private:
   /*! Apply inflow E field BCs in GMRes image iterations (default true).
    *  Inflow BCs are applied per-face only where bcPface == 2 (reemission). */
   bool applyInflowBcsEImage;
+
+  /*! Fields on the X-right open outflow layer (OutflowLayerFields): true =
+   *  "solved" (default), the solver's E and B kept, only the ghost node and
+   *  ghost cell beyond the face copied from the face; false = "copy", E and B
+   *  copied from the reference plane after every solve. */
+  bool outflowLayerSolved;
 
   /*! Field Boundary Condition 0 = Dirichlet Boundary Condition: specifies the
    * valueto take pn the boundary of the domain 1 = Neumann Boundary Condition:

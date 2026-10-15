@@ -2781,8 +2781,8 @@ void c_Solver::MomentsAwait(int cycle) {
   //   gpuCommunicateGhostP2G_AllSpecies: " << ms << " ms" << std::endl;
   // }
 
-  // Phase 2: zero derived quantities, planet charge fix, sum over species,
-  // interp N→C
+  // Phase 2: zero derived quantities, planet charge fix, outflow-layer
+  // neutralization, sum over species, interp N→C
   EMf->gpuSetZeroDerivedMoments();
   // Enforce constant charge inside planet BEFORE summing over species,
   // so that rhon (and downstream rhoc, rhoh) includes the planet fix.
@@ -2795,6 +2795,12 @@ void c_Solver::MomentsAwait(int cycle) {
                                           col->getx_center_planet(),
                                           col->getz_center_planet());
   }
+  // Neutral charge, and the reference plane's current and second moments, on
+  // the X-right outflow layer: the field solve sees a neutral layer, whether
+  // its field is then copied from the reference plane or kept as solved
+  // (OutflowLayerFields).
+  EMf->gpuNeutralizeOutflowLayer();
+  EMf->gpuCopyOutflowLayerMoments();
   EMf->gpuSumOverSpecies();
   if (col->getOutputConfig().needsJTotComputation())
     EMf->gpuSumOverSpeciesJ();
@@ -2840,6 +2846,12 @@ void c_Solver::MomentsAwait(int cycle) {
   }
   // Legacy OpenBC constant-charge path is intentionally left disabled here.
   // EMf->ConstantChargeOpenBC();
+  // Neutral charge, and the reference plane's current and second moments, on
+  // the X-right outflow layer: the field solve sees a neutral layer, whether
+  // its field is then copied from the reference plane or kept as solved
+  // (OutflowLayerFields).
+  EMf->neutralizeOutflowLayer();
+  EMf->copyOutflowLayerMoments();
   // Accumulate species moments into total moments.
   EMf->sumOverSpecies();
   // Total J (Jx/Jy/Jz) is computed on demand inside each output writer

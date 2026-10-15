@@ -79,17 +79,18 @@ __global__ void k_gradC2N(T* __restrict__ gradXN, T* __restrict__ gradYN,
 
 /**
  * gradN2C: gradient node→center.
- * Interior output on center grid: i=1..nxc-2 → reads node[i..i+1].
+ * Output on center grid: i=iLo..iHi (interior 1..nxc-2 by default), j, k
+ * interior → reads node[i..i+1].
  */
 template <typename T>
 __global__ void k_gradN2C(T* __restrict__ gradXC, T* __restrict__ gradYC,
                           T* __restrict__ gradZC, const T* __restrict__ N,
-                          int nxc, int nyc, int nzc, int nyn, int nzn, T invdx,
-                          T invdy, T invdz) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
+                          int iLo, int iHi, int nyc, int nzc, int nyn, int nzn,
+                          T invdx, T invdy, T invdz) {
+  int i = blockIdx.x * BX + threadIdx.x + iLo;
   int j = blockIdx.y * BY + threadIdx.y + 1;
   int k = blockIdx.z * BZ + threadIdx.z + 1;
-  if (i > nxc - 2 || j > nyc - 2 || k > nzc - 2)
+  if (i > iHi || j > nyc - 2 || k > nzc - 2)
     return;
 
 // Node indices (i, i+1) × (j, j+1) × (k, k+1)
@@ -125,12 +126,12 @@ __global__ void k_gradN2C(T* __restrict__ gradXC, T* __restrict__ gradYC,
 template <typename T>
 __global__ void k_divN2C(T* __restrict__ divC, const T* __restrict__ vecXN,
                          const T* __restrict__ vecYN,
-                         const T* __restrict__ vecZN, int nxc, int nyc, int nzc,
-                         int nyn, int nzn, T invdx, T invdy, T invdz) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
+                         const T* __restrict__ vecZN, int iLo, int iHi, int nyc,
+                         int nzc, int nyn, int nzn, T invdx, T invdy, T invdz) {
+  int i = blockIdx.x * BX + threadIdx.x + iLo;
   int j = blockIdx.y * BY + threadIdx.y + 1;
   int k = blockIdx.z * BZ + threadIdx.z + 1;
-  if (i > nxc - 2 || j > nyc - 2 || k > nzc - 2)
+  if (i > iHi || j > nyc - 2 || k > nzc - 2)
     return;
 
 #define N_(arr, ii, jj, kk) arr[IDX(ii, jj, kk, nyn, nzn)]
@@ -444,15 +445,25 @@ void gpuGradC2N(cudaSolverType* gradXN, cudaSolverType* gradYN,
   cudaErrChk(cudaGetLastError());
 }
 
+/** Grid for cells iLo..iHi along x and the interior along y and z. */
+static inline dim3 cellRangeGrid(int iLo, int iHi, int nyc, int nzc) {
+  return dim3((iHi - iLo + 1 + BX - 1) / BX, ((nyc - 2) + BY - 1) / BY,
+              ((nzc - 2) + BZ - 1) / BZ);
+}
+
 void gpuGradN2C(cudaSolverType* gradXC, cudaSolverType* gradYC,
                 cudaSolverType* gradZC, const cudaSolverType* scFieldN, int nxc,
                 int nyc, int nzc, cudaSolverType invdx, cudaSolverType invdy,
-                cudaSolverType invdz, cudaStream_t stream) {
+                cudaSolverType invdz, cudaStream_t stream, int iLo, int iHi) {
+  if (iHi < 0)
+    iHi = nxc - 2;
+  if (iHi < iLo)
+    return;
   int nyn = nyc + 1, nzn = nzc + 1;
-  dim3 grid = stencilGrid(nxc, nyc, nzc);
+  dim3 grid = cellRangeGrid(iLo, iHi, nyc, nzc);
   dim3 block(BX, BY, BZ);
-  k_gradN2C<<<grid, block, 0, stream>>>(gradXC, gradYC, gradZC, scFieldN, nxc,
-                                        nyc, nzc, nyn, nzn, invdx, invdy,
+  k_gradN2C<<<grid, block, 0, stream>>>(gradXC, gradYC, gradZC, scFieldN, iLo,
+                                        iHi, nyc, nzc, nyn, nzn, invdx, invdy,
                                         invdz);
   cudaErrChk(cudaGetLastError());
 }
@@ -460,13 +471,17 @@ void gpuGradN2C(cudaSolverType* gradXC, cudaSolverType* gradYC,
 void gpuDivN2C(cudaSolverType* divC, const cudaSolverType* vecXN,
                const cudaSolverType* vecYN, const cudaSolverType* vecZN,
                int nxc, int nyc, int nzc, cudaSolverType invdx,
-               cudaSolverType invdy, cudaSolverType invdz,
-               cudaStream_t stream) {
+               cudaSolverType invdy, cudaSolverType invdz, cudaStream_t stream,
+               int iLo, int iHi) {
+  if (iHi < 0)
+    iHi = nxc - 2;
+  if (iHi < iLo)
+    return;
   int nyn = nyc + 1, nzn = nzc + 1;
-  dim3 grid = stencilGrid(nxc, nyc, nzc);
+  dim3 grid = cellRangeGrid(iLo, iHi, nyc, nzc);
   dim3 block(BX, BY, BZ);
-  k_divN2C<<<grid, block, 0, stream>>>(divC, vecXN, vecYN, vecZN, nxc, nyc, nzc,
-                                       nyn, nzn, invdx, invdy, invdz);
+  k_divN2C<<<grid, block, 0, stream>>>(divC, vecXN, vecYN, vecZN, iLo, iHi, nyc,
+                                       nzc, nyn, nzn, invdx, invdy, invdz);
   cudaErrChk(cudaGetLastError());
 }
 

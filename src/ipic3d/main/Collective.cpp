@@ -691,6 +691,19 @@ void Collective::ReadInput(const ConfigFile& config) {
   // E field inflow BC: master switch for applying inflow BCs in GMRes image
   applyInflowBcsEImage = config.read<int>("ApplyInflowBcsEImage", 1);
 
+  // Fields on the X-right outflow layer: kept as solved (default), or copied
+  // from the reference plane
+  const string outflowLayerFields =
+      config.read<string>("OutflowLayerFields", "solved");
+  if (outflowLayerFields != "copy" && outflowLayerFields != "solved") {
+    if (!MPIdata::get_rank())
+      eprintf("in input file %s OutflowLayerFields must be copy or solved, "
+              "not %s\n",
+              inputfile.c_str(), outflowLayerFields.c_str());
+    MPIdata::exit(1);
+  }
+  outflowLayerSolved = outflowLayerFields == "solved";
+
   if (RESTART1) { // you are restarting
     RestartDirName = config.read<string>("RestartDirName", "data");
     RestartReadDirName = RestartDirName;
@@ -926,6 +939,12 @@ void Collective::Print() {
        << endl;
   cout << "E inflow BCs in GMRes : " << (applyInflowBcsEImage ? "yes" : "no")
        << " (applied per-face where bcPface == 2)" << endl;
+  if (bcEMfaceXright == 2 && bcPfaceXright == 3)
+    cout << "X-right outflow layer fields : "
+         << (outflowLayerSolved
+                 ? "solved (only the ghost node and ghost cell copied)"
+                 : "copy (E and B copied from the reference plane)")
+         << endl;
   cout << "---------------------" << endl;
   cout << "Field Corrections" << endl;
   cout << "---------------------" << endl;

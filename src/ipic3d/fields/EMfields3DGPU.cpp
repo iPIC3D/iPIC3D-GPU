@@ -89,18 +89,20 @@ void EMfields3D::gpuSolverAllocate() {
     std::abort();
   }
 
-  // Boundary kernels index n_layers_sal directly.  Validate active physical
-  // boundary branches against their local array extent.
-  auto validateLayers = [&](bool active, int extent, int reserved,
+  // Boundary kernels index their layer count directly (n_layers_sal, or
+  // layersXright() on X-right).  Validate active physical boundary branches
+  // against their local array extent.
+  auto validateLayers = [&](bool active, int layers, int extent, int reserved,
                             const char* operation) {
     if (!active)
       return;
     const int minLayers = yes_sal ? 1 : 0;
     const int maxLayers = extent - reserved;
-    if (n_layers_sal >= minLayers && n_layers_sal <= maxLayers)
+    if (layers >= minLayers && layers <= maxLayers)
       return;
-    cerr << "ERROR: invalid n_layers_sal=" << n_layers_sal << " for "
-         << operation << " on rank " << vct->getCartesian_rank()
+    cerr << "ERROR: invalid boundary layer count " << layers
+         << " (n_layers_sal=" << n_layers_sal << ") for " << operation
+         << " on rank " << vct->getCartesian_rank()
          << "; valid local range is [" << minLayers << "," << maxLayers
          << "] for extent " << extent << endl;
     MPI_Abort(vct->getFieldComm(), EXIT_FAILURE);
@@ -120,41 +122,44 @@ void EMfields3D::gpuSolverAllocate() {
   const bool zRightOpen =
       vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 2;
 
-  validateLayers(xLeftOpen && col->getBcPfaceXleft() == 2, nxn, 1,
+  validateLayers(xLeftOpen && col->getBcPfaceXleft() == 2, n_layers_sal, nxn, 1,
                  "electric X-left open boundary");
-  validateLayers(xRightOpen && col->getBcPfaceXright() == 3, nxn, 2,
-                 "electric X-right open boundary");
-  validateLayers(yLeftOpen && col->getBcPfaceYleft() == 2, nyn, yes_sal ? 1 : 2,
-                 "electric Y-left open boundary");
-  validateLayers(yRightOpen && col->getBcPfaceYright() == 2, nyn,
+  validateLayers(xRightOpen && col->getBcPfaceXright() == 3, layersXright(),
+                 nxn, 2, "electric X-right open boundary");
+  validateLayers(yLeftOpen && col->getBcPfaceYleft() == 2, n_layers_sal, nyn,
+                 yes_sal ? 1 : 2, "electric Y-left open boundary");
+  validateLayers(yRightOpen && col->getBcPfaceYright() == 2, n_layers_sal, nyn,
                  yes_sal ? 1 : 2, "electric Y-right open boundary");
-  validateLayers(zLeftOpen && col->getBcPfaceZleft() == 2, nzn, yes_sal ? 1 : 2,
-                 "electric Z-left open boundary");
-  validateLayers(zRightOpen && col->getBcPfaceZright() == 2, nzn,
+  validateLayers(zLeftOpen && col->getBcPfaceZleft() == 2, n_layers_sal, nzn,
+                 yes_sal ? 1 : 2, "electric Z-left open boundary");
+  validateLayers(zRightOpen && col->getBcPfaceZright() == 2, n_layers_sal, nzn,
                  yes_sal ? 1 : 2, "electric Z-right open boundary");
 
   // Center-B open-boundary extrapolation is active only for extents greater
   // than 10 and requires one untouched reference layer beyond the corrected
   // range.
-  validateLayers(xLeftOpen && nxc > 10, nxc, 1,
+  validateLayers(xLeftOpen && nxc > 10, n_layers_sal, nxc, 1,
                  "magnetic X-left open boundary");
-  validateLayers(xRightOpen && nxc > 10, nxc, 2,
+  validateLayers(xRightOpen && nxc > 10, layersXright(), nxc, 2,
                  "magnetic X-right open boundary");
-  validateLayers(yLeftOpen && nyc > 10, nyc, yes_sal ? 1 : 2,
+  validateLayers(yLeftOpen && nyc > 10, n_layers_sal, nyc, yes_sal ? 1 : 2,
                  "magnetic Y-left open boundary");
-  validateLayers(yRightOpen && nyc > 10, nyc, yes_sal ? 1 : 2,
+  validateLayers(yRightOpen && nyc > 10, n_layers_sal, nyc, yes_sal ? 1 : 2,
                  "magnetic Y-right open boundary");
-  validateLayers(zLeftOpen && nzc > 10, nzc, yes_sal ? 1 : 2,
+  validateLayers(zLeftOpen && nzc > 10, n_layers_sal, nzc, yes_sal ? 1 : 2,
                  "magnetic Z-left open boundary");
-  validateLayers(zRightOpen && nzc > 10, nzc, yes_sal ? 1 : 2,
+  validateLayers(zRightOpen && nzc > 10, n_layers_sal, nzc, yes_sal ? 1 : 2,
                  "magnetic Z-right open boundary");
 
   if (divBCorrection) {
-    validateLayers(xLeftOpen || xRightOpen, nxn, 0,
-                   "magnetic divergence correction in X");
-    validateLayers(yLeftOpen || yRightOpen, nyn, 0,
+    validateLayers(xLeftOpen || (xRightOpen && !ownsOutflowFaceXright()),
+                   n_layers_sal, nxn, 0, "magnetic divergence correction in X");
+    validateLayers(
+        ownsOutflowFaceXright(), layersXright(), nxn, 1,
+        "magnetic divergence correction on the X-right outflow layer");
+    validateLayers(yLeftOpen || yRightOpen, n_layers_sal, nyn, 0,
                    "magnetic divergence correction in Y");
-    validateLayers(zLeftOpen || zRightOpen, nzn, 0,
+    validateLayers(zLeftOpen || zRightOpen, n_layers_sal, nzn, 0,
                    "magnetic divergence correction in Z");
   }
 
@@ -858,6 +863,17 @@ void EMfields3D::gpuSmoothE() {
   const double beta3D = (1.0 - alpha) / 6.0;
   size_t nodeSize = (size_t)nxn * nyn * nzn;
 
+  // X-right outflow face: continue every component past the face with zero
+  // gradient, instead of the open-face ghost E_x = 0
+  int bcEx[6], bcEy[6], bcEz[6];
+  for (int f = 0; f < 6; f++) {
+    bcEx[f] = col->bcEx[f];
+    bcEy[f] = col->bcEy[f];
+    bcEz[f] = col->bcEz[f];
+  }
+  if (ownsOutflowFaceXright())
+    bcEx[0] = bcEy[0] = bcEz[0] = 2;
+
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
 #ifdef HALO_OVERLAP
     cudaSolverType* eptrs[3] = {d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr()};
@@ -870,12 +886,12 @@ void EMfields3D::gpuSmoothE() {
     gpuSmoothStep_interior(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn,
                            alpha, beta3D, solverStream_);
     gpuBatchedHaloEndExchange();
-    gpuBCface(nxn, nyn, nzn, d_Ex, col->bcEx[0], col->bcEx[1], col->bcEx[2],
-              col->bcEx[3], col->bcEx[4], col->bcEx[5], &_vct, solverStream_);
-    gpuBCface(nxn, nyn, nzn, d_Ey, col->bcEy[0], col->bcEy[1], col->bcEy[2],
-              col->bcEy[3], col->bcEy[4], col->bcEy[5], &_vct, solverStream_);
-    gpuBCface(nxn, nyn, nzn, d_Ez, col->bcEz[0], col->bcEz[1], col->bcEz[2],
-              col->bcEz[3], col->bcEz[4], col->bcEz[5], &_vct, solverStream_);
+    gpuBCface(nxn, nyn, nzn, d_Ex, bcEx[0], bcEx[1], bcEx[2], bcEx[3], bcEx[4],
+              bcEx[5], &_vct, solverStream_);
+    gpuBCface(nxn, nyn, nzn, d_Ey, bcEy[0], bcEy[1], bcEy[2], bcEy[3], bcEy[4],
+              bcEy[5], &_vct, solverStream_);
+    gpuBCface(nxn, nyn, nzn, d_Ez, bcEz[0], bcEz[1], bcEz[2], bcEz[3], bcEz[4],
+              bcEz[5], &_vct, solverStream_);
     gpuSmoothStep_boundary(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn,
                            alpha, beta3D, solverStream_);
     gpuSmoothStep_boundary(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn,
@@ -884,8 +900,8 @@ void EMfields3D::gpuSmoothE() {
                            alpha, beta3D, solverStream_);
 #else
     // Batched: 3 fields in 1 MPI round instead of 3 sequential exchanges
-    gpuCommunicateNodeBoxStencilBC_3mixed(nxn, nyn, nzn, d_Ex, col->bcEx, d_Ey,
-                                          col->bcEy, d_Ez, col->bcEz);
+    gpuCommunicateNodeBoxStencilBC_3mixed(nxn, nyn, nzn, d_Ex, bcEx, d_Ey, bcEy,
+                                          d_Ez, bcEz);
     gpuSmoothStep(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn, alpha, beta3D,
                   solverStream_);
     gpuSmoothStep(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn, alpha, beta3D,
@@ -1007,20 +1023,33 @@ void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
   double _invdy = grid->get_invdy();
   double _invdz = grid->get_invdz();
 
+  // X-right outflow face: zero-gradient ghost nodes, and the gradients below
+  // include the ghost cell plane (the exchange does not write that plane)
+  GPUFieldArray3* fields[3] = {&fieldA, &fieldB, &fieldC};
+  gpuOutflowGhostNodes(fields);
+  const int iHi = operatorCellEnd();
+
   // Gradient A → d_tempXC, d_tempYC, d_tempZC
   gpuGradN2C(d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
              fieldA.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
-             solverStream_);
+             solverStream_, 1, iHi);
 
   // Gradient B → d_divC, d_poissonTemp, d_poissonIm  (center-sized scratch)
   gpuGradN2C(d_divC.devPtr(), d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
              fieldB.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
-             solverStream_);
+             solverStream_, 1, iHi);
 
   // Gradient C → d_divBwork, d_divE_work, d_tempC  (center-sized scratch)
   gpuGradN2C(d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr(),
              fieldC.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
-             solverStream_);
+             solverStream_, 1, iHi);
+
+  cudaSolverType* grad[9] = {
+      d_tempXC.devPtr(),   d_tempYC.devPtr(),      d_tempZC.devPtr(),
+      d_divC.devPtr(),     d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
+      d_divBwork.devPtr(), d_divE_work.devPtr(),   d_tempC.devPtr()};
+  gpuOutflowGhostRows(grad, 9);
+  const int bcXr = operatorBCXright(1);
 
 #ifdef HALO_OVERLAP
   // ---- Begin halo exchange: pack faces + post MPI ----
@@ -1045,17 +1074,20 @@ void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
   // ---- End halo exchange: MPI_Waitall + unpack + edges/corners ----
   gpuBatchedHaloEndExchange();
 
-  // ---- BC face application (type 1 on all faces) ----
-  gpuBCface(nxc, nyc, nzc, d_tempXC, 1, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_tempYC, 1, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_tempZC, 1, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_divC, 1, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_poissonTemp, 1, 1, 1, 1, 1, 1, &_vct,
+  // ---- BC face application (type 1; an X-right outflow plane is kept) ----
+  gpuBCface(nxc, nyc, nzc, d_tempXC, bcXr, 1, 1, 1, 1, 1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_tempYC, bcXr, 1, 1, 1, 1, 1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_tempZC, bcXr, 1, 1, 1, 1, 1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_divC, bcXr, 1, 1, 1, 1, 1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_poissonTemp, bcXr, 1, 1, 1, 1, 1, &_vct,
             solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_poissonIm, 1, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_divBwork, 1, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_divE_work, 1, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_tempC, 1, 1, 1, 1, 1, 1, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_poissonIm, bcXr, 1, 1, 1, 1, 1, &_vct,
+            solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_divBwork, bcXr, 1, 1, 1, 1, 1, &_vct,
+            solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_divE_work, bcXr, 1, 1, 1, 1, 1, &_vct,
+            solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_tempC, bcXr, 1, 1, 1, 1, 1, &_vct, solverStream_);
 
   // ---- Boundary divC2N (ghost + BC data now available) ----
   gpuDivC2N_boundary(lapA.devPtr(), d_tempXC.devPtr(), d_tempYC.devPtr(),
@@ -1072,7 +1104,7 @@ void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
   // ---- Original blocking path ----
   gpuCommunicateCenterBC_9(nxc, nyc, nzc, d_tempXC, d_tempYC, d_tempZC, d_divC,
                            d_poissonTemp, d_poissonIm, d_divBwork, d_divE_work,
-                           d_tempC, 1, 1, 1, 1, 1, 1);
+                           d_tempC, bcXr, 1, 1, 1, 1, 1);
 
   // Divergence A
   gpuDivC2N(lapA.devPtr(), d_tempXC.devPtr(), d_tempYC.devPtr(),
@@ -1123,10 +1155,15 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
 
   // MUdot: D = μ·vect
   gpuMUdot(d_Dx, d_Dy, d_Dz, d_vectX, d_vectY, d_vectZ);
+  GPUFieldArray3* Dn[3] = {&d_Dx, &d_Dy, &d_Dz};
+  gpuOutflowGhostNodes(Dn);
 
-  // div(D) on centers
+  // div(D) on centers (with the X-right ghost cell plane on an outflow face)
   gpuDivN2C(d_divC.devPtr(), d_Dx.devPtr(), d_Dy.devPtr(), d_Dz.devPtr(), nxc,
-            nyc, nzc, _invdx, _invdy, _invdz, solverStream_);
+            nyc, nzc, _invdx, _invdy, _invdz, solverStream_, 1,
+            operatorCellEnd());
+  cudaSolverType* divPtr[1] = {d_divC.devPtr()};
+  gpuOutflowGhostRows(divPtr, 1);
 
 #ifdef HALO_OVERLAP
   // ---- Begin halo on divC ----
@@ -1141,7 +1178,8 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
 
   // ---- End halo ----
   gpuBatchedHaloEndExchange();
-  gpuBCface(nxc, nyc, nzc, d_divC, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
+  gpuBCface(nxc, nyc, nzc, d_divC, operatorBCXright(2), 2, 2, 2, 2, 2, &_vct,
+            solverStream_);
 
   // ---- Boundary gradC2N ----
   gpuGradC2N_boundary(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
@@ -1149,7 +1187,8 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
                       solverStream_);
 #else
   // Communicate divC
-  gpuCommunicateCenterBC(nxc, nyc, nzc, d_divC, 2, 2, 2, 2, 2, 2);
+  gpuCommunicateCenterBC(nxc, nyc, nzc, d_divC, operatorBCXright(2), 2, 2, 2, 2,
+                         2);
 
   // grad(divC) on nodes
   gpuGradC2N(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
@@ -1286,6 +1325,27 @@ void EMfields3D::gpuMaxwellImageLocal(cudaSolverType* d_im,
       d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(), d_Dx.devPtr(),
       d_Dy.devPtr(), d_Dz.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
       solverStream_);
+
+  // X-right outflow face: the ghost cell plane from zero-gradient ghost
+  // nodes; its ghost rows stay zero like every other ghost cell here.
+  if (ownsOutflowFaceXright()) {
+    GPUFieldArray3* En[3] = {&d_vectX, &d_vectY, &d_vectZ};
+    GPUFieldArray3* Dn[3] = {&d_Dx, &d_Dy, &d_Dz};
+    gpuOutflowGhostNodes(En);
+    gpuOutflowGhostNodes(Dn);
+    const int g = nxc - 1;
+    gpuGradN2C(d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
+               d_vectX.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
+               solverStream_, g, g);
+    gpuGradN2C(d_divC.devPtr(), d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
+               d_vectY.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
+               solverStream_, g, g);
+    gpuGradN2C(d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr(),
+               d_vectZ.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
+               solverStream_, g, g);
+    gpuDivN2C(d_imageX.devPtr(), d_Dx.devPtr(), d_Dy.devPtr(), d_Dz.devPtr(),
+              nxc, nyc, nzc, _invdx, _invdy, _invdz, solverStream_, g, g);
+  }
 
   // ---- Step 4: Fused node-level operations + Krylov packing ----
   // For each interior node:
@@ -1583,7 +1643,8 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
   gpuScale3(d_temp2X.devPtr(), d_temp2Y.devPtr(), d_temp2Z.devPtr(), delt,
             nodeSize, solverStream_);
 
-  // Communicate rhoh
+  // Communicate rhoh (on an X-right outflow face rhohat is already 0 from the
+  // reference node to the ghost cell, gpuZeroOutflowRhohat)
   gpuCommunicateCenterBC_P(nxc, nyc, nzc, d_rhoh, 2, 2, 2, 2, 2, 2);
 
   // grad(rhoh) → tempX/Y/Z
@@ -2489,7 +2550,7 @@ void EMfields3D::gpuCalculateB(int cycle) {
       safeILo = std::max(safeILo, n_layers_sal + 2);
     if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
         nxc > 10)
-      safeIHi = std::min(safeIHi, nxn - n_layers_sal - 3);
+      safeIHi = std::min(safeIHi, nxn - layersXright() - 3);
     if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
         nyc > 10)
       safeJLo = std::max(safeJLo, n_layers_sal + 2);
@@ -2733,6 +2794,9 @@ void EMfields3D::gpuCalculateHatFunctions(int cycle) {
   gpuSum(d_tempXC.devPtr(), d_rhoc.devPtr(), centSize, solverStream_);
   gpuEq(d_rhoh.devPtr(), d_tempXC.devPtr(), centSize, solverStream_);
 
+  // X-right outflow face: no predicted charge beyond the reference node
+  gpuZeroOutflowRhohat();
+
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
   if (gpuCycleDiagnosticsStateCycle(cycle)) {
     static const char* const rhohatName[1] = {"rhohat"};
@@ -2916,6 +2980,94 @@ void EMfields3D::gpuSetZeroDerivedMoments() {
 }
 
 // =========================================================================
+//  GPU neutralizeOutflowLayer: neutral rhons on the X-right outflow layer
+// =========================================================================
+
+void EMfields3D::gpuNeutralizeOutflowLayer() {
+  if (!ownsOutflowFaceXright())
+    return;
+  const int L = layersXright();
+  gpuNeutralizeLayersX(d_rhons.devPtr(), d_qom, ns, nxn - 1 - L, nxn - 1,
+                       nxn - 2 - L, nxn, nyn, nzn, solverStream_);
+}
+
+// =========================================================================
+//  GPU copyOutflowLayerMoments: J_s, P_s on the X-right outflow layer
+// =========================================================================
+
+void EMfields3D::gpuCopyOutflowLayerMoments() {
+  if (!ownsOutflowFaceXright())
+    return;
+  const int L = layersXright();
+  for (int is = 0; is < ns; is++) {
+    cudaSolverType* m[9] = {
+        d_Jxs.speciesPtr(is),   d_Jys.speciesPtr(is),   d_Jzs.speciesPtr(is),
+        d_pXXsn.speciesPtr(is), d_pXYsn.speciesPtr(is), d_pXZsn.speciesPtr(is),
+        d_pYYsn.speciesPtr(is), d_pYZsn.speciesPtr(is), d_pZZsn.speciesPtr(is)};
+    for (int c = 0; c < 9; c += 3)
+      gpuExtrapolateLayers3(m[c], m[c + 1], m[c + 2], 0, nxn - 1 - L, nxn - 1,
+                            nxn - 2 - L, nxn, nyn, nzn, solverStream_);
+  }
+}
+
+// =========================================================================
+//  GPU zeroOutflowRhohat: no predicted charge beyond x_s
+// =========================================================================
+
+void EMfields3D::gpuZeroOutflowRhohat() {
+  if (!ownsOutflowFaceXright())
+    return;
+  // The cells from the one straddling x_s (node nxn-2-L) to the ghost cell,
+  // nxc-1-L .. nxc-1, are the last L+1 x planes of the [i][j][k] cell array:
+  // one contiguous block.
+  const int first = nxc - 1 - layersXright();
+  const size_t plane = (size_t)nyc * nzc;
+  cudaErrChk(cudaMemsetAsync(d_rhoh.devPtr() + first * plane, 0,
+                             (nxc - first) * plane * sizeof(cudaSolverType),
+                             solverStream_));
+}
+
+void EMfields3D::gpuOutflowCopyE(cudaSolverType* dX, cudaSolverType* dY,
+                                 cudaSolverType* dZ) {
+  if (!ownsOutflowFaceXright())
+    return;
+  const int L = fieldCopyLayersXright();
+  gpuExtrapolateLayers3(dX, dY, dZ, 0, nxn - 1 - L, nxn - 1, nxn - 2 - L, nxn,
+                        nyn, nzn, solverStream_);
+}
+
+// =========================================================================
+//  Ghost node on the X-right outflow face (Maxwell operator closure, see
+//  OutflowBoundary.h)
+// =========================================================================
+
+void EMfields3D::gpuOutflowGhostNodes(GPUFieldArray3* const a[3]) {
+  if (!ownsOutflowFaceXright())
+    return;
+  gpuExtrapolateLayers3(a[0]->devPtr(), a[1]->devPtr(), a[2]->devPtr(), 0,
+                        nxn - 1, nxn - 1, nxn - 2, nxn, nyn, nzn,
+                        solverStream_);
+}
+
+void EMfields3D::gpuOutflowGhostRows(cudaSolverType* const a[], int n) {
+  if (!ownsOutflowFaceXright())
+    return;
+  if (n > CellArrayBatch::kMax) {
+    cerr << "ERROR: gpuOutflowGhostRows takes at most " << CellArrayBatch::kMax
+         << " arrays, got " << n << endl;
+    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    std::abort();
+  }
+  CellArrayBatch batch;
+  batch.n = n;
+  for (int i = 0; i < n; i++)
+    batch.p[i] = a[i];
+  int rule[4];
+  outflowGhostRowRules(rule);
+  gpuGhostRowsXright(batch, nxc, nyc, nzc, rule, solverStream_);
+}
+
+// =========================================================================
 //  GPU sumOverSpecies: rhon = Σ_s rhons_s
 // =========================================================================
 
@@ -3046,10 +3198,7 @@ void EMfields3D::gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY,
       gpuSALBlendLayers3(dX, dY, dZ, injE[0], injE[1], injE[2], 0, 0,
                          n_layers_sal, invNL, 1, nx, ny, nz, solverStream_);
     // Xright: outflow — copy from interior reference plane (bcPface==3)
-    if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
-        col->getBcPfaceXright() == 3)
-      gpuExtrapolateLayers3(dX, dY, dZ, 0, nx - n_layers_sal - 1, nx - 1,
-                            nx - 2 - n_layers_sal, nx, ny, nz, solverStream_);
+    gpuOutflowCopyE(dX, dY, dZ);
     if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
         col->getBcPfaceYleft() == 2)
       gpuSALBlendLayers3(dX, dY, dZ, injE[0], injE[1], injE[2], 1, 0,
@@ -3074,10 +3223,7 @@ void EMfields3D::gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY,
         col->getBcPfaceXleft() == 2)
       gpuSetConstLayers3(dX, dY, dZ, injE[0], injE[1], injE[2], 0, 0,
                          n_layers_sal, nx, ny, nz, solverStream_);
-    if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
-        col->getBcPfaceXright() == 3)
-      gpuExtrapolateLayers3(dX, dY, dZ, 0, nx - n_layers_sal - 1, nx - 1,
-                            nx - 2 - n_layers_sal, nx, ny, nz, solverStream_);
+    gpuOutflowCopyE(dX, dY, dZ);
     if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
         col->getBcPfaceYleft() == 2)
       gpuExtrapolateLayers3(dX, dY, dZ, 1, 0, n_layers_sal, n_layers_sal + 1,
@@ -3119,9 +3265,11 @@ void EMfields3D::gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
   }
   // Xright: always extrapolation from interior
   if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
-      nx > 10)
-    gpuExtrapolateLayers3(dX, dY, dZ, 0, nx - n_layers_sal - 1, nx - 1,
-                          nx - 2 - n_layers_sal, nx, ny, nz, solverStream_);
+      nx > 10) {
+    const int L = fieldCopyLayersXright();
+    gpuExtrapolateLayers3(dX, dY, dZ, 0, nx - L - 1, nx - 1, nx - 2 - L, nx, ny,
+                          nz, solverStream_);
+  }
   // Yleft
   if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
       ny > 10) {
@@ -3718,11 +3866,13 @@ void EMfields3D::gpuApplyDivBCleaning() {
                           d_gradPSIX.devPtr(), d_gradPSIY.devPtr(),
                           d_gradPSIZ.devPtr(), 0, 0, n_layers_sal - 1, nxn, nyn,
                           nzn, solverStream_);
+  // Xright: an outflow face cleans its whole layer
   if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2)
-    gpuSubBoundaryLayers3(d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(),
-                          d_gradPSIX.devPtr(), d_gradPSIY.devPtr(),
-                          d_gradPSIZ.devPtr(), 0, nxn - n_layers_sal, nxn - 1,
-                          nxn, nyn, nzn, solverStream_);
+    gpuSubBoundaryLayers3(
+        d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(), d_gradPSIX.devPtr(),
+        d_gradPSIY.devPtr(), d_gradPSIZ.devPtr(), 0,
+        ownsOutflowFaceXright() ? nxn - 1 - layersXright() : nxn - n_layers_sal,
+        nxn - 1, nxn, nyn, nzn, solverStream_);
   if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2)
     gpuSubBoundaryLayers3(d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(),
                           d_gradPSIX.devPtr(), d_gradPSIY.devPtr(),

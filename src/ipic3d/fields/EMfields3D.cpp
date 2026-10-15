@@ -736,7 +736,7 @@ void EMfields3D::MaxwellSource(double* bkrylov) {
 // An alternative way would be to communicate outer ghost node
 // values after each update of Eth.  In this case, there would
 // be no need for the 10=3*3+1 boundary communications in the body
-// of MaxwellImage() entailed in the calls to lapN2N plus the
+// of MaxwellImage() entailed in the calls to operatorLapN2N plus the
 // call needed prior to the call to gradC2N.  Of course,
 // we would then need to communicate the 3 components of the
 // electric field for the outer ghost nodes prior to each call
@@ -786,20 +786,25 @@ void EMfields3D::MaxwellImage(double* im, double* vector) {
   eqValue(0.0, Dz, nxn, nyn, nzn);
   // move from krylov space to physical space
   solver2phys(vectX, vectY, vectZ, vector, nxn, nyn, nzn);
-  grid->lapN2N(imageX, vectX, this);
-  grid->lapN2N(imageY, vectY, this);
-  grid->lapN2N(imageZ, vectZ, this);
+  // X-right outflow face: zero-gradient ghost node (see operatorLapN2N)
+  outflowGhostNodes(vectX, vectY, vectZ);
+  operatorLapN2N(imageX, vectX);
+  operatorLapN2N(imageY, vectY);
+  operatorLapN2N(imageZ, vectZ);
   neg(imageX, nxn, nyn, nzn);
   neg(imageY, nxn, nyn, nzn);
   neg(imageZ, nxn, nyn, nzn);
   // grad(div(mu dot E(n + theta)) mu dot E(n + theta) = D
   MUdot(Dx, Dy, Dz, vectX, vectY, vectZ);
-  grid->divN2C(divC, Dx, Dy, Dz);
+  outflowGhostNodes(Dx, Dy, Dz);
+  grid->divN2C(divC, Dx, Dy, Dz, operatorCellEnd());
+  outflowGhostRows(divC);
   // communicate you should put BC
   // think about the Physics
   // communicateCenterBC(nxc,nyc,nzc,divC,1,1,1,1,1,1,vct);
 
-  communicateCenterBC(nxc, nyc, nzc, divC, 2, 2, 2, 2, 2, 2, vct, this);
+  communicateCenterBC(nxc, nyc, nzc, divC, operatorBCXright(2), 2, 2, 2, 2, 2,
+                      vct, this);
 
   grid->gradC2N(tempX, tempY, tempZ, divC);
 
@@ -872,15 +877,17 @@ void EMfields3D::MaxwellImageLocal(double* im, double* vector) {
   eqValue(0.0, Dz, nxn, nyn, nzn);
   // move from krylov space to physical space
   solver2phys(vectX, vectY, vectZ, vector, nxn, nyn, nzn);
-  grid->lapN2NLocal(imageX, vectX, this);
-  grid->lapN2NLocal(imageY, vectY, this);
-  grid->lapN2NLocal(imageZ, vectZ, this);
+  outflowGhostNodes(vectX, vectY, vectZ);
+  operatorLapN2NLocal(imageX, vectX);
+  operatorLapN2NLocal(imageY, vectY);
+  operatorLapN2NLocal(imageZ, vectZ);
   neg(imageX, nxn, nyn, nzn);
   neg(imageY, nxn, nyn, nzn);
   neg(imageZ, nxn, nyn, nzn);
   // grad(div(mu dot E(n + theta)) mu dot E(n + theta) = D
   MUdot(Dx, Dy, Dz, vectX, vectY, vectZ);
-  grid->divN2C(divC, Dx, Dy, Dz);
+  outflowGhostNodes(Dx, Dy, Dz);
+  grid->divN2C(divC, Dx, Dy, Dz, operatorCellEnd());
   // communicate you should put BC
   // think about the Physics
   // communicateCenterBC(nxc,nyc,nzc,divC,1,1,1,1,1,1,vct);
@@ -1086,18 +1093,26 @@ void EMfields3D::smoothE() {
   const double alpha = Smooth;
   const double beta3D = (1 - alpha) / 6.0;
 
+  // X-right outflow face: continue every component past the face with zero
+  // gradient, instead of the open-face ghost E_x = 0
+  int bcEx[6], bcEy[6], bcEz[6];
+  for (int f = 0; f < 6; f++) {
+    bcEx[f] = col->bcEx[f];
+    bcEy[f] = col->bcEy[f];
+    bcEz[f] = col->bcEz[f];
+  }
+  if (ownsOutflowFaceXright())
+    bcEx[0] = bcEy[0] = bcEz[0] = 2;
+
   // Uses existing persistent member arrays tempX/Y/Z as temp buffers.
   // These are free at this point: smoothE is called after the Maxwell solve.
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
-    communicateNodeBoxStencilBC(nxn, nyn, nzn, Ex, col->bcEx[0], col->bcEx[1],
-                                col->bcEx[2], col->bcEx[3], col->bcEx[4],
-                                col->bcEx[5], vct, this);
-    communicateNodeBoxStencilBC(nxn, nyn, nzn, Ey, col->bcEy[0], col->bcEy[1],
-                                col->bcEy[2], col->bcEy[3], col->bcEy[4],
-                                col->bcEy[5], vct, this);
-    communicateNodeBoxStencilBC(nxn, nyn, nzn, Ez, col->bcEz[0], col->bcEz[1],
-                                col->bcEz[2], col->bcEz[3], col->bcEz[4],
-                                col->bcEz[5], vct, this);
+    communicateNodeBoxStencilBC(nxn, nyn, nzn, Ex, bcEx[0], bcEx[1], bcEx[2],
+                                bcEx[3], bcEx[4], bcEx[5], vct, this);
+    communicateNodeBoxStencilBC(nxn, nyn, nzn, Ey, bcEy[0], bcEy[1], bcEy[2],
+                                bcEy[3], bcEy[4], bcEy[5], vct, this);
+    communicateNodeBoxStencilBC(nxn, nyn, nzn, Ez, bcEz[0], bcEz[1], bcEz[2],
+                                bcEz[3], bcEz[4], bcEz[5], vct, this);
 
 // Fused smooth: compute all 3 components into temp buffers in a single pass
 #pragma omp parallel for collapse(2)
@@ -1807,9 +1822,11 @@ void EMfields3D::applyDivBCleaning() {
           Bzn.fetch(i, j, k) -= gradPSIZ.get(i, j, k);
         }
   }
-  // Xright
+  // Xright: an outflow face cleans its whole layer
   if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2) {
-    for (int i = nxn - n_layers_sal; i < nxn; i++)
+    const int iStart =
+        ownsOutflowFaceXright() ? nxn - 1 - layersXright() : nxn - n_layers_sal;
+    for (int i = iStart; i < nxn; i++)
       for (int j = 0; j < nyn; j++)
         for (int k = 0; k < nzn; k++) {
           Bxn.fetch(i, j, k) -= gradPSIX.get(i, j, k);
@@ -1998,6 +2015,8 @@ void EMfields3D::calculateHatFunctions() {
   scale(tempXC, -dt * th, nxc, nyc, nzc);
   sum(tempXC, rhoc, nxc, nyc, nzc);
   eq(rhoh, tempXC, nxc, nyc, nzc);
+  // X-right outflow face: no predicted charge beyond the reference node
+  zeroOutflowRhohat();
   // communicate rhoh
   communicateCenterBC_P(nxc, nyc, nzc, rhoh, 2, 2, 2, 2, 2, 2, vct, this);
 }
@@ -2157,6 +2176,169 @@ void EMfields3D::setZeroPrimaryMoments() {
 void EMfields3D::setZeroDensities() {
   setZeroDerivedMoments();
   setZeroPrimaryMoments();
+}
+
+bool EMfields3D::ownsOutflowFaceXright() const {
+  return get_vct().getXright_neighbor() == MPI_PROC_NULL &&
+         bcEMfaceXright == 2 && get_col().getBcPfaceXright() == 3;
+}
+
+int EMfields3D::layersXright() const {
+  return ownsOutflowFaceXright() ? std::max(3, n_layers_sal) : n_layers_sal;
+}
+
+int EMfields3D::fieldCopyLayersXright() const {
+  return ownsOutflowFaceXright() && get_col().getOutflowLayerSolved()
+             ? 0
+             : layersXright();
+}
+
+// A (j,k) line whose reference node lacks one sign of charge is emptied, the
+// only neutral choice.
+void EMfields3D::neutralizeOutflowLayer() {
+  if (!ownsOutflowFaceXright())
+    return;
+  const int L = layersXright();
+  const int ref = nxn - 2 - L;
+  const size_t nNodes = (size_t)nxn * nyn * nzn;
+  double* rho = rhons.fetch_arr();
+  for (int j = 0; j < nyn; j++)
+    for (int k = 0; k < nzn; k++) {
+      const size_t r = ((size_t)ref * nyn + j) * nzn + k;
+      double pos = 0, neg = 0;
+      for (int is = 0; is < ns; is++) {
+        if (qom[is] > 0)
+          pos += rho[is * nNodes + r];
+        else
+          neg -= rho[is * nNodes + r];
+      }
+      const double target = 0.5 * (pos + neg);
+      const bool both = pos > 0 && neg > 0;
+      const double scalePos = both ? target / pos : 0.0;
+      const double scaleNeg = both ? target / neg : 0.0;
+      for (int is = 0; is < ns; is++) {
+        const double val =
+            rho[is * nNodes + r] * (qom[is] > 0 ? scalePos : scaleNeg);
+        for (int i = nxn - 1 - L; i < nxn; i++)
+          rho[is * nNodes + ((size_t)i * nyn + j) * nzn + k] = val;
+      }
+    }
+}
+
+void EMfields3D::copyOutflowLayerMoments() {
+  if (!ownsOutflowFaceXright())
+    return;
+  const int L = layersXright();
+  const int ref = nxn - 2 - L;
+  const size_t nNodes = (size_t)nxn * nyn * nzn;
+  const size_t plane = (size_t)nyn * nzn;
+  double* m[9] = {Jxs.fetch_arr(),   Jys.fetch_arr(),   Jzs.fetch_arr(),
+                  pXXsn.fetch_arr(), pXYsn.fetch_arr(), pXZsn.fetch_arr(),
+                  pYYsn.fetch_arr(), pYZsn.fetch_arr(), pZZsn.fetch_arr()};
+  for (double* a : m)
+    for (int is = 0; is < ns; is++) {
+      double* sp = a + is * nNodes;
+      for (int i = nxn - 1 - L; i < nxn; i++)
+        std::copy(sp + ref * plane, sp + (ref + 1) * plane, sp + i * plane);
+    }
+}
+
+void EMfields3D::zeroOutflowRhohat() {
+  if (!ownsOutflowFaceXright())
+    return;
+  for (int i = nxc - 1 - layersXright(); i < nxc; i++)
+    for (int j = 0; j < nyc; j++)
+      for (int k = 0; k < nzc; k++)
+        rhoh[i][j][k] = 0.0;
+}
+
+// =========================================================================
+//  Zero-gradient ghost node on the X-right outflow face (Maxwell operator)
+// =========================================================================
+
+int EMfields3D::operatorCellEnd() const {
+  return ownsOutflowFaceXright() ? nxc - 1 : nxc - 2;
+}
+
+int EMfields3D::operatorBCXright(int code) const {
+  return ownsOutflowFaceXright() ? BC_FACE_KEEP : code;
+}
+
+void EMfields3D::outflowGhostRowRules(int rule[4]) const {
+  const VirtualTopology3D& vct = get_vct();
+  const int self = vct.getCartesian_rank();
+  const int nb[4] = {vct.getYleft_neighbor(), vct.getYright_neighbor(),
+                     vct.getZleft_neighbor(), vct.getZright_neighbor()};
+  for (int s = 0; s < 4; s++)
+    rule[s] = nb[s] == MPI_PROC_NULL ? GHOST_ROW_KEEP
+              : nb[s] == self        ? GHOST_ROW_PERIODIC
+                                     : GHOST_ROW_ADJACENT;
+}
+
+void EMfields3D::outflowGhostNodes(arr3_double a, arr3_double b,
+                                   arr3_double c) {
+  if (!ownsOutflowFaceXright())
+    return;
+  for (int j = 0; j < nyn; j++)
+    for (int k = 0; k < nzn; k++) {
+      a[nxn - 1][j][k] = a[nxn - 2][j][k];
+      b[nxn - 1][j][k] = b[nxn - 2][j][k];
+      c[nxn - 1][j][k] = c[nxn - 2][j][k];
+    }
+}
+
+void EMfields3D::outflowGhostRows(arr3_double a) {
+  if (!ownsOutflowFaceXright())
+    return;
+  int rule[4];
+  outflowGhostRowRules(rule);
+  // source row of a ghost row: the periodic partner or the adjacent row
+  auto src = [](int r, int ghost, int n) {
+    if (r == GHOST_ROW_PERIODIC)
+      return ghost == 0 ? n - 2 : 1;
+    return ghost == 0 ? 1 : n - 2;
+  };
+  const int i = nxc - 1;
+  for (int k = 1; k < nzc - 1; k++) { // y rows first ...
+    if (rule[0] != GHOST_ROW_KEEP)
+      a[i][0][k] = a[i][src(rule[0], 0, nyc)][k];
+    if (rule[1] != GHOST_ROW_KEEP)
+      a[i][nyc - 1][k] = a[i][src(rule[1], nyc - 1, nyc)][k];
+  }
+  for (int j = 0; j < nyc; j++) { // ... then z rows, so corners follow both
+    if (rule[2] != GHOST_ROW_KEEP)
+      a[i][j][0] = a[i][j][src(rule[2], 0, nzc)];
+    if (rule[3] != GHOST_ROW_KEEP)
+      a[i][j][nzc - 1] = a[i][j][src(rule[3], nzc - 1, nzc)];
+  }
+}
+
+void EMfields3D::operatorLapN2N(arr3_double lapN, const_arr3_double field) {
+  // the ghost rows are filled before the exchange, which does not write the
+  // X-right ghost plane
+  static array3_double gX(nxc, nyc, nzc), gY(nxc, nyc, nzc), gZ(nxc, nyc, nzc);
+  const VirtualTopology3D* vct = &get_vct();
+  get_grid().gradN2C(gX, gY, gZ, field, operatorCellEnd());
+  outflowGhostRows(gX);
+  outflowGhostRows(gY);
+  outflowGhostRows(gZ);
+  const int bcXr = operatorBCXright(1);
+  communicateCenterBC(nxc, nyc, nzc, gX, bcXr, 1, 1, 1, 1, 1, vct, this);
+  communicateCenterBC(nxc, nyc, nzc, gY, bcXr, 1, 1, 1, 1, 1, vct, this);
+  communicateCenterBC(nxc, nyc, nzc, gZ, bcXr, 1, 1, 1, 1, 1, vct, this);
+  get_grid().divC2N(lapN, gX, gY, gZ);
+}
+
+void EMfields3D::operatorLapN2NLocal(arr3_double lapN,
+                                     const_arr3_double field) {
+  // as operatorLapN2N without communication: the ghost cells stay zero,
+  // apart from the X-right ghost plane on an outflow face
+  static array3_double gX(nxc, nyc, nzc), gY(nxc, nyc, nzc), gZ(nxc, nyc, nzc);
+  eqValue(0.0, gX, nxc, nyc, nzc);
+  eqValue(0.0, gY, nxc, nyc, nzc);
+  eqValue(0.0, gZ, nxc, nyc, nzc);
+  get_grid().gradN2C(gX, gY, gZ, field, operatorCellEnd());
+  get_grid().divC2N(lapN, gX, gY, gZ);
 }
 
 /**
@@ -2790,12 +2972,13 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY,
   if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
       nx > 10) {
     // force not to apply sal in Xright
-    for (int i = nx - n_layers_sal - 1; i < nx; i++)
+    const int L = fieldCopyLayersXright();
+    for (int i = nx - L - 1; i < nx; i++)
       for (int j = 0; j < ny; j++)
         for (int k = 0; k < nz; k++) {
-          vectorX[i][j][k] = vectorX[nx - 2 - n_layers_sal][j][k];
-          vectorY[i][j][k] = vectorY[nx - 2 - n_layers_sal][j][k];
-          vectorZ[i][j][k] = vectorZ[nx - 2 - n_layers_sal][j][k];
+          vectorX[i][j][k] = vectorX[nx - 2 - L][j][k];
+          vectorY[i][j][k] = vectorY[nx - 2 - L][j][k];
+          vectorZ[i][j][k] = vectorZ[nx - 2 - L][j][k];
         }
   }
 
@@ -2918,17 +3101,15 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY,
           }
       }
     }
-    if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
-        col->getBcPfaceXright() == 3) {
-      for (int i = nx - n_layers_sal - 1; i < nx; i++) {
-        sal = (double)(nx - 1. - i) / n_layers_sal;
+    if (ownsOutflowFaceXright()) {
+      const int L = fieldCopyLayersXright();
+      for (int i = nx - L - 1; i < nx; i++)
         for (int j = 0; j < ny; j++)
           for (int k = 0; k < nz; k++) {
-            vectorX[i][j][k] = vectorX[nx - 2 - n_layers_sal][j][k];
-            vectorY[i][j][k] = vectorY[nx - 2 - n_layers_sal][j][k];
-            vectorZ[i][j][k] = vectorZ[nx - 2 - n_layers_sal][j][k];
+            vectorX[i][j][k] = vectorX[nx - 2 - L][j][k];
+            vectorY[i][j][k] = vectorY[nx - 2 - L][j][k];
+            vectorZ[i][j][k] = vectorZ[nx - 2 - L][j][k];
           }
-      }
     }
 
     if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
@@ -2995,14 +3176,14 @@ void EMfields3D::OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY,
           }
     }
     // outflow face
-    if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
-        col->getBcPfaceXright() == 3) {
-      for (int i = nx - n_layers_sal - 1; i < nx; i++)
+    if (ownsOutflowFaceXright()) {
+      const int L = fieldCopyLayersXright();
+      for (int i = nx - L - 1; i < nx; i++)
         for (int j = 0; j < ny; j++)
           for (int k = 0; k < nz; k++) {
-            vectorX[i][j][k] = vectorX[nx - 2 - n_layers_sal][j][k];
-            vectorY[i][j][k] = vectorY[nx - 2 - n_layers_sal][j][k];
-            vectorZ[i][j][k] = vectorZ[nx - 2 - n_layers_sal][j][k];
+            vectorX[i][j][k] = vectorX[nx - 2 - L][j][k];
+            vectorY[i][j][k] = vectorY[nx - 2 - L][j][k];
+            vectorZ[i][j][k] = vectorZ[nx - 2 - L][j][k];
           }
     }
 

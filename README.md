@@ -54,7 +54,8 @@ mkdir build && cd build
 - Use `CMake` to generate the make files
 ``` shell
 # use .. here because CMakeList.txt would be under project root 
-cmake .. # using CUDA by default
+cmake .. # using CUDA without HDF5 by default
+cmake -DUSE_HDF5=ON .. # using CUDA with HDF5
 cmake -DHIP_ON=ON .. # use HIP
 ```
 

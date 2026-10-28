@@ -53,10 +53,10 @@ mkdir build && cd build
 ```
 - Use `CMake` to generate the make files
 ``` shell
-# use .. here because CMakeList.txt would be under project root 
-cmake .. # using CUDA without HDF5 by default
-cmake -DUSE_HDF5=ON .. # using CUDA with HDF5
-cmake -DHIP_ON=ON .. # use HIP
+# use .. here because CMakeList.txt would be under project root
+cmake .. # if using CUDA without HDF5 by default
+cmake -DUSE_HDF5=ON .. # if using CUDA with HDF5
+cmake -DHIP_ON=ON .. # if using HIP
 ```
 
 If you's like to use HIP, notice the GPU architecture in [CMakeLists.txt](./CMakeLists.txt), change it according to your hardware to get bet performance:
@@ -73,13 +73,21 @@ make -j4 # build with 4 threads
 make -j # build with max threads, fast, recommended
 ```
 
-### Run
+### Run on a single GPU without MPI
+
+``` shell
+export OMP_NUM_THREADS=2
+./iPIC3D ../inputfiles/magneticReconnection/testGEM3D_singleGPU.inp
+```
+
+
+### Run with MPI
 
 iPIC3D uses inputfiles to control the simulation, we pass this text file as the only command line argument:
 
 ``` shell
 export OMP_NUM_THREADS=2
-mpirun -np 8 ./iPIC3D ../share/inputfiles/magneticReconnection/testGEM3Dsmall.inp
+mpirun -np 8 ./iPIC3D ../inputfiles/magneticReconnection/testGEM3Dsmall.inp
 ```
 
 With this command, you are using 8 MPI ranks, 2 OpenMP threads per rank.
@@ -90,7 +98,7 @@ With this command, you are using 8 MPI ranks, 2 OpenMP threads per rank.
 
 If you are on a super-computer, especially a multi-node system, it's likely that you should use `srun` to launch the program. 
 
-#### Multi-node and Multi-GPU
+### Run with Multi-node and Multi-GPU
 
 Assigning MPI processes to nodes and GPUs are vital in performance, for it decides the pipeline and subdomains in the program.
 
@@ -107,7 +115,7 @@ srun --nodes=4 --ntasks=32 --ntasks-per-node=8 ./iPIC3D ../share/benchmark/GEM3D
 
 ### Result
 
-This iPIC3D-GPU will create folder (usually named `data`) for the output results if it doesn't exist. However, **it will delete everything in the folder if it already exits**.
+When compiled with USE_HDF5=ON, iPIC3D-GPU will create folder (usually named `data`) for the output results if it doesn't exist. However, **it will delete everything in the folder if it already exits**.
 
 
 ## Build Options

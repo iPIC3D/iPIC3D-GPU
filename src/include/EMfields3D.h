@@ -242,9 +242,9 @@ public:
    * @param cycle Current simulation cycle.
    */
   void calculateB(int cycle);
-  /** @brief Divergence cleaning of B: solve lap(PSI) = div(B) and correct
-   * the node B on the open-face boundary layers (on an X-right outflow face
-   * the whole outflow layer). */
+  /** @brief Divergence cleaning of B: solve lap(PSI) = div(B) with PSI = 0
+   * beyond the physical faces and subtract grad(PSI) from the node B on every
+   * node, as the div(E) correction does. */
   void applyDivBCleaning();
   /** @brief Fix magnetic-field boundary values for the GEM challenge. */
   void fixBcGEM();
@@ -1001,8 +1001,8 @@ public:
                                   cudaSolverType tol, MPI_Comm fieldcomm);
   /** GPU Poisson correction for div(E) cleaning. */
   void gpuPoissonCorrection(int cycle);
-  /** GPU div(B) cleaning: solve lap(PSI)=div(B), correct B on boundary layers
-   * (on an X-right outflow face the whole outflow layer). */
+  /** GPU div(B) cleaning: solve lap(PSI)=div(B), subtract grad(PSI) from the
+   * node B on every node (see applyDivBCleaning). */
   void gpuApplyDivBCleaning();
 
   // ---- GPU Solver: additional halo exchange ----
@@ -1325,6 +1325,8 @@ private:
   // Absorbing boundary parameters
   int yes_sal;
   int n_layers_sal;
+  // SAL on B leaves the face-normal component alone (sal_tangential_B)
+  int sal_tangential_B;
 
   /*! GEM Challenge background ion */
   double* rhoINIT;
@@ -1518,6 +1520,7 @@ private:
       10; // Chebyshev polynomial degree for Poisson preconditioner
   double poissonChebRescaleEigMin = 1.0; // rescale factor for min eigenvalue
   double poissonChebRescaleEigMax = 1.0; // rescale factor for max eigenvalue
+  double poissonChebEigRatio = 1000.0;   // eigMin >= eigMax / this (<= 0: off)
 
   // Block-Jacobi preconditioner parameters
   int blockJacobiSweeps =

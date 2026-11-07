@@ -201,7 +201,8 @@ void gpuSALBlendLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
                         cudaSolverType tgtX, cudaSolverType tgtY,
                         cudaSolverType tgtZ, int dir, int layerStart,
                         int layerEnd, cudaSolverType invNLayers, int ascending,
-                        int nx, int ny, int nz, cudaStream_t stream = 0);
+                        int nx, int ny, int nz, cudaStream_t stream = 0,
+                        int skipComp = -1);
 
 /** Set 3 arrays to constant on boundary layers. */
 void gpuSetConstLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
@@ -292,17 +293,6 @@ void gpuConstantChargePlanet2DKernel(cudaSolverType* rhons, cudaSolverType val,
                                      cudaSolverType zStart, cudaSolverType dx,
                                      cudaSolverType dz, int nxn, int nyn,
                                      int nzn, cudaStream_t stream = 0);
-
-// =========================================================================
-//  Boundary layer subtraction (divB cleaning)
-// =========================================================================
-
-/** B -= gradPSI on boundary layers. */
-void gpuSubBoundaryLayers3(cudaSolverType* BxN, cudaSolverType* ByN,
-                           cudaSolverType* BzN, const cudaSolverType* gX,
-                           const cudaSolverType* gY, const cudaSolverType* gZ,
-                           int dir, int layerStart, int layerEnd, int nxn,
-                           int nyn, int nzn, cudaStream_t stream = 0);
 
 // =========================================================================
 //  Center-to-center Laplacian (Poisson solver)

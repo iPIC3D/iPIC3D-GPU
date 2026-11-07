@@ -151,18 +151,6 @@ void EMfields3D::gpuSolverAllocate() {
   validateLayers(zRightOpen && nzc > 10, n_layers_sal, nzc, yes_sal ? 1 : 2,
                  "magnetic Z-right open boundary");
 
-  if (divBCorrection) {
-    validateLayers(xLeftOpen || (xRightOpen && !ownsOutflowFaceXright()),
-                   n_layers_sal, nxn, 0, "magnetic divergence correction in X");
-    validateLayers(
-        ownsOutflowFaceXright(), layersXright(), nxn, 1,
-        "magnetic divergence correction on the X-right outflow layer");
-    validateLayers(yLeftOpen || yRightOpen, n_layers_sal, nyn, 0,
-                   "magnetic divergence correction in Y");
-    validateLayers(zLeftOpen || zRightOpen, n_layers_sal, nzn, 0,
-                   "magnetic divergence correction in Z");
-  }
-
   // Raw CUDA workspaces below coexist with RAII field wrappers.  Mark the
   // aggregate live up front so an allocation exception rolls all completed
   // pieces back through the normal teardown path.
@@ -3252,13 +3240,16 @@ void EMfields3D::gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
                                         int nz) {
   const VirtualTopology3D* vct = &get_vct();
   double invNL = (n_layers_sal > 0) ? 1.0 / (double)n_layers_sal : 1.0;
+  // With sal_tangential_B the SAL leaves B normal to the face alone: blending
+  // it towards B0 creates div(B) in the layer (see README)
+  auto skip = [&](int dir) { return sal_tangential_B ? dir : -1; };
 
   // Xleft
   if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 2 &&
       nx > 10) {
     if (yes_sal)
       gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 0, 0, n_layers_sal, invNL,
-                         1, nx, ny, nz, solverStream_);
+                         1, nx, ny, nz, solverStream_, skip(0));
     else
       gpuSetConstLayers3(dX, dY, dZ, B0x, B0y, B0z, 0, 0, n_layers_sal, nx, ny,
                          nz, solverStream_);
@@ -3275,7 +3266,7 @@ void EMfields3D::gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
       ny > 10) {
     if (yes_sal)
       gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 1, 0, n_layers_sal, invNL,
-                         1, nx, ny, nz, solverStream_);
+                         1, nx, ny, nz, solverStream_, skip(1));
     else
       gpuExtrapolateLayers3(dX, dY, dZ, 1, 0, n_layers_sal, n_layers_sal + 1,
                             nx, ny, nz, solverStream_);
@@ -3285,7 +3276,7 @@ void EMfields3D::gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
       ny > 10) {
     if (yes_sal)
       gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 1, ny - n_layers_sal - 1,
-                         ny - 1, invNL, 0, nx, ny, nz, solverStream_);
+                         ny - 1, invNL, 0, nx, ny, nz, solverStream_, skip(1));
     else
       gpuExtrapolateLayers3(dX, dY, dZ, 1, ny - n_layers_sal - 1, ny - 1,
                             ny - 2 - n_layers_sal, nx, ny, nz, solverStream_);
@@ -3295,7 +3286,7 @@ void EMfields3D::gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
       nz > 10) {
     if (yes_sal)
       gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 2, 0, n_layers_sal, invNL,
-                         1, nx, ny, nz, solverStream_);
+                         1, nx, ny, nz, solverStream_, skip(2));
     else
       gpuExtrapolateLayers3(dX, dY, dZ, 2, 0, n_layers_sal, n_layers_sal + 1,
                             nx, ny, nz, solverStream_);
@@ -3305,7 +3296,7 @@ void EMfields3D::gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
       nz > 10) {
     if (yes_sal)
       gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 2, nz - n_layers_sal - 1,
-                         nz - 1, invNL, 0, nx, ny, nz, solverStream_);
+                         nz - 1, invNL, 0, nx, ny, nz, solverStream_, skip(2));
     else
       gpuExtrapolateLayers3(dX, dY, dZ, 2, nz - n_layers_sal - 1, nz - 1,
                             nz - 2 - n_layers_sal, nx, ny, nz, solverStream_);
@@ -3592,6 +3583,19 @@ void EMfields3D::computePoissonChebyshevEigenvalues() {
   if (singular)
     rawEigMin = minNonZero;
 
+  // Floor eigMin at eigMax / PoissonChebEigRatio (default 1000).  The
+  // preconditioner applies a Chebyshev polynomial of fixed degree k
+  // (PoissonChebMaxIter + 1); on [eigMin, eigMax] its residual is at most
+  // 1/T_k(sigma) ~ 1/cosh(2k sqrt(eigMin/eigMax)), so with the exact minimum
+  // of a large block (eigMax/eigMin ~ 3e5 for a 960 x 768 2D block) it does
+  // almost nothing.  With the floor the polynomial clusters the upper
+  // spectrum; below the floor the residual polynomial stays in (0, 1), so
+  // those few smooth modes are inverted less, never with the wrong sign, and
+  // FGMRES resolves them.  Used by both the div(E) and the div(B) cleaning.
+  const double exactEigMin = rawEigMin;
+  if (poissonChebEigRatio > 0.0 && rawEigMax / poissonChebEigRatio > rawEigMin)
+    rawEigMin = rawEigMax / poissonChebEigRatio;
+
   // Apply rescaling (as in chebyshevIterationAlpaka.hpp)
   poissonChebEigMin = rawEigMin * poissonChebRescaleEigMin;
   poissonChebEigMax = rawEigMax * poissonChebRescaleEigMax;
@@ -3626,12 +3630,13 @@ void EMfields3D::computePoissonChebyshevEigenvalues() {
     }
     printf(
         "  [Poisson Chebyshev] Analytic eigenvalue bounds of local -nabla^2: "
-        "raw [%.6g, %.6g], rescaled [%.6g, %.6g]  (rescaleMin=%.4g, "
-        "rescaleMax=%.4g, "
+        "exact min %.6g, raw [%.6g, %.6g] (eigMin floor eigMax/%g), "
+        "rescaled [%.6g, %.6g]  (rescaleMin=%.4g, rescaleMax=%.4g, "
         "interior grid %d x %d x %d, ghost rules %s)%s\n",
-        rawEigMin, rawEigMax, poissonChebEigMin, poissonChebEigMax,
-        poissonChebRescaleEigMin, poissonChebRescaleEigMax, rules.nCell[0],
-        rules.nCell[1], rules.nCell[2], faces.c_str(),
+        exactEigMin, rawEigMin, rawEigMax, poissonChebEigRatio,
+        poissonChebEigMin, poissonChebEigMax, poissonChebRescaleEigMin,
+        poissonChebRescaleEigMax, rules.nCell[0], rules.nCell[1],
+        rules.nCell[2], faces.c_str(),
         rawEigMax == 0.0
             ? "  [zero operator: identity preconditioner]"
             : (singular ? "  [singular: eigMin = smallest non-zero eigenvalue]"
@@ -3853,46 +3858,24 @@ void EMfields3D::gpuApplyDivBCleaning() {
   // Solution → physical
   gpuSolver2Phys1(d_PSI.devPtr(), d_xkrylovPoisson_B.devPtr(), nxc, nyc, nzc,
                   solverStream_);
-  gpuCommunicateCenterBC(nxc, nyc, nzc, d_PSI, 2, 2, 2, 2, 2, 2);
+  // PSI = 0 beyond the physical faces: the ghost rule of the Poisson operator
+  gpuCommunicateCenterBC(nxc, nyc, nzc, d_PSI, kPoissonBCface[0],
+                         kPoissonBCface[1], kPoissonBCface[2],
+                         kPoissonBCface[3], kPoissonBCface[4],
+                         kPoissonBCface[5]);
 
-  // grad(PSI)
+  // grad(PSI); gpuGradC2N writes no ghost node, so they keep the 0 set above
   gpuGradC2N(d_gradPSIX.devPtr(), d_gradPSIY.devPtr(), d_gradPSIZ.devPtr(),
              d_PSI.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
              solverStream_);
 
-  // Subtract grad(PSI) from Bn on boundary layers
-  if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 2)
-    gpuSubBoundaryLayers3(d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(),
-                          d_gradPSIX.devPtr(), d_gradPSIY.devPtr(),
-                          d_gradPSIZ.devPtr(), 0, 0, n_layers_sal - 1, nxn, nyn,
-                          nzn, solverStream_);
-  // Xright: an outflow face cleans its whole layer
-  if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2)
-    gpuSubBoundaryLayers3(
-        d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(), d_gradPSIX.devPtr(),
-        d_gradPSIY.devPtr(), d_gradPSIZ.devPtr(), 0,
-        ownsOutflowFaceXright() ? nxn - 1 - layersXright() : nxn - n_layers_sal,
-        nxn - 1, nxn, nyn, nzn, solverStream_);
-  if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2)
-    gpuSubBoundaryLayers3(d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(),
-                          d_gradPSIX.devPtr(), d_gradPSIY.devPtr(),
-                          d_gradPSIZ.devPtr(), 1, 0, n_layers_sal - 1, nxn, nyn,
-                          nzn, solverStream_);
-  if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 2)
-    gpuSubBoundaryLayers3(d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(),
-                          d_gradPSIX.devPtr(), d_gradPSIY.devPtr(),
-                          d_gradPSIZ.devPtr(), 1, nyn - n_layers_sal, nyn - 1,
-                          nxn, nyn, nzn, solverStream_);
-  if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 2)
-    gpuSubBoundaryLayers3(d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(),
-                          d_gradPSIX.devPtr(), d_gradPSIY.devPtr(),
-                          d_gradPSIZ.devPtr(), 2, 0, n_layers_sal - 1, nxn, nyn,
-                          nzn, solverStream_);
-  if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 2)
-    gpuSubBoundaryLayers3(d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(),
-                          d_gradPSIX.devPtr(), d_gradPSIY.devPtr(),
-                          d_gradPSIZ.devPtr(), 2, nzn - n_layers_sal, nzn - 1,
-                          nxn, nyn, nzn, solverStream_);
+  // B -= grad(PSI) on every node, as gpuPoissonCorrection does for E.  PSI is
+  // a global solution: subtracting its gradient only near the faces would
+  // leave its normal part as div(B) at the inner edge of the corrected region.
+  const size_t nodeSize = (size_t)nxn * nyn * nzn;
+  gpuSub(d_Bxn.devPtr(), d_gradPSIX.devPtr(), nodeSize, solverStream_);
+  gpuSub(d_Byn.devPtr(), d_gradPSIY.devPtr(), nodeSize, solverStream_);
+  gpuSub(d_Bzn.devPtr(), d_gradPSIZ.devPtr(), nodeSize, solverStream_);
 
   // Communicate corrected Bn (batched: 3 fields in 1 MPI round)
   gpuCommunicateNodeBC_3mixed(nxn, nyn, nzn, d_Bxn, col->bcBx, d_Byn, col->bcBy,

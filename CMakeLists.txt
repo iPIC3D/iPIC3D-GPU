@@ -530,6 +530,7 @@ if(BUILD_UTESTS)
   add_subdirectory(src/unitTest/planet)
   add_subdirectory(src/unitTest/gpu_maxwell_solver)
   add_subdirectory(src/unitTest/halo_communication)
+  add_subdirectory(src/unitTest/divb_cleaning)
 endif()
 
 add_subdirectory(share/inputfiles)

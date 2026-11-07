@@ -211,6 +211,7 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
   poissonChebMaxIter = col->getPoissonChebMaxIter();
   poissonChebRescaleEigMin = col->getPoissonChebRescaleEigMin();
   poissonChebRescaleEigMax = col->getPoissonChebRescaleEigMax();
+  poissonChebEigRatio = col->getPoissonChebEigRatio();
 #endif
   qom = new double[ns];
   for (int i = 0; i < ns; i++)
@@ -232,6 +233,7 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
   // absorbing boundary
   yes_sal = col->getYes_sal();
   n_layers_sal = col->getN_layers_sal();
+  sal_tangential_B = col->getSal_tangential_B();
   // GEM challenge parameters
   B0x = col->getB0x();
   B0y = col->getB0y();
@@ -1776,8 +1778,8 @@ void EMfields3D::calculateB(int cycle) {
     applyDivBCleaning();
 }
 
-/*! Apply divergence cleaning on B: solve laplacian(PSI) = div(B), then correct
- * B = B - grad(PSI) on boundary layers */
+/*! Apply divergence cleaning on B: solve laplacian(PSI) = div(B) with PSI = 0
+ * beyond the physical faces, then B = B - grad(PSI) on every node */
 void EMfields3D::applyDivBCleaning() {
   const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
@@ -1806,74 +1808,23 @@ void EMfields3D::applyDivBCleaning() {
 
   // solution back to physical space
   solver2phys(PSI, xkrylovPoisson_B, nxc, nyc, nzc);
-  communicateCenterBC(nxc, nyc, nzc, PSI, 2, 2, 2, 2, 2, 2, vct, this);
+  // PSI = 0 beyond the physical faces: the ghost rule of lapC2Cpoisson
+  communicateCenterBC(nxc, nyc, nzc, PSI, 1, 1, 1, 1, 1, 1, vct, this);
 
   // compute gradient of PSI
   grid->gradC2N(gradPSIX, gradPSIY, gradPSIZ, PSI);
 
-  // correct B on nodes in the boundary layers
-  // Xleft
-  if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 2) {
-    for (int i = 0; i < n_layers_sal; i++)
-      for (int j = 0; j < nyn; j++)
-        for (int k = 0; k < nzn; k++) {
-          Bxn.fetch(i, j, k) -= gradPSIX.get(i, j, k);
-          Byn.fetch(i, j, k) -= gradPSIY.get(i, j, k);
-          Bzn.fetch(i, j, k) -= gradPSIZ.get(i, j, k);
-        }
-  }
-  // Xright: an outflow face cleans its whole layer
-  if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2) {
-    const int iStart =
-        ownsOutflowFaceXright() ? nxn - 1 - layersXright() : nxn - n_layers_sal;
-    for (int i = iStart; i < nxn; i++)
-      for (int j = 0; j < nyn; j++)
-        for (int k = 0; k < nzn; k++) {
-          Bxn.fetch(i, j, k) -= gradPSIX.get(i, j, k);
-          Byn.fetch(i, j, k) -= gradPSIY.get(i, j, k);
-          Bzn.fetch(i, j, k) -= gradPSIZ.get(i, j, k);
-        }
-  }
-  // Yleft
-  if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2) {
-    for (int i = 0; i < nxn; i++)
-      for (int j = 0; j < n_layers_sal; j++)
-        for (int k = 0; k < nzn; k++) {
-          Bxn.fetch(i, j, k) -= gradPSIX.get(i, j, k);
-          Byn.fetch(i, j, k) -= gradPSIY.get(i, j, k);
-          Bzn.fetch(i, j, k) -= gradPSIZ.get(i, j, k);
-        }
-  }
-  // Yright
-  if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 2) {
-    for (int i = 0; i < nxn; i++)
-      for (int j = nyn - n_layers_sal; j < nyn; j++)
-        for (int k = 0; k < nzn; k++) {
-          Bxn.fetch(i, j, k) -= gradPSIX.get(i, j, k);
-          Byn.fetch(i, j, k) -= gradPSIY.get(i, j, k);
-          Bzn.fetch(i, j, k) -= gradPSIZ.get(i, j, k);
-        }
-  }
-  // Zleft
-  if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 2) {
-    for (int i = 0; i < nxn; i++)
-      for (int j = 0; j < nyn; j++)
-        for (int k = 0; k < n_layers_sal; k++) {
-          Bxn.fetch(i, j, k) -= gradPSIX.get(i, j, k);
-          Byn.fetch(i, j, k) -= gradPSIY.get(i, j, k);
-          Bzn.fetch(i, j, k) -= gradPSIZ.get(i, j, k);
-        }
-  }
-  // Zright
-  if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 2) {
-    for (int i = 0; i < nxn; i++)
-      for (int j = 0; j < nyn; j++)
-        for (int k = nzn - n_layers_sal; k < nzn; k++) {
-          Bxn.fetch(i, j, k) -= gradPSIX.get(i, j, k);
-          Byn.fetch(i, j, k) -= gradPSIY.get(i, j, k);
-          Bzn.fetch(i, j, k) -= gradPSIZ.get(i, j, k);
-        }
-  }
+  // B -= grad(PSI) on every node.  PSI is a global solution: subtracting its
+  // gradient only near the faces would leave its normal part as div(B) at the
+  // inner edge of the corrected region.  gradC2N writes no ghost node, so they
+  // subtract the 0 set above; the communication below sets them.
+  for (int i = 0; i < nxn; i++)
+    for (int j = 0; j < nyn; j++)
+      for (int k = 0; k < nzn; k++) {
+        Bxn.fetch(i, j, k) -= gradPSIX.get(i, j, k);
+        Byn.fetch(i, j, k) -= gradPSIY.get(i, j, k);
+        Bzn.fetch(i, j, k) -= gradPSIZ.get(i, j, k);
+      }
 
   // communicate ghost cells for corrected node-based B
   communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0], col->bcBx[1],
@@ -2945,6 +2896,9 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY,
   const VirtualTopology3D* vct = &get_vct();
 
   double sal;
+  // With sal_tangential_B the SAL leaves B normal to the face alone: blending
+  // it towards B0 creates div(B) in the layer (see README)
+  const bool blendNormal = !sal_tangential_B;
 
   if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 2 &&
       nx > 10) {
@@ -2953,7 +2907,8 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY,
         sal = (double)i / n_layers_sal;
         for (int j = 0; j < ny; j++)
           for (int k = 0; k < nz; k++) {
-            vectorX[i][j][k] = vectorX[i][j][k] * sal + B0x * (1. - sal);
+            if (blendNormal)
+              vectorX[i][j][k] = vectorX[i][j][k] * sal + B0x * (1. - sal);
             vectorY[i][j][k] = vectorY[i][j][k] * sal + B0y * (1. - sal);
             vectorZ[i][j][k] = vectorZ[i][j][k] * sal + B0z * (1. - sal);
           }
@@ -2990,7 +2945,8 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY,
           sal = (double)j / n_layers_sal;
           for (int k = 0; k < nz; k++) {
             vectorX[i][j][k] = vectorX[i][j][k] * sal + B0x * (1. - sal);
-            vectorY[i][j][k] = vectorY[i][j][k] * sal + B0y * (1. - sal);
+            if (blendNormal)
+              vectorY[i][j][k] = vectorY[i][j][k] * sal + B0y * (1. - sal);
             vectorZ[i][j][k] = vectorZ[i][j][k] * sal + B0z * (1. - sal);
           }
         }
@@ -3013,7 +2969,8 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY,
           sal = (double)(ny - 1 - j) / n_layers_sal;
           for (int k = 0; k < nz; k++) {
             vectorX[i][j][k] = vectorX[i][j][k] * sal + B0x * (1. - sal);
-            vectorY[i][j][k] = vectorY[i][j][k] * sal + B0y * (1. - sal);
+            if (blendNormal)
+              vectorY[i][j][k] = vectorY[i][j][k] * sal + B0y * (1. - sal);
             vectorZ[i][j][k] = vectorZ[i][j][k] * sal + B0z * (1. - sal);
           }
         }
@@ -3037,7 +2994,8 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY,
             sal = (double)k / n_layers_sal;
             vectorX[i][j][k] = vectorX[i][j][k] * sal + B0x * (1. - sal);
             vectorY[i][j][k] = vectorY[i][j][k] * sal + B0y * (1. - sal);
-            vectorZ[i][j][k] = vectorZ[i][j][k] * sal + B0z * (1. - sal);
+            if (blendNormal)
+              vectorZ[i][j][k] = vectorZ[i][j][k] * sal + B0z * (1. - sal);
           }
     } else {
       for (int i = 0; i < nx; i++)
@@ -3059,7 +3017,8 @@ void EMfields3D::OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY,
             sal = (double)(nz - 1 - k) / n_layers_sal;
             vectorX[i][j][k] = vectorX[i][j][k] * sal + B0x * (1. - sal);
             vectorY[i][j][k] = vectorY[i][j][k] * sal + B0y * (1. - sal);
-            vectorZ[i][j][k] = vectorZ[i][j][k] * sal + B0z * (1. - sal);
+            if (blendNormal)
+              vectorZ[i][j][k] = vectorZ[i][j][k] * sal + B0z * (1. - sal);
           }
     } else {
       for (int i = 0; i < nx; i++)

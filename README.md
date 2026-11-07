@@ -350,9 +350,35 @@ With `bcEMfaceXright = 2` and `bcPfaceXright = 3` (and `PERIODICX = 0`), the las
 - Before each solve, the species densities on the layer are set to the x_s values, rescaled to equal positive and negative charge, (ρ₊ + |ρ₋|)/2 each; where a node of x_s holds charge of one sign only, the layer nodes in its line are emptied. J_s and the pressure tensors on the layer are copied from x_s.
 - The predicted charge ρ̂ is zero on every cell beyond x_s, including the cell between x_s and the first layer node, so the solver's neutral exterior starts at x_s (where the field copy starts with `OutflowLayerFields = copy`).
 - Inside the field solver, the face is closed with a zero-gradient ghost node (the Krylov vector is unchanged), and the E smoothing continues all components with zero gradient.
-- With `divBCorrection`, the ∇·B cleaning, which corrects B on the open-face boundary layers, covers the whole outflow layer.
+- With `divBCorrection`, the ∇·B cleaning corrects B on every node, the outflow layer included (see below).
 
 The written `rho`, `J` and pressure on the layer are these neutralized or copied values; the written E and B are the copied or the solved fields.
+
+### Absorbing layer and ∇·B cleaning on open faces
+
+On an open face (`bcEMface* = 2`) with `yes_sal = 1`, every field solve blends the fields toward the upstream values on the cell layers 0…`n_layers_sal`: E toward −u0×B0 and B toward B0, with a weight s that is 0 at the face and rises linearly to 1 inside. X-right is excluded: it always continues the interior (see above). Below, B_n is the component of B normal to the face and B_t the tangential ones.
+
+- `sal_tangential_B = 1` (default): only B_t is blended; B_n is left to the field solve.
+  - Blending B_n creates ∇·B of about (B_n − B0_n)/(`n_layers_sal` Δx) in the layer every cycle, however smooth the field is. Blending only B_t creates (1 − s) ∂_n B_n, which the cleaning drives to zero.
+  - B_n across the layer then follows the interior field (zero normal gradient) instead of being clamped to B0_n.
+- `sal_tangential_B = 0`: all three components are blended (the behaviour before this option).
+
+`divBCorrection = yes` cleans the node B every `divBCorrectionCycle` cycles, at the end of `calculateB`:
+1. It solves ∇²ψ = ∇·B on the cells, with ψ = 0 beyond the physical faces (GMRES on the CPU, preconditioned FGMRES with the GPU field solver, see below).
+2. It subtracts ∇ψ from B on every node, with the same ψ ghosts. With zero ghosts, `gradC2N` is minus the transpose of `divN2C`, so the step is the orthogonal projection of the node B onto divergence-free fields, apart from the difference between the 7-point Laplacian of the solve and divN2C∘gradC2N. That difference only ever reduces ∇·B, mode by mode.
+3. It rebuilds the cell-centred B as interpN2C of the node B.
+
+Use the cleaning with the tangential SAL. With `sal_tangential_B = 0`, the cleaning carries the SAL's B_n = B0_n at the faces into the whole box, and the code prints a warning. Without the cleaning, the tangential SAL lets ∇·B pile up in the layer.
+
+### Poisson solves of the ∇·E and ∇·B corrections
+
+`PoissonCorrection` (∇·E) and `divBCorrection` (∇·B) solve their Poisson problems with FGMRES(20), at most 200 restarts, to `GMREStol`. With the GPU field solver, FGMRES is preconditioned on each rank by a Chebyshev polynomial of degree `PoissonChebMaxIter` + 1 in the rank's local Laplacian (block Jacobi, zero values at rank cuts), using the analytic eigenvalue bounds [λ_min, λ_max] of that local operator.
+
+On [λ_min, λ_max], the polynomial leaves a residual of at most 1/T_k(σ) ≈ 1/cosh(2k √(λ_min/λ_max)). With the exact minimum of a large block, this is close to 1: λ_max/λ_min ≈ 3·10⁵ for a 960 × 768 2D block. The preconditioner then does almost nothing, and the solves become slow or stall.
+
+`PoissonChebEigRatio` (default 1000) therefore raises the lower bound to max(λ_min, λ_max / `PoissonChebEigRatio`). The polynomial then reduces the upper spectrum, and FGMRES resolves the few smooth modes below the bound, which the polynomial still inverts with the right sign. `PoissonChebEigRatio = 0` restores the exact bounds.
+
+The CPU field solver uses unpreconditioned GMRES for these solves.
 
 ### Planet surface (`Dipole`, `Dipole2D`)
 

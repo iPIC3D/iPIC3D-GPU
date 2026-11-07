@@ -264,6 +264,7 @@ void Collective::ReadInput(const ConfigFile& config) {
         config.read<double>("PoissonChebRescaleEigMin", 1.0);
     PoissonChebRescaleEigMax =
         config.read<double>("PoissonChebRescaleEigMax", 1.0);
+    PoissonChebEigRatio = config.read<double>("PoissonChebEigRatio", 1000.0);
     // take the injection of the particless
     Vinj = config.read<double>("Vinj", 0.0);
 
@@ -617,6 +618,9 @@ void Collective::ReadInput(const ConfigFile& config) {
   // EM field absorbing boundary condition parameters
   yes_sal = config.read<int>("yes_sal", 0);
   n_layers_sal = config.read<int>("n_layers_sal", 3);
+  // B SAL on the components tangential to the face only (see README):
+  // the global div(B) correction is consistent only with this choice
+  sal_tangential_B = config.read<int>("sal_tangential_B", 1);
 
   /*  ------------------------------------------------------------------- */
   /*  Electric and Magnetic field boundary conditions for BCface          */
@@ -906,7 +910,8 @@ void Collective::Print() {
        << endl;
   cout << "SAL (absorbing layer): " << (yes_sal ? "yes" : "no");
   if (yes_sal)
-    cout << ", n_layers=" << n_layers_sal;
+    cout << ", n_layers=" << n_layers_sal
+         << (sal_tangential_B ? ", B tangential only" : ", all B components");
   cout << endl;
   cout << "---------------------" << endl;
   cout << "Particle Boundary Conditions" << endl;
@@ -958,6 +963,11 @@ void Collective::Print() {
   if (divBCorrection == "yes")
     cout << ", every " << divBCorrectionCycle << " cycles (in calculateB)";
   cout << endl;
+  if (divBCorrection == "yes" && yes_sal && !sal_tangential_B)
+    cout << "WARNING: full B SAL with the global div(B) cleaning: the cleaning "
+            "carries the SAL's B_n = B0_n at the faces into the whole box; use "
+            "sal_tangential_B = 1"
+         << endl;
   cout << "---------------------" << endl;
   cout << "Planet Boundary" << endl;
   cout << "---------------------" << endl;

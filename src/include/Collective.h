@@ -218,6 +218,7 @@ public:
   int getBcEMfaceZleft() const { return (bcEMfaceZleft); }
   int getYes_sal() const { return (yes_sal); }
   int getN_layers_sal() const { return (n_layers_sal); }
+  int getSal_tangential_B() const { return (sal_tangential_B); }
   double getDelta() const { return (delta); }
   double getB0x() const { return (B0x); }
   double getB0y() const { return (B0y); }
@@ -286,6 +287,7 @@ public:
   double getPoissonChebRescaleEigMax() const {
     return (PoissonChebRescaleEigMax);
   }
+  double getPoissonChebEigRatio() const { return (PoissonChebEigRatio); }
   int getFieldOutputCycle() const { return (FieldOutputCycle); }
   int getParticlesOutputCycle() const { return (ParticlesOutputCycle); }
   int getTestParticlesOutputCycle() const { return (TestParticlesOutputCycle); }
@@ -542,6 +544,9 @@ private:
   int yes_sal;
   /*! Absorbing Boundary Condition EM Field: number of layers */
   int n_layers_sal;
+  /*! Absorbing layer blends only the B components tangential to the face
+   * (default 1; 0 blends all three) */
+  int sal_tangential_B;
 
   /*! GEM Challenge parameters */
   /*! current sheet thickness */
@@ -603,6 +608,9 @@ private:
   /*! Poisson Chebyshev preconditioner: rescale factor for max eigenvalue
    * (default 1.0) */
   double PoissonChebRescaleEigMax;
+  /*! Poisson Chebyshev preconditioner: eigMin is at least eigMax / this ratio
+   * (default 1000; <= 0 keeps the exact minimum) */
+  double PoissonChebEigRatio;
 
   /*! Output for field */
   int FieldOutputCycle;

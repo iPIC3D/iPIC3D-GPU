@@ -881,11 +881,13 @@ void gpuOpenBCImageDiffFace3(cudaSolverType* imX, cudaSolverType* imY,
  * SAL blend: v[idx] = v[idx]*sal + target*(1-sal) on boundary layers.
  * dir: 0=X, 1=Y, 2=Z.
  * ascending: true if sal increases from layerStart to layerEnd.
+ * skipComp: component (0=X, 1=Y, 2=Z) left unchanged, or -1 for none.
  */
 template <typename T>
 __global__ void k_salBlend3(T* X, T* Y, T* Z, T tgtX, T tgtY, T tgtZ, int dir,
                             int layerStart, int layerEnd, T invNLayers,
-                            int ascending, int nx, int ny, int nz) {
+                            int ascending, int skipComp, int nx, int ny,
+                            int nz) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int nLayers = layerEnd - layerStart + 1;
   int d1, d2;
@@ -924,16 +926,20 @@ __global__ void k_salBlend3(T* X, T* Y, T* Z, T tgtX, T tgtY, T tgtZ, int dir,
     k = layer;
   }
   int idx = (i * ny + j) * nz + k;
-  X[idx] = X[idx] * sal + tgtX * (1.0 - sal);
-  Y[idx] = Y[idx] * sal + tgtY * (1.0 - sal);
-  Z[idx] = Z[idx] * sal + tgtZ * (1.0 - sal);
+  if (skipComp != 0)
+    X[idx] = X[idx] * sal + tgtX * (1.0 - sal);
+  if (skipComp != 1)
+    Y[idx] = Y[idx] * sal + tgtY * (1.0 - sal);
+  if (skipComp != 2)
+    Z[idx] = Z[idx] * sal + tgtZ * (1.0 - sal);
 }
 
 void gpuSALBlendLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
                         cudaSolverType tgtX, cudaSolverType tgtY,
                         cudaSolverType tgtZ, int dir, int layerStart,
                         int layerEnd, cudaSolverType invNLayers, int ascending,
-                        int nx, int ny, int nz, cudaStream_t stream) {
+                        int nx, int ny, int nz, cudaStream_t stream,
+                        int skipComp) {
   int nLayers = layerEnd - layerStart + 1;
   int d1, d2;
   if (dir == 0) {
@@ -952,7 +958,7 @@ void gpuSALBlendLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
   int blk = 256;
   k_salBlend3<<<(total + blk - 1) / blk, blk, 0, stream>>>(
       X, Y, Z, tgtX, tgtY, tgtZ, dir, layerStart, layerEnd, invNLayers,
-      ascending, nx, ny, nz);
+      ascending, skipComp, nx, ny, nz);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -1440,82 +1446,6 @@ void gpuConstantChargePlanet2DKernel(cudaSolverType* rhons, cudaSolverType val,
   int blk = 256;
   k_constantChargePlanet2D<<<(total + blk - 1) / blk, blk, 0, stream>>>(
       rhons, val, R * R, xc, zc, xStart, zStart, dx, dz, nxn, nyn, nzn);
-  cudaErrChk(cudaGetLastError());
-}
-
-// =========================================================================
-//  Subtract grad(PSI) from B on boundary layers (divB cleaning)
-// =========================================================================
-
-/** B -= gradPSI on boundary layers [layerStart..layerEnd] in direction dir. */
-template <typename T>
-__global__ void k_subLayers3(T* BxN, T* ByN, T* BzN, const T* gX, const T* gY,
-                             const T* gZ, int dir, int layerStart, int layerEnd,
-                             int nxn, int nyn, int nzn) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int nLayers = layerEnd - layerStart + 1;
-  int d1, d2;
-  if (dir == 0) {
-    d1 = nyn;
-    d2 = nzn;
-  } else if (dir == 1) {
-    d1 = nxn;
-    d2 = nzn;
-  } else {
-    d1 = nxn;
-    d2 = nyn;
-  }
-  int total = nLayers * d1 * d2;
-  if (tid >= total)
-    return;
-  int layerOff = tid / (d1 * d2);
-  int rem = tid % (d1 * d2);
-  int a = rem / d2;
-  int b = rem % d2;
-  int layer = layerStart + layerOff;
-  int i, j, k;
-  if (dir == 0) {
-    i = layer;
-    j = a;
-    k = b;
-  } else if (dir == 1) {
-    i = a;
-    j = layer;
-    k = b;
-  } else {
-    i = a;
-    j = b;
-    k = layer;
-  }
-  int idx = (i * nyn + j) * nzn + k;
-  BxN[idx] -= gX[idx];
-  ByN[idx] -= gY[idx];
-  BzN[idx] -= gZ[idx];
-}
-
-void gpuSubBoundaryLayers3(cudaSolverType* BxN, cudaSolverType* ByN,
-                           cudaSolverType* BzN, const cudaSolverType* gX,
-                           const cudaSolverType* gY, const cudaSolverType* gZ,
-                           int dir, int layerStart, int layerEnd, int nxn,
-                           int nyn, int nzn, cudaStream_t stream) {
-  int nLayers = layerEnd - layerStart + 1;
-  int d1, d2;
-  if (dir == 0) {
-    d1 = nyn;
-    d2 = nzn;
-  } else if (dir == 1) {
-    d1 = nxn;
-    d2 = nzn;
-  } else {
-    d1 = nxn;
-    d2 = nyn;
-  }
-  int total = nLayers * d1 * d2;
-  if (total <= 0)
-    return;
-  int blk = 256;
-  k_subLayers3<<<(total + blk - 1) / blk, blk, 0, stream>>>(
-      BxN, ByN, BzN, gX, gY, gZ, dir, layerStart, layerEnd, nxn, nyn, nzn);
   cudaErrChk(cudaGetLastError());
 }
 

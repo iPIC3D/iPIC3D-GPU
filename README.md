@@ -336,6 +336,10 @@ Some cases apply additional boundary-condition fixes during the time loop:
 | `GEMHarris` | None |
 | `HumpPert` | None |
 
+### Boundary injection (reemission faces)
+
+On a non-periodic face with `bcPface* = 2`, every particle that ends a push in the last 3 cells before the face is deleted. The GPU then refills those cells with a drifting Maxwellian (`rhoINJECT`, the species' drift and thermal speeds), every cycle and with the same number of particles per cell as the initial loading (`npcel*`). Each injected particle draws its numbers from its own Philox stream. The key is set by the cycle and the species, and the stream number is set by the particle's global cell and sub-cell. So ranks inject different plasma, the injected plasma does not depend on `XLEN`/`YLEN`/`ZLEN`, and a restart repeats the injection of every cycle.
+
 ### Open outflow boundary (X-right)
 
 With `bcEMfaceXright = 2` and `bcPfaceXright = 3` (and `PERIODICX = 0`), the last L = max(3, `n_layers_sal`) cells before the X-right face form the outflow layer, beyond the reference plane x_s, L cells inside the face. The field solve sees the layer as neutral, with the current and pressure of x_s. This is always on, in the GPU and the CPU field solver (`GPU_SOLVER`):

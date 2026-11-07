@@ -996,10 +996,13 @@ void ParticleCommInjection::fillInjectionParameter(
   param->domainLengthY = domainLengthY_;
   param->domainLengthZ = domainLengthZ_;
 
-  // --- Grid origin (for cell-corner formula: xStart + (ix-1)*dx) ---
-  param->gridXstart = grid_->getXstart();
-  param->gridYstart = grid_->getYstart();
-  param->gridZstart = grid_->getZstart();
+  // --- Global cell indexing (cell corner = global cell * dx; RNG stream) ---
+  param->globalCellOffX = grid_->getCellOffsetX();
+  param->globalCellOffY = grid_->getCellOffsetY();
+  param->globalCellOffZ = grid_->getCellOffsetZ();
+  param->globalNumCellsY = col_->getNyc();
+  param->globalNumCellsZ = col_->getNzc();
+
   param->gridDx = gridSpacingX_;
   param->gridDy = gridSpacingY_;
   param->gridDz = gridSpacingZ_;

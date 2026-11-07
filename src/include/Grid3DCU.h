@@ -265,6 +265,8 @@ private:
   double* center_zcoord;
   /** local grid boundaries coordinate of proper subdomain */
   double xStart, xEnd, yStart, yEnd, zStart, zEnd;
+  /** global cell index of the first proper cell (local index 1) */
+  int cellOffX = 0, cellOffY = 0, cellOffZ = 0;
   double xStart_g, yStart_g, zStart_g;
   double epsilon;
   double nxc_minus_epsilon;
@@ -318,6 +320,10 @@ public: // accessors (inline)
   const double& getZC(int X, int Y, int Z) const { return center_zcoord[Z]; }
   //
   double getXstart() const { return (xStart); }
+  /** global cell index of local cell 1 in x, y, z */
+  int getCellOffsetX() const { return cellOffX; }
+  int getCellOffsetY() const { return cellOffY; }
+  int getCellOffsetZ() const { return cellOffZ; }
   double getXend() const { return (xEnd); }
   double getYstart() const { return (yStart); }
   double getYend() const { return (yEnd); }

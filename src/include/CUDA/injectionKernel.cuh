@@ -43,10 +43,18 @@ struct injectionParameter {
   // --- Domain bounds (for position rejection) ---
   cudaParticleType domainLengthX, domainLengthY, domainLengthZ;
 
-  // --- Grid origin (for computing cell-corner coordinates) ---
-  // cellLowX = gridXstart + (ix - 1) * gridDx
-  cudaParticleType gridXstart, gridYstart, gridZstart;
+  // --- Cell size ---
   cudaParticleType gridDx, gridDy, gridDz;
+
+  // --- Global cell indexing (RNG stream and cell corners) ---
+  // Global index of local cell 1 per direction (Grid3DCU::getCellOffset*)
+  // and the global cell counts in y and z. The cell corner is
+  // globalCell * gridDx, and a particle's Philox stream is
+  // (globalCell * numParticlesPerCell + subcell), so the injected plasma
+  // depends only on (cycle, species, global cell, subcell): it differs from
+  // rank to rank and does not depend on the decomposition.
+  long long globalCellOffX, globalCellOffY, globalCellOffZ;
+  long long globalNumCellsY, globalNumCellsZ;
 
   // --- 6 face ranges with cumulative particle offsets ---
   // Order: Xleft(0), Xright(1), Yleft(2), Yright(3), Zleft(4), Zright(5)

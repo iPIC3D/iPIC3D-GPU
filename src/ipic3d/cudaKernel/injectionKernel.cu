@@ -12,7 +12,9 @@
  * One thread per particle.  Thread mapping:
  *   globalIdx → face (via pclOffset[]) → cell within face → subcell
  *
- * RNG: Philox counter-based (stateless, no warm-up cost).
+ * RNG: Philox counter-based (stateless, no warm-up cost). Stream = global
+ * cell index * particles per cell + subcell, so ranks draw different numbers
+ * and the injection is the same for any decomposition.
  * Rejection: regenerate if position outside domain or |v| > c.
  */
 __global__ void injectionKernel(particleArrayCUDA* pclsArray,
@@ -68,14 +70,30 @@ __global__ void injectionKernel(particleArrayCUDA* pclsArray,
   const int jj = (subcellIdx % (npcy * npcz)) / npcz;
   const int kk = subcellIdx % npcz;
 
-  // --- 3. Cell corner (uniform grid, arithmetic only) ---
-  const double cellLowX = params->gridXstart + (ix - 1) * params->gridDx;
-  const double cellLowY = params->gridYstart + (iy - 1) * params->gridDy;
-  const double cellLowZ = params->gridZstart + (iz - 1) * params->gridDz;
+  // --- 3. Global cell index and cell corner ---
+  // Local cell 1 is global cell globalCellOff*. The corner is computed from
+  // the global index so that it is bitwise the same for any decomposition.
+  const long long gx = params->globalCellOffX + (ix - 1);
+  const long long gy = params->globalCellOffY + (iy - 1);
+  const long long gz = params->globalCellOffZ + (iz - 1);
+  const double cellLowX = (double)gx * params->gridDx;
+  const double cellLowY = (double)gy * params->gridDy;
+  const double cellLowZ = (double)gz * params->gridDz;
 
-  // --- 4. RNG init (Philox: zero warm-up, per-thread sequence) ---
+  // --- 4. RNG init (Philox: zero warm-up, O(1) in the stream number) ---
+  // Stream = global particle slot (global cell, subcell): unique in the box
+  // for a given (cycle, species) seed, independent of the rank layout.
+  // Philox puts the stream in the counter's high 64 bits, so its size
+  // does not change the cost; do not switch to XORWOW, whose curand_init
+  // skips ahead by matrix powers.
+  const unsigned long long stream =
+      (unsigned long long)((gx * params->globalNumCellsY + gy) *
+                               params->globalNumCellsZ +
+                           gz) *
+          (unsigned long long)params->numParticlesPerCell +
+      (unsigned long long)subcellIdx;
   curandStatePhilox4_32_10_t rngState;
-  curand_init(rngSeed, (unsigned long long)globalIdx, 0, &rngState);
+  curand_init(rngSeed, stream, 0, &rngState);
 
   // --- 5. Generate position + velocity with rejection ---
   double posX, posY, posZ, velX, velY, velZ;

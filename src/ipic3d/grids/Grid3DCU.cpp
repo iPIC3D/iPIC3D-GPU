@@ -108,6 +108,10 @@ Grid3DCU::Grid3DCU(CollectiveIO* col, VirtualTopology3D* vct) : _vct(*vct) {
   xStart = vct->getCoordinates(0) * xWidth;
   yStart = vct->getCoordinates(1) * yWidth;
   zStart = vct->getCoordinates(2) * zWidth;
+  // Global index of the first proper cell (local cell 1); xStart = cellOffX*dx.
+  cellOffX = vct->getCoordinates(0) * nxc_rr;
+  cellOffY = vct->getCoordinates(1) * nyc_rr;
+  cellOffZ = vct->getCoordinates(2) * nzc_rr;
   //
   xEnd = xStart + xWidth - (nxc_rr - nxc_r) * dx;
   yEnd = yStart + yWidth - (nyc_rr - nyc_r) * dy;

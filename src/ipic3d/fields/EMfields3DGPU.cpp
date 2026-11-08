@@ -496,6 +496,12 @@ void EMfields3D::gpuSolverFree() {
     d_bjScratch2 = nullptr;
   }
   bjScratchAlloc = 0;
+  if (d_blockJacobiDinv) {
+    cudaFree(d_blockJacobiDinv);
+    d_blockJacobiDinv = nullptr;
+  }
+  blockJacobiDinvAlloc = 0;
+  blockJacobiDinvStale = true;
 
   // Free pinned GMRES host buffers
   if (h_gmresReduceLocal) {
@@ -969,30 +975,40 @@ void EMfields3D::gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2,
   }
 }
 
-void EMfields3D::gpuPerfectConductorLeft(GPUFieldArray3& imX,
-                                         GPUFieldArray3& imY,
-                                         GPUFieldArray3& imZ,
-                                         GPUFieldArray3& vX, GPUFieldArray3& vY,
-                                         GPUFieldArray3& vZ, int dir) {
-  ::gpuPerfectConductorLeft(
-      imX.devPtr(), imY.devPtr(), imZ.devPtr(), vX.devPtr(), vY.devPtr(),
-      vZ.devPtr(), d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr(), d_Jxh.devPtr(),
-      d_Jyh.devPtr(), d_Jzh.devPtr(), d_Bxn.devPtr(), d_Byn.devPtr(),
-      d_Bzn.devPtr(), d_Bx_ext.devPtr(), d_By_ext.devPtr(), d_Bz_ext.devPtr(),
-      d_rhons.devPtr(), d_qom, ns, dt, c, th, FourPI, delt, nxn, nyn, nzn, dir,
-      solverStream_);
+void EMfields3D::gpuPerfectConductorImages(
+    GPUFieldArray3& imX, GPUFieldArray3& imY, GPUFieldArray3& imZ,
+    GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ) {
+  for (int f = 0; f < 6; f++) {
+    if (!conductorFace_[f])
+      continue;
+    ::gpuPerfectConductorImage(
+        imX.devPtr(), imY.devPtr(), imZ.devPtr(), vX.devPtr(), vY.devPtr(),
+        vZ.devPtr(), d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(),
+        d_Bx_ext.devPtr(), d_By_ext.devPtr(), d_Bz_ext.devPtr(),
+        d_rhons.devPtr(), d_qom, ns, dt, c, FourPI, delt, nxn, nyn, nzn, f / 2,
+        f % 2 == 1, solverStream_);
+  }
 }
 
-void EMfields3D::gpuPerfectConductorRight(
-    GPUFieldArray3& imX, GPUFieldArray3& imY, GPUFieldArray3& imZ,
-    GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ, int dir) {
-  ::gpuPerfectConductorRight(
-      imX.devPtr(), imY.devPtr(), imZ.devPtr(), vX.devPtr(), vY.devPtr(),
-      vZ.devPtr(), d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr(), d_Jxh.devPtr(),
-      d_Jyh.devPtr(), d_Jzh.devPtr(), d_Bxn.devPtr(), d_Byn.devPtr(),
-      d_Bzn.devPtr(), d_Bx_ext.devPtr(), d_By_ext.devPtr(), d_Bz_ext.devPtr(),
-      d_rhons.devPtr(), d_qom, ns, dt, c, th, FourPI, delt, nxn, nyn, nzn, dir,
-      solverStream_);
+void EMfields3D::gpuPerfectConductorSources(cudaSolverType* dX,
+                                            cudaSolverType* dY,
+                                            cudaSolverType* dZ) {
+  // CPU perfectConductor*S uses ebc = -(ue0,ve0,we0) x (B0x,B0y,B0z).
+  const cudaSolverType ebc0 = -(ve0 * B0z - we0 * B0y);
+  const cudaSolverType ebc1 = -(we0 * B0x - ue0 * B0z);
+  const cudaSolverType ebc2 = -(ue0 * B0y - ve0 * B0x);
+  const cudaSolverType* E[3] = {d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr()};
+  const cudaSolverType* J[3] = {d_Jxh.devPtr(), d_Jyh.devPtr(), d_Jzh.devPtr()};
+  for (int f = 0; f < 6; f++) {
+    if (!conductorFace_[f])
+      continue;
+    const int dir = f / 2;
+    ::gpuPerfectConductorSource(
+        dX, dY, dZ, E[dir], J[dir], d_Bxn.devPtr(), d_Byn.devPtr(),
+        d_Bzn.devPtr(), d_Bx_ext.devPtr(), d_By_ext.devPtr(), d_Bz_ext.devPtr(),
+        d_rhons.devPtr(), d_qom, ns, dt, c, th, FourPI, delt, ebc0, ebc1, ebc2,
+        nxn, nyn, nzn, dir, f % 2 == 1, solverStream_);
+  }
 }
 
 // =========================================================================
@@ -1199,25 +1215,9 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
                 d_imageZ.devPtr(), d_Dz.devPtr(), d_vectZ.devPtr(), nodeSize,
                 solverStream_);
 
-  // Perfect conductor BCs
-  if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 0)
-    gpuPerfectConductorLeft(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                            d_vectZ, 0);
-  if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 0)
-    gpuPerfectConductorRight(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                             d_vectZ, 0);
-  if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 0)
-    gpuPerfectConductorLeft(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                            d_vectZ, 1);
-  if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 0)
-    gpuPerfectConductorRight(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                             d_vectZ, 1);
-  if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 0)
-    gpuPerfectConductorLeft(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                            d_vectZ, 2);
-  if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 0)
-    gpuPerfectConductorRight(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                             d_vectZ, 2);
+  // Perfect conductor BCs (image rows, linear)
+  gpuPerfectConductorImages(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
+                            d_vectZ);
 
   // OpenBC: apply inflow BCs to GMRES image if enabled
   if (get_col().getApplyInflowBcsEImage())
@@ -1358,24 +1358,9 @@ void EMfields3D::gpuMaxwellImageLocal(cudaSolverType* d_im,
   gpuSolver2Phys3(d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(), d_im,
                   nxn, nyn, nzn, solverStream_);
 
-  if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 0)
-    gpuPerfectConductorLeft(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                            d_vectZ, 0);
-  if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 0)
-    gpuPerfectConductorRight(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                             d_vectZ, 0);
-  if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 0)
-    gpuPerfectConductorLeft(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                            d_vectZ, 1);
-  if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 0)
-    gpuPerfectConductorRight(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                             d_vectZ, 1);
-  if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 0)
-    gpuPerfectConductorLeft(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                            d_vectZ, 2);
-  if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 0)
-    gpuPerfectConductorRight(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                             d_vectZ, 2);
+  // Perfect conductor BCs (image rows, linear)
+  gpuPerfectConductorImages(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
+                            d_vectZ);
 
   if (get_col().getApplyInflowBcsEImage())
     gpuOpenBoundaryInflowEImage(
@@ -1693,38 +1678,11 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
                 d_tempZ.devPtr(), d_Ez.devPtr(), d_temp2Z.devPtr(), nodeSize,
                 solverStream_);
 
-  // CPU perfectConductor*S uses ebc = -(ue0,ve0,we0) x (B0x,B0y,B0z).
-  const cudaSolverType ebc0 = -(ve0 * B0z - we0 * B0y);
-  const cudaSolverType ebc1 = -(we0 * B0x - ue0 * B0z);
-  const cudaSolverType ebc2 = -(ue0 * B0y - ve0 * B0x);
+  // Perfect conductor BCs for source (RHS rows of the conductor faces)
+  gpuPerfectConductorSources(d_tempX.devPtr(), d_tempY.devPtr(),
+                             d_tempZ.devPtr());
 
-  // Perfect conductor BCs for source
-  if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 0)
-    gpuPerfectConductorLeftS(d_tempX.devPtr(), d_tempY.devPtr(),
-                             d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn,
-                             0, solverStream_);
-  if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 0)
-    gpuPerfectConductorRightS(d_tempX.devPtr(), d_tempY.devPtr(),
-                              d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn,
-                              0, solverStream_);
-  if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 0)
-    gpuPerfectConductorLeftS(d_tempX.devPtr(), d_tempY.devPtr(),
-                             d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn,
-                             1, solverStream_);
-  if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 0)
-    gpuPerfectConductorRightS(d_tempX.devPtr(), d_tempY.devPtr(),
-                              d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn,
-                              1, solverStream_);
-  if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 0)
-    gpuPerfectConductorLeftS(d_tempX.devPtr(), d_tempY.devPtr(),
-                             d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn,
-                             2, solverStream_);
-  if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 0)
-    gpuPerfectConductorRightS(d_tempX.devPtr(), d_tempY.devPtr(),
-                              d_tempZ.devPtr(), ebc0, ebc1, ebc2, nxn, nyn, nzn,
-                              2, solverStream_);
-
-  // OpenBC: zero source on inflow boundary nodes
+  // OpenBC: RHS rows of the open inflow faces (E0; identity image rows)
   gpuOpenBoundaryInflowESource(d_tempX.devPtr(), d_tempY.devPtr(),
                                d_tempZ.devPtr(), nxn, nyn, nzn);
 
@@ -1745,6 +1703,15 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
 //    • Device workspace (V, w) is allocated persistently in
 //    gpuSolverAllocate().
 // =========================================================================
+
+// A NaN or Inf residual means the field or the operator is no longer finite:
+// stop instead of iterating to max_iter and applying the result.
+static void gmresCheckFinite(double err, const char* label, int restart) {
+  if (!std::isfinite(err)) {
+    eprintf("%s: non-finite residual (%g) at restart %d", label, err, restart);
+    abort();
+  }
+}
 
 static void
 gpuGMRES_impl(EMfields3D* field,
@@ -1784,6 +1751,7 @@ gpuGMRES_impl(EMfields3D* field,
   MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1,
                 mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
   initial_error = sqrt(initial_error);
+  gmresCheckFinite(initial_error, "GMRES", 0);
   if (initial_error < 1e-30)
     return;
 
@@ -1913,7 +1881,7 @@ gpuGMRES_impl(EMfields3D* field,
     for (int j = 0; j <= kEnd; j++)
       gpuAddscale(y[j], d_x, d_gmresV + (size_t)j * n, n, stream);
 
-    // ---- True residual check (handles affine operators correctly) ----
+    // ---- True residual check (the Arnoldi estimate can drift) ----
     (field->*GpuImage)(d_gmresW, d_x);
     gpuEq(d_gmresV, d_b, n, stream);
     gpuSub(d_gmresV, d_gmresW, n, stream);
@@ -1923,6 +1891,7 @@ gpuGMRES_impl(EMfields3D* field,
     MPI_Allreduce(&h_reduceLocal[0], &error, 1, mpiTypeOf<cudaSolverType>(),
                   MPI_SUM, fieldcomm);
     error = sqrt(error);
+    gmresCheckFinite(error, "GMRES", restart);
 
     if (error / initial_error < tol) {
       if (gmresRank == 0)
@@ -2020,6 +1989,7 @@ gpuFGMRES_impl(EMfields3D* field,
   MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1,
                 mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
   initial_error = sqrt(initial_error);
+  gmresCheckFinite(initial_error, label, 0);
   if (initial_error < 1e-30)
     return;
 
@@ -2155,6 +2125,7 @@ gpuFGMRES_impl(EMfields3D* field,
     MPI_Allreduce(&h_reduceLocal[0], &error, 1, mpiTypeOf<cudaSolverType>(),
                   MPI_SUM, fieldcomm);
     error = sqrt(error);
+    gmresCheckFinite(error, label, restart);
 
     if (error <= rho_tol) {
       if (rank == 0)
@@ -3092,74 +3063,39 @@ void EMfields3D::gpuInterpDensitiesN2C() {
 }
 
 // =========================================================================
-//  GPU OpenBoundaryInflowESource: zero source RHS on open inflow faces
+//  GPU OpenBoundaryInflowESource: RHS rows (E0) of the open inflow faces
 // =========================================================================
 
 void EMfields3D::gpuOpenBoundaryInflowESource(cudaSolverType* dX,
                                               cudaSolverType* dY,
                                               cudaSolverType* dZ, int nx,
                                               int ny, int nz) {
-  const VirtualTopology3D* vct = &get_vct();
-  const Collective* col = &get_col();
-
-  if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 2 &&
-      col->getBcPfaceXleft() == 2)
-    gpuOpenBCZeroFace3(dX, dY, dZ, 0, 1, nx, ny, nz, solverStream_);
-  if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
-      col->getBcPfaceXright() == 2)
-    gpuOpenBCZeroFace3(dX, dY, dZ, 0, nx - 2, nx, ny, nz, solverStream_);
-  if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
-      col->getBcPfaceYleft() == 2)
-    gpuOpenBCZeroFace3(dX, dY, dZ, 1, 1, nx, ny, nz, solverStream_);
-  if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 2 &&
-      col->getBcPfaceYright() == 2)
-    gpuOpenBCZeroFace3(dX, dY, dZ, 1, ny - 2, nx, ny, nz, solverStream_);
-  if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 2 &&
-      col->getBcPfaceZleft() == 2)
-    gpuOpenBCZeroFace3(dX, dY, dZ, 2, 1, nx, ny, nz, solverStream_);
-  if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 2 &&
-      col->getBcPfaceZright() == 2)
-    gpuOpenBCZeroFace3(dX, dY, dZ, 2, nz - 2, nx, ny, nz, solverStream_);
+  if (!get_col().getApplyInflowBcsEImage())
+    return;
+  // injE = -(ue0,ve0,we0) x (B0x,B0y,B0z)
+  const cudaSolverType injE[3] = {-(ve0 * B0z - we0 * B0y),
+                                  -(we0 * B0x - ue0 * B0z),
+                                  -(ue0 * B0y - ve0 * B0x)};
+  const int n[3] = {nx, ny, nz};
+  for (int f = 0; f < 6; f++)
+    if (openInflowFace_[f])
+      gpuOpenBCSetFace3(dX, dY, dZ, injE[0], injE[1], injE[2], f / 2,
+                        f % 2 ? n[f / 2] - 2 : 1, nx, ny, nz, solverStream_);
 }
 
 // =========================================================================
-//  GPU OpenBoundaryInflowEImage: image = vect - injE on open inflow faces
+//  GPU OpenBoundaryInflowEImage: identity rows on the open inflow faces
 // =========================================================================
 
 void EMfields3D::gpuOpenBoundaryInflowEImage(
     cudaSolverType* imX, cudaSolverType* imY, cudaSolverType* imZ,
     const cudaSolverType* vX, const cudaSolverType* vY,
     const cudaSolverType* vZ, int nx, int ny, int nz) {
-  const VirtualTopology3D* vct = &get_vct();
-  const Collective* col = &get_col();
-
-  // injE = -(ue0,ve0,we0) × (B0x,B0y,B0z)
-  double injE[3];
-  injE[0] = -(ve0 * B0z - we0 * B0y);
-  injE[1] = -(we0 * B0x - ue0 * B0z);
-  injE[2] = -(ue0 * B0y - ve0 * B0x);
-
-  if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 2 &&
-      col->getBcPfaceXleft() == 2)
-    gpuOpenBCImageDiffFace3(imX, imY, imZ, vX, vY, vZ, injE[0], injE[1],
-                            injE[2], 0, 1, nx, ny, nz, solverStream_);
-  // Xright image disabled (matches CPU)
-  if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
-      col->getBcPfaceYleft() == 2)
-    gpuOpenBCImageDiffFace3(imX, imY, imZ, vX, vY, vZ, injE[0], injE[1],
-                            injE[2], 1, 1, nx, ny, nz, solverStream_);
-  if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 2 &&
-      col->getBcPfaceYright() == 2)
-    gpuOpenBCImageDiffFace3(imX, imY, imZ, vX, vY, vZ, injE[0], injE[1],
-                            injE[2], 1, ny - 2, nx, ny, nz, solverStream_);
-  if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 2 &&
-      col->getBcPfaceZleft() == 2)
-    gpuOpenBCImageDiffFace3(imX, imY, imZ, vX, vY, vZ, injE[0], injE[1],
-                            injE[2], 2, 1, nx, ny, nz, solverStream_);
-  if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 2 &&
-      col->getBcPfaceZright() == 2)
-    gpuOpenBCImageDiffFace3(imX, imY, imZ, vX, vY, vZ, injE[0], injE[1],
-                            injE[2], 2, nz - 2, nx, ny, nz, solverStream_);
+  const int n[3] = {nx, ny, nz};
+  for (int f = 0; f < 6; f++)
+    if (openInflowFace_[f])
+      gpuOpenBCCopyFace3(imX, imY, imZ, vX, vY, vZ, f / 2,
+                         f % 2 ? n[f / 2] - 2 : 1, nx, ny, nz, solverStream_);
 }
 
 // =========================================================================
@@ -3803,7 +3739,11 @@ void EMfields3D::gpuPoissonCorrection(int cycle) {
   // Solution → physical
   gpuSolver2Phys1(d_PHI.devPtr(), d_xkrylovPoisson_E.devPtr(), nxc, nyc, nzc,
                   solverStream_);
-  gpuCommunicateCenterBC(nxc, nyc, nzc, d_PHI, 2, 2, 2, 2, 2, 2);
+  // PHI = 0 beyond the physical faces: the ghost rule of the Poisson operator
+  gpuCommunicateCenterBC(nxc, nyc, nzc, d_PHI, kPoissonBCface[0],
+                         kPoissonBCface[1], kPoissonBCface[2],
+                         kPoissonBCface[3], kPoissonBCface[4],
+                         kPoissonBCface[5]);
 
   // grad(PHI)
   gpuGradC2N(d_gradPHIX_work.devPtr(), d_gradPHIY_work.devPtr(),

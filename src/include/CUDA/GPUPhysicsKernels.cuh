@@ -75,81 +75,51 @@ void gpuPIdotSpecies(cudaSolverType* PIX, cudaSolverType* PIY,
                      cudaStream_t stream = 0);
 
 // =========================================================================
-//  Perfect conductor boundary conditions (fused sustensor + application)
+//  Perfect conductor boundary conditions (fused susceptibility + rows)
 // =========================================================================
 
 /**
- * @brief GPU perfect conductor BC on the LEFT boundary for direction dir.
+ * @brief Image rows of the Maxwell operator on a perfect-conductor face.
  *
- * dir = 0 → X-left (i=1),  dir = 1 → Y-left (j=1),  dir = 2 → Z-left (k=1).
+ * Face node plane: index 1 (high = false) or n-2 (high = true) along dir
+ * (0 X, 1 Y, 2 Z), tangential interior.  Tangential components: identity.
+ * Normal component n: Ampere's law without curl B, chi_n . E = E^n_n - 4 pi
+ * theta dt Jhat_n, written linearly in the Krylov vector:
+ *   image_n = vect_n + (chi_na vect_a + chi_nb vect_b) / chi_nn
+ * (chi: implicit susceptibility at the node).  The rest of the equation is in
+ * the RHS row, gpuPerfectConductorSource.
  *
- * Computes the sustensor on the boundary face and applies the correction:
- *   imageX[bnd] = vectX[bnd] - (E[bnd] - sus_yx*vY - sus_zx*vZ - Jh*dt*th*4π) /
- * sus_xx (with appropriate permutation for Y and Z directions)
- *
- * @param imageX/Y/Z  Device arrays to write the corrected image.
- * @param vectX/Y/Z   Input Krylov iterate (node-based).
- * @param Ex/Ey/Ez     Electric field at nodes.
- * @param Jxh/Jyh/Jzh Hat current at nodes.
- * @param Bxn/Byn/Bzn B at nodes.
- * @param Bx_ext/By_ext/Bz_ext External B.
- * @param rhons        All-species density [ns][nxn][nyn][nzn] (contiguous).
- * @param qom          Species q/m array (host, ns elements).  Copied
- * internally.
- * @param ns           Number of species.
- * @param dt,c,th,FourPI,delt  Physical constants.
- * @param nxn,nyn,nzn  Grid dimensions.
- * @param dir          Direction (0=X, 1=Y, 2=Z).
- * @param stream       CUDA stream.
+ * @param rhons  All-species density [ns][nxn][nyn][nzn] (contiguous).
+ * @param d_qom  Device array of the species q/m (ns elements).
  */
-void gpuPerfectConductorLeft(
+void gpuPerfectConductorImage(
     cudaSolverType* imageX, cudaSolverType* imageY, cudaSolverType* imageZ,
     const cudaSolverType* vectX, const cudaSolverType* vectY,
-    const cudaSolverType* vectZ, const cudaSolverType* Ex,
-    const cudaSolverType* Ey, const cudaSolverType* Ez,
-    const cudaSolverType* Jxh, const cudaSolverType* Jyh,
-    const cudaSolverType* Jzh, const cudaSolverType* Bxn,
+    const cudaSolverType* vectZ, const cudaSolverType* Bxn,
     const cudaSolverType* Byn, const cudaSolverType* Bzn,
     const cudaSolverType* Bx_ext, const cudaSolverType* By_ext,
     const cudaSolverType* Bz_ext, const cudaSolverType* rhons,
     const cudaSolverType* d_qom, int ns, cudaSolverType dt, cudaSolverType c,
-    cudaSolverType th, cudaSolverType FourPI, cudaSolverType delt, int nxn,
-    int nyn, int nzn, int dir, cudaStream_t stream = 0);
-
-/** Same as gpuPerfectConductorLeft but for the RIGHT boundary. */
-void gpuPerfectConductorRight(
-    cudaSolverType* imageX, cudaSolverType* imageY, cudaSolverType* imageZ,
-    const cudaSolverType* vectX, const cudaSolverType* vectY,
-    const cudaSolverType* vectZ, const cudaSolverType* Ex,
-    const cudaSolverType* Ey, const cudaSolverType* Ez,
-    const cudaSolverType* Jxh, const cudaSolverType* Jyh,
-    const cudaSolverType* Jzh, const cudaSolverType* Bxn,
-    const cudaSolverType* Byn, const cudaSolverType* Bzn,
-    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext,
-    const cudaSolverType* Bz_ext, const cudaSolverType* rhons,
-    const cudaSolverType* d_qom, int ns, cudaSolverType dt, cudaSolverType c,
-    cudaSolverType th, cudaSolverType FourPI, cudaSolverType delt, int nxn,
-    int nyn, int nzn, int dir, cudaStream_t stream = 0);
+    cudaSolverType FourPI, cudaSolverType delt, int nxn, int nyn, int nzn,
+    int dir, bool high, cudaStream_t stream = 0);
 
 /**
- * @brief GPU perfect conductor BC for source term (LEFT boundary).
- *
- * Version used in MaxwellSource.  Matches the CPU perfectConductorLeftS:
- * the normal source component is zeroed and tangential components are set to
- * ebc = -(u0 x B0).
+ * @brief RHS rows of the Maxwell system on a perfect-conductor face (same
+ * plane as gpuPerfectConductorImage): tangential components ebc = -(u0 x B0),
+ * normal component (E^n_n - 4 pi theta dt Jhat_n) / chi_nn, with En / Jn the
+ * normal components of E^n and Jhat.
  */
-void gpuPerfectConductorLeftS(cudaSolverType* vectorX, cudaSolverType* vectorY,
-                              cudaSolverType* vectorZ, cudaSolverType ebc0,
-                              cudaSolverType ebc1, cudaSolverType ebc2, int nxn,
-                              int nyn, int nzn, int dir,
-                              cudaStream_t stream = 0);
-
-/** Same as gpuPerfectConductorLeftS but for the RIGHT boundary. */
-void gpuPerfectConductorRightS(cudaSolverType* vectorX, cudaSolverType* vectorY,
-                               cudaSolverType* vectorZ, cudaSolverType ebc0,
-                               cudaSolverType ebc1, cudaSolverType ebc2,
-                               int nxn, int nyn, int nzn, int dir,
-                               cudaStream_t stream = 0);
+void gpuPerfectConductorSource(
+    cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,
+    const cudaSolverType* En, const cudaSolverType* Jn,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn,
+    const cudaSolverType* Bzn, const cudaSolverType* Bx_ext,
+    const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons, const cudaSolverType* d_qom, int ns,
+    cudaSolverType dt, cudaSolverType c, cudaSolverType th,
+    cudaSolverType FourPI, cudaSolverType delt, cudaSolverType ebc0,
+    cudaSolverType ebc1, cudaSolverType ebc2, int nxn, int nyn, int nzn,
+    int dir, bool high, cudaStream_t stream = 0);
 
 // =========================================================================
 //  adjustNonPeriodicDensities: doubles boundary-face values for
@@ -183,18 +153,20 @@ void gpuAdjustNonPeriodicDensities(int nptrs, cudaSolverType* const* d_devPtrs,
 //  Open boundary face/layer kernels
 // =========================================================================
 
-/** Zero 3 arrays on a face plane interior [1..n-2]. */
-void gpuOpenBCZeroFace3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
+/** Set 3 arrays to (cx, cy, cz) on a face plane interior [1..n-2]: the RHS
+ *  rows of the open inflow faces. */
+void gpuOpenBCSetFace3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
+                       cudaSolverType cx, cudaSolverType cy, cudaSolverType cz,
+                       int dir, int faceIdx, int nx, int ny, int nz,
+                       cudaStream_t stream = 0);
+
+/** Identity rows, image = vect, on a face plane interior [1..n-2]: the image
+ *  rows of the open inflow faces (their RHS rows hold E0). */
+void gpuOpenBCCopyFace3(cudaSolverType* imX, cudaSolverType* imY,
+                        cudaSolverType* imZ, const cudaSolverType* vX,
+                        const cudaSolverType* vY, const cudaSolverType* vZ,
                         int dir, int faceIdx, int nx, int ny, int nz,
                         cudaStream_t stream = 0);
-
-/** Set image = vect - injE on a face plane interior. */
-void gpuOpenBCImageDiffFace3(cudaSolverType* imX, cudaSolverType* imY,
-                             cudaSolverType* imZ, const cudaSolverType* vX,
-                             const cudaSolverType* vY, const cudaSolverType* vZ,
-                             cudaSolverType injE0, cudaSolverType injE1,
-                             cudaSolverType injE2, int dir, int faceIdx, int nx,
-                             int ny, int nz, cudaStream_t stream = 0);
 
 /** SAL blend: v = v*sal + target*(1-sal) on boundary layers. */
 void gpuSALBlendLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,

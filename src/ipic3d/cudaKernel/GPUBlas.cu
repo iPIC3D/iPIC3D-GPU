@@ -6,6 +6,8 @@
 
 #include "GPUBlas.cuh"
 #include "GPUFieldArray.cuh" // for fillKernelLaunch
+#include <cstdio>
+#include <cstdlib>
 
 #ifdef GPU_SOLVER
 
@@ -511,6 +513,11 @@ void gpuDot_async(const cudaSolverType* a, const cudaSolverType* b, size_t n,
 //  Batched dot+norm kernel for GMRES Arnoldi
 // =========================================================================
 
+// k_batchedDotNorm keeps its partial sums in a fixed-size per-thread array:
+// at most this many dot products per call (k + 1, at most the GMRES restart
+// length)
+constexpr int kBatchedDotMax = 32;
+
 /**
  * Fused kernel: compute (k+1) dot products dot(w, V[j]) for j=0..k
  * AND norm2(w) simultaneously.  Uses grid-stride loop.
@@ -530,11 +537,8 @@ __global__ void k_batchedDotNorm(const T* __restrict__ w,
 
   // Each thread accumulates kp1+1 partial sums.
   // Use stack-allocated array up to a compile-time max.
-  constexpr int MAX_BATCH = 32;
-  T sums[MAX_BATCH + 1]; // +1 for norm2
-  int total = kp1 + 1;
-  if (total > MAX_BATCH + 1)
-    total = MAX_BATCH + 1; // safety clamp
+  T sums[kBatchedDotMax + 1]; // +1 for norm2
+  const int total = kp1 + 1;  // kp1 <= kBatchedDotMax: checked on the host
   for (int j = 0; j < total; j++)
     sums[j] = 0.0;
 
@@ -578,6 +582,14 @@ void gpuBatchedDotNorm(const cudaSolverType* w, const cudaSolverType* V_base,
                        cudaStream_t stream) {
   int kp1 = k + 1;     // number of dot products
   int total = kp1 + 1; // +1 for norm2
+  // more vectors would write past the kernel's per-thread sums array
+  if (kp1 > kBatchedDotMax) {
+    fprintf(stderr,
+            "gpuBatchedDotNorm: %d vectors exceed the %d the kernel "
+            "supports (GMRES restart length too large)\n",
+            kp1, kBatchedDotMax);
+    abort();
+  }
 
   // Zero the output array
   cudaErrChk(cudaMemsetAsync(d_out, 0, total * sizeof(cudaSolverType), stream));

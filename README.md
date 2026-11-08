@@ -336,6 +336,19 @@ Some cases apply additional boundary-condition fixes during the time loop:
 | `GEMHarris` | None |
 | `HumpPert` | None |
 
+### Boundary rows of the implicit field solve
+
+The Maxwell solve for E(n+θ) (GMRES, or with the GPU field solver also FGMRES with block Jacobi, or Chebyshev) needs a linear operator: the image M·v that the solver evaluates on its own basis vectors must hold no constant term. Each boundary condition is therefore split into its linear part, which goes in the image row, and its constant part, which goes in the right-hand-side row.
+
+| face | image row | right-hand-side row |
+|---|---|---|
+| open inflow face (`bcEMface* = 2`, `bcPface* = 2`, X-right excluded), with `ApplyInflowBcsEImage = 1` (default) | v | E0 = −u0×B0 |
+| perfect conductor (`bcEMface* = 0`), tangential components | v_t | E0_t |
+| perfect conductor, normal component n (Ampère's law without curl B, χ_n·E = Eⁿ_n − 4πθΔt Ĵ_n, χ_n the row n of the implicit susceptibility that `MUdot` applies in the interior) | v_n + (χ_na v_a + χ_nb v_b)/χ_nn | (Eⁿ_n − 4πθΔt Ĵ_n)/χ_nn |
+| every other face, among them the open X-right face and open faces with `bcPface* ≠ 2` or `ApplyInflowBcsEImage = 0` | the operator's | the physical right-hand side |
+
+Earlier versions put the constants in the image (v − E0 on open faces; the Eⁿ and Ĵ terms on conductor faces). That is an affine map, so GMRES built a wrong Krylov space whenever the constants were nonzero. A 3D magnetosphere with E0 ≠ 0 took about 60 GMRES iterations per cycle instead of 11. The CPU GMRES, which stops on its own residual estimate, also accepted wrong fields: in a 2D case with E0 ≠ 0 the field after one solve was 2 % off at `GMREStol` = 1e-6. Two further defects are fixed. The conductor rows used the transpose of the interior susceptibility, which flipped the sign of the Hall coupling at the wall. The CPU GMRES stopped on the wrong Givens entry and dropped the last Krylov direction of each restart. With these fixes GMRES converges steadily down to 1e-15, and the CPU and GPU solvers take the same number of iterations and return the same field. Rows that kept the operator's image but had their right-hand side zeroed (the open X-right face with `bcPface = 2`, and every open face with `bcPface = 2` when `ApplyInflowBcsEImage = 0`) now keep their physical right-hand side.
+
 ### Boundary injection (reemission faces)
 
 On a non-periodic face with `bcPface* = 2`, every particle that ends a push in the last 3 cells before the face is deleted. The GPU then refills those cells with a drifting Maxwellian (`rhoINJECT`, the species' drift and thermal speeds), every cycle and with the same number of particles per cell as the initial loading (`npcel*`). Each injected particle draws its numbers from its own Philox stream. The key is set by the cycle and the species, and the stream number is set by the particle's global cell and sub-cell. So ranks inject different plasma, the injected plasma does not depend on `XLEN`/`YLEN`/`ZLEN`, and a restart repeats the injection of every cycle.
@@ -379,6 +392,8 @@ On [λ_min, λ_max], the polynomial leaves a residual of at most 1/T_k(σ) ≈ 1
 `PoissonChebEigRatio` (default 1000) therefore raises the lower bound to max(λ_min, λ_max / `PoissonChebEigRatio`). The polynomial then reduces the upper spectrum, and FGMRES resolves the few smooth modes below the bound, which the polynomial still inverts with the right sign. `PoissonChebEigRatio = 0` restores the exact bounds.
 
 The CPU field solver uses unpreconditioned GMRES for these solves.
+
+Both corrections subtract ∇ψ with the ghost rule of their solve (ψ = 0 beyond the physical faces), so the step is the discrete projection the solve inverted.
 
 ### Planet surface (`Dipole`, `Dipole2D`)
 

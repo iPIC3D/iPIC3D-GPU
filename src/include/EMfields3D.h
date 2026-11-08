@@ -409,6 +409,16 @@ public:
   /*! Perfect conductor boundary conditions for source RIGHT wall */
   void perfectConductorRightS(arr3_double vectorX, arr3_double vectorY,
                               arr3_double vectorZ, int dir);
+  /*! Conductor image rows (linear) on every conductor face of this rank
+   *  (conductorFace_): perfectConductorLeft / perfectConductorRight */
+  void perfectConductorImages(arr3_double imageX, arr3_double imageY,
+                              arr3_double imageZ, const_arr3_double vectorX,
+                              const_arr3_double vectorY,
+                              const_arr3_double vectorZ);
+  /*! Conductor RHS rows on every conductor face of this rank
+   *  (conductorFace_): perfectConductorLeftS / perfectConductorRightS */
+  void perfectConductorSources(arr3_double vectorX, arr3_double vectorY,
+                               arr3_double vectorZ);
 
   /*! Calculate the sysceptibility tensor on the boundary */
   void sustensorRightX(double** susxx, double** susyx, double** suszx);
@@ -829,15 +839,16 @@ public:
   /** GPU smooth3: fused 3-component node-field smoothing (for Jhat). */
   void gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
                   int type);
-  /** GPU perfect conductor BC: left boundary. */
-  void gpuPerfectConductorLeft(GPUFieldArray3& imX, GPUFieldArray3& imY,
-                               GPUFieldArray3& imZ, GPUFieldArray3& vX,
-                               GPUFieldArray3& vY, GPUFieldArray3& vZ, int dir);
-  /** GPU perfect conductor BC: right boundary. */
-  void gpuPerfectConductorRight(GPUFieldArray3& imX, GPUFieldArray3& imY,
-                                GPUFieldArray3& imZ, GPUFieldArray3& vX,
-                                GPUFieldArray3& vY, GPUFieldArray3& vZ,
-                                int dir);
+  /** GPU perfect conductor BC, image rows (linear) on every conductor face
+   *  of this rank (bcEMface = 0): gpuPerfectConductorImage. */
+  void gpuPerfectConductorImages(GPUFieldArray3& imX, GPUFieldArray3& imY,
+                                 GPUFieldArray3& imZ, GPUFieldArray3& vX,
+                                 GPUFieldArray3& vY, GPUFieldArray3& vZ);
+  /** GPU perfect conductor BC, RHS rows on every conductor face of this rank
+   *  (bcEMface = 0): tangential -(u0 x B0), normal the constant part of the
+   *  normal row (gpuPerfectConductorSource). */
+  void gpuPerfectConductorSources(cudaSolverType* dX, cudaSolverType* dY,
+                                  cudaSolverType* dZ);
   /** Fused triple Laplacian, the GPU form of 3x operatorLapN2N (X-right
    * outflow closure included), with ONE batched halo exchange. */
   void gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
@@ -927,10 +938,10 @@ public:
   void gpuInterpDensitiesN2C();
 
   // ---- GPU Solver: open boundary conditions ----
-  /** GPU open BC: zero source term on inflow faces. */
+  /** GPU open BC: RHS rows (E0 = -u0 x B0) of the open inflow faces. */
   void gpuOpenBoundaryInflowESource(cudaSolverType* dX, cudaSolverType* dY,
                                     cudaSolverType* dZ, int nx, int ny, int nz);
-  /** GPU open BC: set image = vect - E_inj on inflow faces. */
+  /** GPU open BC: identity image rows of the open inflow faces. */
   void gpuOpenBoundaryInflowEImage(cudaSolverType* imX, cudaSolverType* imY,
                                    cudaSolverType* imZ,
                                    const cudaSolverType* vX,
@@ -1321,6 +1332,15 @@ private:
   int bcEMfaceYleft;
   int bcEMfaceZright;
   int bcEMfaceZleft;
+  // Faces of this rank (0 Xleft, 1 Xright, 2 Yleft, 3 Yright, 4 Zleft,
+  // 5 Zright), fixed at construction so the solver loops do not re-evaluate
+  // the topology and boundary codes:
+  // - openInflowFace_: bcEMface = 2 with bcPface = 2, X-right excluded (the
+  //   outflow face keeps its operator rows).  With ApplyInflowBcsEImage its
+  //   Maxwell rows are the identity (image) and E0 = -u0 x B0 (RHS);
+  // - conductorFace_: perfect conductor, bcEMface = 0.
+  bool openInflowFace_[6];
+  bool conductorFace_[6];
 
   // Absorbing boundary parameters
   int yes_sal;

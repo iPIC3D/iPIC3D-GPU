@@ -140,350 +140,123 @@ void gpuPIdotSpecies(cudaSolverType* PIX, cudaSolverType* PIY,
 
 // =========================================================================
 //  Perfect conductor boundary condition kernels
-//  Each kernel operates on one 2D face and fuses the sustensor computation.
+//
+//  On a conductor face the tangential E rows are E_t = ebc_t (the RHS) and
+//  the normal row is Ampere's law without curl B, chi_n . E = E^n_n -
+//  4 pi theta dt Jhat_n, with chi the implicit susceptibility at the node.
+//  The image (A x) carries only the part linear in x, the RHS the rest, so
+//  the operator GMRES sees is linear:
+//    image_n  = x_n + (chi_na x_a + chi_nb x_b) / chi_nn
+//    source_n = (E^n_n - 4 pi theta dt Jhat_n) / chi_nn
 // =========================================================================
 
-// Maximum number of species for stack allocation in kernels
-#define MAX_SPECIES 8
+/** Index of point (a, b) of the face plane `face` normal to DIR: compile-time
+ *  layout, no branch at run time.  Shared by the conductor and open-face
+ *  kernels. */
+template <int DIR>
+__device__ __forceinline__ int faceIdx3(int face, int a, int b, int ny,
+                                        int nz) {
+  if constexpr (DIR == 0)
+    return IDX3(face, a, b, ny, nz);
+  else if constexpr (DIR == 1)
+    return IDX3(a, face, b, ny, nz);
+  else
+    return IDX3(a, b, face, ny, nz);
+}
 
-/**
- * Perfect conductor LEFT boundary, direction X (face i=1).
- * 2D grid over (j,k) ∈ [1, nyn-2] × [1, nzn-2].
- * Thread block: 16×16.
- */
-template <typename T>
-__global__ void k_perfectConductorLeftX(
-    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
+/** Row DIR of the implicit susceptibility at node idx, as (chi_nn, chi_na,
+ *  chi_nb) with a = DIR+1, b = DIR+2 (mod 3):
+ *  chi_nj = delta_nj + sum_s d_s (delta_nj + w_n w_j + eps_njk w_k), the
+ *  row n of the operator MUdot applies in the interior,
+ *  w = (q/m)_s dt B / 2c, d_s = 2 pi delt dt (q/m)_s rho_s / (c (1 + w^2)). */
+template <typename T, int DIR>
+__device__ __forceinline__ void
+pecSusceptibilityRow(T& chiN, T& chiA, T& chiB, int idx,
+                     const T* __restrict__ Bxn, const T* __restrict__ Byn,
+                     const T* __restrict__ Bzn, const T* __restrict__ Bx_ext,
+                     const T* __restrict__ By_ext, const T* __restrict__ Bz_ext,
+                     const T* __restrict__ rhons, const T* __restrict__ qom_d,
+                     int ns, int speciesStride, T dt, T c, T FourPI, T delt) {
+  const T bx = Bxn[idx] + Bx_ext[idx], by = Byn[idx] + By_ext[idx],
+          bz = Bzn[idx] + Bz_ext[idx];
+  // field components in the (n, a, b) frame of the face, at compile time
+  const T bn = DIR == 0 ? bx : (DIR == 1 ? by : bz);
+  const T ba = DIR == 0 ? by : (DIR == 1 ? bz : bx);
+  const T bb = DIR == 0 ? bz : (DIR == 1 ? bx : by);
+  const T b2 = bx * bx + by * by + bz * bz;
+  chiN = 1.0;
+  chiA = 0.0;
+  chiB = 0.0;
+  for (int is = 0; is < ns; is++) {
+    const T beta = 0.5 * qom_d[is] * dt / c;
+    const T wn = beta * bn, wa = beta * ba, wb = beta * bb;
+    const T d = FourPI / 2.0 * delt * dt / c * qom_d[is] *
+                rhons[is * speciesStride + idx] / (1.0 + beta * beta * b2);
+    chiN += (1.0 + wn * wn) * d;
+    // the rows of MUdot / k_PIdotSpecies: (v + v x w + (v.w) w) d
+    chiA += (wn * wa + wb) * d; // (v x w)_n from v_a: +w_b
+    chiB += (wn * wb - wa) * d; // (v x w)_n from v_b: -w_a
+  }
+}
+
+/** Conductor image rows on face node plane `face` normal to DIR (tangential
+ *  interior), linear in the Krylov vector (see the banner above). */
+template <typename T, int DIR>
+__global__ void k_perfectConductorImage(
+    T* __restrict__ imX, T* __restrict__ imY, T* __restrict__ imZ,
     const T* __restrict__ vX, const T* __restrict__ vY,
-    const T* __restrict__ vZ, const T* __restrict__ Ex,
-    const T* __restrict__ Jxh, const T* __restrict__ Bxn,
+    const T* __restrict__ vZ, const T* __restrict__ Bxn,
     const T* __restrict__ Byn, const T* __restrict__ Bzn,
     const T* __restrict__ Bx_ext, const T* __restrict__ By_ext,
     const T* __restrict__ Bz_ext, const T* __restrict__ rhons,
-    const T* __restrict__ qom_d, int ns, T dt, T c, T th, T FourPI, T delt,
+    const T* __restrict__ qom_d, int ns, T dt, T c, T FourPI, T delt, int face,
     int nxn, int nyn, int nzn) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (j > nyn - 2 || k > nzn - 2)
+  constexpr int A = (DIR + 1) % 3, B = (DIR + 2) % 3;
+  const int d1 = DIR == 0 ? nyn : nxn, d2 = DIR == 2 ? nyn : nzn;
+  const int a = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const int b = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  if (a > d1 - 2 || b > d2 - 2)
     return;
-
-  int bnd = IDX3(1, j, k, nyn, nzn);
-  int speciesStride = nxn * nyn * nzn;
-
-  // Compute sustensor at boundary
-  T susxx = 1.0, susyx = 0.0, suszx = 0.0;
-  for (int is = 0; is < ns; is++) {
-    T beta = 0.5 * qom_d[is] * dt / c;
-    T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-    T omcy = beta * (Byn[bnd] + By_ext[bnd]);
-    T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-    T rho = rhons[is * speciesStride + bnd];
-    T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
-              (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
-    susxx += (1.0 + omcx * omcx) * denom;
-    susyx += (-omcz + omcx * omcy) * denom;
-    suszx += (omcy + omcx * omcz) * denom;
-  }
-
-  // Apply perfect conductor BC
-  imageX[bnd] = vX[bnd] - (Ex[bnd] - susyx * vY[bnd] - suszx * vZ[bnd] -
-                           Jxh[bnd] * dt * th * FourPI) /
-                              susxx;
-  imageY[bnd] = vY[bnd];
-  imageZ[bnd] = vZ[bnd];
+  const int idx = faceIdx3<DIR>(face, a, b, nyn, nzn);
+  T chiN, chiA, chiB;
+  pecSusceptibilityRow<T, DIR>(chiN, chiA, chiB, idx, Bxn, Byn, Bzn, Bx_ext,
+                               By_ext, Bz_ext, rhons, qom_d, ns,
+                               nxn * nyn * nzn, dt, c, FourPI, delt);
+  T* const im[3] = {imX, imY, imZ};
+  const T v[3] = {vX[idx], vY[idx], vZ[idx]};
+  im[DIR][idx] = v[DIR] + (chiA * v[A] + chiB * v[B]) / chiN;
+  im[A][idx] = v[A];
+  im[B][idx] = v[B];
 }
 
-template <typename T>
-__global__ void k_perfectConductorLeftY(
-    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
-    const T* __restrict__ vX, const T* __restrict__ vY,
-    const T* __restrict__ vZ, const T* __restrict__ Ey,
-    const T* __restrict__ Jyh, const T* __restrict__ Bxn,
-    const T* __restrict__ Byn, const T* __restrict__ Bzn,
-    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext,
-    const T* __restrict__ Bz_ext, const T* __restrict__ rhons,
-    const T* __restrict__ qom_d, int ns, T dt, T c, T th, T FourPI, T delt,
-    int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (i > nxn - 2 || k > nzn - 2)
+/** Conductor RHS rows on the same plane: normal (E^n_n - 4 pi theta dt
+ *  Jhat_n) / chi_nn, tangential ebc. */
+template <typename T, int DIR>
+__global__ void k_perfectConductorSource(
+    T* __restrict__ sX, T* __restrict__ sY, T* __restrict__ sZ,
+    const T* __restrict__ En, const T* __restrict__ Jn,
+    const T* __restrict__ Bxn, const T* __restrict__ Byn,
+    const T* __restrict__ Bzn, const T* __restrict__ Bx_ext,
+    const T* __restrict__ By_ext, const T* __restrict__ Bz_ext,
+    const T* __restrict__ rhons, const T* __restrict__ qom_d, int ns, T dt, T c,
+    T th, T FourPI, T delt, T ebc0, T ebc1, T ebc2, int face, int nxn, int nyn,
+    int nzn) {
+  constexpr int A = (DIR + 1) % 3, B = (DIR + 2) % 3;
+  const int d1 = DIR == 0 ? nyn : nxn, d2 = DIR == 2 ? nyn : nzn;
+  const int a = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const int b = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  if (a > d1 - 2 || b > d2 - 2)
     return;
-
-  int bnd = IDX3(i, 1, k, nyn, nzn);
-  int speciesStride = nxn * nyn * nzn;
-
-  T susxy = 0.0, susyy = 1.0, suszy = 0.0;
-  for (int is = 0; is < ns; is++) {
-    T beta = 0.5 * qom_d[is] * dt / c;
-    T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-    T omcy = beta * (Byn[bnd] + By_ext[bnd]);
-    T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-    T rho = rhons[is * speciesStride + bnd];
-    T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
-              (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
-    susxy += (omcz + omcx * omcy) * denom;
-    susyy += (1.0 + omcy * omcy) * denom;
-    suszy += (-omcx + omcy * omcz) * denom;
-  }
-
-  imageX[bnd] = vX[bnd];
-  imageY[bnd] = vY[bnd] - (Ey[bnd] - susxy * vX[bnd] - suszy * vZ[bnd] -
-                           Jyh[bnd] * dt * th * FourPI) /
-                              susyy;
-  imageZ[bnd] = vZ[bnd];
-}
-
-template <typename T>
-__global__ void k_perfectConductorLeftZ(
-    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
-    const T* __restrict__ vX, const T* __restrict__ vY,
-    const T* __restrict__ vZ, const T* __restrict__ Ez,
-    const T* __restrict__ Jzh, const T* __restrict__ Bxn,
-    const T* __restrict__ Byn, const T* __restrict__ Bzn,
-    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext,
-    const T* __restrict__ Bz_ext, const T* __restrict__ rhons,
-    const T* __restrict__ qom_d, int ns, T dt, T c, T th, T FourPI, T delt,
-    int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (i > nxn - 2 || j > nyn - 2)
-    return;
-
-  int bnd = IDX3(i, j, 1, nyn, nzn);
-  int speciesStride = nxn * nyn * nzn;
-
-  T susxz = 0.0, susyz = 0.0, suszz = 1.0;
-  for (int is = 0; is < ns; is++) {
-    T beta = 0.5 * qom_d[is] * dt / c;
-    T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-    T omcy = beta * (Byn[bnd] + By_ext[bnd]);
-    T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-    T rho = rhons[is * speciesStride + bnd];
-    T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
-              (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
-    susxz += (-omcy + omcx * omcz) * denom;
-    susyz += (omcx + omcy * omcz) * denom;
-    suszz += (1.0 + omcz * omcz) * denom;
-  }
-
-  imageX[bnd] = vX[bnd];
-  imageY[bnd] = vY[bnd];
-  imageZ[bnd] = vZ[bnd] - (Ez[bnd] - susxz * vX[bnd] - susyz * vY[bnd] -
-                           Jzh[bnd] * dt * th * FourPI) /
-                              suszz;
-}
-
-// ---- RIGHT boundary kernels ----
-
-template <typename T>
-__global__ void k_perfectConductorRightX(
-    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
-    const T* __restrict__ vX, const T* __restrict__ vY,
-    const T* __restrict__ vZ, const T* __restrict__ Ex,
-    const T* __restrict__ Jxh, const T* __restrict__ Bxn,
-    const T* __restrict__ Byn, const T* __restrict__ Bzn,
-    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext,
-    const T* __restrict__ Bz_ext, const T* __restrict__ rhons,
-    const T* __restrict__ qom_d, int ns, T dt, T c, T th, T FourPI, T delt,
-    int nxn, int nyn, int nzn) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (j > nyn - 2 || k > nzn - 2)
-    return;
-
-  int bnd = IDX3(nxn - 2, j, k, nyn, nzn);
-  int speciesStride = nxn * nyn * nzn;
-
-  T susxx = 1.0, susyx = 0.0, suszx = 0.0;
-  for (int is = 0; is < ns; is++) {
-    T beta = 0.5 * qom_d[is] * dt / c;
-    T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-    T omcy = beta * (Byn[bnd] + By_ext[bnd]);
-    T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-    T rho = rhons[is * speciesStride + bnd];
-    T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
-              (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
-    susxx += (1.0 + omcx * omcx) * denom;
-    susyx += (-omcz + omcx * omcy) * denom;
-    suszx += (omcy + omcx * omcz) * denom;
-  }
-
-  imageX[bnd] = vX[bnd] - (Ex[bnd] - susyx * vY[bnd] - suszx * vZ[bnd] -
-                           Jxh[bnd] * dt * th * FourPI) /
-                              susxx;
-  imageY[bnd] = vY[bnd];
-  imageZ[bnd] = vZ[bnd];
-}
-
-template <typename T>
-__global__ void k_perfectConductorRightY(
-    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
-    const T* __restrict__ vX, const T* __restrict__ vY,
-    const T* __restrict__ vZ, const T* __restrict__ Ey,
-    const T* __restrict__ Jyh, const T* __restrict__ Bxn,
-    const T* __restrict__ Byn, const T* __restrict__ Bzn,
-    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext,
-    const T* __restrict__ Bz_ext, const T* __restrict__ rhons,
-    const T* __restrict__ qom_d, int ns, T dt, T c, T th, T FourPI, T delt,
-    int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (i > nxn - 2 || k > nzn - 2)
-    return;
-
-  int bnd = IDX3(i, nyn - 2, k, nyn, nzn);
-  int speciesStride = nxn * nyn * nzn;
-
-  T susxy = 0.0, susyy = 1.0, suszy = 0.0;
-  for (int is = 0; is < ns; is++) {
-    T beta = 0.5 * qom_d[is] * dt / c;
-    T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-    T omcy = beta * (Byn[bnd] + By_ext[bnd]);
-    T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-    T rho = rhons[is * speciesStride + bnd];
-    T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
-              (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
-    susxy += (omcz + omcx * omcy) * denom;
-    susyy += (1.0 + omcy * omcy) * denom;
-    suszy += (-omcx + omcy * omcz) * denom;
-  }
-
-  imageX[bnd] = vX[bnd];
-  imageY[bnd] = vY[bnd] - (Ey[bnd] - susxy * vX[bnd] - suszy * vZ[bnd] -
-                           Jyh[bnd] * dt * th * FourPI) /
-                              susyy;
-  imageZ[bnd] = vZ[bnd];
-}
-
-template <typename T>
-__global__ void k_perfectConductorRightZ(
-    T* __restrict__ imageX, T* __restrict__ imageY, T* __restrict__ imageZ,
-    const T* __restrict__ vX, const T* __restrict__ vY,
-    const T* __restrict__ vZ, const T* __restrict__ Ez,
-    const T* __restrict__ Jzh, const T* __restrict__ Bxn,
-    const T* __restrict__ Byn, const T* __restrict__ Bzn,
-    const T* __restrict__ Bx_ext, const T* __restrict__ By_ext,
-    const T* __restrict__ Bz_ext, const T* __restrict__ rhons,
-    const T* __restrict__ qom_d, int ns, T dt, T c, T th, T FourPI, T delt,
-    int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (i > nxn - 2 || j > nyn - 2)
-    return;
-
-  int bnd = IDX3(i, j, nzn - 2, nyn, nzn);
-  int speciesStride = nxn * nyn * nzn;
-
-  T susxz = 0.0, susyz = 0.0, suszz = 1.0;
-  for (int is = 0; is < ns; is++) {
-    T beta = 0.5 * qom_d[is] * dt / c;
-    T omcx = beta * (Bxn[bnd] + Bx_ext[bnd]);
-    T omcy = beta * (Byn[bnd] + By_ext[bnd]);
-    T omcz = beta * (Bzn[bnd] + Bz_ext[bnd]);
-    T rho = rhons[is * speciesStride + bnd];
-    T denom = FourPI / 2.0 * delt * dt / c * qom_d[is] * rho /
-              (1.0 + omcx * omcx + omcy * omcy + omcz * omcz);
-    susxz += (-omcy + omcx * omcz) * denom;
-    susyz += (omcx + omcy * omcz) * denom;
-    suszz += (1.0 + omcz * omcz) * denom;
-  }
-
-  imageX[bnd] = vX[bnd];
-  imageY[bnd] = vY[bnd];
-  imageZ[bnd] = vZ[bnd] - (Ez[bnd] - susxz * vX[bnd] - susyz * vY[bnd] -
-                           Jzh[bnd] * dt * th * FourPI) /
-                              suszz;
-}
-
-// =========================================================================
-//  Perfect conductor source kernels
-// =========================================================================
-
-template <typename T>
-__global__ void k_perfectConductorLeftSX(T* __restrict__ vX, T* __restrict__ vY,
-                                         T* __restrict__ vZ, T ebc1, T ebc2,
-                                         int nyn, int nzn) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (j > nyn - 2 || k > nzn - 2)
-    return;
-  int idx = 1 * nyn * nzn + j * nzn + k;
-  vX[idx] = 0.0;
-  vY[idx] = ebc1;
-  vZ[idx] = ebc2;
-}
-
-template <typename T>
-__global__ void k_perfectConductorLeftSY(T* __restrict__ vX, T* __restrict__ vY,
-                                         T* __restrict__ vZ, T ebc0, T ebc2,
-                                         int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (i > nxn - 2 || k > nzn - 2)
-    return;
-  int idx = i * nyn * nzn + 1 * nzn + k;
-  vX[idx] = ebc0;
-  vY[idx] = 0.0;
-  vZ[idx] = ebc2;
-}
-
-template <typename T>
-__global__ void k_perfectConductorLeftSZ(T* __restrict__ vX, T* __restrict__ vY,
-                                         T* __restrict__ vZ, T ebc0, T ebc1,
-                                         int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (i > nxn - 2 || j > nyn - 2)
-    return;
-  int idx = i * nyn * nzn + j * nzn + 1;
-  vX[idx] = ebc0;
-  vY[idx] = ebc1;
-  vZ[idx] = 0.0;
-}
-
-template <typename T>
-__global__ void k_perfectConductorRightSX(T* __restrict__ vX,
-                                          T* __restrict__ vY,
-                                          T* __restrict__ vZ, T ebc1, T ebc2,
-                                          int nxn, int nyn, int nzn) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (j > nyn - 2 || k > nzn - 2)
-    return;
-  int idx = (nxn - 2) * nyn * nzn + j * nzn + k;
-  vX[idx] = 0.0;
-  vY[idx] = ebc1;
-  vZ[idx] = ebc2;
-}
-
-template <typename T>
-__global__ void k_perfectConductorRightSY(T* __restrict__ vX,
-                                          T* __restrict__ vY,
-                                          T* __restrict__ vZ, T ebc0, T ebc2,
-                                          int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (i > nxn - 2 || k > nzn - 2)
-    return;
-  int idx = i * nyn * nzn + (nyn - 2) * nzn + k;
-  vX[idx] = ebc0;
-  vY[idx] = 0.0;
-  vZ[idx] = ebc2;
-}
-
-template <typename T>
-__global__ void k_perfectConductorRightSZ(T* __restrict__ vX,
-                                          T* __restrict__ vY,
-                                          T* __restrict__ vZ, T ebc0, T ebc1,
-                                          int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (i > nxn - 2 || j > nyn - 2)
-    return;
-  int idx = i * nyn * nzn + j * nzn + (nzn - 2);
-  vX[idx] = ebc0;
-  vY[idx] = ebc1;
-  vZ[idx] = 0.0;
+  const int idx = faceIdx3<DIR>(face, a, b, nyn, nzn);
+  T chiN, chiA, chiB;
+  pecSusceptibilityRow<T, DIR>(chiN, chiA, chiB, idx, Bxn, Byn, Bzn, Bx_ext,
+                               By_ext, Bz_ext, rhons, qom_d, ns,
+                               nxn * nyn * nzn, dt, c, FourPI, delt);
+  T* const src[3] = {sX, sY, sZ};
+  const T ebc[3] = {ebc0, ebc1, ebc2};
+  src[DIR][idx] = (En[idx] - Jn[idx] * dt * th * FourPI) / chiN;
+  src[A][idx] = ebc[A];
+  src[B][idx] = ebc[B];
 }
 
 // =========================================================================
@@ -495,135 +268,63 @@ static inline dim3 faceGrid2D(int d1, int d2) {
 }
 static const dim3 faceBlock2D(16, 16);
 
-void gpuPerfectConductorLeft(
+/** Launch `KERNEL<cudaSolverType, DIR>` for the runtime face direction dir:
+ *  the only direction dispatch, on the host, once per launch. */
+#define FACE_DIR_DISPATCH(dir, KERNEL, grid, block, stream, ...)               \
+  switch (dir) {                                                               \
+  case 0:                                                                      \
+    KERNEL<cudaSolverType, 0><<<grid, block, 0, stream>>>(__VA_ARGS__);        \
+    break;                                                                     \
+  case 1:                                                                      \
+    KERNEL<cudaSolverType, 1><<<grid, block, 0, stream>>>(__VA_ARGS__);        \
+    break;                                                                     \
+  default:                                                                     \
+    KERNEL<cudaSolverType, 2><<<grid, block, 0, stream>>>(__VA_ARGS__);        \
+    break;                                                                     \
+  }
+
+void gpuPerfectConductorImage(
     cudaSolverType* imageX, cudaSolverType* imageY, cudaSolverType* imageZ,
     const cudaSolverType* vectX, const cudaSolverType* vectY,
-    const cudaSolverType* vectZ, const cudaSolverType* Ex,
-    const cudaSolverType* Ey, const cudaSolverType* Ez,
-    const cudaSolverType* Jxh, const cudaSolverType* Jyh,
-    const cudaSolverType* Jzh, const cudaSolverType* Bxn,
+    const cudaSolverType* vectZ, const cudaSolverType* Bxn,
     const cudaSolverType* Byn, const cudaSolverType* Bzn,
     const cudaSolverType* Bx_ext, const cudaSolverType* By_ext,
     const cudaSolverType* Bz_ext, const cudaSolverType* rhons,
     const cudaSolverType* d_qom, int ns, cudaSolverType dt, cudaSolverType c,
-    cudaSolverType th, cudaSolverType FourPI, cudaSolverType delt, int nxn,
-    int nyn, int nzn, int dir, cudaStream_t stream) {
-  switch (dir) {
-  case 0: {
-    dim3 grid = faceGrid2D(nyn, nzn);
-    k_perfectConductorLeftX<<<grid, faceBlock2D, 0, stream>>>(
-        imageX, imageY, imageZ, vectX, vectY, vectZ, Ex, Jxh, Bxn, Byn, Bzn,
-        Bx_ext, By_ext, Bz_ext, rhons, d_qom, ns, dt, c, th, FourPI, delt, nxn,
-        nyn, nzn);
-  } break;
-  case 1: {
-    dim3 grid = faceGrid2D(nxn, nzn);
-    k_perfectConductorLeftY<<<grid, faceBlock2D, 0, stream>>>(
-        imageX, imageY, imageZ, vectX, vectY, vectZ, Ey, Jyh, Bxn, Byn, Bzn,
-        Bx_ext, By_ext, Bz_ext, rhons, d_qom, ns, dt, c, th, FourPI, delt, nxn,
-        nyn, nzn);
-  } break;
-  case 2: {
-    dim3 grid = faceGrid2D(nxn, nyn);
-    k_perfectConductorLeftZ<<<grid, faceBlock2D, 0, stream>>>(
-        imageX, imageY, imageZ, vectX, vectY, vectZ, Ez, Jzh, Bxn, Byn, Bzn,
-        Bx_ext, By_ext, Bz_ext, rhons, d_qom, ns, dt, c, th, FourPI, delt, nxn,
-        nyn, nzn);
-  } break;
-  }
+    cudaSolverType FourPI, cudaSolverType delt, int nxn, int nyn, int nzn,
+    int dir, bool high, cudaStream_t stream) {
+  const int n[3] = {nxn, nyn, nzn};
+  const int face = high ? n[dir] - 2 : 1;
+  const dim3 grid = faceGrid2D(dir == 0 ? nyn : nxn, dir == 2 ? nyn : nzn);
+  FACE_DIR_DISPATCH(dir, k_perfectConductorImage, grid, faceBlock2D, stream,
+                    imageX, imageY, imageZ, vectX, vectY, vectZ, Bxn, Byn, Bzn,
+                    Bx_ext, By_ext, Bz_ext, rhons, d_qom, ns, dt, c, FourPI,
+                    delt, face, nxn, nyn, nzn)
   cudaErrChk(cudaGetLastError());
 }
 
-void gpuPerfectConductorRight(
-    cudaSolverType* imageX, cudaSolverType* imageY, cudaSolverType* imageZ,
-    const cudaSolverType* vectX, const cudaSolverType* vectY,
-    const cudaSolverType* vectZ, const cudaSolverType* Ex,
-    const cudaSolverType* Ey, const cudaSolverType* Ez,
-    const cudaSolverType* Jxh, const cudaSolverType* Jyh,
-    const cudaSolverType* Jzh, const cudaSolverType* Bxn,
-    const cudaSolverType* Byn, const cudaSolverType* Bzn,
-    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext,
-    const cudaSolverType* Bz_ext, const cudaSolverType* rhons,
-    const cudaSolverType* d_qom, int ns, cudaSolverType dt, cudaSolverType c,
-    cudaSolverType th, cudaSolverType FourPI, cudaSolverType delt, int nxn,
-    int nyn, int nzn, int dir, cudaStream_t stream) {
-  switch (dir) {
-  case 0: {
-    dim3 grid = faceGrid2D(nyn, nzn);
-    k_perfectConductorRightX<<<grid, faceBlock2D, 0, stream>>>(
-        imageX, imageY, imageZ, vectX, vectY, vectZ, Ex, Jxh, Bxn, Byn, Bzn,
-        Bx_ext, By_ext, Bz_ext, rhons, d_qom, ns, dt, c, th, FourPI, delt, nxn,
-        nyn, nzn);
-  } break;
-  case 1: {
-    dim3 grid = faceGrid2D(nxn, nzn);
-    k_perfectConductorRightY<<<grid, faceBlock2D, 0, stream>>>(
-        imageX, imageY, imageZ, vectX, vectY, vectZ, Ey, Jyh, Bxn, Byn, Bzn,
-        Bx_ext, By_ext, Bz_ext, rhons, d_qom, ns, dt, c, th, FourPI, delt, nxn,
-        nyn, nzn);
-  } break;
-  case 2: {
-    dim3 grid = faceGrid2D(nxn, nyn);
-    k_perfectConductorRightZ<<<grid, faceBlock2D, 0, stream>>>(
-        imageX, imageY, imageZ, vectX, vectY, vectZ, Ez, Jzh, Bxn, Byn, Bzn,
-        Bx_ext, By_ext, Bz_ext, rhons, d_qom, ns, dt, c, th, FourPI, delt, nxn,
-        nyn, nzn);
-  } break;
-  }
-  cudaErrChk(cudaGetLastError());
-}
-
-void gpuPerfectConductorLeftS(cudaSolverType* vectorX, cudaSolverType* vectorY,
-                              cudaSolverType* vectorZ, cudaSolverType ebc0,
-                              cudaSolverType ebc1, cudaSolverType ebc2, int nxn,
-                              int nyn, int nzn, int dir, cudaStream_t stream) {
-  switch (dir) {
-  case 0: {
-    dim3 grid = faceGrid2D(nyn, nzn);
-    k_perfectConductorLeftSX<<<grid, faceBlock2D, 0, stream>>>(
-        vectorX, vectorY, vectorZ, ebc1, ebc2, nyn, nzn);
-  } break;
-  case 1: {
-    dim3 grid = faceGrid2D(nxn, nzn);
-    k_perfectConductorLeftSY<<<grid, faceBlock2D, 0, stream>>>(
-        vectorX, vectorY, vectorZ, ebc0, ebc2, nxn, nyn, nzn);
-  } break;
-  case 2: {
-    dim3 grid = faceGrid2D(nxn, nyn);
-    k_perfectConductorLeftSZ<<<grid, faceBlock2D, 0, stream>>>(
-        vectorX, vectorY, vectorZ, ebc0, ebc1, nxn, nyn, nzn);
-  } break;
-  }
-  cudaErrChk(cudaGetLastError());
-}
-
-void gpuPerfectConductorRightS(cudaSolverType* vectorX, cudaSolverType* vectorY,
-                               cudaSolverType* vectorZ, cudaSolverType ebc0,
-                               cudaSolverType ebc1, cudaSolverType ebc2,
-                               int nxn, int nyn, int nzn, int dir,
-                               cudaStream_t stream) {
-  switch (dir) {
-  case 0: {
-    dim3 grid = faceGrid2D(nyn, nzn);
-    k_perfectConductorRightSX<<<grid, faceBlock2D, 0, stream>>>(
-        vectorX, vectorY, vectorZ, ebc1, ebc2, nxn, nyn, nzn);
-  } break;
-  case 1: {
-    dim3 grid = faceGrid2D(nxn, nzn);
-    k_perfectConductorRightSY<<<grid, faceBlock2D, 0, stream>>>(
-        vectorX, vectorY, vectorZ, ebc0, ebc2, nxn, nyn, nzn);
-  } break;
-  case 2: {
-    dim3 grid = faceGrid2D(nxn, nyn);
-    k_perfectConductorRightSZ<<<grid, faceBlock2D, 0, stream>>>(
-        vectorX, vectorY, vectorZ, ebc0, ebc1, nxn, nyn, nzn);
-  } break;
-  }
+void gpuPerfectConductorSource(
+    cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,
+    const cudaSolverType* En, const cudaSolverType* Jn,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn,
+    const cudaSolverType* Bzn, const cudaSolverType* Bx_ext,
+    const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons, const cudaSolverType* d_qom, int ns,
+    cudaSolverType dt, cudaSolverType c, cudaSolverType th,
+    cudaSolverType FourPI, cudaSolverType delt, cudaSolverType ebc0,
+    cudaSolverType ebc1, cudaSolverType ebc2, int nxn, int nyn, int nzn,
+    int dir, bool high, cudaStream_t stream) {
+  const int n[3] = {nxn, nyn, nzn};
+  const int face = high ? n[dir] - 2 : 1;
+  const dim3 grid = faceGrid2D(dir == 0 ? nyn : nxn, dir == 2 ? nyn : nzn);
+  FACE_DIR_DISPATCH(dir, k_perfectConductorSource, grid, faceBlock2D, stream,
+                    vectorX, vectorY, vectorZ, En, Jn, Bxn, Byn, Bzn, Bx_ext,
+                    By_ext, Bz_ext, rhons, d_qom, ns, dt, c, th, FourPI, delt,
+                    ebc0, ebc1, ebc2, face, nxn, nyn, nzn)
   cudaErrChk(cudaGetLastError());
 }
 
 #undef IDX3
-#undef MAX_SPECIES
 
 // =========================================================================
 //  adjustNonPeriodicDensities: cudaSolverType boundary-face values on GPU
@@ -746,136 +447,65 @@ void gpuAdjustNonPeriodicDensities(int nptrs, cudaSolverType* const* d_devPtrs,
 //  Open Boundary kernels
 // =========================================================================
 
-/** Zero 3 arrays on a single face plane (interior [1..n-2]). */
-template <typename T>
-__global__ void k_zeroFacePlane3(T* X, T* Y, T* Z, int dir, int faceIdx, int nx,
-                                 int ny, int nz) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int d1, d2;
-  if (dir == 0) {
-    d1 = ny - 2;
-    d2 = nz - 2;
-  } else if (dir == 1) {
-    d1 = nx - 2;
-    d2 = nz - 2;
-  } else {
-    d1 = nx - 2;
-    d2 = ny - 2;
-  }
+/** Set 3 arrays to (cx, cy, cz) on a face plane interior [1..n-2]. */
+template <typename T, int DIR>
+__global__ void k_setFacePlane3(T* __restrict__ X, T* __restrict__ Y,
+                                T* __restrict__ Z, T cx, T cy, T cz, int face,
+                                int nx, int ny, int nz) {
+  const int d1 = (DIR == 0 ? ny : nx) - 2, d2 = (DIR == 2 ? ny : nz) - 2;
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid >= d1 * d2)
     return;
-  int a = tid / d2 + 1;
-  int b = tid % d2 + 1;
-  int i, j, k;
-  if (dir == 0) {
-    i = faceIdx;
-    j = a;
-    k = b;
-  } else if (dir == 1) {
-    i = a;
-    j = faceIdx;
-    k = b;
-  } else {
-    i = a;
-    j = b;
-    k = faceIdx;
-  }
-  int idx = (i * ny + j) * nz + k;
-  X[idx] = 0.0;
-  Y[idx] = 0.0;
-  Z[idx] = 0.0;
+  const int idx = faceIdx3<DIR>(face, tid / d2 + 1, tid % d2 + 1, ny, nz);
+  X[idx] = cx;
+  Y[idx] = cy;
+  Z[idx] = cz;
 }
 
-void gpuOpenBCZeroFace3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
+/** Identity rows: image = vect on a face plane interior [1..n-2]. */
+template <typename T, int DIR>
+__global__ void
+k_copyFacePlane3(T* __restrict__ imX, T* __restrict__ imY, T* __restrict__ imZ,
+                 const T* __restrict__ vX, const T* __restrict__ vY,
+                 const T* __restrict__ vZ, int face, int nx, int ny, int nz) {
+  const int d1 = (DIR == 0 ? ny : nx) - 2, d2 = (DIR == 2 ? ny : nz) - 2;
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= d1 * d2)
+    return;
+  const int idx = faceIdx3<DIR>(face, tid / d2 + 1, tid % d2 + 1, ny, nz);
+  imX[idx] = vX[idx];
+  imY[idx] = vY[idx];
+  imZ[idx] = vZ[idx];
+}
+
+void gpuOpenBCSetFace3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
+                       cudaSolverType cx, cudaSolverType cy, cudaSolverType cz,
+                       int dir, int faceIdx, int nx, int ny, int nz,
+                       cudaStream_t stream) {
+  const int total = ((dir == 0 ? ny : nx) - 2) * ((dir == 2 ? ny : nz) - 2);
+  if (total <= 0)
+    return;
+  const int blk = 256;
+  FACE_DIR_DISPATCH(dir, k_setFacePlane3, (total + blk - 1) / blk, blk, stream,
+                    X, Y, Z, cx, cy, cz, faceIdx, nx, ny, nz)
+  cudaErrChk(cudaGetLastError());
+}
+
+void gpuOpenBCCopyFace3(cudaSolverType* imX, cudaSolverType* imY,
+                        cudaSolverType* imZ, const cudaSolverType* vX,
+                        const cudaSolverType* vY, const cudaSolverType* vZ,
                         int dir, int faceIdx, int nx, int ny, int nz,
                         cudaStream_t stream) {
-  int d1, d2;
-  if (dir == 0) {
-    d1 = ny - 2;
-    d2 = nz - 2;
-  } else if (dir == 1) {
-    d1 = nx - 2;
-    d2 = nz - 2;
-  } else {
-    d1 = nx - 2;
-    d2 = ny - 2;
-  }
-  int total = d1 * d2;
+  const int total = ((dir == 0 ? ny : nx) - 2) * ((dir == 2 ? ny : nz) - 2);
   if (total <= 0)
     return;
-  int blk = 256;
-  k_zeroFacePlane3<<<(total + blk - 1) / blk, blk, 0, stream>>>(
-      X, Y, Z, dir, faceIdx, nx, ny, nz);
+  const int blk = 256;
+  FACE_DIR_DISPATCH(dir, k_copyFacePlane3, (total + blk - 1) / blk, blk, stream,
+                    imX, imY, imZ, vX, vY, vZ, faceIdx, nx, ny, nz)
   cudaErrChk(cudaGetLastError());
 }
 
-/** Set image = vect - injE on a single face plane (interior [1..n-2]). */
-template <typename T>
-__global__ void k_imageDiffFacePlane3(T* imX, T* imY, T* imZ, const T* vX,
-                                      const T* vY, const T* vZ, T injE0,
-                                      T injE1, T injE2, int dir, int faceIdx,
-                                      int nx, int ny, int nz) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int d1, d2;
-  if (dir == 0) {
-    d1 = ny - 2;
-    d2 = nz - 2;
-  } else if (dir == 1) {
-    d1 = nx - 2;
-    d2 = nz - 2;
-  } else {
-    d1 = nx - 2;
-    d2 = ny - 2;
-  }
-  if (tid >= d1 * d2)
-    return;
-  int a = tid / d2 + 1;
-  int b = tid % d2 + 1;
-  int i, j, k;
-  if (dir == 0) {
-    i = faceIdx;
-    j = a;
-    k = b;
-  } else if (dir == 1) {
-    i = a;
-    j = faceIdx;
-    k = b;
-  } else {
-    i = a;
-    j = b;
-    k = faceIdx;
-  }
-  int idx = (i * ny + j) * nz + k;
-  imX[idx] = vX[idx] - injE0;
-  imY[idx] = vY[idx] - injE1;
-  imZ[idx] = vZ[idx] - injE2;
-}
-
-void gpuOpenBCImageDiffFace3(cudaSolverType* imX, cudaSolverType* imY,
-                             cudaSolverType* imZ, const cudaSolverType* vX,
-                             const cudaSolverType* vY, const cudaSolverType* vZ,
-                             cudaSolverType injE0, cudaSolverType injE1,
-                             cudaSolverType injE2, int dir, int faceIdx, int nx,
-                             int ny, int nz, cudaStream_t stream) {
-  int d1, d2;
-  if (dir == 0) {
-    d1 = ny - 2;
-    d2 = nz - 2;
-  } else if (dir == 1) {
-    d1 = nx - 2;
-    d2 = nz - 2;
-  } else {
-    d1 = nx - 2;
-    d2 = ny - 2;
-  }
-  int total = d1 * d2;
-  if (total <= 0)
-    return;
-  int blk = 256;
-  k_imageDiffFacePlane3<<<(total + blk - 1) / blk, blk, 0, stream>>>(
-      imX, imY, imZ, vX, vY, vZ, injE0, injE1, injE2, dir, faceIdx, nx, ny, nz);
-  cudaErrChk(cudaGetLastError());
-}
+#undef FACE_DIR_DISPATCH
 
 /**
  * SAL blend: v[idx] = v[idx]*sal + target*(1-sal) on boundary layers.

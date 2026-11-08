@@ -30,6 +30,7 @@
 #include "EMfields3D.h"
 #include "VCtopology3D.h"
 
+#include <cmath>
 #include <cstring>
 
 // Flexible-GMRES --> allows to a have a flexible preeconditioner
@@ -183,7 +184,8 @@ void FGMRES(FIELD_IMAGE FunctionImage, FIELD_IMAGE LocalFunctionImage,
         H[k + 1][k] = normP(w, xkrylovlen, &fieldcomm);
       }
       // normalize the new vector
-      scale(w, (1.0 / H[k + 1][k]), xkrylovlen);
+      if (H[k + 1][k] > 0.0) // else lucky breakdown: residual 0 below
+        scale(w, (1.0 / H[k + 1][k]), xkrylovlen);
 
       if (0 < k) {
 
@@ -200,11 +202,15 @@ void FGMRES(FIELD_IMAGE FunctionImage, FIELD_IMAGE LocalFunctionImage,
       H[k + 1][k] = 0.0;
 
       ApplyPlaneRotation(s[k + 1], s[k], cs[k], sn[k]);
-      initial_error = fabs(s[k]);
+      // ApplyPlaneRotation(s[k+1], s[k]) with s[k+1] = 0 leaves the
+      // least-squares residual after column k in s[k+1]
+      initial_error = fabs(s[k + 1]);
       k++;
     }
+    // k columns were built; after k--, k is the last one (-1: none)
     k--;
-    y[k] = s[k] / H[k][k];
+    if (k >= 0)
+      y[k] = s[k] / H[k][k];
 
     for (int i = k - 1; i >= 0; i--) {
       double tmp = 0.0;
@@ -213,7 +219,8 @@ void FGMRES(FIELD_IMAGE FunctionImage, FIELD_IMAGE LocalFunctionImage,
       y[i] = (s[i] - tmp) / H[i][i];
     }
 
-    for (int j = 0; j < k; j++) {
+    // all k + 1 directions of the least-squares solution
+    for (int j = 0; j <= k; j++) {
       const double yj = y[j];
       // double* Vj = V[j];
       double* Zj = Z[j];
@@ -386,7 +393,8 @@ void GMRESasPreconditioner(FIELD_IMAGE FunctionImage, double* xkrylov,
         H[k + 1][k] = normP(w, xkrylovlen, &fieldcomm);
       }
       // normalize the new vector
-      scale(w, (1.0 / H[k + 1][k]), xkrylovlen);
+      if (H[k + 1][k] > 0.0) // else lucky breakdown: residual 0 below
+        scale(w, (1.0 / H[k + 1][k]), xkrylovlen);
 
       if (0 < k) {
         for (int j = 0; j < k; j++)
@@ -402,12 +410,16 @@ void GMRESasPreconditioner(FIELD_IMAGE FunctionImage, double* xkrylov,
       H[k + 1][k] = 0.0;
 
       ApplyPlaneRotation(s[k + 1], s[k], cs[k], sn[k]);
-      initial_error = fabs(s[k]);
+      // ApplyPlaneRotation(s[k+1], s[k]) with s[k+1] = 0 leaves the
+      // least-squares residual after column k in s[k+1]
+      initial_error = fabs(s[k + 1]);
       k++;
     }
 
+    // k columns were built; after k--, k is the last one (-1: none)
     k--;
-    y[k] = s[k] / H[k][k];
+    if (k >= 0)
+      y[k] = s[k] / H[k][k];
 
     for (int i = k - 1; i >= 0; i--) {
       double tmp = 0.0;
@@ -416,7 +428,8 @@ void GMRESasPreconditioner(FIELD_IMAGE FunctionImage, double* xkrylov,
       y[i] = (s[i] - tmp) / H[i][i];
     }
 
-    for (int j = 0; j < k; j++) {
+    // all k + 1 directions of the least-squares solution
+    for (int j = 0; j <= k; j++) {
       const double yj = y[j];
       double* Vj = V[j];
       for (int i = 0; i < xkrylovlen; i++)
@@ -559,7 +572,8 @@ void GMRESasPreconditionerNoComm(FIELD_IMAGE FunctionImage, double* xkrylov,
       }
 
       // normalize the new vector
-      scale(w, (1.0 / H[k + 1][k]), xkrylovlen);
+      if (H[k + 1][k] > 0.0) // else lucky breakdown: residual 0 below
+        scale(w, (1.0 / H[k + 1][k]), xkrylovlen);
 
       if (0 < k) {
 
@@ -576,12 +590,16 @@ void GMRESasPreconditionerNoComm(FIELD_IMAGE FunctionImage, double* xkrylov,
       H[k + 1][k] = 0.0;
 
       ApplyPlaneRotation(s[k + 1], s[k], cs[k], sn[k]);
-      initial_error = fabs(s[k]);
+      // ApplyPlaneRotation(s[k+1], s[k]) with s[k+1] = 0 leaves the
+      // least-squares residual after column k in s[k+1]
+      initial_error = fabs(s[k + 1]);
       k++;
     }
 
+    // k columns were built; after k--, k is the last one (-1: none)
     k--;
-    y[k] = s[k] / H[k][k];
+    if (k >= 0)
+      y[k] = s[k] / H[k][k];
 
     for (int i = k - 1; i >= 0; i--) {
       double tmp = 0.0;
@@ -590,7 +608,8 @@ void GMRESasPreconditionerNoComm(FIELD_IMAGE FunctionImage, double* xkrylov,
       y[i] = (s[i] - tmp) / H[i][i];
     }
 
-    for (int j = 0; j < k; j++) {
+    // all k + 1 directions of the least-squares solution
+    for (int j = 0; j <= k; j++) {
       const double yj = y[j];
       double* Vj = V[j];
       for (int i = 0; i < xkrylovlen; i++)
@@ -685,6 +704,11 @@ void GMRES(FIELD_IMAGE FunctionImage, double* xkrylov, int xkrylovlen,
     (field->*FunctionImage)(im, xkrylov);
     sub(r, b, im, xkrylovlen);
     initial_error = normP(r, xkrylovlen, &fieldcomm);
+    if (!std::isfinite(initial_error)) {
+      eprintf("GMRES: non-finite residual (%g) at restart %d", initial_error,
+              itr);
+      abort();
+    }
 
     if (itr == 0) {
       if (is_output_thread())
@@ -758,7 +782,8 @@ void GMRES(FIELD_IMAGE FunctionImage, double* xkrylov, int xkrylovlen,
         H[k + 1][k] = normP(w, xkrylovlen, &fieldcomm);
       }
       // normalize the new vector
-      scale(w, (1.0 / H[k + 1][k]), xkrylovlen);
+      if (H[k + 1][k] > 0.0) // else lucky breakdown: residual 0 below
+        scale(w, (1.0 / H[k + 1][k]), xkrylovlen);
 
       if (0 < k) {
 
@@ -775,12 +800,16 @@ void GMRES(FIELD_IMAGE FunctionImage, double* xkrylov, int xkrylovlen,
       H[k + 1][k] = 0.0;
 
       ApplyPlaneRotation(s[k + 1], s[k], cs[k], sn[k]);
-      initial_error = fabs(s[k]);
+      // ApplyPlaneRotation(s[k+1], s[k]) with s[k+1] = 0 leaves the
+      // least-squares residual after column k in s[k+1]
+      initial_error = fabs(s[k + 1]);
       k++;
     }
 
+    // k columns were built; after k--, k is the last one (-1: none)
     k--;
-    y[k] = s[k] / H[k][k];
+    if (k >= 0)
+      y[k] = s[k] / H[k][k];
 
     for (int i = k - 1; i >= 0; i--) {
       double tmp = 0.0;
@@ -789,7 +818,8 @@ void GMRES(FIELD_IMAGE FunctionImage, double* xkrylov, int xkrylovlen,
       y[i] = (s[i] - tmp) / H[i][i];
     }
 
-    for (int j = 0; j < k; j++) {
+    // all k + 1 directions of the least-squares solution
+    for (int j = 0; j <= k; j++) {
       const double yj = y[j];
       double* Vj = V[j];
       for (int i = 0; i < xkrylovlen; i++)

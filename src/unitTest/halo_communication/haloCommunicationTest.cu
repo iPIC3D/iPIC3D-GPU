@@ -153,6 +153,8 @@ ConfigFile makeConfig(const Scenario& scenario) {
   cfg.add("SolverType", "GMRES");
   addConfigValues(cfg, kDisabledOutputCycleKeys, 0);
   cfg.add("CallFinalize", 0);
+  // creates the split exchange resources, so runGpu can test both exchanges
+  cfg.add("HaloOverlap", 1);
   return cfg;
 }
 
@@ -593,52 +595,54 @@ int runCpu(ExchangeCase exchangeCase, const Scenario& scenario,
 int runGpu(ExchangeCase exchangeCase, const Scenario& scenario,
            const VCtopology3D& vct, EMfields3D& emFields, int rank, int nx,
            int ny, int nz) {
-  HostFields host(nx, ny, nz);
-  if (exchangeCase == ExchangeCase::Conventional) {
-    initializeConventional(host, scenario, vct, nx, ny, nz);
-  } else {
-    initializeAdditive(host, rank, nx, ny, nz);
-  }
+  // The conventional exchange runs blocking and split (makeConfig sets
+  // HaloOverlap, which creates the split resources).  The additive exchange
+  // updates active nodes and has no split contract: blocking only.
+  const bool conventional = exchangeCase == ExchangeCase::Conventional;
+  int failures = 0;
+  for (int split = 0; split < (conventional ? 2 : 1); ++split) {
+    HostFields host(nx, ny, nz);
+    if (conventional) {
+      initializeConventional(host, scenario, vct, nx, ny, nz);
+    } else {
+      initializeAdditive(host, rank, nx, ny, nz);
+    }
 
-  StreamGuard stream;
-  const cudaStream_t testStream = stream.get();
-  DeviceFields device(nx, ny, nz);
-  // GPUFieldArray3 initializes with cudaMemset on the legacy default stream.
-  // A cudaStreamNonBlocking stream has no implicit ordering with that stream,
-  // so finish constructor initialization before starting the test H2D copies.
-  cudaErrChk(cudaDeviceSynchronize());
-  HaloBufferGuard haloBuffers(emFields);
-  for (int field = 0; field < kFieldCount; ++field) {
-    device[field].copyFromHostAsync(host[field].fetch_arr(), testStream);
-  }
-  auto pointers = device.pointers();
-#ifdef HALO_OVERLAP
-  if (exchangeCase == ExchangeCase::Conventional) {
-    emFields.gpuBatchedHaloBeginExchange(pointers.data(), kFieldCount, nx, ny,
-                                         nz, false, false, true, testStream);
-    emFields.gpuBatchedHaloEndExchange();
-  } else {
-    // Additive exchange updates active nodes and has no safe split contract,
-    // so it uses the checked blocking path.
-    emFields.gpuBatchedHaloExchange(pointers.data(), kFieldCount, nx, ny, nz,
-                                    true, false, true, true, testStream);
-  }
-#else
-  emFields.gpuBatchedHaloExchange(pointers.data(), kFieldCount, nx, ny, nz,
-                                  exchangeCase == ExchangeCase::Additive, false,
-                                  exchangeCase == ExchangeCase::Additive, true,
-                                  testStream);
-#endif
-  cudaErrChk(cudaGetLastError());
-  cudaErrChk(cudaStreamSynchronize(testStream));
+    StreamGuard stream;
+    const cudaStream_t testStream = stream.get();
+    DeviceFields device(nx, ny, nz);
+    // GPUFieldArray3 initializes with cudaMemset on the legacy default
+    // stream.  A cudaStreamNonBlocking stream has no implicit ordering with
+    // that stream, so finish constructor initialization before starting the
+    // test H2D copies.
+    cudaErrChk(cudaDeviceSynchronize());
+    HaloBufferGuard haloBuffers(emFields);
+    for (int field = 0; field < kFieldCount; ++field) {
+      device[field].copyFromHostAsync(host[field].fetch_arr(), testStream);
+    }
+    auto pointers = device.pointers();
+    if (split) {
+      emFields.gpuBatchedHaloBeginExchange(pointers.data(), kFieldCount, nx, ny,
+                                           nz, false, false, true, testStream);
+      emFields.gpuBatchedHaloEndExchange();
+    } else {
+      emFields.gpuBatchedHaloExchange(pointers.data(), kFieldCount, nx, ny, nz,
+                                      !conventional, false, !conventional, true,
+                                      testStream);
+    }
+    cudaErrChk(cudaGetLastError());
+    cudaErrChk(cudaStreamSynchronize(testStream));
 
-  for (int field = 0; field < kFieldCount; ++field) {
-    device[field].copyToHost(host[field].fetch_arr());
+    for (int field = 0; field < kFieldCount; ++field) {
+      device[field].copyToHost(host[field].fetch_arr());
+    }
+    const char* label = split ? "gpu split" : "gpu";
+    failures +=
+        conventional
+            ? checkConventional(host, scenario, vct, rank, label, nx, ny, nz)
+            : checkAdditive(host, scenario, vct, rank, label, nx, ny, nz);
   }
-  if (exchangeCase == ExchangeCase::Conventional) {
-    return checkConventional(host, scenario, vct, rank, "gpu", nx, ny, nz);
-  }
-  return checkAdditive(host, scenario, vct, rank, "gpu", nx, ny, nz);
+  return failures;
 }
 
 int runScenario(ExchangeCase exchangeCase, Backend backend,

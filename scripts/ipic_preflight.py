@@ -157,6 +157,7 @@ def print_report(cfg: Input) -> None:
     th = cfg.real("th", 1.0)
     smooth = cfg.real("Smooth", 1.0)
     smooth_niter = cfg.integer("SmoothNiter", 6)
+    halo_overlap = cfg.integer("HaloOverlap", 0) != 0
     save_dir = cfg.string("SaveDirName", "data")
     ns = cfg.integer("ns")
 
@@ -246,6 +247,7 @@ def print_report(cfg: Input) -> None:
     print(f"Case type         : {case}")
     print(f"Simulation name   : {sim_name}")
     print(f"Smoothing         : {'off' if smooth == 1.0 else 'on'} (alpha={cxx(smooth)}, Niter={smooth_niter})")
+    print(f"Halo overlap      : {'on' if halo_overlap else 'off'} (field solver)")
     print("---------------------")
     print("EM Field Boundary Conditions")
     print("---------------------")

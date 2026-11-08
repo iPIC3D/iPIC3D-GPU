@@ -12,6 +12,7 @@
 #ifndef GPU_PHYSICS_KERNELS_CUH
 #define GPU_PHYSICS_KERNELS_CUH
 
+#include "GPUPointLaunch.cuh"
 #include "OutflowBoundary.h"
 #include "cudaTypeDef.cuh"
 #include <cstddef>
@@ -25,7 +26,8 @@ inline constexpr int kMUdotMaxSpecies = 16;
 
 /**
  * @brief MUdot = μ·v, the implicit susceptibility of all species applied to v
- * on the interior nodes, written to MUdotX/Y/Z (ghost nodes untouched).
+ * on the interior nodes of points, written to MUdotX/Y/Z (the other nodes
+ * untouched).
  *
  * With b = B + B_ext and, per species, beta_s = (q/m)_s dt / (2c) and
  * d_s = (4π/2) delt dt/c (q/m)_s rho_s / (1 + beta_s^2 b^2):
@@ -44,8 +46,11 @@ inline constexpr int kMUdotMaxSpecies = 16;
  * @param ns          Number of species.
  * @param dt,c,FourPI,delt Time step, light speed, 4π and c θ dt.
  * @param nxn,nyn,nzn Grid dimensions (node-based, including ghosts).
+ * @param points      Nodes to compute: a PointBox (3D launch) or a PointList
+ *                    (1D launch).
  * @param stream      CUDA stream.
  */
+template <typename Points>
 void gpuMUdot(cudaSolverType* MUdotX, cudaSolverType* MUdotY,
               cudaSolverType* MUdotZ, const cudaSolverType* vX,
               const cudaSolverType* vY, const cudaSolverType* vZ,
@@ -54,7 +59,7 @@ void gpuMUdot(cudaSolverType* MUdotX, cudaSolverType* MUdotY,
               const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
               const cudaSolverType* rhons, const double* qom, int ns, double dt,
               double c, double FourPI, double delt, int nxn, int nyn, int nzn,
-              cudaStream_t stream = 0);
+              const Points& points, cudaStream_t stream = 0);
 
 /**
  * @brief One species' term of MUdot = Σ_s ( denom_s * rot_s(E) );
@@ -124,19 +129,21 @@ void gpuPIdotSpecies(cudaSolverType* PIX, cudaSolverType* PIY,
  * (chi: implicit susceptibility at the node).  The rest of the equation is in
  * the RHS row, gpuPerfectConductorSource.
  *
+ * @param image  Krylov image (interleaved layout of gpuPhys2Solver3): only
+ *               the face rows are written.
  * @param rhons  All-species density [ns][nxn][nyn][nzn] (contiguous).
  * @param d_qom  Device array of the species q/m (ns elements).
  */
 void gpuPerfectConductorImage(
-    cudaSolverType* imageX, cudaSolverType* imageY, cudaSolverType* imageZ,
-    const cudaSolverType* vectX, const cudaSolverType* vectY,
-    const cudaSolverType* vectZ, const cudaSolverType* Bxn,
-    const cudaSolverType* Byn, const cudaSolverType* Bzn,
-    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext,
-    const cudaSolverType* Bz_ext, const cudaSolverType* rhons,
-    const cudaSolverType* d_qom, int ns, cudaSolverType dt, cudaSolverType c,
-    cudaSolverType FourPI, cudaSolverType delt, int nxn, int nyn, int nzn,
-    int dir, bool high, cudaStream_t stream = 0);
+    cudaSolverType* image, const cudaSolverType* vectX,
+    const cudaSolverType* vectY, const cudaSolverType* vectZ,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn,
+    const cudaSolverType* Bzn, const cudaSolverType* Bx_ext,
+    const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons, const cudaSolverType* d_qom, int ns,
+    cudaSolverType dt, cudaSolverType c, cudaSolverType FourPI,
+    cudaSolverType delt, int nxn, int nyn, int nzn, int dir, bool high,
+    cudaStream_t stream = 0);
 
 /**
  * @brief RHS rows of the Maxwell system on a perfect-conductor face (same
@@ -197,10 +204,10 @@ void gpuOpenBCSetFace3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
                        int dir, int faceIdx, int nx, int ny, int nz,
                        cudaStream_t stream = 0);
 
-/** Identity rows, image = vect, on a face plane interior [1..n-2]: the image
+/** Identity rows, image = vect, on a face plane interior [1..n-2], written
+ *  into the Krylov image (interleaved layout of gpuPhys2Solver3): the image
  *  rows of the open inflow faces (their RHS rows hold E0). */
-void gpuOpenBCCopyFace3(cudaSolverType* imX, cudaSolverType* imY,
-                        cudaSolverType* imZ, const cudaSolverType* vX,
+void gpuOpenBCCopyFace3(cudaSolverType* image, const cudaSolverType* vX,
                         const cudaSolverType* vY, const cudaSolverType* vZ,
                         int dir, int faceIdx, int nx, int ny, int nz,
                         cudaStream_t stream = 0);

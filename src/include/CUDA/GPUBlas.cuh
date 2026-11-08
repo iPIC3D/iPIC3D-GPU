@@ -65,11 +65,13 @@ void gpuEq(cudaSolverType* dst, const cudaSolverType* src, size_t n,
 //  Fused triple operations (3 arrays in one kernel launch)
 // =========================================================================
 
-/** dX[i] = -dX[i];  dY[i] = -dY[i];  dZ[i] = -dZ[i]; */
+/** dX[i] = -dX[i];  dY[i] = -dY[i];  dZ[i] = -dZ[i];  (not used currently;
+ *  the image-reference test uses it as reference) */
 void gpuNeg3(cudaSolverType* dX, cudaSolverType* dY, cudaSolverType* dZ,
              size_t n, cudaStream_t stream = 0);
 
-/** dstX[i] -= srcX[i]; dstY -= srcY; dstZ -= srcZ; */
+/** dstX[i] -= srcX[i]; dstY -= srcY; dstZ -= srcZ;  (not used currently;
+ *  the image-reference test uses it as reference) */
 void gpuSub3(cudaSolverType* dstX, const cudaSolverType* srcX,
              cudaSolverType* dstY, const cudaSolverType* srcY,
              cudaSolverType* dstZ, const cudaSolverType* srcZ, size_t n,

@@ -76,7 +76,6 @@ if(NOT "${BENCHMARK_MODE}" MATCHES "^[012]$")
           "BENCHMARK_MODE must be 0, 1, or 2; got '${BENCHMARK_MODE}'")
 endif()
 option(USE_OPENMP "Use OpenMP in supported loops" ON) # must delete all cmake cache if you change this option
-option(HALO_OVERLAP "Overlap halo exchanges with computation in the field solver" OFF)
 option(GPU_CYCLE_DIAGNOSTICS
        "Instrument one GPU timestep and the Maxwell RHS that consumes it"
        OFF)
@@ -411,11 +410,6 @@ if(GPU_CYCLE_DIAGNOSTICS)
           "GPU cycle diagnostics enabled for producer cycle ${GPU_DIAGNOSTIC_CYCLE}")
 endif()
 
-if(HALO_OVERLAP)
-  target_compile_definitions(iPIC3Dlib PUBLIC HALO_OVERLAP)
-  message(STATUS "Halo-computation overlap enabled for GPU field solver")
-endif()
-
 #
 # Build identity (git commit, uncommitted changes, options, compilers), written
 # to the run log, SimulationData.txt, restart metadata and output files. The
@@ -433,7 +427,7 @@ else()
       "CUDA ${CMAKE_CUDA_COMPILER_ID} ${CMAKE_CUDA_COMPILER_VERSION}")
 endif()
 set(ipic3d_build_options "${ipic3d_device_option}")
-foreach(opt HALO_OVERLAP BENCHMARK_MODE USE_OPENMP USE_HDF5
+foreach(opt BENCHMARK_MODE USE_OPENMP USE_HDF5
             USE_PHDF5 USE_ADIOS2 USE_CATALYST USE_BATSRUS TIME_TASKS
             GPU_CYCLE_DIAGNOSTICS)
   string(APPEND ipic3d_build_options " ${opt}=${${opt}}")
@@ -539,7 +533,6 @@ message(STATUS "  GPU backend                 : HIP  (arch=${HIP_ARCH})")
 else()
   message(STATUS "  GPU backend                 : CUDA  (arch=sm_${CUDA_ARCH})")
 endif()
-message(STATUS "  GPU halo overlap            : ${HALO_OVERLAP}  (overlap halo communication with computation in the field solver)")
 message(STATUS "  GPU cycle diagnostics       : ${GPU_CYCLE_DIAGNOSTICS}  (producer cycle=${GPU_DIAGNOSTIC_CYCLE})")
 message(STATUS "  HDF5 output                 : ${USE_HDF5}")
 message(STATUS "  HDF5_INCLUDE_DIRS           : ${HDF5_INCLUDE_DIRS}")

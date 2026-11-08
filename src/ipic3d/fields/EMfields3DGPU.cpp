@@ -210,9 +210,7 @@ void EMfields3D::gpuSolverAllocate() {
   d_temp2X = GPUFieldArray3(nxn, nyn, nzn);
   d_temp2Y = GPUFieldArray3(nxn, nyn, nzn);
   d_temp2Z = GPUFieldArray3(nxn, nyn, nzn);
-  d_imageX = GPUFieldArray3(nxn, nyn, nzn);
-  d_imageY = GPUFieldArray3(nxn, nyn, nzn);
-  d_imageZ = GPUFieldArray3(nxn, nyn, nzn);
+  d_divD = GPUFieldArray3(nxc, nyc, nzc);
   d_Dx = GPUFieldArray3(nxn, nyn, nzn);
   d_Dy = GPUFieldArray3(nxn, nyn, nzn);
   d_Dz = GPUFieldArray3(nxn, nyn, nzn);
@@ -305,6 +303,25 @@ void EMfields3D::gpuSolverAllocate() {
   // ---- Persistent batched halo-exchange buffers ----
   gpuAllocateHaloBuffers();
 
+  // ---- Launch sets of the Maxwell image (built once) ----
+  {
+    const int nCell[3] = {nxc, nyc, nzc};
+    const int self = vct->getCartesian_rank();
+    const int left[3] = {vct->getXleft_neighbor(), vct->getYleft_neighbor(),
+                         vct->getZleft_neighbor()};
+    const int right[3] = {vct->getXright_neighbor(), vct->getYright_neighbor(),
+                          vct->getZright_neighbor()};
+    bool flat[3];
+    for (int a = 0; a < 3; a++)
+      flat[a] = nCell[a] - 2 == 1 && left[a] == self && right[a] == self;
+    imageBoxes_ =
+        maxwellImageBoxes(nCell, operatorCellEnd(), flat, haloOverlap_);
+  }
+
+  // The arrays are zeroed at allocation on the default stream, which the
+  // non-blocking solver stream does not wait for: finish before first use.
+  cudaErrChk(cudaDeviceSynchronize());
+
   rollback.fields = nullptr;
 }
 
@@ -386,9 +403,7 @@ void EMfields3D::gpuSolverFree() {
   d_temp2X.free();
   d_temp2Y.free();
   d_temp2Z.free();
-  d_imageX.free();
-  d_imageY.free();
-  d_imageZ.free();
+  d_divD.free();
   d_Dx.free();
   d_Dy.free();
   d_Dz.free();
@@ -554,22 +569,22 @@ void EMfields3D::gpuAllocateHaloBuffers() {
                              HALO_MAX_BATCH * sizeof(cudaSolverType*),
                              cudaHostAllocDefault));
 
-#ifdef HALO_OVERLAP
-    // Split exchange resources belong to the halo subsystem, so tests and
-    // communication-only users do not need the full field solver.
-    int leastPriority = 0;
-    int greatestPriority = 0;
-    cudaErrChk(
-        cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
-    cudaErrChk(cudaStreamCreateWithPriority(&haloStream_, cudaStreamNonBlocking,
-                                            greatestPriority));
-    cudaErrChk(
-        cudaEventCreateWithFlags(&haloInputReady_, cudaEventDisableTiming));
-    cudaErrChk(
-        cudaEventCreateWithFlags(&haloPhaseReady_, cudaEventDisableTiming));
-    cudaErrChk(
-        cudaEventCreateWithFlags(&haloBuffersReady_, cudaEventDisableTiming));
-#endif
+    // Split exchange resources (HaloOverlap) belong to the halo subsystem, so
+    // tests and communication-only users do not need the full field solver.
+    if (haloOverlap_) {
+      int leastPriority = 0;
+      int greatestPriority = 0;
+      cudaErrChk(
+          cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
+      cudaErrChk(cudaStreamCreateWithPriority(
+          &haloStream_, cudaStreamNonBlocking, greatestPriority));
+      cudaErrChk(
+          cudaEventCreateWithFlags(&haloInputReady_, cudaEventDisableTiming));
+      cudaErrChk(
+          cudaEventCreateWithFlags(&haloPhaseReady_, cudaEventDisableTiming));
+      cudaErrChk(
+          cudaEventCreateWithFlags(&haloBuffersReady_, cudaEventDisableTiming));
+    }
   } catch (...) {
     gpuFreeHaloBuffers();
     throw;
@@ -580,7 +595,6 @@ void EMfields3D::gpuFreeHaloBuffers() {
   if (!haloBufsAllocated_)
     return;
 
-#ifdef HALO_OVERLAP
   if (haloExchange_.active) {
     cerr << "ERROR: freeing shared GPU halo buffers during an active exchange"
          << endl;
@@ -592,7 +606,6 @@ void EMfields3D::gpuFreeHaloBuffers() {
   // unified availability event completes.
   if (haloBuffersReady_)
     cudaErrChk(cudaEventSynchronize(haloBuffersReady_));
-#endif
 
   for (int d = 0; d < 6; ++d) {
     if (d_haloBuf_send_[d]) {
@@ -613,7 +626,6 @@ void EMfields3D::gpuFreeHaloBuffers() {
     h_ptrArray_ = nullptr;
   }
 
-#ifdef HALO_OVERLAP
   if (haloInputReady_) {
     cudaErrChk(cudaEventDestroy(haloInputReady_));
     haloInputReady_ = nullptr;
@@ -630,7 +642,6 @@ void EMfields3D::gpuFreeHaloBuffers() {
     cudaErrChk(cudaStreamDestroy(haloStream_));
     haloStream_ = 0;
   }
-#endif
 
   haloBufsAllocated_ = false;
 }
@@ -752,12 +763,29 @@ void EMfields3D::gpuSolverSyncD2H(cudaStream_t stream) {
 void EMfields3D::gpuMUdot(GPUFieldArray3& MUdotX, GPUFieldArray3& MUdotY,
                           GPUFieldArray3& MUdotZ, GPUFieldArray3& vX,
                           GPUFieldArray3& vY, GPUFieldArray3& vZ) {
+  gpuMUdot(MUdotX, MUdotY, MUdotZ, vX, vY, vZ, imageBoxes_.mudot);
+}
+
+template <typename Points>
+void EMfields3D::gpuMUdot(GPUFieldArray3& MUdotX, GPUFieldArray3& MUdotY,
+                          GPUFieldArray3& MUdotZ, GPUFieldArray3& vX,
+                          GPUFieldArray3& vY, GPUFieldArray3& vZ,
+                          const Points& points) {
   ::gpuMUdot(MUdotX.devPtr(), MUdotY.devPtr(), MUdotZ.devPtr(), vX.devPtr(),
              vY.devPtr(), vZ.devPtr(), d_Bxn.devPtr(), d_Byn.devPtr(),
              d_Bzn.devPtr(), d_Bx_ext.devPtr(), d_By_ext.devPtr(),
              d_Bz_ext.devPtr(), d_rhons.devPtr(), qom, ns, dt, c, FourPI, delt,
-             nxn, nyn, nzn, solverStream_);
+             nxn, nyn, nzn, points, solverStream_);
 }
+
+template void EMfields3D::gpuMUdot<PointBox>(GPUFieldArray3&, GPUFieldArray3&,
+                                             GPUFieldArray3&, GPUFieldArray3&,
+                                             GPUFieldArray3&, GPUFieldArray3&,
+                                             const PointBox&);
+template void EMfields3D::gpuMUdot<PointList>(GPUFieldArray3&, GPUFieldArray3&,
+                                              GPUFieldArray3&, GPUFieldArray3&,
+                                              GPUFieldArray3&, GPUFieldArray3&,
+                                              const PointList&);
 
 void EMfields3D::gpuPIdot(GPUFieldArray3& PIX, GPUFieldArray3& PIY,
                           GPUFieldArray3& PIZ, GPUFieldArray3& vX,
@@ -769,6 +797,7 @@ void EMfields3D::gpuPIdot(GPUFieldArray3& PIX, GPUFieldArray3& PIY,
                   d_Bz_ext.devPtr(), beta, nxn, nyn, nzn, solverStream_);
 }
 
+template <EMfields3D::HaloMode M>
 void EMfields3D::gpuSmooth(GPUFieldArray3& arr, int type) {
   if (Smooth == 1.0)
     return;
@@ -791,29 +820,29 @@ void EMfields3D::gpuSmooth(GPUFieldArray3& arr, int type) {
   bool isCenter = (type == 0);
 
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
-#ifdef HALO_OVERLAP
-    cudaSolverType* ptr1[1] = {arr.devPtr()};
-    gpuBatchedHaloBeginExchange(ptr1, 1, nx, ny, nz, isCenter, true, true,
-                                solverStream_);
-    gpuSmoothStep_interior(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz,
-                           alpha, beta3D, solverStream_);
-    gpuBatchedHaloEndExchange();
-    gpuBCface_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
-    gpuSmoothStep_boundary(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz,
-                           alpha, beta3D, solverStream_);
-#else
-    if (type == 0)
-      gpuCommunicateCenterBoxStencilBC_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2);
-    else
-      gpuCommunicateNodeBoxStencilBC_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2);
-    gpuSmoothStep(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz, alpha,
-                  beta3D, solverStream_);
-#endif
+    if constexpr (M == HaloMode::Overlap) {
+      cudaSolverType* ptr1[1] = {arr.devPtr()};
+      gpuBatchedHaloBeginExchange(ptr1, 1, nx, ny, nz, isCenter, true, true,
+                                  solverStream_);
+      gpuSmoothStep_interior(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz,
+                             alpha, beta3D, solverStream_);
+      gpuBatchedHaloEndExchange();
+      gpuBCface_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
+      gpuSmoothStep_boundary(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz,
+                             alpha, beta3D, solverStream_);
+    } else {
+      if (type == 0)
+        gpuCommunicateCenterBoxStencilBC_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2);
+      else
+        gpuCommunicateNodeBoxStencilBC_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2);
+      gpuSmoothStep(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz, alpha,
+                    beta3D, solverStream_);
+    }
     gpuEq(arr.devPtr(), d_smoothTemp.devPtr(), fieldSize, solverStream_);
   }
 }
 
-void EMfields3D::gpuSmoothE() {
+template <EMfields3D::HaloMode M> void EMfields3D::gpuSmoothE() {
   if (Smooth == 1.0)
     return;
 
@@ -834,40 +863,40 @@ void EMfields3D::gpuSmoothE() {
     bcEx[0] = bcEy[0] = bcEz[0] = 2;
 
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
-#ifdef HALO_OVERLAP
-    cudaSolverType* eptrs[3] = {d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr()};
-    gpuBatchedHaloBeginExchange(eptrs, 3, nxn, nyn, nzn, false, true, false,
-                                solverStream_);
-    gpuSmoothStep_interior(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn,
-                           alpha, beta3D, solverStream_);
-    gpuSmoothStep_interior(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn,
-                           alpha, beta3D, solverStream_);
-    gpuSmoothStep_interior(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn,
-                           alpha, beta3D, solverStream_);
-    gpuBatchedHaloEndExchange();
-    gpuBCface(nxn, nyn, nzn, d_Ex, bcEx[0], bcEx[1], bcEx[2], bcEx[3], bcEx[4],
-              bcEx[5], &_vct, solverStream_);
-    gpuBCface(nxn, nyn, nzn, d_Ey, bcEy[0], bcEy[1], bcEy[2], bcEy[3], bcEy[4],
-              bcEy[5], &_vct, solverStream_);
-    gpuBCface(nxn, nyn, nzn, d_Ez, bcEz[0], bcEz[1], bcEz[2], bcEz[3], bcEz[4],
-              bcEz[5], &_vct, solverStream_);
-    gpuSmoothStep_boundary(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn,
-                           alpha, beta3D, solverStream_);
-    gpuSmoothStep_boundary(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn,
-                           alpha, beta3D, solverStream_);
-    gpuSmoothStep_boundary(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn,
-                           alpha, beta3D, solverStream_);
-#else
-    // Batched: 3 fields in 1 MPI round instead of 3 sequential exchanges
-    gpuCommunicateNodeBoxStencilBC_3mixed(nxn, nyn, nzn, d_Ex, bcEx, d_Ey, bcEy,
-                                          d_Ez, bcEz);
-    gpuSmoothStep(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn, alpha, beta3D,
-                  solverStream_);
-    gpuSmoothStep(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn, alpha, beta3D,
-                  solverStream_);
-    gpuSmoothStep(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn, alpha, beta3D,
-                  solverStream_);
-#endif
+    if constexpr (M == HaloMode::Overlap) {
+      cudaSolverType* eptrs[3] = {d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr()};
+      gpuBatchedHaloBeginExchange(eptrs, 3, nxn, nyn, nzn, false, true, false,
+                                  solverStream_);
+      gpuSmoothStep_interior(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn,
+                             alpha, beta3D, solverStream_);
+      gpuSmoothStep_interior(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn,
+                             alpha, beta3D, solverStream_);
+      gpuSmoothStep_interior(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn,
+                             alpha, beta3D, solverStream_);
+      gpuBatchedHaloEndExchange();
+      gpuBCface(nxn, nyn, nzn, d_Ex, bcEx[0], bcEx[1], bcEx[2], bcEx[3],
+                bcEx[4], bcEx[5], &_vct, solverStream_);
+      gpuBCface(nxn, nyn, nzn, d_Ey, bcEy[0], bcEy[1], bcEy[2], bcEy[3],
+                bcEy[4], bcEy[5], &_vct, solverStream_);
+      gpuBCface(nxn, nyn, nzn, d_Ez, bcEz[0], bcEz[1], bcEz[2], bcEz[3],
+                bcEz[4], bcEz[5], &_vct, solverStream_);
+      gpuSmoothStep_boundary(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn,
+                             alpha, beta3D, solverStream_);
+      gpuSmoothStep_boundary(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn,
+                             alpha, beta3D, solverStream_);
+      gpuSmoothStep_boundary(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn,
+                             alpha, beta3D, solverStream_);
+    } else {
+      // Batched: 3 fields in 1 MPI round instead of 3 sequential exchanges
+      gpuCommunicateNodeBoxStencilBC_3mixed(nxn, nyn, nzn, d_Ex, bcEx, d_Ey,
+                                            bcEy, d_Ez, bcEz);
+      gpuSmoothStep(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn, alpha,
+                    beta3D, solverStream_);
+      gpuSmoothStep(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn, alpha,
+                    beta3D, solverStream_);
+      gpuSmoothStep(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn, alpha,
+                    beta3D, solverStream_);
+    }
 
     gpuEq(d_Ex.devPtr(), d_tempX.devPtr(), nodeSize, solverStream_);
     gpuEq(d_Ey.devPtr(), d_tempY.devPtr(), nodeSize, solverStream_);
@@ -875,6 +904,7 @@ void EMfields3D::gpuSmoothE() {
   }
 }
 
+template <EMfields3D::HaloMode M>
 void EMfields3D::gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2,
                             GPUFieldArray3& a3, int type) {
   if (Smooth == 1.0)
@@ -898,41 +928,41 @@ void EMfields3D::gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2,
   bool isCenter = (type == 0);
 
   for (int icount = 1; icount < SmoothNiter + 1; icount++) {
-#ifdef HALO_OVERLAP
-    cudaSolverType* s3ptrs[3] = {a1.devPtr(), a2.devPtr(), a3.devPtr()};
-    gpuBatchedHaloBeginExchange(s3ptrs, 3, nx, ny, nz, isCenter, true, true,
-                                solverStream_);
-    gpuSmoothStep_interior(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha,
-                           beta3D, solverStream_);
-    gpuSmoothStep_interior(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha,
-                           beta3D, solverStream_);
-    gpuSmoothStep_interior(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha,
-                           beta3D, solverStream_);
-    gpuBatchedHaloEndExchange();
-    gpuBCface_P(nx, ny, nz, a1, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
-    gpuBCface_P(nx, ny, nz, a2, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
-    gpuBCface_P(nx, ny, nz, a3, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
-    gpuSmoothStep_boundary(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha,
-                           beta3D, solverStream_);
-    gpuSmoothStep_boundary(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha,
-                           beta3D, solverStream_);
-    gpuSmoothStep_boundary(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha,
-                           beta3D, solverStream_);
-#else
-    // Batched: 3 fields in 1 MPI round
-    if (type == 0)
-      gpuCommunicateCenterBoxStencilBC_P_3(nx, ny, nz, a1, a2, a3, 2, 2, 2, 2,
+    if constexpr (M == HaloMode::Overlap) {
+      cudaSolverType* s3ptrs[3] = {a1.devPtr(), a2.devPtr(), a3.devPtr()};
+      gpuBatchedHaloBeginExchange(s3ptrs, 3, nx, ny, nz, isCenter, true, true,
+                                  solverStream_);
+      gpuSmoothStep_interior(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha,
+                             beta3D, solverStream_);
+      gpuSmoothStep_interior(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha,
+                             beta3D, solverStream_);
+      gpuSmoothStep_interior(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha,
+                             beta3D, solverStream_);
+      gpuBatchedHaloEndExchange();
+      gpuBCface_P(nx, ny, nz, a1, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
+      gpuBCface_P(nx, ny, nz, a2, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
+      gpuBCface_P(nx, ny, nz, a3, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
+      gpuSmoothStep_boundary(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha,
+                             beta3D, solverStream_);
+      gpuSmoothStep_boundary(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha,
+                             beta3D, solverStream_);
+      gpuSmoothStep_boundary(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha,
+                             beta3D, solverStream_);
+    } else {
+      // Batched: 3 fields in 1 MPI round
+      if (type == 0)
+        gpuCommunicateCenterBoxStencilBC_P_3(nx, ny, nz, a1, a2, a3, 2, 2, 2, 2,
+                                             2, 2);
+      else
+        gpuCommunicateNodeBoxStencilBC_P_3(nx, ny, nz, a1, a2, a3, 2, 2, 2, 2,
                                            2, 2);
-    else
-      gpuCommunicateNodeBoxStencilBC_P_3(nx, ny, nz, a1, a2, a3, 2, 2, 2, 2, 2,
-                                         2);
-    gpuSmoothStep(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha, beta3D,
-                  solverStream_);
-    gpuSmoothStep(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha, beta3D,
-                  solverStream_);
-    gpuSmoothStep(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha, beta3D,
-                  solverStream_);
-#endif
+      gpuSmoothStep(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha, beta3D,
+                    solverStream_);
+      gpuSmoothStep(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha, beta3D,
+                    solverStream_);
+      gpuSmoothStep(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha, beta3D,
+                    solverStream_);
+    }
 
     gpuEq(a1.devPtr(), d_temp2X.devPtr(), fieldSize, solverStream_);
     gpuEq(a2.devPtr(), d_temp2Y.devPtr(), fieldSize, solverStream_);
@@ -940,18 +970,18 @@ void EMfields3D::gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2,
   }
 }
 
-void EMfields3D::gpuPerfectConductorImages(
-    GPUFieldArray3& imX, GPUFieldArray3& imY, GPUFieldArray3& imZ,
-    GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ) {
+void EMfields3D::gpuPerfectConductorImages(cudaSolverType* d_im,
+                                           GPUFieldArray3& vX,
+                                           GPUFieldArray3& vY,
+                                           GPUFieldArray3& vZ) {
   for (int f = 0; f < 6; f++) {
     if (!conductorFace_[f])
       continue;
     ::gpuPerfectConductorImage(
-        imX.devPtr(), imY.devPtr(), imZ.devPtr(), vX.devPtr(), vY.devPtr(),
-        vZ.devPtr(), d_Bxn.devPtr(), d_Byn.devPtr(), d_Bzn.devPtr(),
-        d_Bx_ext.devPtr(), d_By_ext.devPtr(), d_Bz_ext.devPtr(),
-        d_rhons.devPtr(), d_qom, ns, dt, c, FourPI, delt, nxn, nyn, nzn, f / 2,
-        f % 2 == 1, solverStream_);
+        d_im, vX.devPtr(), vY.devPtr(), vZ.devPtr(), d_Bxn.devPtr(),
+        d_Byn.devPtr(), d_Bzn.devPtr(), d_Bx_ext.devPtr(), d_By_ext.devPtr(),
+        d_Bz_ext.devPtr(), d_rhons.devPtr(), d_qom, ns, dt, c, FourPI, delt,
+        nxn, nyn, nzn, f / 2, f % 2 == 1, solverStream_);
   }
 }
 
@@ -977,223 +1007,145 @@ void EMfields3D::gpuPerfectConductorSources(cudaSolverType* dX,
 }
 
 // =========================================================================
-//  Fused triple Laplacian: 3 independent lap(fieldN) with ONE halo exchange
-//  Uses 9 center-sized scratch arrays:
-//    fieldA → d_tempXC / d_tempYC / d_tempZC
-//    fieldB → d_divC   / d_poissonTemp / d_poissonIm
-//    fieldC → d_divBwork / d_divE_work / d_tempC
-// =========================================================================
-
-void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
-                             GPUFieldArray3& lapB, GPUFieldArray3& fieldB,
-                             GPUFieldArray3& lapC, GPUFieldArray3& fieldC) {
-  const Grid* grid = &get_grid();
-  double _invdx = grid->get_invdx();
-  double _invdy = grid->get_invdy();
-  double _invdz = grid->get_invdz();
-
-  // X-right outflow face: zero-gradient ghost nodes, and the gradients below
-  // include the ghost cell plane (the exchange does not write that plane)
-  GPUFieldArray3* fields[3] = {&fieldA, &fieldB, &fieldC};
-  gpuOutflowGhostNodes(fields);
-  const int iHi = operatorCellEnd();
-
-  // Gradient A → d_tempXC, d_tempYC, d_tempZC
-  gpuGradN2C(d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
-             fieldA.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
-             solverStream_, 1, iHi);
-
-  // Gradient B → d_divC, d_poissonTemp, d_poissonIm  (center-sized scratch)
-  gpuGradN2C(d_divC.devPtr(), d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
-             fieldB.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
-             solverStream_, 1, iHi);
-
-  // Gradient C → d_divBwork, d_divE_work, d_tempC  (center-sized scratch)
-  gpuGradN2C(d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr(),
-             fieldC.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
-             solverStream_, 1, iHi);
-
-  cudaSolverType* grad[9] = {
-      d_tempXC.devPtr(),   d_tempYC.devPtr(),      d_tempZC.devPtr(),
-      d_divC.devPtr(),     d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
-      d_divBwork.devPtr(), d_divE_work.devPtr(),   d_tempC.devPtr()};
-  gpuOutflowGhostRows(grad, 9);
-  const int bcXr = operatorBCXright(1);
-
-#ifdef HALO_OVERLAP
-  // ---- Begin halo exchange: pack faces on the halo stream ----
-  cudaSolverType* ptrs9[9] = {
-      d_tempXC.devPtr(),   d_tempYC.devPtr(),      d_tempZC.devPtr(),
-      d_divC.devPtr(),     d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
-      d_divBwork.devPtr(), d_divE_work.devPtr(),   d_tempC.devPtr()};
-  gpuBatchedHaloBeginExchange(ptrs9, 9, nxc, nyc, nzc, true, false, false,
-                              solverStream_);
-
-  // ---- Interior divC2N while the faces are packed ----
-  gpuDivC2N_interior(lapA.devPtr(), d_tempXC.devPtr(), d_tempYC.devPtr(),
-                     d_tempZC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-                     solverStream_);
-  gpuDivC2N_interior(lapB.devPtr(), d_divC.devPtr(), d_poissonTemp.devPtr(),
-                     d_poissonIm.devPtr(), nxn, nyn, nzn, _invdx, _invdy,
-                     _invdz, solverStream_);
-  gpuDivC2N_interior(lapC.devPtr(), d_divBwork.devPtr(), d_divE_work.devPtr(),
-                     d_tempC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-                     solverStream_);
-
-  // ---- End halo exchange: MPI faces, edges and corners + unpack ----
-  gpuBatchedHaloEndExchange();
-
-  // ---- BC face application (type 1; an X-right outflow plane is kept) ----
-  gpuBCface(nxc, nyc, nzc, d_tempXC, bcXr, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_tempYC, bcXr, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_tempZC, bcXr, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_divC, bcXr, 1, 1, 1, 1, 1, &_vct, solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_poissonTemp, bcXr, 1, 1, 1, 1, 1, &_vct,
-            solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_poissonIm, bcXr, 1, 1, 1, 1, 1, &_vct,
-            solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_divBwork, bcXr, 1, 1, 1, 1, 1, &_vct,
-            solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_divE_work, bcXr, 1, 1, 1, 1, 1, &_vct,
-            solverStream_);
-  gpuBCface(nxc, nyc, nzc, d_tempC, bcXr, 1, 1, 1, 1, 1, &_vct, solverStream_);
-
-  // ---- Boundary divC2N (ghost + BC data now available) ----
-  gpuDivC2N_boundary(lapA.devPtr(), d_tempXC.devPtr(), d_tempYC.devPtr(),
-                     d_tempZC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-                     solverStream_);
-  gpuDivC2N_boundary(lapB.devPtr(), d_divC.devPtr(), d_poissonTemp.devPtr(),
-                     d_poissonIm.devPtr(), nxn, nyn, nzn, _invdx, _invdy,
-                     _invdz, solverStream_);
-  gpuDivC2N_boundary(lapC.devPtr(), d_divBwork.devPtr(), d_divE_work.devPtr(),
-                     d_tempC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-                     solverStream_);
-
-#else
-  // ---- Blocking path (without HALO_OVERLAP) ----
-  gpuCommunicateCenterBC_9(nxc, nyc, nzc, d_tempXC, d_tempYC, d_tempZC, d_divC,
-                           d_poissonTemp, d_poissonIm, d_divBwork, d_divE_work,
-                           d_tempC, bcXr, 1, 1, 1, 1, 1);
-
-  // Divergence A
-  gpuDivC2N(lapA.devPtr(), d_tempXC.devPtr(), d_tempYC.devPtr(),
-            d_tempZC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-            solverStream_);
-
-  // Divergence B
-  gpuDivC2N(lapB.devPtr(), d_divC.devPtr(), d_poissonTemp.devPtr(),
-            d_poissonIm.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-            solverStream_);
-
-  // Divergence C
-  gpuDivC2N(lapC.devPtr(), d_divBwork.devPtr(), d_divE_work.devPtr(),
-            d_tempC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-            solverStream_);
-#endif
-}
-
-// =========================================================================
 //  gpuMaxwellImage:  im = A * vector  (Krylov ↔ Krylov)
+//
+//    im = delt² (-lap E - grad div(μ·E)) + μ·E + E on the interior nodes,
+//    then the boundary rows (perfect conductor, open inflow faces).
+//  D = μ·E on the nodes (gpuMUdot).  Cell level: the 9 gradients of E and
+//  div D in one kernel (gpuMaxwellLocalCenterOps), the X-right outflow ghost
+//  cell plane included, exchanged between ranks in one halo exchange and set
+//  by the face BCs.  Node level: gpuMaxwellLocalNodeFused (divC2N of the
+//  gradients, gradC2N of the divergence, the arithmetic and the Krylov
+//  packing in one pass), the kernel of the local operator too.  Every value
+//  read is written first, so no work array is zeroed.
+//
+//  Split operator (HaloMode::Overlap, needs MaxwellImageBoxes::split): D and
+//  the cell arrays on the boundary layers (with a flat axis: whole), the
+//  exchange started, then D, the cell arrays and the image on the interior
+//  while it is in flight (they read no value it writes), and the image on
+//  the nodes next to the faces once it is complete.  Same values as the
+//  blocking exchange.
 // =========================================================================
+
+EMfields3D::GpuImageFn EMfields3D::gpuMaxwellImageFn() const {
+  return imageBoxes_.split ? &EMfields3D::gpuMaxwellImage<HaloMode::Overlap>
+                           : &EMfields3D::gpuMaxwellImage<HaloMode::Blocking>;
+}
 
 void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
                                  cudaSolverType* d_vector) {
-  const VirtualTopology3D* vct = &get_vct();
+  (this->*gpuMaxwellImageFn())(d_im, d_vector);
+}
+
+template <EMfields3D::HaloMode M>
+void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
+                                 cudaSolverType* d_vector) {
   const Grid* grid = &get_grid();
-  double _invdx = grid->get_invdx();
-  double _invdy = grid->get_invdy();
-  double _invdz = grid->get_invdz();
+  const double _invdx = grid->get_invdx();
+  const double _invdy = grid->get_invdy();
+  const double _invdz = grid->get_invdz();
+  const MaxwellImageBoxes& box = imageBoxes_;
+  if constexpr (M == HaloMode::Overlap) {
+    // without split the shell and interior lists are empty
+    if (!box.split) {
+      cerr << "ERROR: gpuMaxwellImage<Overlap> on a subdomain that does not "
+              "split (see MaxwellImageBoxes::split)"
+           << endl;
+      MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+      std::abort();
+    }
+  }
 
-  size_t nodeSize = (size_t)nxn * nyn * nzn;
+  // The 10 cell arrays: the 9 gradients of Ex, Ey, Ez and div(μ·E)
+  GPUFieldArray3* cell[10] = {
+      &d_tempXC,    &d_tempYC,   &d_tempZC,    &d_divC,  &d_poissonTemp,
+      &d_poissonIm, &d_divBwork, &d_divE_work, &d_tempC, &d_divD};
+  cudaSolverType* cp[10];
+  for (int a = 0; a < 10; a++)
+    cp[a] = cell[a]->devPtr();
+  GPUFieldArray3* En[3] = {&d_vectX, &d_vectY, &d_vectZ};
+  GPUFieldArray3* Dn[3] = {&d_Dx, &d_Dy, &d_Dz};
 
-  // Zero work arrays (9 memsets batched)
-  cudaSolverType* zptrs[9] = {
-      d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
-      d_tempX.devPtr(),  d_tempY.devPtr(),  d_tempZ.devPtr(),
-      d_Dx.devPtr(),     d_Dy.devPtr(),     d_Dz.devPtr()};
-  gpuSetAll0_N(zptrs, 9, nodeSize, solverStream_);
+  // each stage launches a PointList of imageBoxes_ (built once)
+  auto mudot = [&](const PointList& points) {
+    gpuMUdot(d_Dx, d_Dy, d_Dz, d_vectX, d_vectY, d_vectZ, points);
+  };
+  auto cellOps = [&](const PointList& points) {
+    gpuMaxwellLocalCenterOps(cp[0], cp[1], cp[2], cp[3], cp[4], cp[5], cp[6],
+                             cp[7], cp[8], cp[9], d_vectX.devPtr(),
+                             d_vectY.devPtr(), d_vectZ.devPtr(), d_Dx.devPtr(),
+                             d_Dy.devPtr(), d_Dz.devPtr(), nxc, nyc, nzc,
+                             _invdx, _invdy, _invdz, points, solverStream_);
+  };
+  // face BCs after the exchange: code 1 for the gradients, code 2 for div D
+  // (an X-right outflow plane is kept)
+  auto faceBCs = [&]() {
+    const int bcGrad = operatorBCXright(1), bcDiv = operatorBCXright(2);
+    for (int a = 0; a < 9; a++)
+      gpuBCface(nxc, nyc, nzc, *cell[a], bcGrad, 1, 1, 1, 1, 1, &_vct,
+                solverStream_);
+    gpuBCface(nxc, nyc, nzc, d_divD, bcDiv, 2, 2, 2, 2, 2, &_vct,
+              solverStream_);
+  };
+  // node level, straight into the Krylov image
+  auto nodeOps = [&](const PointList& points, const CellIndex& index) {
+    gpuMaxwellLocalNodeFused(
+        d_im, cp[0], cp[1], cp[2], cp[3], cp[4], cp[5], cp[6], cp[7], cp[8],
+        cp[9], d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(),
+        d_Dx.devPtr(), d_Dy.devPtr(), d_Dz.devPtr(), nxn, nyn, nzn, _invdx,
+        _invdy, _invdz, delt * delt, points, index, solverStream_);
+  };
+  // boundary rows: perfect conductor (linear), open inflow faces (identity)
+  auto boundaryRows = [&]() {
+    gpuPerfectConductorImages(d_im, d_vectX, d_vectY, d_vectZ);
+    if (get_col().getApplyInflowBcsEImage())
+      gpuOpenBoundaryInflowEImage(d_im, d_vectX.devPtr(), d_vectY.devPtr(),
+                                  d_vectZ.devPtr(), nxn, nyn, nzn);
+  };
 
-  // Krylov → physical space
+  // Krylov → physical space; X-right outflow: zero-gradient ghost nodes (the
+  // cell stencils include the ghost cell plane)
   gpuSolver2Phys3(d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(),
                   d_vector, nxn, nyn, nzn, solverStream_);
+  gpuOutflowGhostNodes(En);
 
-  // Laplacian: image = -lap(vect)  (fused: 3 Laps with 1 halo exchange)
-  gpuLapN2N_3(d_imageX, d_vectX, d_imageY, d_vectY, d_imageZ, d_vectZ);
-  gpuNeg3(d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(), nodeSize,
-          solverStream_);
-
-  // MUdot: D = μ·vect
-  gpuMUdot(d_Dx, d_Dy, d_Dz, d_vectX, d_vectY, d_vectZ);
-  GPUFieldArray3* Dn[3] = {&d_Dx, &d_Dy, &d_Dz};
-  gpuOutflowGhostNodes(Dn);
-
-  // div(D) on centers (with the X-right ghost cell plane on an outflow face)
-  gpuDivN2C(d_divC.devPtr(), d_Dx.devPtr(), d_Dy.devPtr(), d_Dz.devPtr(), nxc,
-            nyc, nzc, _invdx, _invdy, _invdz, solverStream_, 1,
-            operatorCellEnd());
-  cudaSolverType* divPtr[1] = {d_divC.devPtr()};
-  gpuOutflowGhostRows(divPtr, 1);
-
-#ifdef HALO_OVERLAP
-  // ---- Begin halo on divC ----
-  cudaSolverType* ptr1[1] = {d_divC.devPtr()};
-  gpuBatchedHaloBeginExchange(ptr1, 1, nxc, nyc, nzc, true, false, false,
-                              solverStream_);
-
-  // ---- Interior gradC2N while the faces are packed ----
-  gpuGradC2N_interior(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
-                      d_divC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-                      solverStream_);
-
-  // ---- End halo ----
-  gpuBatchedHaloEndExchange();
-  gpuBCface(nxc, nyc, nzc, d_divC, operatorBCXright(2), 2, 2, 2, 2, 2, &_vct,
-            solverStream_);
-
-  // ---- Boundary gradC2N ----
-  gpuGradC2N_boundary(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
-                      d_divC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-                      solverStream_);
-#else
-  // Communicate divC
-  gpuCommunicateCenterBC(nxc, nyc, nzc, d_divC, operatorBCXright(2), 2, 2, 2, 2,
-                         2);
-
-  // grad(divC) on nodes
-  gpuGradC2N(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
-             d_divC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-             solverStream_);
-#endif
-
-  // image -= temp  (fused triple)
-  gpuSub3(d_imageX.devPtr(), d_tempX.devPtr(), d_imageY.devPtr(),
-          d_tempY.devPtr(), d_imageZ.devPtr(), d_tempZ.devPtr(), nodeSize,
-          solverStream_);
-
-  // Scale by delt²  (fused triple)
-  gpuScale3(d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
-            delt * delt, nodeSize, solverStream_);
-
-  // Add ε·E: image += D + vect  (fused: 6 gpuSum → 1 gpuSumAddTwo3)
-  gpuSumAddTwo3(d_imageX.devPtr(), d_Dx.devPtr(), d_vectX.devPtr(),
-                d_imageY.devPtr(), d_Dy.devPtr(), d_vectY.devPtr(),
-                d_imageZ.devPtr(), d_Dz.devPtr(), d_vectZ.devPtr(), nodeSize,
-                solverStream_);
-
-  // Perfect conductor BCs (image rows, linear)
-  gpuPerfectConductorImages(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                            d_vectZ);
-
-  // OpenBC: identity rows of the open inflow faces in the Maxwell image
-  if (get_col().getApplyInflowBcsEImage())
-    gpuOpenBoundaryInflowEImage(
-        d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
-        d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(), nxn, nyn, nzn);
-
-  // Physical → Krylov space
-  gpuPhys2Solver3(d_im, d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
-                  nxn, nyn, nzn, solverStream_);
+  if constexpr (M == HaloMode::Overlap) {
+    // The D the cell shells read, then the cell arrays the exchange sends,
+    // one launch each (with a flat axis: both whole)
+    mudot(box.mudotShells);
+    gpuOutflowGhostNodes(Dn);
+    cellOps(box.cellShells);
+    gpuOutflowGhostRows(cp, 10);
+    gpuBatchedHaloBeginExchange(cp, 10, nxc, nyc, nzc, true, false, false,
+                                solverStream_);
+    // The interior, queued before the host completes the MPI in
+    // EndExchange: it runs while the exchange is in flight
+    mudot(box.mudotInterior);
+    cellOps(box.cellInterior);
+    nodeOps(box.nodeInterior, box.splitCellIndex);
+    gpuBatchedHaloEndExchange();
+    // The nodes next to the faces read the exchanged ghost cells
+    faceBCs();
+    nodeOps(box.nodeShells, box.splitCellIndex);
+  } else {
+    mudot(box.mudot);
+    gpuOutflowGhostNodes(Dn);
+    cellOps(box.cells);
+    gpuOutflowGhostRows(cp, 10);
+    gpuBatchedHaloExchange(cp, 10, nxc, nyc, nzc, true, false, false, false,
+                           solverStream_);
+    faceBCs();
+    nodeOps(box.nodes, box.cellIndex);
+  }
+  boundaryRows();
 }
+
+template void
+EMfields3D::gpuMaxwellImage<EMfields3D::HaloMode::Blocking>(cudaSolverType*,
+                                                            cudaSolverType*);
+template void
+EMfields3D::gpuMaxwellImage<EMfields3D::HaloMode::Overlap>(cudaSolverType*,
+                                                           cudaSolverType*);
 
 // =========================================================================
 //  gpuMaxwellImageLocal:  communication-free  im = A * vector
@@ -1211,14 +1163,14 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
 //    3. gpuMaxwellLocalCenterOps — fused 3×gradN2C + divN2C
 //    4. gpuMaxwellLocalNodeFused — fused 3×divC2N + gradC2N
 //                                  + arithmetic + Krylov packing → d_im
-//    5. unpack, physical-boundary image corrections, repack
+//    5. boundary rows (conductor, open inflow faces) written into d_im
 //
 //  Scratch arrays used (all pre-allocated in gpuSolverAllocate):
 //    Node-sized:  d_vectX/Y/Z, d_Dx/Y/Z           (input/work)
 //    Center-sized: d_tempXC/YC/ZC                   (grad Ex)
 //                  d_divC, d_poissonTemp, d_poissonIm (grad Ey)
 //                  d_divBwork, d_divE_work, d_tempC   (grad Ez)
-//                  d_imageX (first centSize elems)     (div D)
+//                  d_divD                             (div D)
 // =========================================================================
 
 void EMfields3D::gpuMaxwellImageLocal(cudaSolverType* d_im,
@@ -1233,9 +1185,9 @@ void EMfields3D::gpuMaxwellImageLocal(cudaSolverType* d_im,
 
   // ---- Step 0: Zero center-sized scratch arrays ----
   // Ghost cells of center arrays MUST be zero since we skip communication.
-  // gpuGradN2C / gpuDivN2C only write interior cells; ghost cells must be
-  // pre-zeroed so the subsequent divC2N / gradC2N stencils read zeros at
-  // subdomain boundaries.
+  // gpuMaxwellLocalCenterOps writes only the cells of its box; ghost cells
+  // must be pre-zeroed so the node kernel reads zeros at subdomain
+  // boundaries.
   cudaErrChk(cudaMemsetAsync(d_tempXC.devPtr(), 0,
                              centSize * sizeof(cudaSolverType), solverStream_));
   cudaErrChk(cudaMemsetAsync(d_tempYC.devPtr(), 0,
@@ -1254,9 +1206,7 @@ void EMfields3D::gpuMaxwellImageLocal(cudaSolverType* d_im,
                              centSize * sizeof(cudaSolverType), solverStream_));
   cudaErrChk(cudaMemsetAsync(d_tempC.devPtr(), 0,
                              centSize * sizeof(cudaSolverType), solverStream_));
-  // 10th center array: reuse first centSize doubles of d_imageX (node-sized, >
-  // centSize)
-  cudaErrChk(cudaMemsetAsync(d_imageX.devPtr(), 0,
+  cudaErrChk(cudaMemsetAsync(d_divD.devPtr(), 0,
                              centSize * sizeof(cudaSolverType), solverStream_));
 
   // ---- Step 1: Krylov → physical space ----
@@ -1265,41 +1215,26 @@ void EMfields3D::gpuMaxwellImageLocal(cudaSolverType* d_im,
 
   // ---- Step 2: MUdot: D = μ̂·E ----
   // Purely local (no communication), loops over species internally.
-  gpuMUdot(d_Dx, d_Dy, d_Dz, d_vectX, d_vectY, d_vectZ);
+  // X-right outflow face: zero-gradient ghost nodes of E and D for the ghost
+  // cell plane, whose ghost rows stay zero like every other ghost cell here.
+  GPUFieldArray3* En[3] = {&d_vectX, &d_vectY, &d_vectZ};
+  GPUFieldArray3* Dn[3] = {&d_Dx, &d_Dy, &d_Dz};
+  gpuOutflowGhostNodes(En);
+  gpuMUdot(d_Dx, d_Dy, d_Dz, d_vectX, d_vectY, d_vectZ, imageBoxes_.mudot);
+  gpuOutflowGhostNodes(Dn);
 
   // ---- Step 3: Fused center-level operations ----
   // Computes 3×gradN2C(Ex,Ey,Ez) → 9 center arrays
   //        + divN2C(Dx,Dy,Dz)    → 1 center array
-  // All in a single kernel launch.
+  // in a single kernel launch, on the cells of the full image.
   gpuMaxwellLocalCenterOps(
       d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),       // grad(Ex)
       d_divC.devPtr(), d_poissonTemp.devPtr(), d_poissonIm.devPtr(), // grad(Ey)
       d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr(),   // grad(Ez)
-      d_imageX.devPtr(), // div(D) — stored in first centSize of d_imageX
+      d_divD.devPtr(),                                               // div(D)
       d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(), d_Dx.devPtr(),
       d_Dy.devPtr(), d_Dz.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
-      solverStream_);
-
-  // X-right outflow face: the ghost cell plane from zero-gradient ghost
-  // nodes; its ghost rows stay zero like every other ghost cell here.
-  if (ownsOutflowFaceXright()) {
-    GPUFieldArray3* En[3] = {&d_vectX, &d_vectY, &d_vectZ};
-    GPUFieldArray3* Dn[3] = {&d_Dx, &d_Dy, &d_Dz};
-    gpuOutflowGhostNodes(En);
-    gpuOutflowGhostNodes(Dn);
-    const int g = nxc - 1;
-    gpuGradN2C(d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
-               d_vectX.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
-               solverStream_, g, g);
-    gpuGradN2C(d_divC.devPtr(), d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
-               d_vectY.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
-               solverStream_, g, g);
-    gpuGradN2C(d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr(),
-               d_vectZ.devPtr(), nxc, nyc, nzc, _invdx, _invdy, _invdz,
-               solverStream_, g, g);
-    gpuDivN2C(d_imageX.devPtr(), d_Dx.devPtr(), d_Dy.devPtr(), d_Dz.devPtr(),
-              nxc, nyc, nzc, _invdx, _invdy, _invdz, solverStream_, g, g);
-  }
+      imageBoxes_.cells, solverStream_);
 
   // ---- Step 4: Fused node-level operations + Krylov packing ----
   // For each interior node:
@@ -1308,33 +1243,21 @@ void EMfields3D::gpuMaxwellImageLocal(cudaSolverType* d_im,
   //   lapZ = divC2N(grad(Ez))       — from 3 center arrays
   //   gdivX/Y/Z = gradC2N(div(D))  — from 1 center array
   //   im = delt²·(-lap - gdiv) + D + E
-  // Output is packed into Krylov space first, then boundary corrections are
-  // applied after unpacking to node arrays.
+  // Output is packed into Krylov space; the boundary rows follow.
   gpuMaxwellLocalNodeFused(
       d_im, d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(), // grad(Ex)
       d_divC.devPtr(), d_poissonTemp.devPtr(), d_poissonIm.devPtr(), // grad(Ey)
       d_divBwork.devPtr(), d_divE_work.devPtr(), d_tempC.devPtr(),   // grad(Ez)
-      d_imageX.devPtr(),                                             // div(D)
+      d_divD.devPtr(),                                               // div(D)
       d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(), d_Dx.devPtr(),
       d_Dy.devPtr(), d_Dz.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
-      delt * delt, solverStream_);
+      delt * delt, imageBoxes_.nodes, imageBoxes_.cellIndex, solverStream_);
 
-  // Boundary image rows on the unpacked node fields, then repack to Krylov
-  // space.
-  gpuSolver2Phys3(d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(), d_im,
-                  nxn, nyn, nzn, solverStream_);
-
-  // Perfect conductor BCs (image rows, linear)
-  gpuPerfectConductorImages(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
-                            d_vectZ);
-
+  // Boundary rows as in the full image, written into the Krylov image
+  gpuPerfectConductorImages(d_im, d_vectX, d_vectY, d_vectZ);
   if (get_col().getApplyInflowBcsEImage())
-    gpuOpenBoundaryInflowEImage(
-        d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
-        d_vectX.devPtr(), d_vectY.devPtr(), d_vectZ.devPtr(), nxn, nyn, nzn);
-
-  gpuPhys2Solver3(d_im, d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
-                  nxn, nyn, nzn, solverStream_);
+    gpuOpenBoundaryInflowEImage(d_im, d_vectX.devPtr(), d_vectY.devPtr(),
+                                d_vectZ.devPtr(), nxn, nyn, nzn);
 }
 
 // =========================================================================
@@ -2238,19 +2161,44 @@ void EMfields3D::gpuFGMRES_BlockJacobiPrecond(cudaSolverType* d_x, int n,
   blockJacobiDinvStale = true;
   gpuEnsureFGMRESWorkspace(m, n);
 
-  gpuFGMRES_impl(this, &EMfields3D::gpuMaxwellImage,
-                 &EMfields3D::gpuBlockJacobiPrecond, d_x, n, d_b, m, max_iter,
-                 tol, d_blasScratch, d_gmresV, d_gmresW, gmresVAlloc, d_fgmresZ,
-                 fgmresZAlloc, fieldcomm, solverStream_, h_gmresReduceLocal,
-                 h_gmresReduceGlobal, h_gmresH, h_gmresG, h_gmresCS, h_gmresSN,
-                 h_gmresY, "FGMRES+BlockJacobi");
+  gpuFGMRES_impl(this, gpuMaxwellImageFn(), &EMfields3D::gpuBlockJacobiPrecond,
+                 d_x, n, d_b, m, max_iter, tol, d_blasScratch, d_gmresV,
+                 d_gmresW, gmresVAlloc, d_fgmresZ, fgmresZAlloc, fieldcomm,
+                 solverStream_, h_gmresReduceLocal, h_gmresReduceGlobal,
+                 h_gmresH, h_gmresG, h_gmresCS, h_gmresSN, h_gmresY,
+                 "FGMRES+BlockJacobi");
+}
+
+// =========================================================================
+//  Solver steps: the instantiation of the run's halo mode (HaloOverlap)
+// =========================================================================
+
+void EMfields3D::gpuCalculateE(int cycle) {
+  if (haloOverlap_)
+    gpuCalculateE<HaloMode::Overlap>(cycle);
+  else
+    gpuCalculateE<HaloMode::Blocking>(cycle);
+}
+
+void EMfields3D::gpuCalculateB(int cycle) {
+  if (haloOverlap_)
+    gpuCalculateB<HaloMode::Overlap>(cycle);
+  else
+    gpuCalculateB<HaloMode::Blocking>(cycle);
+}
+
+void EMfields3D::gpuCalculateHatFunctions(int cycle) {
+  if (haloOverlap_)
+    gpuCalculateHatFunctions<HaloMode::Overlap>(cycle);
+  else
+    gpuCalculateHatFunctions<HaloMode::Blocking>(cycle);
 }
 
 // =========================================================================
 //  gpuCalculateE: full E-field solver
 // =========================================================================
 
-void EMfields3D::gpuCalculateE(int cycle) {
+template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateE(int cycle) {
   const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
 
@@ -2304,11 +2252,11 @@ void EMfields3D::gpuCalculateE(int cycle) {
     double eigMin = (chebEigMin > 0.0) ? chebEigMin : 1.0;
     double eigMax = chebEigMax;
     if (eigMax <= 0.0) {
-      eigMax = gpuEstimateMaxEigenvalue(&EMfields3D::gpuMaxwellImage, nMaxwell,
-                                        20, fieldcomm);
+      eigMax = gpuEstimateMaxEigenvalue(gpuMaxwellImageFn(), nMaxwell, 20,
+                                        fieldcomm);
     }
     gpuChebyshevSolve(d_xkrylovMaxwell.devPtr(), nMaxwell,
-                      d_bkrylovMaxwell.devPtr(), &EMfields3D::gpuMaxwellImage,
+                      d_bkrylovMaxwell.devPtr(), gpuMaxwellImageFn(),
                       chebMaxIter, eigMin, eigMax, fieldcomm);
   } else if (SolverType == "FGMRESBlockJacobi") {
     // FGMRES(20) with communication-free block-Jacobi preconditioner
@@ -2319,7 +2267,7 @@ void EMfields3D::gpuCalculateE(int cycle) {
                                  fieldcomm);
   } else {
     // Default: GMRES(20) solver
-    gpuGMRES_impl(this, &EMfields3D::gpuMaxwellImage, d_xkrylovMaxwell.devPtr(),
+    gpuGMRES_impl(this, gpuMaxwellImageFn(), d_xkrylovMaxwell.devPtr(),
                   nMaxwell, d_bkrylovMaxwell.devPtr(), 20, 200, GMREStol,
                   d_blasScratch, d_gmresV, d_gmresW, gmresVAlloc, fieldcomm,
                   solverStream_, h_gmresReduceLocal, h_gmresReduceGlobal,
@@ -2360,7 +2308,7 @@ void EMfields3D::gpuCalculateE(int cycle) {
 #endif
 
   // Smooth E
-  gpuSmoothE();
+  gpuSmoothE<M>();
 
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
   reportElectricField("E_after_smoothing", false);
@@ -2391,7 +2339,7 @@ void EMfields3D::gpuCalculateE(int cycle) {
 //  gpuCalculateB: Faraday update
 // =========================================================================
 
-void EMfields3D::gpuCalculateB(int cycle) {
+template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateB(int cycle) {
   const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
@@ -2446,8 +2394,7 @@ void EMfields3D::gpuCalculateB(int cycle) {
 #endif
 
   // Communicate center B ghost cells (batched: 3 fields in 1 MPI round)
-#ifdef HALO_OVERLAP
-  {
+  if constexpr (M == HaloMode::Overlap) {
     // C2N at node (i,j,k) reads centers (i-1..i, j-1..j, k-1..k).
     // Start with the halo-independent core, then exclude every node whose
     // stencil can intersect a center layer modified after the halo exchange.
@@ -2548,26 +2495,25 @@ void EMfields3D::gpuCalculateB(int cycle) {
     gpuInterpC2N_complement(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn,
                             safeILo, safeIHi, bzSafeJLo, bzSafeJHi, safeKLo,
                             safeKHi, solverStream_);
+  } else {
+    gpuCommunicateCenterBC_3mixed(nxc, nyc, nzc, d_Bxc, col->bcBx, d_Byc,
+                                  col->bcBy, d_Bzc, col->bcBz);
+
+    // Open boundary conditions on center-based B
+    gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
+                           nyc, nzc);
+
+    // Case-specific fixes on center-based B
+    if (isGemCase)
+      gpuFixBcGEM();
+    if (isForceFreeCase)
+      gpuFixBforcefree();
+
+    // Interpolate center → node
+    gpuInterpC2N(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn, solverStream_);
+    gpuInterpC2N(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn, solverStream_);
+    gpuInterpC2N(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn, solverStream_);
   }
-#else
-  gpuCommunicateCenterBC_3mixed(nxc, nyc, nzc, d_Bxc, col->bcBx, d_Byc,
-                                col->bcBy, d_Bzc, col->bcBz);
-
-  // Open boundary conditions on center-based B
-  gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
-                         nyc, nzc);
-
-  // Case-specific fixes on center-based B
-  if (isGemCase)
-    gpuFixBcGEM();
-  if (isForceFreeCase)
-    gpuFixBforcefree();
-
-  // Interpolate center → node
-  gpuInterpC2N(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn, solverStream_);
-  gpuInterpC2N(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn, solverStream_);
-  gpuInterpC2N(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn, solverStream_);
-#endif
 
   // Communicate node B ghost cells (batched: 3 fields in 1 MPI round)
   gpuCommunicateNodeBC_3mixed(nxn, nyn, nzn, d_Bxn, col->bcBx, d_Byn, col->bcBy,
@@ -2586,6 +2532,7 @@ void EMfields3D::gpuCalculateB(int cycle) {
 //  gpuCalculateHatFunctions: compute Jhat and rhohat
 // =========================================================================
 
+template <EMfields3D::HaloMode M>
 void EMfields3D::gpuCalculateHatFunctions(int cycle) {
   const Grid* grid = &get_grid();
   double _invdx = grid->get_invdx();
@@ -2596,7 +2543,7 @@ void EMfields3D::gpuCalculateHatFunctions(int cycle) {
   size_t centSize = (size_t)nxc * nyc * nzc;
 
   // Smooth rhoc
-  gpuSmooth(d_rhoc, 0);
+  gpuSmooth<M>(d_rhoc, 0);
 
   // Initialise Jxh/Jyh/Jzh = 0
   cudaSolverType* jptrs[3] = {d_Jxh.devPtr(), d_Jyh.devPtr(), d_Jzh.devPtr()};
@@ -2614,49 +2561,49 @@ void EMfields3D::gpuCalculateHatFunctions(int cycle) {
     gpuScale3(d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
               -dt / 2.0, centSize, solverStream_);
 
-#ifdef HALO_OVERLAP
-    // --- overlap: begin halo exchange for 3 centre fields ---
-    cudaSolverType* hatPtrs[3] = {d_tempXC.devPtr(), d_tempYC.devPtr(),
-                                  d_tempZC.devPtr()};
-    gpuBatchedHaloBeginExchange(hatPtrs, 3, nxc, nyc, nzc,
-                                /*offsetZero=*/true, /*faceOnly=*/false,
-                                /*isParticle=*/true, solverStream_);
-    // --- interior interpC2N while the faces are packed ---
-    gpuInterpC2N_interior(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn,
-                          solverStream_);
-    gpuInterpC2N_interior(d_tempYN.devPtr(), d_tempYC.devPtr(), nxn, nyn, nzn,
-                          solverStream_);
-    gpuInterpC2N_interior(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn,
-                          solverStream_);
-    // --- end exchange: MPI faces, edges and corners + unpack ---
-    gpuBatchedHaloEndExchange();
-    // BC
-    gpuBCface_P(nxc, nyc, nzc, d_tempXC, 2, 2, 2, 2, 2, 2, &get_vct(),
-                solverStream_);
-    gpuBCface_P(nxc, nyc, nzc, d_tempYC, 2, 2, 2, 2, 2, 2, &get_vct(),
-                solverStream_);
-    gpuBCface_P(nxc, nyc, nzc, d_tempZC, 2, 2, 2, 2, 2, 2, &get_vct(),
-                solverStream_);
-    // --- boundary interpC2N ---
-    gpuInterpC2N_boundary(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn,
-                          solverStream_);
-    gpuInterpC2N_boundary(d_tempYN.devPtr(), d_tempYC.devPtr(), nxn, nyn, nzn,
-                          solverStream_);
-    gpuInterpC2N_boundary(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn,
-                          solverStream_);
-#else
-    // Communicate (batched: 3 fields in 1 MPI round)
-    gpuCommunicateCenterBC_P_3(nxc, nyc, nzc, d_tempXC, d_tempYC, d_tempZC, 2,
-                               2, 2, 2, 2, 2);
+    if constexpr (M == HaloMode::Overlap) {
+      // --- overlap: begin halo exchange for 3 centre fields ---
+      cudaSolverType* hatPtrs[3] = {d_tempXC.devPtr(), d_tempYC.devPtr(),
+                                    d_tempZC.devPtr()};
+      gpuBatchedHaloBeginExchange(hatPtrs, 3, nxc, nyc, nzc,
+                                  /*offsetZero=*/true, /*faceOnly=*/false,
+                                  /*isParticle=*/true, solverStream_);
+      // --- interior interpC2N while the exchange is in flight ---
+      gpuInterpC2N_interior(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn,
+                            solverStream_);
+      gpuInterpC2N_interior(d_tempYN.devPtr(), d_tempYC.devPtr(), nxn, nyn, nzn,
+                            solverStream_);
+      gpuInterpC2N_interior(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn,
+                            solverStream_);
+      // --- end exchange: MPI faces, edges and corners + unpack ---
+      gpuBatchedHaloEndExchange();
+      // BC
+      gpuBCface_P(nxc, nyc, nzc, d_tempXC, 2, 2, 2, 2, 2, 2, &get_vct(),
+                  solverStream_);
+      gpuBCface_P(nxc, nyc, nzc, d_tempYC, 2, 2, 2, 2, 2, 2, &get_vct(),
+                  solverStream_);
+      gpuBCface_P(nxc, nyc, nzc, d_tempZC, 2, 2, 2, 2, 2, 2, &get_vct(),
+                  solverStream_);
+      // --- boundary interpC2N ---
+      gpuInterpC2N_boundary(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn,
+                            solverStream_);
+      gpuInterpC2N_boundary(d_tempYN.devPtr(), d_tempYC.devPtr(), nxn, nyn, nzn,
+                            solverStream_);
+      gpuInterpC2N_boundary(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn,
+                            solverStream_);
+    } else {
+      // Communicate (batched: 3 fields in 1 MPI round)
+      gpuCommunicateCenterBC_P_3(nxc, nyc, nzc, d_tempXC, d_tempYC, d_tempZC, 2,
+                                 2, 2, 2, 2, 2);
 
-    // Interpolate C → N
-    gpuInterpC2N(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn,
-                 solverStream_);
-    gpuInterpC2N(d_tempYN.devPtr(), d_tempYC.devPtr(), nxn, nyn, nzn,
-                 solverStream_);
-    gpuInterpC2N(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn,
-                 solverStream_);
-#endif
+      // Interpolate C → N
+      gpuInterpC2N(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn,
+                   solverStream_);
+      gpuInterpC2N(d_tempYN.devPtr(), d_tempYC.devPtr(), nxn, nyn, nzn,
+                   solverStream_);
+      gpuInterpC2N(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn,
+                   solverStream_);
+    }
 
     // Add species current: tempN += Jxs[is] (fused triple)
     gpuSum3(d_tempXN.devPtr(), d_Jxs.speciesPtr(is), d_tempYN.devPtr(),
@@ -2691,7 +2638,7 @@ void EMfields3D::gpuCalculateHatFunctions(int cycle) {
 #endif
 
   // Smooth Jhat (batched: 3 fields in 1 MPI round per iteration)
-  gpuSmooth3(d_Jxh, d_Jyh, d_Jzh, 1);
+  gpuSmooth3<M>(d_Jxh, d_Jyh, d_Jzh, 1);
 
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
   reportJhat("Jhat_after_smoothing");
@@ -3038,15 +2985,16 @@ void EMfields3D::gpuOpenBoundaryInflowESource(cudaSolverType* dX,
 //  gpuOpenBoundaryInflowEImage: identity rows on the open inflow faces
 // =========================================================================
 
-void EMfields3D::gpuOpenBoundaryInflowEImage(
-    cudaSolverType* imX, cudaSolverType* imY, cudaSolverType* imZ,
-    const cudaSolverType* vX, const cudaSolverType* vY,
-    const cudaSolverType* vZ, int nx, int ny, int nz) {
+void EMfields3D::gpuOpenBoundaryInflowEImage(cudaSolverType* d_im,
+                                             const cudaSolverType* vX,
+                                             const cudaSolverType* vY,
+                                             const cudaSolverType* vZ, int nx,
+                                             int ny, int nz) {
   const int n[3] = {nx, ny, nz};
   for (int f = 0; f < 6; f++)
     if (openInflowFace_[f])
-      gpuOpenBCCopyFace3(imX, imY, imZ, vX, vY, vZ, f / 2,
-                         f % 2 ? n[f / 2] - 2 : 1, nx, ny, nz, solverStream_);
+      gpuOpenBCCopyFace3(d_im, vX, vY, vZ, f / 2, f % 2 ? n[f / 2] - 2 : 1, nx,
+                         ny, nz, solverStream_);
 }
 
 // =========================================================================

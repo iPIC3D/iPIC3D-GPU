@@ -146,6 +146,7 @@ void Collective::ReadInput(const ConfigFile& config) {
 
     Smooth = config.read<double>("Smooth", 1.0);
     SmoothNiter = config.read<int>("SmoothNiter", 6);
+    haloOverlap = config.read<int>("HaloOverlap", 0) != 0;
 
     SaveDirName = config.read<string>("SaveDirName", "data");
     RestartDirName = config.read<string>("RestartDirName", "data");
@@ -878,6 +879,8 @@ void Collective::Print() {
   cout << "Simulation name   : " << SimName << endl;
   cout << "Smoothing         : " << (Smooth == 1.0 ? "off" : "on")
        << " (alpha=" << Smooth << ", Niter=" << SmoothNiter << ")" << endl;
+  cout << "Halo overlap      : " << (haloOverlap ? "on" : "off")
+       << " (field solver)" << endl;
   cout << "---------------------" << endl;
   cout << "EM Field Boundary Conditions" << endl;
   cout << "---------------------" << endl;
@@ -1244,6 +1247,7 @@ void Collective::save(const std::string& header) {
   my_file << "---------------------------" << endl;
   my_file << "Smooth                   = " << Smooth << endl;
   my_file << "SmoothNiter              = " << SmoothNiter << endl;
+  my_file << "HaloOverlap              = " << haloOverlap << endl;
   my_file << "GMRES error tolerance    = " << GMREStol << endl;
   my_file << "CG error tolerance       = " << CGtol << endl;
   my_file << "Mover error tolerance    = " << NiterMover << endl;

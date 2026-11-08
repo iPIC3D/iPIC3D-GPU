@@ -542,7 +542,7 @@ void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in, int nx,
 }
 
 // =========================================================================
-//  HALO_OVERLAP: interior / boundary stencil variants
+//  Interior / boundary stencil variants (HaloMode::Overlap)
 //
 //  Each centre→node stencil (divC2N, gradC2N, interpC2N) reads
 //  centre[i-1..i][j-1..j][k-1..k] for node output at [i][j][k].
@@ -554,7 +554,6 @@ void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in, int nx,
 //
 //  The interior and boundary variants share one device helper per stencil.
 // =========================================================================
-#ifdef HALO_OVERLAP
 
 // -----------------------------------------------------------------
 //  divC2N  (centre → node divergence)
@@ -991,7 +990,5 @@ void gpuSmoothStep_boundary(cudaSolverType* out, const cudaSolverType* in,
       out, in, nx, ny, nz, alpha, beta3D, 2, nx - 3, 2, ny - 3, 2, nz - 3);
   cudaErrChk(cudaGetLastError());
 }
-
-#endif // HALO_OVERLAP
 
 #undef IDX

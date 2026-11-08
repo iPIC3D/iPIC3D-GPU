@@ -195,6 +195,7 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
   delta = col->getDelta();
   Smooth = col->getSmooth();
   SmoothNiter = col->getSmoothNiter();
+  haloOverlap_ = col->getHaloOverlap();
   // per-species initial density and drifting (u0 or w0 != 0) species
   rhoINIT = new double[ns];
   DriftSpecies = new bool[ns];

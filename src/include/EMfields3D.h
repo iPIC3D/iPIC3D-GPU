@@ -42,6 +42,7 @@
 
 #include "GPUFieldArray.cuh"
 #include "GPUHaloComm.cuh"
+#include "GPUMaxwellLocal.cuh"
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
 #include "GPUCycleDiagnostics.cuh"
 #endif
@@ -58,6 +59,16 @@
 class EMfields3D // :public Field
 {
 public:
+  /** Halo exchanges of the field solver (input HaloOverlap): Blocking
+   *  exchanges, then computes; Overlap computes what does not read the
+   *  exchanged values while the exchange is in flight.  gpuCalculateE/B/
+   *  HatFunctions, the smoothing routines and gpuMaxwellImage are compiled
+   *  for both modes (template parameter): the public gpuCalculate* run the
+   *  mode of the run, the public gpuMaxwellImage the one of
+   *  gpuMaxwellImageFn().  The other exchanges (Maxwell source, Poisson
+   *  solves) are blocking. */
+  enum class HaloMode { Blocking, Overlap };
+
   // ======= Construction and lifetime =======
 
   /**
@@ -477,8 +488,9 @@ public:
                               int bcFaceXright, int bcFaceXleft,
                               int bcFaceYright, int bcFaceYleft,
                               int bcFaceZright, int bcFaceZleft);
-  /** Batched 9-field center-based halo exchange + BC in one MPI round (for
-   * fused triple Laplacian). */
+  /** Batched 9-field center-based halo exchange + BC in one MPI round.  Not
+   * used currently: the Maxwell image exchanges its 10 cell arrays with
+   * per-array face BCs (the image-reference test uses it as reference). */
   void gpuCommunicateCenterBC_9(int nx, int ny, int nz, GPUFieldArray3& a1,
                                 GPUFieldArray3& a2, GPUFieldArray3& a3,
                                 GPUFieldArray3& a4, GPUFieldArray3& a5,
@@ -546,6 +558,8 @@ public:
                                             int bcZR, int bcZL);
 
   // ---- GPU Solver: field-solver methods ----
+  // gpuCalculateE, gpuCalculateB and gpuCalculateHatFunctions run the
+  // instantiation of the run's HaloMode (input HaloOverlap).
   /** Advance E: div(E) correction (PoissonCorrection), implicit Maxwell
    * solve, smoothing, halo exchange and the post-solve open-boundary update
    * (gpuOpenBoundaryInflowE). */
@@ -556,9 +570,29 @@ public:
   /** Build the hat quantities (rhohat, Jhat) of the implicit field solve;
    * cycle=-1 denotes initialization. */
   void gpuCalculateHatFunctions(int cycle = -1);
-  /** Maxwell operator A*x, the Krylov callback of the field solvers
-   * (operates on device Krylov vectors). */
+  /** Maxwell operator A*x on device Krylov vectors (runs
+   * gpuMaxwellImageFn(), the Krylov callback the field solvers take):
+   *   A*x = delt^2 (-lap x - grad div(mu.x)) + mu.x + x
+   * on the interior nodes, then the boundary rows.  The cell gradients of x
+   * and div(mu.x) are exchanged between ranks in one halo exchange;
+   * gpuMaxwellLocalNodeFused writes the Krylov image. */
   void gpuMaxwellImage(cudaSolverType* d_im, cudaSolverType* d_vector);
+  /** The Maxwell image in halo mode M.  Overlap (the split operator) computes
+   *  the boundary layers first (with a flat axis: D and the cell arrays
+   *  whole) and the interior while the exchange is in flight; it needs
+   *  MaxwellImageBoxes::split (aborts otherwise).  Both give the same
+   *  values. */
+  template <HaloMode M>
+  void gpuMaxwellImage(cudaSolverType* d_im, cudaSolverType* d_vector);
+  /** A Krylov operator: im = A * vector on device Krylov vectors. */
+  using GpuImageFn = void (EMfields3D::*)(cudaSolverType*, cudaSolverType*);
+  /** The Maxwell image of this run: the split operator where HaloOverlap is
+   *  on and the subdomain allows it (MaxwellImageBoxes::split), otherwise
+   *  the blocking one. */
+  GpuImageFn gpuMaxwellImageFn() const;
+  /** Launch sets of the Maxwell images and gpuMUdot (set by
+   *  gpuSolverAllocate). */
+  const MaxwellImageBoxes& gpuMaxwellImageBoxes() const { return imageBoxes_; }
   /** Maxwell operator, communication-free: A*x for use as
    * preconditioner (the Richardson sweeps of gpuBlockJacobiPrecond, run when
    * BlockJacobiSweeps > 1). Ghost cells are treated as zero, apart from the
@@ -576,8 +610,7 @@ public:
    *  @param d_x      [in/out] initial guess → solution (Krylov vector, device)
    *  @param n         Krylov vector length = 3*(nxn-2)*(nyn-2)*(nzn-2)
    *  @param d_b       [in] right-hand side (Krylov vector, device)
-   *  @param GpuImage  operator callback A·v  (e.g.
-   * &EMfields3D::gpuMaxwellImage)
+   *  @param GpuImage  operator callback A·v  (e.g. gpuMaxwellImageFn())
    *  @param maxIter   number of Chebyshev polynomial steps
    *  @param eigMin    lower bound on eigenvalues of A  (>0)
    *  @param eigMax    upper bound on eigenvalues of A  (>eigMin)
@@ -620,39 +653,30 @@ public:
   cudaSolverType gpuEstimateMaxEigenvalue(
       void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*), int n,
       int nIter, MPI_Comm fieldcomm);
-  /** GPU MUdot: compute μ·E for all species. */
+  /** GPU MUdot: compute μ·E for all species on the interior nodes (after
+   *  gpuSolverAllocate). */
   void gpuMUdot(GPUFieldArray3& MUdotX, GPUFieldArray3& MUdotY,
                 GPUFieldArray3& MUdotZ, GPUFieldArray3& vX, GPUFieldArray3& vY,
                 GPUFieldArray3& vZ);
+  /** GPU MUdot on the nodes of points (a PointBox or a PointList). */
+  template <typename Points>
+  void gpuMUdot(GPUFieldArray3& MUdotX, GPUFieldArray3& MUdotY,
+                GPUFieldArray3& MUdotZ, GPUFieldArray3& vX, GPUFieldArray3& vY,
+                GPUFieldArray3& vZ, const Points& points);
   /** GPU PIdot: compute π·v for one species (accumulative). */
   void gpuPIdot(GPUFieldArray3& PIX, GPUFieldArray3& PIY, GPUFieldArray3& PIZ,
                 GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ,
                 int is);
-  /** GPU smooth: SmoothNiter iterations of box smoothing. */
-  void gpuSmooth(GPUFieldArray3& arr, int type);
-  /** Smooth E: fused 3-component E-field smoothing. */
-  void gpuSmoothE();
-  /** GPU smooth3: fused 3-component node-field smoothing (for Jhat). */
-  void gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
-                  int type);
   /** GPU perfect conductor BC, image rows (linear) on every conductor face
-   *  of this rank (bcEMface = 0): gpuPerfectConductorImage. */
-  void gpuPerfectConductorImages(GPUFieldArray3& imX, GPUFieldArray3& imY,
-                                 GPUFieldArray3& imZ, GPUFieldArray3& vX,
+   *  of this rank (bcEMface = 0), written into the Krylov image d_im:
+   *  gpuPerfectConductorImage. */
+  void gpuPerfectConductorImages(cudaSolverType* d_im, GPUFieldArray3& vX,
                                  GPUFieldArray3& vY, GPUFieldArray3& vZ);
   /** GPU perfect conductor BC, RHS rows on every conductor face of this rank
    *  (bcEMface = 0): tangential -(u0 x B0), normal the constant part of the
    *  normal row (gpuPerfectConductorSource). */
   void gpuPerfectConductorSources(cudaSolverType* dX, cudaSolverType* dY,
                                   cudaSolverType* dZ);
-  /** Laplacian of the Maxwell operator for three components: div(grad),
-   * node -> cell -> node, with the cell gradients exchanged between ranks in
-   * one batched halo exchange and set to 0 in physical ghost cells (BC code
-   * 1). On an outflow face the gradients also cover the X-right ghost cell
-   * plane (operatorCellEnd()), whose ghost rows are filled and kept. */
-  void gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
-                   GPUFieldArray3& lapB, GPUFieldArray3& fieldB,
-                   GPUFieldArray3& lapC, GPUFieldArray3& fieldC);
 
   // ---- GPU Solver: moment post-processing on GPU ----
   /** D2D scatter: copy 10 packed moment arrays from the moment-kernel buffer
@@ -686,7 +710,7 @@ public:
    *  @param isFaceOnlyFlag true = skip edges/corners.
    *  @param needInterp   true = additive accumulation after exchange.
    *  @param isParticle   true = use particle communicator.
-   *  @param stream       CUDA stream for kernels.  Without HALO_OVERLAP,
+   *  @param stream       CUDA stream for kernels.  With HaloOverlap off,
    *                      successive calls sharing the persistent buffers must
    *                      use this same stream or be externally synchronized. */
   void gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs, int nFields, int nx,
@@ -694,9 +718,9 @@ public:
                               bool isFaceOnlyFlag, bool needInterp,
                               bool isParticle, cudaStream_t stream);
 
-#ifdef HALO_OVERLAP
   /** Queue pointer upload and face packing on the halo stream.  The caller
-   *  then queues dependency-free work on @p computeStream. */
+   *  then queues dependency-free work on @p computeStream.  Needs the split
+   *  exchange resources (HaloOverlap on). */
   void gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs, int nFields,
                                    int nx, int ny, int nz, bool offsetZero,
                                    bool isFaceOnlyFlag, bool isParticle,
@@ -705,7 +729,6 @@ public:
    *  corners, then make the caller-provided compute stream wait for
    *  completion. */
   void gpuBatchedHaloEndExchange();
-#endif
 
   /** Allocate persistent GPU halo exchange buffers. */
   void gpuAllocateHaloBuffers();
@@ -769,9 +792,9 @@ public:
    *  with ApplyInflowBcsEImage). */
   void gpuOpenBoundaryInflowESource(cudaSolverType* dX, cudaSolverType* dY,
                                     cudaSolverType* dZ, int nx, int ny, int nz);
-  /** GPU open BC: identity image rows of the open inflow faces. */
-  void gpuOpenBoundaryInflowEImage(cudaSolverType* imX, cudaSolverType* imY,
-                                   cudaSolverType* imZ,
+  /** GPU open BC: identity image rows of the open inflow faces, written into
+   *  the Krylov image d_im. */
+  void gpuOpenBoundaryInflowEImage(cudaSolverType* d_im,
                                    const cudaSolverType* vX,
                                    const cudaSolverType* vY,
                                    const cudaSolverType* vZ, int nx, int ny,
@@ -919,6 +942,19 @@ private: // X-right open boundary layer
    *  for by the adjacent row. */
   void outflowGhostRowRules(int rule[4]) const;
 
+private: // solver steps in halo mode M (see HaloMode)
+  template <HaloMode M> void gpuCalculateE(int cycle);
+  template <HaloMode M> void gpuCalculateB(int cycle);
+  template <HaloMode M> void gpuCalculateHatFunctions(int cycle);
+  /** SmoothNiter iterations of box smoothing of arr (type 0: cells). */
+  template <HaloMode M> void gpuSmooth(GPUFieldArray3& arr, int type);
+  /** Smoothing of E, the 3 components together. */
+  template <HaloMode M> void gpuSmoothE();
+  /** Smoothing of 3 arrays together (type 0: cells; Jhat). */
+  template <HaloMode M>
+  void gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
+                  int type);
+
   /* ********************************* // VARIABLES
    * ********************************* */
 
@@ -938,6 +974,8 @@ private:
   /*! Smoothing value */
   double Smooth;
   int SmoothNiter;
+  /*! Halo mode of the field solver (input HaloOverlap) */
+  bool haloOverlap_;
   /*! delt = c*th*dt */
   double delt;
   /*! number of particles species */
@@ -1182,7 +1220,7 @@ private:
   GPUFieldArray3 d_tempC;
   GPUFieldArray3 d_tempX, d_tempY, d_tempZ;
   GPUFieldArray3 d_temp2X, d_temp2Y, d_temp2Z;
-  GPUFieldArray3 d_imageX, d_imageY, d_imageZ;
+  GPUFieldArray3 d_divD; // div(μ·E) of the Maxwell images (cell-centred)
   GPUFieldArray3 d_Dx, d_Dy, d_Dz;
   GPUFieldArray3 d_vectX, d_vectY, d_vectZ;
   GPUFieldArray3 d_divC;
@@ -1278,6 +1316,10 @@ private:
   // stream.
   cudaStream_t solverStream_ = 0;
 
+  // Launch sets of the Maxwell images and gpuMUdot (whole and split
+  // operator), built once by gpuSolverAllocate
+  MaxwellImageBoxes imageBoxes_{};
+
   // ---- Persistent batched halo-exchange buffers ----
   // 6 directions: 0=XL 1=XR 2=YL 3=YR 4=ZL 5=ZR
   // HALO_MAX_BATCH is the max number of fields per single batched exchange.
@@ -1365,10 +1407,10 @@ private:
                              const HaloGeometryPlan& geometry, int nFields,
                              bool faceOnly, cudaStream_t stream);
 
-#ifdef HALO_OVERLAP
   // ---- Split halo exchange state ----
   // Communication kernels use a separate stream so face, edge and corner
   // progress can overlap the dependency-free stencil core on solverStream_.
+  // Created only with HaloOverlap on (gpuAllocateHaloBuffers).
   cudaStream_t haloStream_ = 0;
   cudaEvent_t haloInputReady_ = nullptr;
   cudaEvent_t haloPhaseReady_ = nullptr;
@@ -1382,8 +1424,6 @@ private:
     bool faceOnly = false;
     cudaStream_t computeStream = 0;
   } haloExchange_;
-
-#endif // HALO_OVERLAP
 
   // Flag tracking whether GPU solver arrays have been allocated
   bool gpuSolverAllocated_ = false;

@@ -36,6 +36,8 @@ void gpuGradC2N(cudaSolverType* gradXN, cudaSolverType* gradYN,
  * the interior), j and k interior. iHi = nxc-1 also evaluates the X-right
  * ghost cell plane from the ghost node plane.
  * Input on node grid [nxn][nyn][nzn] (nxn=nxc+1, etc.).
+ * Not used currently: the Maxwell images evaluate it inside
+ * gpuMaxwellLocalCenterOps (the image-reference test uses it as reference).
  */
 void gpuGradN2C(cudaSolverType* gradXC, cudaSolverType* gradYC,
                 cudaSolverType* gradZC, const cudaSolverType* scFieldN, int nxc,
@@ -62,6 +64,8 @@ void gpuDivN2C(cudaSolverType* divC, const cudaSolverType* vecXN,
  * Divergence center→node:  divN = ∇·(vecX_C, vecY_C, vecZ_C).
  * Output on node grid [nxn][nyn][nzn], interior i=1..nxn-2.
  * Input on center grid [nxc][nyc][nzc].
+ * Not used currently: the Maxwell images evaluate it inside
+ * gpuMaxwellLocalNodeFused (the image-reference test uses it as reference).
  */
 void gpuDivC2N(cudaSolverType* divN, const cudaSolverType* vecXC,
                const cudaSolverType* vecYC, const cudaSolverType* vecZC,
@@ -155,11 +159,13 @@ void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in, int nx,
                    cudaStream_t stream = 0);
 
 // =========================================================================
-//  Interior / boundary stencil variants for halo-computation overlap.
+//  Interior / boundary stencil variants of the overlapped halo exchanges
+//  (HaloMode::Overlap).
 //  Interior covers [2..n-3] (no ghost dependency).
 //  Boundary covers [1..n-2] minus the interior block.
+//  The divC2N and gradC2N variants are not used currently (the Maxwell
+//  image evaluates both in gpuMaxwellLocalNodeFused).
 // =========================================================================
-#ifdef HALO_OVERLAP
 
 void gpuDivC2N_interior(cudaSolverType* divN, const cudaSolverType* vecXC,
                         const cudaSolverType* vecYC,
@@ -210,7 +216,5 @@ void gpuSmoothStep_interior(cudaSolverType* out, const cudaSolverType* in,
 void gpuSmoothStep_boundary(cudaSolverType* out, const cudaSolverType* in,
                             int nx, int ny, int nz, cudaSolverType alpha,
                             cudaSolverType beta3D, cudaStream_t stream = 0);
-
-#endif // HALO_OVERLAP
 
 #endif // GPU_STENCILS_CUH

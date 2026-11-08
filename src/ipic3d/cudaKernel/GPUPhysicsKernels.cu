@@ -93,20 +93,18 @@ template <typename T> struct MUdotSpeciesSet {
  *  NS > 0 is the species count at compile time (loop fully unrolled); NS = 0
  *  reads it from set.count.  kAccumulate adds to the output (species sets
  *  after the first). */
-template <typename T, int NS, bool kAccumulate>
-__global__ void k_MUdot(T* __restrict__ MUdotX, T* __restrict__ MUdotY,
-                        T* __restrict__ MUdotZ, const T* __restrict__ vX,
-                        const T* __restrict__ vY, const T* __restrict__ vZ,
-                        const T* __restrict__ Bxn, const T* __restrict__ Byn,
-                        const T* __restrict__ Bzn, const T* __restrict__ Bx_ext,
-                        const T* __restrict__ By_ext,
-                        const T* __restrict__ Bz_ext,
-                        const T* __restrict__ rhons, size_t speciesStride,
-                        MUdotSpeciesSet<T> set, int nxn, int nyn, int nzn) {
-  const int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
-  const int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  const int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
+template <typename T, int NS, bool kAccumulate, typename Points>
+__global__ void
+k_MUdot(T* __restrict__ MUdotX, T* __restrict__ MUdotY, T* __restrict__ MUdotZ,
+        const T* __restrict__ vX, const T* __restrict__ vY,
+        const T* __restrict__ vZ, const T* __restrict__ Bxn,
+        const T* __restrict__ Byn, const T* __restrict__ Bzn,
+        const T* __restrict__ Bx_ext, const T* __restrict__ By_ext,
+        const T* __restrict__ Bz_ext, const T* __restrict__ rhons,
+        size_t speciesStride, MUdotSpeciesSet<T> set, int nyn, int nzn,
+        Points points) {
+  int i, j, k;
+  if (!pointOf(points, i, j, k))
     return;
 
   const int idx = IDX3(i, j, k, nyn, nzn);
@@ -149,20 +147,22 @@ struct MUdotArgs {
   const cudaSolverType *vX, *vY, *vZ, *Bxn, *Byn, *Bzn, *Bx_ext, *By_ext,
       *Bz_ext, *rhons;
   size_t speciesStride;
-  int nxn, nyn, nzn;
+  int nyn, nzn;
 };
 
-template <int NS, bool kAccumulate>
-static void launchMUdot(const PointLaunch& L, const MUdotArgs& a,
-                        const MUdotSpeciesSet<cudaSolverType>& set,
-                        cudaStream_t stream) {
-  k_MUdot<cudaSolverType, NS, kAccumulate><<<L.grid, L.block, 0, stream>>>(
-      a.MUdotX, a.MUdotY, a.MUdotZ, a.vX, a.vY, a.vZ, a.Bxn, a.Byn, a.Bzn,
-      a.Bx_ext, a.By_ext, a.Bz_ext, a.rhons, a.speciesStride, set, a.nxn, a.nyn,
-      a.nzn);
+template <int NS, bool kAccumulate, typename Points>
+static void
+launchMUdot(const PointLaunch& L, const MUdotArgs& a, const Points& points,
+            const MUdotSpeciesSet<cudaSolverType>& set, cudaStream_t stream) {
+  k_MUdot<cudaSolverType, NS, kAccumulate, Points>
+      <<<L.grid, L.block, 0, stream>>>(
+          a.MUdotX, a.MUdotY, a.MUdotZ, a.vX, a.vY, a.vZ, a.Bxn, a.Byn, a.Bzn,
+          a.Bx_ext, a.By_ext, a.Bz_ext, a.rhons, a.speciesStride, set, a.nyn,
+          a.nzn, points);
   cudaErrChk(cudaGetLastError());
 }
 
+template <typename Points>
 void gpuMUdot(cudaSolverType* MUdotX, cudaSolverType* MUdotY,
               cudaSolverType* MUdotZ, const cudaSolverType* vX,
               const cudaSolverType* vY, const cudaSolverType* vZ,
@@ -171,11 +171,13 @@ void gpuMUdot(cudaSolverType* MUdotX, cudaSolverType* MUdotY,
               const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
               const cudaSolverType* rhons, const double* qom, int ns, double dt,
               double c, double FourPI, double delt, int nxn, int nyn, int nzn,
-              cudaStream_t stream) {
-  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+              const Points& points, cudaStream_t stream) {
+  if (points.empty())
+    return;
+  const PointLaunch L = pointLaunch(points);
   const size_t stride = (size_t)nxn * nyn * nzn;
-  MUdotArgs a{MUdotX, MUdotY, MUdotZ, vX,    vY,     vZ,  Bxn, Byn, Bzn,
-              Bx_ext, By_ext, Bz_ext, rhons, stride, nxn, nyn, nzn};
+  MUdotArgs a{MUdotX, MUdotY, MUdotZ, vX,     vY,    vZ,     Bxn, Byn,
+              Bzn,    Bx_ext, By_ext, Bz_ext, rhons, stride, nyn, nzn};
   // Species sets of up to kMUdotMaxSpecies: the first writes, the others add.
   // With ns = 0 one launch with an empty set writes zero.
   for (int first = 0; first == 0 || first < ns; first += kMUdotMaxSpecies) {
@@ -190,19 +192,33 @@ void gpuMUdot(cudaSolverType* MUdotX, cudaSolverType* MUdotY,
     }
     a.rhons = rhons + first * stride;
     if (first > 0)
-      launchMUdot<0, true>(L, a, set, stream);
+      launchMUdot<0, true>(L, a, points, set, stream);
     else if (set.count == 1)
-      launchMUdot<1, false>(L, a, set, stream);
+      launchMUdot<1, false>(L, a, points, set, stream);
     else if (set.count == 2)
-      launchMUdot<2, false>(L, a, set, stream);
+      launchMUdot<2, false>(L, a, points, set, stream);
     else if (set.count == 3)
-      launchMUdot<3, false>(L, a, set, stream);
+      launchMUdot<3, false>(L, a, points, set, stream);
     else if (set.count == 4)
-      launchMUdot<4, false>(L, a, set, stream);
+      launchMUdot<4, false>(L, a, points, set, stream);
     else
-      launchMUdot<0, false>(L, a, set, stream);
+      launchMUdot<0, false>(L, a, points, set, stream);
   }
 }
+
+// The two point sets: PointList (1D launch, the images) and PointBox (3D
+// launch, the unit tests)
+#define MUDOT_INSTANTIATE(Points)                                              \
+  template void gpuMUdot<Points>(                                              \
+      cudaSolverType*, cudaSolverType*, cudaSolverType*,                       \
+      const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,     \
+      const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,     \
+      const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,     \
+      const cudaSolverType*, const double*, int, double, double, double,       \
+      double, int, int, int, const Points&, cudaStream_t);
+MUDOT_INSTANTIATE(PointBox)
+MUDOT_INSTANTIATE(PointList)
+#undef MUDOT_INSTANTIATE
 
 // =========================================================================
 //  PIdot kernel
@@ -279,6 +295,34 @@ __device__ __forceinline__ int faceIdx3(int face, int a, int b, int ny,
     return IDX3(a, b, face, ny, nz);
 }
 
+/** The point (a, b) of this thread on the interior [1..n-2]^2 of a face plane
+ *  normal to DIR (1D launch, facePoints threads), b fastest: k on x and y
+ *  faces, so a warp reads and writes along the contiguous axis; false past
+ *  the plane. */
+template <int DIR>
+__device__ __forceinline__ bool facePoint(int& a, int& b, int nx, int ny,
+                                          int nz) {
+  const int d1 = (DIR == 0 ? ny : nx) - 2, d2 = (DIR == 2 ? ny : nz) - 2;
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= d1 * d2)
+    return false;
+  a = tid / d2 + 1;
+  b = tid % d2 + 1;
+  return true;
+}
+
+/** Packed interior index of point (a, b) of the face plane `face` normal to
+ *  DIR in the Krylov layout of gpuPhys2Solver3: node (i, j, k) is entry
+ *  ((i-1)(ny-2) + j-1)(nz-2) + k-1, with 3 components per entry. */
+template <int DIR>
+__device__ __forceinline__ int faceKrylovNode(int face, int a, int b, int ny,
+                                              int nz) {
+  const int i = DIR == 0 ? face : a;
+  const int j = DIR == 0 ? a : (DIR == 1 ? face : b);
+  const int k = DIR == 2 ? face : b;
+  return ((i - 1) * (ny - 2) + (j - 1)) * (nz - 2) + (k - 1);
+}
+
 /** Row DIR of the implicit susceptibility at node idx, as (chi_nn, chi_na,
  *  chi_nb) with a = DIR+1, b = DIR+2 (mod 3):
  *  chi_nj = delta_nj + sum_s d_s (delta_nj + w_n w_j + eps_njk w_k), the
@@ -315,11 +359,11 @@ pecSusceptibilityRow(T& chiN, T& chiA, T& chiB, int idx,
 }
 
 /** Conductor image rows on face node plane `face` normal to DIR (tangential
- *  interior), linear in the Krylov vector (see the banner above). */
+ *  interior), linear in the Krylov vector (see the banner above), written
+ *  into the Krylov image. */
 template <typename T, int DIR>
 __global__ void k_perfectConductorImage(
-    T* __restrict__ imX, T* __restrict__ imY, T* __restrict__ imZ,
-    const T* __restrict__ vX, const T* __restrict__ vY,
+    T* __restrict__ im, const T* __restrict__ vX, const T* __restrict__ vY,
     const T* __restrict__ vZ, const T* __restrict__ Bxn,
     const T* __restrict__ Byn, const T* __restrict__ Bzn,
     const T* __restrict__ Bx_ext, const T* __restrict__ By_ext,
@@ -327,21 +371,19 @@ __global__ void k_perfectConductorImage(
     const T* __restrict__ qom_d, int ns, T dt, T c, T FourPI, T delt, int face,
     int nxn, int nyn, int nzn) {
   constexpr int A = (DIR + 1) % 3, B = (DIR + 2) % 3;
-  const int d1 = DIR == 0 ? nyn : nxn, d2 = DIR == 2 ? nyn : nzn;
-  const int a = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  const int b = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (a > d1 - 2 || b > d2 - 2)
+  int a, b;
+  if (!facePoint<DIR>(a, b, nxn, nyn, nzn))
     return;
   const int idx = faceIdx3<DIR>(face, a, b, nyn, nzn);
   T chiN, chiA, chiB;
   pecSusceptibilityRow<T, DIR>(chiN, chiA, chiB, idx, Bxn, Byn, Bzn, Bx_ext,
                                By_ext, Bz_ext, rhons, qom_d, ns,
                                nxn * nyn * nzn, dt, c, FourPI, delt);
-  T* const im[3] = {imX, imY, imZ};
+  T* const row = im + 3 * faceKrylovNode<DIR>(face, a, b, nyn, nzn);
   const T v[3] = {vX[idx], vY[idx], vZ[idx]};
-  im[DIR][idx] = v[DIR] + (chiA * v[A] + chiB * v[B]) / chiN;
-  im[A][idx] = v[A];
-  im[B][idx] = v[B];
+  row[DIR] = v[DIR] + (chiA * v[A] + chiB * v[B]) / chiN;
+  row[A] = v[A];
+  row[B] = v[B];
 }
 
 /** Conductor RHS rows on the same plane: normal (E^n_n - 4 pi theta dt
@@ -357,10 +399,8 @@ __global__ void k_perfectConductorSource(
     T th, T FourPI, T delt, T ebc0, T ebc1, T ebc2, int face, int nxn, int nyn,
     int nzn) {
   constexpr int A = (DIR + 1) % 3, B = (DIR + 2) % 3;
-  const int d1 = DIR == 0 ? nyn : nxn, d2 = DIR == 2 ? nyn : nzn;
-  const int a = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  const int b = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  if (a > d1 - 2 || b > d2 - 2)
+  int a, b;
+  if (!facePoint<DIR>(a, b, nxn, nyn, nzn))
     return;
   const int idx = faceIdx3<DIR>(face, a, b, nyn, nzn);
   T chiN, chiA, chiB;
@@ -378,10 +418,11 @@ __global__ void k_perfectConductorSource(
 //  Host wrappers
 // =========================================================================
 
-static inline dim3 faceGrid2D(int d1, int d2) {
-  return dim3(((d1 - 2) + 15) / 16, ((d2 - 2) + 15) / 16);
+/** Points of the interior [1..n-2]^2 of a face plane normal to dir. */
+static inline int facePoints(int dir, int nx, int ny, int nz) {
+  return ((dir == 0 ? ny : nx) - 2) * ((dir == 2 ? ny : nz) - 2);
 }
-static const dim3 faceBlock2D(16, 16);
+static constexpr int kFaceBlock = 256;
 
 /** Launch `KERNEL<cudaSolverType, DIR>` for the runtime face direction dir:
  *  the only direction dispatch, on the host, once per launch. */
@@ -399,22 +440,25 @@ static const dim3 faceBlock2D(16, 16);
   }
 
 void gpuPerfectConductorImage(
-    cudaSolverType* imageX, cudaSolverType* imageY, cudaSolverType* imageZ,
-    const cudaSolverType* vectX, const cudaSolverType* vectY,
-    const cudaSolverType* vectZ, const cudaSolverType* Bxn,
-    const cudaSolverType* Byn, const cudaSolverType* Bzn,
-    const cudaSolverType* Bx_ext, const cudaSolverType* By_ext,
-    const cudaSolverType* Bz_ext, const cudaSolverType* rhons,
-    const cudaSolverType* d_qom, int ns, cudaSolverType dt, cudaSolverType c,
-    cudaSolverType FourPI, cudaSolverType delt, int nxn, int nyn, int nzn,
-    int dir, bool high, cudaStream_t stream) {
+    cudaSolverType* image, const cudaSolverType* vectX,
+    const cudaSolverType* vectY, const cudaSolverType* vectZ,
+    const cudaSolverType* Bxn, const cudaSolverType* Byn,
+    const cudaSolverType* Bzn, const cudaSolverType* Bx_ext,
+    const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+    const cudaSolverType* rhons, const cudaSolverType* d_qom, int ns,
+    cudaSolverType dt, cudaSolverType c, cudaSolverType FourPI,
+    cudaSolverType delt, int nxn, int nyn, int nzn, int dir, bool high,
+    cudaStream_t stream) {
   const int n[3] = {nxn, nyn, nzn};
   const int face = high ? n[dir] - 2 : 1;
-  const dim3 grid = faceGrid2D(dir == 0 ? nyn : nxn, dir == 2 ? nyn : nzn);
-  FACE_DIR_DISPATCH(dir, k_perfectConductorImage, grid, faceBlock2D, stream,
-                    imageX, imageY, imageZ, vectX, vectY, vectZ, Bxn, Byn, Bzn,
-                    Bx_ext, By_ext, Bz_ext, rhons, d_qom, ns, dt, c, FourPI,
-                    delt, face, nxn, nyn, nzn)
+  const int total = facePoints(dir, nxn, nyn, nzn);
+  if (total <= 0)
+    return;
+  const int grid = (total + kFaceBlock - 1) / kFaceBlock;
+  FACE_DIR_DISPATCH(dir, k_perfectConductorImage, grid, kFaceBlock, stream,
+                    image, vectX, vectY, vectZ, Bxn, Byn, Bzn, Bx_ext, By_ext,
+                    Bz_ext, rhons, d_qom, ns, dt, c, FourPI, delt, face, nxn,
+                    nyn, nzn)
   cudaErrChk(cudaGetLastError());
 }
 
@@ -431,8 +475,11 @@ void gpuPerfectConductorSource(
     int dir, bool high, cudaStream_t stream) {
   const int n[3] = {nxn, nyn, nzn};
   const int face = high ? n[dir] - 2 : 1;
-  const dim3 grid = faceGrid2D(dir == 0 ? nyn : nxn, dir == 2 ? nyn : nzn);
-  FACE_DIR_DISPATCH(dir, k_perfectConductorSource, grid, faceBlock2D, stream,
+  const int total = facePoints(dir, nxn, nyn, nzn);
+  if (total <= 0)
+    return;
+  const int grid = (total + kFaceBlock - 1) / kFaceBlock;
+  FACE_DIR_DISPATCH(dir, k_perfectConductorSource, grid, kFaceBlock, stream,
                     vectorX, vectorY, vectorZ, En, Jn, Bxn, Byn, Bzn, Bx_ext,
                     By_ext, Bz_ext, rhons, d_qom, ns, dt, c, th, FourPI, delt,
                     ebc0, ebc1, ebc2, face, nxn, nyn, nzn)
@@ -567,56 +614,55 @@ template <typename T, int DIR>
 __global__ void k_setFacePlane3(T* __restrict__ X, T* __restrict__ Y,
                                 T* __restrict__ Z, T cx, T cy, T cz, int face,
                                 int nx, int ny, int nz) {
-  const int d1 = (DIR == 0 ? ny : nx) - 2, d2 = (DIR == 2 ? ny : nz) - 2;
-  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid >= d1 * d2)
+  int a, b;
+  if (!facePoint<DIR>(a, b, nx, ny, nz))
     return;
-  const int idx = faceIdx3<DIR>(face, tid / d2 + 1, tid % d2 + 1, ny, nz);
+  const int idx = faceIdx3<DIR>(face, a, b, ny, nz);
   X[idx] = cx;
   Y[idx] = cy;
   Z[idx] = cz;
 }
 
-/** Identity rows: image = vect on a face plane interior [1..n-2]. */
+/** Identity rows: image = vect on a face plane interior [1..n-2], written
+ *  into the Krylov image. */
 template <typename T, int DIR>
-__global__ void
-k_copyFacePlane3(T* __restrict__ imX, T* __restrict__ imY, T* __restrict__ imZ,
-                 const T* __restrict__ vX, const T* __restrict__ vY,
-                 const T* __restrict__ vZ, int face, int nx, int ny, int nz) {
-  const int d1 = (DIR == 0 ? ny : nx) - 2, d2 = (DIR == 2 ? ny : nz) - 2;
-  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid >= d1 * d2)
+__global__ void k_copyFacePlane3(T* __restrict__ im, const T* __restrict__ vX,
+                                 const T* __restrict__ vY,
+                                 const T* __restrict__ vZ, int face, int nx,
+                                 int ny, int nz) {
+  int a, b;
+  if (!facePoint<DIR>(a, b, nx, ny, nz))
     return;
-  const int idx = faceIdx3<DIR>(face, tid / d2 + 1, tid % d2 + 1, ny, nz);
-  imX[idx] = vX[idx];
-  imY[idx] = vY[idx];
-  imZ[idx] = vZ[idx];
+  const int idx = faceIdx3<DIR>(face, a, b, ny, nz);
+  T* const row = im + 3 * faceKrylovNode<DIR>(face, a, b, ny, nz);
+  row[0] = vX[idx];
+  row[1] = vY[idx];
+  row[2] = vZ[idx];
 }
 
 void gpuOpenBCSetFace3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
                        cudaSolverType cx, cudaSolverType cy, cudaSolverType cz,
                        int dir, int faceIdx, int nx, int ny, int nz,
                        cudaStream_t stream) {
-  const int total = ((dir == 0 ? ny : nx) - 2) * ((dir == 2 ? ny : nz) - 2);
+  const int total = facePoints(dir, nx, ny, nz);
   if (total <= 0)
     return;
-  const int blk = 256;
-  FACE_DIR_DISPATCH(dir, k_setFacePlane3, (total + blk - 1) / blk, blk, stream,
-                    X, Y, Z, cx, cy, cz, faceIdx, nx, ny, nz)
+  const int grid = (total + kFaceBlock - 1) / kFaceBlock;
+  FACE_DIR_DISPATCH(dir, k_setFacePlane3, grid, kFaceBlock, stream, X, Y, Z, cx,
+                    cy, cz, faceIdx, nx, ny, nz)
   cudaErrChk(cudaGetLastError());
 }
 
-void gpuOpenBCCopyFace3(cudaSolverType* imX, cudaSolverType* imY,
-                        cudaSolverType* imZ, const cudaSolverType* vX,
+void gpuOpenBCCopyFace3(cudaSolverType* image, const cudaSolverType* vX,
                         const cudaSolverType* vY, const cudaSolverType* vZ,
                         int dir, int faceIdx, int nx, int ny, int nz,
                         cudaStream_t stream) {
-  const int total = ((dir == 0 ? ny : nx) - 2) * ((dir == 2 ? ny : nz) - 2);
+  const int total = facePoints(dir, nx, ny, nz);
   if (total <= 0)
     return;
-  const int blk = 256;
-  FACE_DIR_DISPATCH(dir, k_copyFacePlane3, (total + blk - 1) / blk, blk, stream,
-                    imX, imY, imZ, vX, vY, vZ, faceIdx, nx, ny, nz)
+  const int grid = (total + kFaceBlock - 1) / kFaceBlock;
+  FACE_DIR_DISPATCH(dir, k_copyFacePlane3, grid, kFaceBlock, stream, image, vX,
+                    vY, vZ, faceIdx, nx, ny, nz)
   cudaErrChk(cudaGetLastError());
 }
 

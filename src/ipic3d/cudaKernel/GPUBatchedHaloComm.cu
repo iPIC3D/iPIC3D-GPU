@@ -772,14 +772,13 @@ void EMfields3D::gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs,
       gpuSelectHaloGeometry(nx, ny, nz, offsetZero);
   const HaloTopologyPlan& topology =
       haloTopologyPlans_[isParticle ? HALO_PARTICLE : HALO_FIELD];
-#ifdef HALO_OVERLAP
   if (haloExchange_.active)
     batchedHaloContractFailure("overlapping use of shared GPU halo buffers");
-  // This also orders a blocking exchange on an arbitrary CUDA stream after
-  // the final buffer consumer of the preceding blocking or split exchange.
+  // With the split exchange resources (HaloOverlap), this orders a blocking
+  // exchange on an arbitrary CUDA stream after the final buffer consumer of
+  // the preceding blocking or split exchange.
   if (haloBuffersReady_)
     cudaErrChk(cudaStreamWaitEvent(stream, haloBuffersReady_, 0));
-#endif
   gpuQueueHaloFacePack(h_fieldPtrs, nFields, topology, geometry, stream);
   // CUDA-aware MPI may consume the send buffers only after face packing.
   // This also completes the pinned pointer-table upload before reuse.
@@ -849,16 +848,14 @@ void EMfields3D::gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs,
 
   cudaErrChk(cudaGetLastError());
 
-#ifdef HALO_OVERLAP
   if (haloBuffersReady_)
     cudaErrChk(cudaEventRecord(haloBuffersReady_, stream));
-#endif
 }
 
 // =========================================================================
-//  HALO_OVERLAP: asynchronous face packing plus shared halo completion
+//  Split exchange (HaloOverlap): asynchronous face packing plus shared halo
+//  completion
 // =========================================================================
-#ifdef HALO_OVERLAP
 
 void EMfields3D::gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs,
                                              int nFields, int nx, int ny,
@@ -918,5 +915,3 @@ void EMfields3D::gpuBatchedHaloEndExchange() {
   cudaErrChk(cudaStreamWaitEvent(computeStream, haloBuffersReady_, 0));
   haloExchange_ = HaloExchangeState{};
 }
-
-#endif // HALO_OVERLAP

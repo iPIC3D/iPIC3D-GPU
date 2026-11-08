@@ -9,7 +9,6 @@ set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 option(HIP_ON "Use HIP" OFF)
-option(HALO_OVERLAP "Compile GPU field code with split halo overlap" OFF)
 set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for")
 set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture")
 # Keep this default in sync with TestInput::{x,y,z}len.
@@ -77,9 +76,6 @@ endif()
 target_include_directories(gpuMaxwellSolverTest PUBLIC ${include_path})
 target_link_libraries(gpuMaxwellSolverTest PRIVATE MPI::MPI_CXX)
 target_compile_definitions(gpuMaxwellSolverTest PUBLIC NO_HDF5)
-if(HALO_OVERLAP)
-  target_compile_definitions(gpuMaxwellSolverTest PUBLIC HALO_OVERLAP)
-endif()
 
 if(NOT HIP_ON)
   set_target_properties(gpuMaxwellSolverTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
@@ -131,6 +127,28 @@ set_tests_properties(
   )
 
 add_test(
+  NAME gpuMaxwellSolverBoundaryRows
+  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
+          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
+          --case boundary-rows ${MPIEXEC_POSTFLAGS})
+set_tests_properties(
+  gpuMaxwellSolverBoundaryRows
+  PROPERTIES
+    TIMEOUT 90
+  )
+
+add_test(
+  NAME gpuMaxwellSolverImageReference
+  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
+          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
+          --case image-reference ${MPIEXEC_POSTFLAGS})
+set_tests_properties(
+  gpuMaxwellSolverImageReference
+  PROPERTIES
+    TIMEOUT 90
+  )
+
+add_test(
   NAME gpuMaxwellSolverObliqueWaveConvergence
   COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
           ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
@@ -142,3 +160,22 @@ set_tests_properties(
     RUN_SERIAL TRUE
     TIMEOUT 300
   )
+
+# The solver cases with HaloOverlap = 1 (image-reference runs both modes)
+foreach(test_case periodic reflective manufactured boundary-rows oblique-wave)
+  string(REPLACE "-" "_" test_name ${test_case})
+  add_test(
+    NAME gpuMaxwellSolverOverlap_${test_name}
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
+            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
+            --case ${test_case} --halo-overlap ${MPIEXEC_POSTFLAGS})
+  if(test_case STREQUAL "oblique-wave")
+    set_tests_properties(
+      gpuMaxwellSolverOverlap_${test_name}
+      PROPERTIES PROCESSORS ${GPU_MAXWELL_MPI_PROCS} RUN_SERIAL TRUE
+                 TIMEOUT 300)
+  else()
+    set_tests_properties(gpuMaxwellSolverOverlap_${test_name}
+                         PROPERTIES TIMEOUT 90)
+  endif()
+endforeach()

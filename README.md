@@ -71,7 +71,6 @@ cmake -DHIP_ON=ON .. # use HIP
 | `USE_CATALYST` | `OFF` | Enable ParaView Catalyst in-situ visualization (requires ParaView ≥ 5.7) |
 | `USE_BATSRUS` | `OFF` | Enable BATS-R-US MHD coupling (adds `BATSRUS` compile definition) |
 | `USE_OPENMP` | `ON` | Enable OpenMP in the host-side loops (see [OpenMP](#openmp)). **Delete CMake cache when changing this.** |
-| `HALO_OVERLAP` | `OFF` | Overlap halo exchanges with computation in the field solver |
 | `GPU_CYCLE_DIAGNOSTICS` | `OFF` | Instrument one GPU timestep and the Maxwell right-hand side that consumes it |
 | `GPU_DIAGNOSTIC_CYCLE` | `1` | Cycle instrumented by `GPU_CYCLE_DIAGNOSTICS` (`-1`: every cycle) |
 | `BUILD_UTESTS` | `OFF` | Build the unit tests (run with `ctest` in the build directory) |
@@ -280,7 +279,7 @@ For a final checkpoint, the payload is written after the last cycle has complete
 Every run records the code that produced it, so it can be reproduced later. At configure time and before every build, CMake (`cmake/GenerateBuildInfo.cmake`) records:
 
 - the **version**, `git describe` of the commit, with `-dirty` if the working tree had uncommitted changes (modified, staged or untracked files that git does not ignore; files inside the build directory do not count, and an in-source build counts only tracked files);
-- the **build signature**, one line with the full commit hash, a hash of the uncommitted changes (if any), the build type, the CMake options that change results (`CUDA_ARCH`/`HIP_ARCH`, `HALO_OVERLAP`, `BENCHMARK_MODE`, `USE_*`, ...) and the compiler versions.
+- the **build signature**, one line with the full commit hash, a hash of the uncommitted changes (if any), the build type, the CMake options that change results (`CUDA_ARCH`/`HIP_ARCH`, `BENCHMARK_MODE`, `USE_*`, ...) and the compiler versions.
 
 A build from a tree with uncommitted changes prints a CMake warning, at configure time and at every build, and the run prints the same warning: the commit alone does not reproduce such a binary. Builds without git (e.g. from a tarball) record `unknown`.
 
@@ -348,6 +347,7 @@ Some cases apply additional boundary-condition fixes during the time loop:
 | `PoissonChebEigRatio` | `1000` | Floor of its lower eigenvalue bound, λ_max / `PoissonChebEigRatio` (see [Poisson solves](#poisson-solves-of-the-e-and-b-corrections)) |
 | `PoissonChebRescaleEigMin`, `PoissonChebRescaleEigMax` | `1.0`, `1.0` | Factors applied to its lower and upper eigenvalue bounds |
 | `Smooth`, `SmoothNiter` | `1.0`, `6` | Smoothing coefficient (`1` disables) and number of passes, applied to E after each solve and to the hat moments |
+| `HaloOverlap` | `0` | `1` overlaps the halo exchanges of the field solver (Maxwell image, smoothing, B and hat-moment interpolation) with the computation that does not read the exchanged values; same results as `0`. Meant for multi-rank runs: on a single rank there is no MPI to hide and the extra boundary-layer launches can make it slower. The Maxwell image overlaps on ranks with at least 3 cells along every axis, except an axis of a single cell that is periodic onto the rank itself (one rank along it, as y of an x-z run; then only its node stage overlaps); other ranks use the blocking exchange |
 
 ### Boundary rows of the implicit field solve
 

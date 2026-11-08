@@ -172,6 +172,7 @@ public:
   int getImplSusceptMode() const { return ImplSusceptMode; }
   double getSmooth() const { return (Smooth); }
   int getSmoothNiter() const { return SmoothNiter; }
+  bool getHaloOverlap() const { return haloOverlap; }
   int getNcycles() const { return (ncycles); }
   int getNs() const { return (ns); }
   int getNsTestPart() const { return (nstestpart); }
@@ -335,6 +336,10 @@ private:
   /*! Smoothing value */
   double Smooth;
   int SmoothNiter;
+  /*! Field solver: overlap the halo exchanges of the Maxwell image, the
+   *  smoothing and the B / hat-moment interpolation with the computation that
+   *  does not read the exchanged values (HaloOverlap, default 0) */
+  bool haloOverlap;
   /*! number of time cycles */
   int ncycles;
   /*! macrocell size (interior cells) for the (v_par,v_perp) spectra

@@ -1,7 +1,29 @@
 /**
  * Run with mpirun -n 8 ./gpuMaxwellSolverTest --case all
  * to execute all test cases, or with --case periodic, --case reflective,
- * --case manufactured, or --case oblique-wave to run a single case.
+ * --case manufactured, --case oblique-wave, --case boundary-rows or
+ * --case image-reference to run a single case.
+ *
+ * boundary-rows, and image-reference where its layout leaves x non-periodic,
+ * use an open inflow face at x-left (bcEMface = bcPface = 2,
+ * ApplyInflowBcsEImage = 1).
+ *   boundary-rows (x-right perfect conductor): gpuMaxwellImage of a random
+ *     vector must already hold the face rows, i.e. equal itself after
+ *     gpuPerfectConductorImages and gpuOpenBoundaryInflowEImage are applied
+ *     to it again.
+ *   image-reference (x-right open, which keeps its operator rows, or an
+ *     outflow face; conductor walls on the non-periodic y and z faces), on the
+ *     layouts of kImageLayouts (3D and 2D, flat and self-periodic axes,
+ *     odd and minimal subdomains): gpuMaxwellImage of a random vector against
+ *     the image assembled step by step: the cell gradients exchanged,
+ *     divC2N, MUdot, div D exchanged, gradC2N, delt^2 (-lap - grad div D) +
+ *     D + E with the vector kernels, the packing and the face rows.  Each
+ *     layout runs with HaloOverlap = 0 and 1; with 1 the image overlaps its
+ *     exchange where the layout says so, and equals
+ *     gpuMaxwellImage<HaloMode::Blocking> bitwise.
+ *
+ * --halo-overlap runs the selected cases with HaloOverlap = 1 (the solver
+ * steps in HaloMode::Overlap); image-reference always runs both modes.
  */
 
 #include <mpi.h>
@@ -13,6 +35,7 @@
 #include "GPUStencils.cuh"
 #include "Grid3DCU.h"
 #include "MPIdata.h"
+#include "OutflowBoundary.h"
 #include "Parameters.h"
 #include "VCtopology3D.h"
 #include "cudaTypeDef.cuh"
@@ -24,6 +47,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -85,15 +109,23 @@ constexpr std::array<const char*, 4> kDisabledOutputCycleKeys = {
     "FieldOutputCycle", "ParticlesOutputCycle", "RestartOutputCycle",
     "DiagnosticsOutputCycle"};
 
-enum class TestCase { Periodic, Reflective, Manufactured, ObliqueWave };
+enum class TestCase {
+  Periodic,
+  Reflective,
+  Manufactured,
+  ObliqueWave,
+  BoundaryRows,
+  ImageReference
+};
 
-constexpr std::array<TestCase, 4> kAllTestCases = {
-    TestCase::Periodic, TestCase::Reflective, TestCase::Manufactured,
-    TestCase::ObliqueWave};
+constexpr std::array<TestCase, 6> kAllTestCases = {
+    TestCase::Periodic,    TestCase::Reflective,   TestCase::Manufactured,
+    TestCase::ObliqueWave, TestCase::BoundaryRows, TestCase::ImageReference};
 
 struct TestSelection {
   bool runAll = true;
   TestCase singleCase = TestCase::Periodic;
+  bool haloOverlap = false; // --halo-overlap
 };
 
 struct FieldBounds {
@@ -184,6 +216,7 @@ struct TestInput {
   double gmresTolerance = 1.0e-11;
   double comparisonTolerance = 1.0e-9;
   int cycles = 1;
+  int haloOverlap = 0; // input HaloOverlap
 
   double exUniform = 1.25;
   double eyPeriodic = -0.5;
@@ -202,7 +235,9 @@ struct TestInput {
   }
 
   ConfigFile config(TestCase testCase) const {
-    const bool periodicX = (testCase != TestCase::Reflective);
+    const bool openInflowXleft = testCase == TestCase::BoundaryRows ||
+                                 testCase == TestCase::ImageReference;
+    const bool periodicX = testCase != TestCase::Reflective && !openInflowXleft;
 
     ConfigFile cfg;
     cfg.add("SaveDirName", ".");
@@ -249,14 +284,58 @@ struct TestInput {
     addConfigValues(cfg, kEmBoundaryKeys, 0);
     addConfigValues(cfg, kParticleBoundaryKeys, 1);
     cfg.add("ApplyInflowBcsEImage", 0);
+    if (openInflowXleft) {
+      // open inflow face at x-left
+      cfg.add("bcEMfaceXleft", 2);
+      cfg.add("bcPfaceXleft", 2);
+      cfg.add("ApplyInflowBcsEImage", 1);
+    }
+    if (testCase == TestCase::ImageReference) {
+      // x-right open but not an inflow face: it keeps its operator rows, so
+      // the image reads the face-BC ghost cells there; conductor walls in y
+      cfg.add("bcEMfaceXright", 2);
+      cfg.add("bcPfaceXright", 2);
+      cfg.add("PERIODICY", 0);
+      cfg.add("PERIODICY_P", 0);
+    }
 
     cfg.add("CGtol", gmresTolerance);
     cfg.add("GMREStol", gmresTolerance);
     cfg.add("SolverType", "GMRES");
     addConfigValues(cfg, kDisabledOutputCycleKeys, 0);
     cfg.add("CallFinalize", 0);
+    cfg.add("HaloOverlap", haloOverlap);
     return cfg;
   }
+};
+
+/** A layout of the image-reference case (8 ranks).  Non-periodic x: open
+ *  inflow face at x-left, open x-right face (outflowXright: the outflow
+ *  closure, bcPfaceXright = 3); non-periodic y, z: conductor walls. */
+struct ImageLayout {
+  const char* name;
+  int cells[3];         // global cells
+  int ranks[3];         // ranks per axis
+  const char* periodic; // periodic axes: letters of "xyz"
+  bool outflowXright;
+  bool split; // with HaloOverlap = 1 the image overlaps its exchange
+};
+
+constexpr int kImageLayoutRanks = 8;
+constexpr ImageLayout kImageLayouts[] = {
+    {"3D, conductor y", {128, 164, 128}, {2, 2, 2}, "z", false, true},
+    {"3D, outflow", {64, 40, 48}, {2, 2, 2}, "z", true, true},
+    // y flat (one periodic cell)
+    {"2D x-z, outflow", {96, 1, 64}, {4, 1, 2}, "yz", true, true},
+    // z flat
+    {"2D x-y, conductor y", {64, 48, 1}, {2, 4, 1}, "xz", false, true},
+    // y and z periodic onto the rank itself
+    {"3D, y z on the rank", {64, 20, 24}, {8, 1, 1}, "xyz", false, true},
+    {"3D, 37x23x29 per rank", {74, 46, 58}, {2, 2, 2}, "xyz", false, true},
+    // the fewest cells that split
+    {"3D, 3 cells in x", {6, 26, 14}, {2, 2, 2}, "y", true, true},
+    // too few: the blocking exchange
+    {"3D, 2 cells in z", {32, 20, 4}, {2, 2, 2}, "z", false, false},
 };
 
 struct Check {
@@ -284,7 +363,6 @@ struct Check {
   }
 };
 
-#ifdef HALO_OVERLAP
 struct InterpolationBox {
   const char* name;
   int iLo;
@@ -388,7 +466,6 @@ void reportInterpolationResult(int failures) {
               << " mismatches\n";
   }
 }
-#endif
 
 const char* caseName(TestCase testCase) {
   switch (testCase) {
@@ -400,17 +477,32 @@ const char* caseName(TestCase testCase) {
     return "manufactured";
   case TestCase::ObliqueWave:
     return "oblique-wave";
+  case TestCase::BoundaryRows:
+    return "boundary-rows";
+  case TestCase::ImageReference:
+    return "image-reference";
   }
   return "unknown";
 }
 
+TestSelection parseCase(int argc, char** argv);
+
 TestSelection parseSelection(int argc, char** argv) {
+  bool haloOverlap = false;
+  for (int i = 1; i < argc; i++)
+    haloOverlap = haloOverlap || std::strcmp(argv[i], "--halo-overlap") == 0;
+  TestSelection selection = parseCase(argc, argv);
+  selection.haloOverlap = haloOverlap;
+  return selection;
+}
+
+TestSelection parseCase(int argc, char** argv) {
   for (int i = 1; i < argc; i++) {
     if (std::strcmp(argv[i], "--case") == 0) {
       if (i + 1 >= argc) {
         throw std::runtime_error(
             "missing value for --case; expected all, periodic, reflective, "
-            "manufactured, or oblique-wave");
+            "manufactured, oblique-wave, boundary-rows or image-reference");
       }
       const char* value = argv[i + 1];
       if (std::strcmp(value, "all") == 0)
@@ -427,9 +519,16 @@ TestSelection parseSelection(int argc, char** argv) {
       if (std::strcmp(value, "oblique-wave") == 0) {
         return {false, TestCase::ObliqueWave};
       }
+      if (std::strcmp(value, "boundary-rows") == 0) {
+        return {false, TestCase::BoundaryRows};
+      }
+      if (std::strcmp(value, "image-reference") == 0) {
+        return {false, TestCase::ImageReference};
+      }
       throw std::runtime_error(std::string("unknown --case '") + value +
                                "'; expected all, periodic, reflective, "
-                               "manufactured, or oblique-wave");
+                               "manufactured, oblique-wave, boundary-rows or "
+                               "image-reference");
     }
   }
   return {};
@@ -950,6 +1049,233 @@ void runManufacturedCase(EMfields3D& fields, Grid3DCU& grid,
   checkManufactured(fields, check, grid, input);
 }
 
+void runBoundaryRowsCase(EMfields3D& fields, Grid3DCU& grid,
+                         const TestInput& input, int rank, Check& check) {
+  const cudaStream_t stream = fields.gpuSolverStream();
+  // non-uniform B and density, so the conductor rows are not trivial
+  initializeManufacturedFields(fields, grid, input);
+  fields.gpuSolverSyncH2D(stream);
+  prepareManufacturedMoments(fields);
+
+  const int n = maxwellVectorSize(grid);
+  const int nxn = grid.getNXN(), nyn = grid.getNYN(), nzn = grid.getNZN();
+  std::vector<cudaSolverType> hx(n);
+  std::mt19937_64 gen(1234 + rank);
+  std::uniform_real_distribution<double> uniform(-1.0, 1.0);
+  for (auto& v : hx)
+    v = uniform(gen);
+  GPUKrylovVector x(n), image(n), reapplied(n), rowsOnly(n);
+  GPUFieldArray3 vX(nxn, nyn, nzn), vY(nxn, nyn, nzn), vZ(nxn, nyn, nzn);
+  // the allocations zero the arrays outside the solver stream
+  cudaErrChk(cudaDeviceSynchronize());
+  x.copyFromHost(hx.data(), stream);
+  fields.gpuMaxwellImage(image.devPtr(), x.devPtr());
+
+  // the face rows applied to a copy of the image, and to a zero vector
+  gpuSolver2Phys3(vX.devPtr(), vY.devPtr(), vZ.devPtr(), x.devPtr(), nxn, nyn,
+                  nzn, stream);
+  gpuEq(reapplied.devPtr(), image.devPtr(), n, stream);
+  rowsOnly.setZero(stream);
+  for (GPUKrylovVector* target : {&reapplied, &rowsOnly}) {
+    fields.gpuPerfectConductorImages(target->devPtr(), vX, vY, vZ);
+    fields.gpuOpenBoundaryInflowEImage(target->devPtr(), vX.devPtr(),
+                                       vY.devPtr(), vZ.devPtr(), nxn, nyn, nzn);
+  }
+  std::vector<cudaSolverType> hImage(n), hReapplied(n), hRows(n);
+  image.copyToHost(hImage.data(), stream);
+  reapplied.copyToHost(hReapplied.data(), stream);
+  rowsOnly.copyToHost(hRows.data(), stream);
+  cudaErrChk(cudaStreamSynchronize(stream));
+
+  double local[2] = {0.0, 0.0}; // max |reapplied - image|, rows written
+  for (int q = 0; q < n; q++) {
+    local[0] = std::max(local[0], std::fabs(hReapplied[q] - hImage[q]));
+    local[1] = std::max(local[1], std::fabs(hRows[q]));
+  }
+  double global[2];
+  MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
+  if (rank == 0) {
+    std::cout << "boundary-rows: max |rows reapplied - image| = " << global[0]
+              << ", max |rows of a zero image| = " << global[1] << "\n";
+    if (global[1] == 0.0)
+      check.fail("no boundary row was written: the case has no face rows");
+    if (global[0] != 0.0)
+      check.fail("gpuMaxwellImage does not hold the boundary rows");
+  }
+}
+
+void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
+                           const TestInput& input, const ImageLayout& layout,
+                           int rank, Check& check) {
+  const cudaStream_t stream = fields.gpuSolverStream();
+  initializeManufacturedFields(fields, grid, input);
+  fields.gpuSolverSyncH2D(stream);
+  prepareManufacturedMoments(fields);
+
+  const int n = maxwellVectorSize(grid);
+  const int nxn = grid.getNXN(), nyn = grid.getNYN(), nzn = grid.getNZN();
+  const int nxc = grid.getNXC(), nyc = grid.getNYC(), nzc = grid.getNZC();
+  const double ix = grid.get_invdx(), iy = grid.get_invdy(),
+               iz = grid.get_invdz();
+  const double delt = input.c * input.th * input.dt;
+  const size_t nodes = (size_t)nxn * nyn * nzn;
+  // X-right outflow face: the cell stencils fill the ghost cell plane, whose
+  // face BC keeps it
+  const bool outflow = layout.outflowXright &&
+                       fields.get_vct().getXright_neighbor() == MPI_PROC_NULL;
+  const int iHi = outflow ? nxc - 1 : nxc - 2;
+  const int bcGradXright = outflow ? BC_FACE_KEEP : 1;
+  const int bcDivXright = outflow ? BC_FACE_KEEP : 2;
+
+  GPUKrylovVector x(n), image(n), ref(n);
+  std::vector<GPUFieldArray3> v, D, lap, gd, g;
+  for (int c = 0; c < 3; c++) {
+    v.emplace_back(nxn, nyn, nzn);
+    D.emplace_back(nxn, nyn, nzn);
+    lap.emplace_back(nxn, nyn, nzn);
+    gd.emplace_back(nxn, nyn, nzn);
+  }
+  for (int a = 0; a < 9; a++)
+    g.emplace_back(nxc, nyc, nzc);
+  GPUFieldArray3 divD(nxc, nyc, nzc);
+  // the allocations zero the arrays outside the solver stream
+  cudaErrChk(cudaDeviceSynchronize());
+
+  std::vector<cudaSolverType> hx(n);
+  std::mt19937_64 gen(4321 + rank);
+  std::uniform_real_distribution<double> uniform(-1.0, 1.0);
+  for (auto& value : hx)
+    value = uniform(gen);
+  x.copyFromHost(hx.data(), stream);
+  fields.gpuMaxwellImage(image.devPtr(), x.devPtr());
+
+  // reference: lap E from the exchanged cell gradients, grad div(μ·E) from the
+  // exchanged divergence, then delt² (-lap - grad div D) + D + E
+  gpuSolver2Phys3(v[0].devPtr(), v[1].devPtr(), v[2].devPtr(), x.devPtr(), nxn,
+                  nyn, nzn, stream);
+  GPUFieldArray3* vn[3] = {&v[0], &v[1], &v[2]};
+  GPUFieldArray3* Dn[3] = {&D[0], &D[1], &D[2]};
+  fields.gpuOutflowGhostNodes(vn);
+  for (int c = 0; c < 3; c++)
+    gpuGradN2C(g[3 * c].devPtr(), g[3 * c + 1].devPtr(), g[3 * c + 2].devPtr(),
+               v[c].devPtr(), nxc, nyc, nzc, ix, iy, iz, stream, 1, iHi);
+  fields.gpuMUdot(D[0], D[1], D[2], v[0], v[1], v[2]);
+  fields.gpuOutflowGhostNodes(Dn);
+  gpuDivN2C(divD.devPtr(), D[0].devPtr(), D[1].devPtr(), D[2].devPtr(), nxc,
+            nyc, nzc, ix, iy, iz, stream, 1, iHi);
+  cudaSolverType* cellPtr[10];
+  for (int a = 0; a < 9; a++)
+    cellPtr[a] = g[a].devPtr();
+  cellPtr[9] = divD.devPtr();
+  fields.gpuOutflowGhostRows(cellPtr, 10);
+  fields.gpuCommunicateCenterBC_9(nxc, nyc, nzc, g[0], g[1], g[2], g[3], g[4],
+                                  g[5], g[6], g[7], g[8], bcGradXright, 1, 1, 1,
+                                  1, 1);
+  for (int c = 0; c < 3; c++)
+    gpuDivC2N(lap[c].devPtr(), g[3 * c].devPtr(), g[3 * c + 1].devPtr(),
+              g[3 * c + 2].devPtr(), nxn, nyn, nzn, ix, iy, iz, stream);
+  fields.gpuCommunicateCenterBC(nxc, nyc, nzc, divD, bcDivXright, 2, 2, 2, 2,
+                                2);
+  gpuGradC2N(gd[0].devPtr(), gd[1].devPtr(), gd[2].devPtr(), divD.devPtr(), nxn,
+             nyn, nzn, ix, iy, iz, stream);
+  gpuNeg3(lap[0].devPtr(), lap[1].devPtr(), lap[2].devPtr(), nodes, stream);
+  gpuSub3(lap[0].devPtr(), gd[0].devPtr(), lap[1].devPtr(), gd[1].devPtr(),
+          lap[2].devPtr(), gd[2].devPtr(), nodes, stream);
+  gpuScale3(lap[0].devPtr(), lap[1].devPtr(), lap[2].devPtr(), delt * delt,
+            nodes, stream);
+  gpuSumAddTwo3(lap[0].devPtr(), D[0].devPtr(), v[0].devPtr(), lap[1].devPtr(),
+                D[1].devPtr(), v[1].devPtr(), lap[2].devPtr(), D[2].devPtr(),
+                v[2].devPtr(), nodes, stream);
+  gpuPhys2Solver3(ref.devPtr(), lap[0].devPtr(), lap[1].devPtr(),
+                  lap[2].devPtr(), nxn, nyn, nzn, stream);
+  fields.gpuPerfectConductorImages(ref.devPtr(), v[0], v[1], v[2]);
+  fields.gpuOpenBoundaryInflowEImage(ref.devPtr(), v[0].devPtr(), v[1].devPtr(),
+                                     v[2].devPtr(), nxn, nyn, nzn);
+
+  std::vector<cudaSolverType> hImage(n), hRef(n);
+  image.copyToHost(hImage.data(), stream);
+  ref.copyToHost(hRef.data(), stream);
+  cudaErrChk(cudaStreamSynchronize(stream));
+  // max |image - ref|, max |ref|, max |image - blocking image|, split ranks
+  double local[4] = {0.0, 0.0, 0.0, 0.0};
+  for (int q = 0; q < n; q++) {
+    local[0] = std::max(local[0], std::fabs(hImage[q] - hRef[q]));
+    local[1] = std::max(local[1], std::fabs(hRef[q]));
+  }
+  GPUKrylovVector blocking(n);
+  fields.gpuMaxwellImage<EMfields3D::HaloMode::Blocking>(blocking.devPtr(),
+                                                         x.devPtr());
+  std::vector<cudaSolverType> hBlocking(n);
+  blocking.copyToHost(hBlocking.data(), stream);
+  cudaErrChk(cudaStreamSynchronize(stream));
+  for (int q = 0; q < n; q++)
+    local[2] = std::max(local[2], std::fabs(hImage[q] - hBlocking[q]));
+  local[3] = fields.gpuMaxwellImageBoxes().split ? 1.0 : 0.0;
+  double globalMax[3], splitRanks = 0.0;
+  MPI_Allreduce(local, globalMax, 3, MPI_DOUBLE, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
+  MPI_Allreduce(&local[3], &splitRanks, 1, MPI_DOUBLE, MPI_SUM,
+                MPIdata::get_PicGlobalComm());
+  if (rank == 0) {
+    const double rel = globalMax[0] / globalMax[1];
+    std::cout << "image-reference [" << layout.name << ", HaloOverlap "
+              << input.haloOverlap
+              << "]: max |image - reference| / max |reference| = " << rel
+              << "; split on " << splitRanks
+              << " ranks, max |image - blocking image| = " << globalMax[2]
+              << "\n";
+    if (!(rel < 1e-13))
+      check.fail("gpuMaxwellImage differs from the step-by-step image");
+    const double expected =
+        input.haloOverlap && layout.split ? kImageLayoutRanks : 0.0;
+    if (splitRanks != expected)
+      check.fail("the image does not overlap its exchange as expected");
+    if (globalMax[2] != 0.0)
+      check.fail("the image differs from the blocking image");
+  }
+}
+
+/** The image-reference case on one layout and halo mode; failures of this
+ *  rank. */
+int runImageLayout(const ImageLayout& layout, const TestInput& baseInput,
+                   int haloOverlap, int rank, int nprocs) {
+  if (layout.ranks[0] * layout.ranks[1] * layout.ranks[2] != kImageLayoutRanks)
+    throw std::logic_error("an image layout must have 8 ranks");
+  TestInput input = baseInput;
+  input.nxc = layout.cells[0];
+  input.nyc = layout.cells[1];
+  input.nzc = layout.cells[2];
+  input.xlen = layout.ranks[0];
+  input.ylen = layout.ranks[1];
+  input.zlen = layout.ranks[2];
+  input.haloOverlap = haloOverlap;
+  ConfigFile config = input.config(TestCase::ImageReference);
+  const char* periodicKeys[3][2] = {{"PERIODICX", "PERIODICX_P"},
+                                    {"PERIODICY", "PERIODICY_P"},
+                                    {"PERIODICZ", "PERIODICZ_P"}};
+  for (int a = 0; a < 3; a++)
+    for (const char* key : periodicKeys[a])
+      config.add(key, std::strchr(layout.periodic, "xyz"[a]) ? 1 : 0);
+  if (layout.outflowXright)
+    config.add("bcPfaceXright", 3);
+
+  Collective col(config, "gpuMaxwellSolverTest");
+  VCtopology3D vct(col);
+  if (nprocs != vct.getNprocs())
+    throw std::runtime_error("MPI size does not match generated topology");
+  vct.setup_vctopology(MPIdata::get_PicGlobalComm());
+  Grid3DCU grid(&col, &vct);
+  EMfields3D fields(&col, &grid, &vct);
+  fields.gpuSolverAllocate();
+
+  Check check;
+  check.rank = rank;
+  check.tolerance = input.comparisonTolerance;
+  runImageReferenceCase(fields, grid, input, layout, rank, check);
+  return check.failures;
+}
+
 WaveLevelResult runObliqueWaveLevel(int cells, const TestInput& baseInput,
                                     int nprocs) {
   TestInput input = baseInput;
@@ -1202,17 +1528,32 @@ int runOnFields(TestCase testCase, EMfields3D& fields, Grid3DCU& grid,
     runManufacturedCase(fields, grid, input, rank, check);
     break;
 
+  case TestCase::BoundaryRows:
+    runBoundaryRowsCase(fields, grid, input, rank, check);
+    break;
+
   case TestCase::ObliqueWave:
     throw std::logic_error(
         "oblique-wave refinement must run through its multi-grid driver");
+
+  case TestCase::ImageReference:
+    throw std::logic_error("image-reference must run through its layouts");
   }
 
   return check.failures;
 }
 
 int runCase(TestCase testCase, int rank, int nprocs, const TestInput& input) {
-  if (testCase == TestCase::ObliqueWave) {
-    const int localFailures = runObliqueWaveConvergence(rank, nprocs, input);
+  if (testCase == TestCase::ObliqueWave ||
+      testCase == TestCase::ImageReference) {
+    int localFailures = 0;
+    if (testCase == TestCase::ObliqueWave)
+      localFailures = runObliqueWaveConvergence(rank, nprocs, input);
+    else
+      for (int haloOverlap = 0; haloOverlap < 2; haloOverlap++)
+        for (const ImageLayout& layout : kImageLayouts)
+          localFailures +=
+              runImageLayout(layout, input, haloOverlap, rank, nprocs);
     int globalFailures = 0;
     MPI_Allreduce(&localFailures, &globalFailures, 1, MPI_INT, MPI_SUM,
                   MPIdata::get_PicGlobalComm());
@@ -1246,7 +1587,7 @@ int main(int argc, char** argv) {
   try {
     const int rank = MPIdata::get_rank();
     const int nprocs = MPIdata::get_nprocs();
-    const TestInput input;
+    TestInput input;
 
     if (nprocs != input.mpiRanks()) {
       if (rank == 0) {
@@ -1276,8 +1617,8 @@ int main(int argc, char** argv) {
     Parameters::init_parameters();
 
     const TestSelection selection = parseSelection(argc, argv);
+    input.haloOverlap = selection.haloOverlap ? 1 : 0;
     int failures = 0;
-#ifdef HALO_OVERLAP
     const int localInterpolationFailures =
         runInterpolationRangeComplementRegression(rank);
     int interpolationFailures = 0;
@@ -1287,7 +1628,6 @@ int main(int argc, char** argv) {
     if (rank == 0) {
       reportInterpolationResult(interpolationFailures);
     }
-#endif
     if (selection.runAll) {
       for (TestCase testCase : kAllTestCases) {
         const int caseFailures = runCase(testCase, rank, nprocs, input);

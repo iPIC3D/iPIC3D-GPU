@@ -825,7 +825,8 @@ public:
   /** GPU Poisson image operator, communication-free (computes -∇², positive
    * eigenvalues).  Physical faces use the ghost rule of gpuPoissonImage, a
    * periodic direction with one cell is flat, rank interfaces are cut with
-   * zero ghosts (block Jacobi). */
+   * zero ghosts (block Jacobi).  Not used currently: the Chebyshev
+   * preconditioner applies the same operator inside its step kernels. */
   void gpuPoissonImageLocal(cudaSolverType* d_im, cudaSolverType* d_vec);
   /** Analytic eigenvalue bounds of the local -∇², eigMin floored at
    * eigMax / PoissonChebEigRatio and both rescaled (once per simulation). */

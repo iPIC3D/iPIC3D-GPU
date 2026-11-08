@@ -18,12 +18,48 @@
 
 // =========================================================================
 //  MUdot: magnetised susceptibility response  μ·E
-//  One species per call; the caller (gpuMUdot) loops over species.
 // =========================================================================
+
+/** Species per MUdot launch; more species run in several launches. */
+inline constexpr int kMUdotMaxSpecies = 16;
+
+/**
+ * @brief MUdot = μ·v, the implicit susceptibility of all species applied to v
+ * on the interior nodes, written to MUdotX/Y/Z (ghost nodes untouched).
+ *
+ * With b = B + B_ext and, per species, beta_s = (q/m)_s dt / (2c) and
+ * d_s = (4π/2) delt dt/c (q/m)_s rho_s / (1 + beta_s^2 b^2):
+ *   μ·v = Σ_s d_s (v + beta_s v×b + beta_s^2 (v·b) b)
+ *       = A v + C1 v×b + C2 (v·b) b,
+ *   A = Σ_s d_s,  C1 = Σ_s d_s beta_s,  C2 = Σ_s d_s beta_s^2.
+ * One kernel per kMUdotMaxSpecies species reads v, B, B_ext and each rho_s
+ * once.
+ *
+ * @param MUdotX/Y/Z  Device output (node-based [nxn][nyn][nzn]).
+ * @param vX/Y/Z      Input vector (node-based).
+ * @param Bxn/Byn/Bzn B at nodes, without B_ext (the kernel adds it).
+ * @param Bx_ext/By_ext/Bz_ext External B at nodes.
+ * @param rhons       Species densities: ns contiguous node slices.
+ * @param qom         Host array of the ns charge-to-mass ratios.
+ * @param ns          Number of species.
+ * @param dt,c,FourPI,delt Time step, light speed, 4π and c θ dt.
+ * @param nxn,nyn,nzn Grid dimensions (node-based, including ghosts).
+ * @param stream      CUDA stream.
+ */
+void gpuMUdot(cudaSolverType* MUdotX, cudaSolverType* MUdotY,
+              cudaSolverType* MUdotZ, const cudaSolverType* vX,
+              const cudaSolverType* vY, const cudaSolverType* vZ,
+              const cudaSolverType* Bxn, const cudaSolverType* Byn,
+              const cudaSolverType* Bzn, const cudaSolverType* Bx_ext,
+              const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+              const cudaSolverType* rhons, const double* qom, int ns, double dt,
+              double c, double FourPI, double delt, int nxn, int nyn, int nzn,
+              cudaStream_t stream = 0);
 
 /**
  * @brief One species' term of MUdot = Σ_s ( denom_s * rot_s(E) );
- * firstSpecies writes, later species add.
+ * firstSpecies writes, later species add.  Not used currently: gpuMUdot
+ * covers all species in one kernel; kept as the per-species reference.
  *
  * @param MUdotX/Y/Z  Device output (node-based [nxn][nyn][nzn]).
  * @param vX/Y/Z      Input vector (node-based).
@@ -271,7 +307,16 @@ void gpuConstantChargePlanet2DKernel(cudaSolverType* rhons, cudaSolverType val,
 //  Center-to-center Laplacian (Poisson solver)
 // =========================================================================
 
-/** 7-point center Laplacian. */
+/** 7-point center Laplacian of the interior cells of fC (face ghosts set by
+ *  the caller), written packed into the Krylov vector lapK, p = (i nj + j) nk
+ *  + k over the interior cells (layout of gpuPhys2Solver1). */
+void gpuLapC2CToKrylov(cudaSolverType* lapK, const cudaSolverType* fC, int nxc,
+                       int nyc, int nzc, cudaSolverType invdx2,
+                       cudaSolverType invdy2, cudaSolverType invdz2,
+                       cudaStream_t stream = 0);
+
+/** 7-point center Laplacian on the cell array.  Not used currently: the
+ *  Poisson image writes the Krylov vector directly (gpuLapC2CToKrylov). */
 void gpuLapC2CKernel(cudaSolverType* lapC, const cudaSolverType* fC, int nxc,
                      int nyc, int nzc, cudaSolverType invdx2,
                      cudaSolverType invdy2, cudaSolverType invdz2,
@@ -280,7 +325,9 @@ void gpuLapC2CKernel(cudaSolverType* lapC, const cudaSolverType* fC, int nxc,
 /** 7-point center Laplacian that never reads the ghost layer.  The value
  *  beyond each face is ghostFactor[f] * (adjacent interior cell), with
  *  f = Xleft, Xright, Yleft, Yright, Zleft, Zright and factor 0 (zero
- *  ghost), +1 (copy) or -1 (antisymmetric). */
+ *  ghost), +1 (copy) or -1 (antisymmetric).  Not used currently: the Poisson
+ *  preconditioner applies this operator inside its Chebyshev step kernels
+ *  (gpuChebyshevPoissonStep1/N). */
 void gpuLapC2CLocalKernel(cudaSolverType* lapC, const cudaSolverType* fC,
                           int nxc, int nyc, int nzc, cudaSolverType invdx2,
                           cudaSolverType invdy2, cudaSolverType invdz2,

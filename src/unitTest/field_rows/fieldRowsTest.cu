@@ -10,6 +10,11 @@
  *                          and the tangential rows are x_t - ebc_t.
  *   --case open-rows       gpuOpenBCSetFace3 / gpuOpenBCCopyFace3 write the
  *                          constants / identity on the face rows only.
+ *   --case mudot           gpuMUdot (all species in one kernel) against a host
+ *                          per-species MUdot and the per-species kernel
+ *                          gpuMUdotSpecies, for 1..6, 16, 17 and 33 species
+ *                          (several species sets) on 3D and 2D boxes; ghost
+ *                          nodes are not written.
  *
  * Array layout as in the code: (i * ny + j) * nz + k. */
 #include "GPUPhysicsKernels.cuh"
@@ -275,6 +280,97 @@ static void testOpenRows() {
     }
 }
 
+// ---------------------------------------------------------------------------
+static void testMUdot() {
+  std::printf("mudot\n");
+  const int shapes[][3] = {{9, 8, 7}, {12, 4, 10}, {6, 9, 4}, {4, 4, 4}};
+  const int counts[] = {1, 2, 3, 4, 5, 6, 16, 17, 33};
+  const T sentinel = 1234.5;
+  std::mt19937_64 g(17);
+  std::uniform_real_distribution<double> mag(0.5, 100.0);
+  double errHost = 0, errKernel = 0;
+  bool ghostsKept = true;
+  int cases = 0;
+  for (const auto& sh : shapes)
+    for (const int ns : counts) {
+      const int nx = sh[0], ny = sh[1], nz = sh[2];
+      const size_t n = (size_t)nx * ny * nz;
+      std::vector<double> qom(ns);
+      for (int s = 0; s < ns; s++)
+        qom[s] = (s % 2 ? 1.0 : -1.0) * mag(g);
+      Vec v[3], b[3], be[3];
+      for (int c = 0; c < 3; c++) {
+        v[c] = randomVec(n, g);
+        b[c] = randomVec(n, g, -0.5, 0.5);
+        be[c] = randomVec(n, g, -0.2, 0.2);
+      }
+      const Vec rho = randomVec(n * ns, g, -0.3, 0.3);
+      Dev dv[3] = {Dev(v[0]), Dev(v[1]), Dev(v[2])};
+      Dev db[3] = {Dev(b[0]), Dev(b[1]), Dev(b[2])};
+      Dev dbe[3] = {Dev(be[0]), Dev(be[1]), Dev(be[2])};
+      Dev drho(rho);
+      const Vec fill(n, sentinel);
+      Dev out[3] = {Dev(fill), Dev(fill), Dev(fill)};
+      Dev ref[3] = {Dev(fill), Dev(fill), Dev(fill)};
+
+      gpuMUdot(out[0].p, out[1].p, out[2].p, dv[0].p, dv[1].p, dv[2].p, db[0].p,
+               db[1].p, db[2].p, dbe[0].p, dbe[1].p, dbe[2].p, drho.p,
+               qom.data(), ns, kDt, kC, kFourPI, kDelt, nx, ny, nz);
+      for (int s = 0; s < ns; s++)
+        gpuMUdotSpecies(ref[0].p, ref[1].p, ref[2].p, dv[0].p, dv[1].p, dv[2].p,
+                        db[0].p, db[1].p, db[2].p, dbe[0].p, dbe[1].p, dbe[2].p,
+                        drho.p + s * n, 0.5 * qom[s] * kDt / kC,
+                        kFourPI / 2.0 * kDelt * kDt / kC * qom[s], nx, ny, nz,
+                        s == 0);
+      const Vec o[3] = {out[0].get(), out[1].get(), out[2].get()};
+      const Vec r[3] = {ref[0].get(), ref[1].get(), ref[2].get()};
+
+      // host MUdot, species by species: (v + v x w + (v.w) w) d_s, w = beta b
+      double scale = 0, dh = 0, dk = 0;
+      for (int i = 0; i < nx; i++)
+        for (int j = 0; j < ny; j++)
+          for (int k = 0; k < nz; k++) {
+            const size_t q = ((size_t)i * ny + j) * nz + k;
+            const bool ghost = i == 0 || i == nx - 1 || j == 0 || j == ny - 1 ||
+                               k == 0 || k == nz - 1;
+            if (ghost) {
+              for (int c = 0; c < 3; c++)
+                ghostsKept = ghostsKept && o[c][q] == sentinel;
+              continue;
+            }
+            double h[3] = {0, 0, 0};
+            for (int s = 0; s < ns; s++) {
+              const double beta = 0.5 * qom[s] * kDt / kC;
+              const double w[3] = {beta * (b[0][q] + be[0][q]),
+                                   beta * (b[1][q] + be[1][q]),
+                                   beta * (b[2][q] + be[2][q])};
+              const double vw =
+                  v[0][q] * w[0] + v[1][q] * w[1] + v[2][q] * w[2];
+              const double d = kFourPI / 2.0 * kDelt * kDt / kC * qom[s] *
+                               rho[s * n + q] /
+                               (1.0 + w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+              const double cr[3] = {v[1][q] * w[2] - v[2][q] * w[1],
+                                    v[2][q] * w[0] - v[0][q] * w[2],
+                                    v[0][q] * w[1] - v[1][q] * w[0]};
+              for (int c = 0; c < 3; c++)
+                h[c] += (v[c][q] + cr[c] + vw * w[c]) * d;
+            }
+            for (int c = 0; c < 3; c++) {
+              scale = std::max(scale, std::fabs(h[c]));
+              dh = std::max(dh, (double)std::fabs(o[c][q] - h[c]));
+              dk = std::max(dk, (double)std::fabs(o[c][q] - r[c][q]));
+            }
+          }
+      errHost = std::max(errHost, dh / scale);
+      errKernel = std::max(errKernel, dk / scale);
+      cases++;
+    }
+  std::printf("  %d box/species-count cases\n", cases);
+  check(errHost < 1e-12, "gpuMUdot vs host per-species MUdot", errHost);
+  check(errKernel < 1e-12, "gpuMUdot vs gpuMUdotSpecies summed", errKernel);
+  check(ghostsKept, "ghost nodes not written", ghostsKept ? 0 : 1);
+}
+
 int main(int argc, char** argv) {
   std::string which = "all";
   for (int a = 1; a + 1 < argc; a++)
@@ -286,6 +382,8 @@ int main(int argc, char** argv) {
     testPecEquivalent();
   if (which == "all" || which == "open-rows")
     testOpenRows();
+  if (which == "all" || which == "mudot")
+    testMUdot();
   std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
               failures == 1 ? "" : "s");
   return failures ? 1 : 0;

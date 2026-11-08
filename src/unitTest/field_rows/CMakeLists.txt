@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.21) # HIP requires 3.21
 project(fieldRowsTest LANGUAGES CXX)
 
-# Unit tests of the boundary rows of the implicit Maxwell solve on the GPU
-# kernels (GPUPhysicsKernels); no MPI, no field solver.
+# Unit tests of the boundary rows and of MUdot of the implicit Maxwell solve
+# on the GPU kernels (GPUPhysicsKernels); no MPI, no field solver.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -51,7 +51,7 @@ endif()
 
 enable_testing()
 
-foreach(test_case pec-linear pec-equivalent open-rows)
+foreach(test_case pec-linear pec-equivalent open-rows mudot)
   string(REPLACE "-" "_" test_name ${test_case})
   add_test(NAME fieldRows_${test_name}
            COMMAND $<TARGET_FILE:fieldRowsTest> --case ${test_case})

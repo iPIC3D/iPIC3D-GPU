@@ -4,8 +4,9 @@
  *        MUdot, PIdot, perfect-conductor rows, open-boundary, outflow,
  *        case-B-fix, planet-charge, Laplacian and block-Jacobi kernels.
  *
- * The MUdot, PIdot and block-Jacobi kernels use the launch shape of
- * GPUPointLaunch.cuh; the others use flat 1D or 2D face launches.
+ * The MUdot, PIdot, block-Jacobi and Poisson-image Laplacian kernels use the
+ * launch shape of GPUPointLaunch.cuh; the others use flat 1D or 2D face
+ * launches.
  */
 
 #include "GPUPhysicsKernels.cuh"
@@ -73,6 +74,134 @@ void gpuMUdotSpecies(cudaSolverType* MUdotX, cudaSolverType* MUdotY,
       MUdotX, MUdotY, MUdotZ, vX, vY, vZ, Bxn, Byn, Bzn, Bx_ext, By_ext, Bz_ext,
       rhons_is, beta, prefactor, nxn, nyn, nzn, firstSpecies);
   cudaErrChk(cudaGetLastError());
+}
+
+// =========================================================================
+//  MUdot of all species in one kernel
+// =========================================================================
+
+/** Per-species constants of one MUdot launch, passed by value (constant
+ *  bank). */
+template <typename T> struct MUdotSpeciesSet {
+  int count;                 // species in this set
+  T scale[kMUdotMaxSpecies]; // (4π/2) delt dt/c (q/m)_s
+  T beta[kMUdotMaxSpecies];  // (q/m)_s dt / (2c)
+  T beta2[kMUdotMaxSpecies]; // beta_s^2
+};
+
+/** μ·v = A v + C1 v×b + C2 (v·b) b over the species of set (gpuMUdot).
+ *  NS > 0 is the species count at compile time (loop fully unrolled); NS = 0
+ *  reads it from set.count.  kAccumulate adds to the output (species sets
+ *  after the first). */
+template <typename T, int NS, bool kAccumulate>
+__global__ void k_MUdot(T* __restrict__ MUdotX, T* __restrict__ MUdotY,
+                        T* __restrict__ MUdotZ, const T* __restrict__ vX,
+                        const T* __restrict__ vY, const T* __restrict__ vZ,
+                        const T* __restrict__ Bxn, const T* __restrict__ Byn,
+                        const T* __restrict__ Bzn, const T* __restrict__ Bx_ext,
+                        const T* __restrict__ By_ext,
+                        const T* __restrict__ Bz_ext,
+                        const T* __restrict__ rhons, size_t speciesStride,
+                        MUdotSpeciesSet<T> set, int nxn, int nyn, int nzn) {
+  const int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  const int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  const int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
+    return;
+
+  const int idx = IDX3(i, j, k, nyn, nzn);
+  const T bx = Bxn[idx] + Bx_ext[idx];
+  const T by = Byn[idx] + By_ext[idx];
+  const T bz = Bzn[idx] + Bz_ext[idx];
+  const T b2 = bx * bx + by * by + bz * bz;
+
+  // species sums A, C1, C2 (they depend on b and rho only)
+  T a = 0, c1 = 0, c2 = 0;
+  const int count = NS > 0 ? NS : set.count;
+#pragma unroll
+  for (int s = 0; s < count; s++) {
+    const T d = set.scale[s] * rhons[s * speciesStride + idx] /
+                (T(1) + set.beta2[s] * b2);
+    a += d;
+    c1 += d * set.beta[s];
+    c2 += d * set.beta2[s];
+  }
+
+  const T vx = vX[idx], vy = vY[idx], vz = vZ[idx];
+  const T c2vb = c2 * (vx * bx + vy * by + vz * bz);
+  const T dx = a * vx + c1 * (vy * bz - vz * by) + c2vb * bx;
+  const T dy = a * vy + c1 * (vz * bx - vx * bz) + c2vb * by;
+  const T dz = a * vz + c1 * (vx * by - vy * bx) + c2vb * bz;
+  if constexpr (kAccumulate) {
+    MUdotX[idx] += dx;
+    MUdotY[idx] += dy;
+    MUdotZ[idx] += dz;
+  } else {
+    MUdotX[idx] = dx;
+    MUdotY[idx] = dy;
+    MUdotZ[idx] = dz;
+  }
+}
+
+/** The pointer and size arguments shared by every MUdot launch. */
+struct MUdotArgs {
+  cudaSolverType *MUdotX, *MUdotY, *MUdotZ;
+  const cudaSolverType *vX, *vY, *vZ, *Bxn, *Byn, *Bzn, *Bx_ext, *By_ext,
+      *Bz_ext, *rhons;
+  size_t speciesStride;
+  int nxn, nyn, nzn;
+};
+
+template <int NS, bool kAccumulate>
+static void launchMUdot(const PointLaunch& L, const MUdotArgs& a,
+                        const MUdotSpeciesSet<cudaSolverType>& set,
+                        cudaStream_t stream) {
+  k_MUdot<cudaSolverType, NS, kAccumulate><<<L.grid, L.block, 0, stream>>>(
+      a.MUdotX, a.MUdotY, a.MUdotZ, a.vX, a.vY, a.vZ, a.Bxn, a.Byn, a.Bzn,
+      a.Bx_ext, a.By_ext, a.Bz_ext, a.rhons, a.speciesStride, set, a.nxn, a.nyn,
+      a.nzn);
+  cudaErrChk(cudaGetLastError());
+}
+
+void gpuMUdot(cudaSolverType* MUdotX, cudaSolverType* MUdotY,
+              cudaSolverType* MUdotZ, const cudaSolverType* vX,
+              const cudaSolverType* vY, const cudaSolverType* vZ,
+              const cudaSolverType* Bxn, const cudaSolverType* Byn,
+              const cudaSolverType* Bzn, const cudaSolverType* Bx_ext,
+              const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
+              const cudaSolverType* rhons, const double* qom, int ns, double dt,
+              double c, double FourPI, double delt, int nxn, int nyn, int nzn,
+              cudaStream_t stream) {
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  const size_t stride = (size_t)nxn * nyn * nzn;
+  MUdotArgs a{MUdotX, MUdotY, MUdotZ, vX,    vY,     vZ,  Bxn, Byn, Bzn,
+              Bx_ext, By_ext, Bz_ext, rhons, stride, nxn, nyn, nzn};
+  // Species sets of up to kMUdotMaxSpecies: the first writes, the others add.
+  // With ns = 0 one launch with an empty set writes zero.
+  for (int first = 0; first == 0 || first < ns; first += kMUdotMaxSpecies) {
+    MUdotSpeciesSet<cudaSolverType> set{};
+    set.count = ns - first < kMUdotMaxSpecies ? ns - first : kMUdotMaxSpecies;
+    for (int s = 0; s < set.count; s++) {
+      const double q = qom[first + s];
+      const double beta = 0.5 * q * dt / c;
+      set.scale[s] = FourPI / 2.0 * delt * dt / c * q;
+      set.beta[s] = beta;
+      set.beta2[s] = beta * beta;
+    }
+    a.rhons = rhons + first * stride;
+    if (first > 0)
+      launchMUdot<0, true>(L, a, set, stream);
+    else if (set.count == 1)
+      launchMUdot<1, false>(L, a, set, stream);
+    else if (set.count == 2)
+      launchMUdot<2, false>(L, a, set, stream);
+    else if (set.count == 3)
+      launchMUdot<3, false>(L, a, set, stream);
+    else if (set.count == 4)
+      launchMUdot<4, false>(L, a, set, stream);
+    else
+      launchMUdot<0, false>(L, a, set, stream);
+  }
 }
 
 // =========================================================================
@@ -1071,7 +1200,41 @@ void gpuConstantChargePlanet2DKernel(cudaSolverType* rhons, cudaSolverType val,
 //  Center-to-center Laplacian (for Poisson solver)
 // =========================================================================
 
-/** 7-point center Laplacian: lapC = d²f/dx² + d²f/dy² + d²f/dz². */
+/** 7-point center Laplacian of the interior cells, written packed:
+ *  lapK[(i nj + j) nk + k] for the interior cell (i+1, j+1, k+1).  Reads the
+ *  face ghosts of fC, never the edge or corner ghosts. */
+template <typename T>
+__global__ void k_lapC2CToKrylov(T* __restrict__ lapK, const T* __restrict__ fC,
+                                 int nxc, int nyc, int nzc, T invdx2, T invdy2,
+                                 T invdz2) {
+  const int i = blockIdx.z * blockDim.z + threadIdx.z;
+  const int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const int ni = nxc - 2, nj = nyc - 2, nk = nzc - 2;
+  if (i >= ni || j >= nj || k >= nk)
+    return;
+  const int sX = nyc * nzc; // stride in X direction
+  const int sY = nzc;       // stride in Y direction
+  const int idx = ((i + 1) * nyc + (j + 1)) * nzc + (k + 1);
+  const T f = fC[idx];
+  lapK[(i * nj + j) * nk + k] =
+      (fC[idx - sX] - 2.0 * f + fC[idx + sX]) * invdx2 +
+      (fC[idx - sY] - 2.0 * f + fC[idx + sY]) * invdy2 +
+      (fC[idx - 1] - 2.0 * f + fC[idx + 1]) * invdz2;
+}
+
+void gpuLapC2CToKrylov(cudaSolverType* lapK, const cudaSolverType* fC, int nxc,
+                       int nyc, int nzc, cudaSolverType invdx2,
+                       cudaSolverType invdy2, cudaSolverType invdz2,
+                       cudaStream_t stream) {
+  const PointLaunch L = pointLaunch(nxc - 2, nyc - 2, nzc - 2);
+  k_lapC2CToKrylov<<<L.grid, L.block, 0, stream>>>(lapK, fC, nxc, nyc, nzc,
+                                                   invdx2, invdy2, invdz2);
+  cudaErrChk(cudaGetLastError());
+}
+
+/** 7-point center Laplacian: lapC = d²f/dx² + d²f/dy² + d²f/dz².  Not used
+ *  currently (gpuLapC2CToKrylov). */
 template <typename T>
 __global__ void k_lapC2C(T* lapC, const T* fC, int nxc, int nyc, int nzc,
                          T invdx2, T invdy2, T invdz2) {
@@ -1106,7 +1269,8 @@ void gpuLapC2CKernel(cudaSolverType* lapC, const cudaSolverType* fC, int nxc,
 
 /** 7-point center Laplacian with per-face ghost rules (no ghost reads).
  *  A neighbour outside the interior is replaced by g * f(cell), g in
- *  {0, +1, -1}.  With one interior cell both faces act on the same cell. */
+ *  {0, +1, -1}.  With one interior cell both faces act on the same cell.
+ *  Not used currently (gpuChebyshevPoissonStep1/N). */
 template <typename T>
 __global__ void k_lapC2CLocal(T* lapC, const T* fC, int nxc, int nyc, int nzc,
                               T invdx2, T invdy2, T invdz2, T gXl, T gXr, T gYl,

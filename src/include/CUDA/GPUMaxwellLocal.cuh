@@ -16,7 +16,7 @@
  *
  * Pipeline (called from EMfields3D::gpuMaxwellImageLocal):
  *   1. gpuSolver2Phys3          — unpack Krylov → vectX/Y/Z
- *   2. gpuMUdot                 — D = μ̂·E  (ns species)
+ *   2. gpuMUdot                 — D = μ̂·E  (all species, one kernel)
  *   3. gpuMaxwellLocalCenterOps — fused: 3×gradN2C + divN2C → 10 center arrays
  *   4. gpuMaxwellLocalNodeFused — fused: 3×divC2N + gradC2N + arithmetic
  *                                  + Krylov packing → d_im

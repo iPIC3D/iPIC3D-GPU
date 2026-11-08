@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.21) # HIP requires 3.21
 project(divbCleaningTest LANGUAGES CXX)
 
-# Unit tests of the div(B) cleaning and of the B absorbing layer on the GPU
-# kernels (GPUPhysicsKernels, GPUStencils, GPUBlas); no MPI, no field solver.
+# Unit tests of the div(B) cleaning (Poisson operators and preconditioner
+# steps) and of the B absorbing layer on the GPU kernels (GPUPhysicsKernels,
+# GPUStencils, GPUBlas, GPUChebyshev); no MPI, no field solver.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,6 +30,7 @@ set(src_files
     ${SOURCE_CODE_DIR}/cudaKernel/GPUPhysicsKernels.cu
     ${SOURCE_CODE_DIR}/cudaKernel/GPUStencils.cu
     ${SOURCE_CODE_DIR}/cudaKernel/GPUBlas.cu
+    ${SOURCE_CODE_DIR}/cudaKernel/GPUChebyshev.cu
     ${SOURCE_CODE_DIR}/cudaKernel/GPUFieldArray.cu)
 if(HIP_ON)
   set_source_files_properties(${src_files} PROPERTIES LANGUAGE HIP)
@@ -54,7 +56,8 @@ endif()
 
 enable_testing()
 
-foreach(test_case sal-tangential adjoint contraction)
+foreach(test_case sal-tangential adjoint contraction poisson-local
+                  poisson-image)
   string(REPLACE "-" "_" test_name ${test_case})
   add_test(NAME divbCleaning_${test_name}
            COMMAND $<TARGET_FILE:divbCleaningTest> --case ${test_case})

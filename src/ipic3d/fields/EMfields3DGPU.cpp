@@ -752,16 +752,11 @@ void EMfields3D::gpuSolverSyncD2H(cudaStream_t stream) {
 void EMfields3D::gpuMUdot(GPUFieldArray3& MUdotX, GPUFieldArray3& MUdotY,
                           GPUFieldArray3& MUdotZ, GPUFieldArray3& vX,
                           GPUFieldArray3& vY, GPUFieldArray3& vZ) {
-  for (int is = 0; is < ns; is++) {
-    double beta = 0.5 * qom[is] * dt / c;
-    double prefactor = FourPI / 2.0 * delt * dt / c * qom[is];
-    gpuMUdotSpecies(MUdotX.devPtr(), MUdotY.devPtr(), MUdotZ.devPtr(),
-                    vX.devPtr(), vY.devPtr(), vZ.devPtr(), d_Bxn.devPtr(),
-                    d_Byn.devPtr(), d_Bzn.devPtr(), d_Bx_ext.devPtr(),
-                    d_By_ext.devPtr(), d_Bz_ext.devPtr(),
-                    d_rhons.speciesPtr(is), beta, prefactor, nxn, nyn, nzn,
-                    /*firstSpecies=*/(is == 0), solverStream_);
-  }
+  ::gpuMUdot(MUdotX.devPtr(), MUdotY.devPtr(), MUdotZ.devPtr(), vX.devPtr(),
+             vY.devPtr(), vZ.devPtr(), d_Bxn.devPtr(), d_Byn.devPtr(),
+             d_Bzn.devPtr(), d_Bx_ext.devPtr(), d_By_ext.devPtr(),
+             d_Bz_ext.devPtr(), d_rhons.devPtr(), qom, ns, dt, c, FourPI, delt,
+             nxn, nyn, nzn, solverStream_);
 }
 
 void EMfields3D::gpuPIdot(GPUFieldArray3& PIX, GPUFieldArray3& PIY,
@@ -1212,7 +1207,7 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
 //
 //  Pipeline:
 //    1. gpuSolver2Phys3         — unpack Krylov → vectX/Y/Z
-//    2. gpuMUdot                — D = μ̂·E  (ns species sub-launches)
+//    2. gpuMUdot                — D = μ̂·E  (all species, one kernel)
 //    3. gpuMaxwellLocalCenterOps — fused 3×gradN2C + divN2C
 //    4. gpuMaxwellLocalNodeFused — fused 3×divC2N + gradC2N
 //                                  + arithmetic + Krylov packing → d_im
@@ -3288,10 +3283,8 @@ void EMfields3D::gpuPoissonImage(cudaSolverType* d_im, cudaSolverType* d_vec) {
   double _invdy = grid->get_invdy();
   double _invdz = grid->get_invdz();
 
-  d_poissonTemp.setAll(0.0, solverStream_);
-  d_poissonIm.setAll(0.0, solverStream_);
-
-  // Krylov → physical
+  // Krylov → physical (interior; the 7-point stencil reads only the face
+  // ghosts, which the exchange or the face BCs set)
   gpuSolver2Phys1(d_poissonTemp.devPtr(), d_vec, nxc, nyc, nzc, solverStream_);
 
   // Communicate ghost cells (center box stencil)
@@ -3300,13 +3293,10 @@ void EMfields3D::gpuPoissonImage(cudaSolverType* d_im, cudaSolverType* d_vec) {
                                    kPoissonBCface[2], kPoissonBCface[3],
                                    kPoissonBCface[4], kPoissonBCface[5]);
 
-  // Laplacian
-  gpuLapC2CKernel(d_poissonIm.devPtr(), d_poissonTemp.devPtr(), nxc, nyc, nzc,
-                  _invdx * _invdx, _invdy * _invdy, _invdz * _invdz,
-                  solverStream_);
-
-  // Physical → Krylov
-  gpuPhys2Solver1(d_im, d_poissonIm.devPtr(), nxc, nyc, nzc, solverStream_);
+  // Laplacian, written straight into the Krylov image
+  gpuLapC2CToKrylov(d_im, d_poissonTemp.devPtr(), nxc, nyc, nzc,
+                    _invdx * _invdx, _invdy * _invdy, _invdz * _invdz,
+                    solverStream_);
 }
 
 // =========================================================================
@@ -3368,10 +3358,28 @@ poissonLocalGhostRules(const VirtualTopology3D* vct, int nxc, int nyc,
   return rules;
 }
 
+/** The communication-free -∇² of the Chebyshev preconditioner, applied by
+ *  its step kernels on the packed interior cells. */
+static PoissonLocalOperator
+poissonLocalOperator(const Grid* grid, const PoissonLocalGhostRules& r) {
+  PoissonLocalOperator op;
+  op.ni = r.nCell[0];
+  op.nj = r.nCell[1];
+  op.nk = r.nCell[2];
+  op.invdx2 = grid->get_invdx() * grid->get_invdx();
+  op.invdy2 = grid->get_invdy() * grid->get_invdy();
+  op.invdz2 = grid->get_invdz() * grid->get_invdz();
+  for (int f = 0; f < 6; f++)
+    op.g[f] = r.factor[f];
+  return op;
+}
+
 // =========================================================================
 //  gpuPoissonImageLocal: -∇²·x (positive eigenvalues, NO communication)
 //  The ghost layer is never read: gpuLapC2CLocalKernel applies the face
-//  rules of poissonLocalGhostRules instead.
+//  rules of poissonLocalGhostRules instead.  Not used currently: the
+//  Chebyshev preconditioner applies the same operator (PoissonLocalOperator)
+//  inside its step kernels.
 // =========================================================================
 
 void EMfields3D::gpuPoissonImageLocal(cudaSolverType* d_im,
@@ -3399,7 +3407,8 @@ void EMfields3D::gpuPoissonImageLocal(cudaSolverType* d_im,
 }
 
 // =========================================================================
-//  Analytic eigenvalue bounds of the local -∇² (gpuPoissonImageLocal)
+//  Analytic eigenvalue bounds of the local -∇² of the Chebyshev
+//  preconditioner (PoissonLocalOperator)
 //
 //  The operator is a Kronecker sum of three 1D operators, so its
 //  eigenvalues are sums of 1D eigenvalues: min = Σ 1D minima, max = Σ 1D
@@ -3546,8 +3555,9 @@ void EMfields3D::computePoissonChebyshevEigenvalues() {
 // =========================================================================
 //  Chebyshev preconditioner for Poisson (communication-free)
 //  Approximately solves (-∇²)·x = b via Chebyshev semi-iteration on
-//  the local operator gpuPoissonImageLocal (positive eigenvalues).
-//  Final result is NEGATED so that x ≈ (∇²)⁻¹ b.
+//  the local operator PoissonLocalOperator (positive eigenvalues), which the
+//  step kernels evaluate on the packed cells: one kernel per step.  The last
+//  step writes x = -y, so that x ≈ (∇²)⁻¹ b.
 // =========================================================================
 
 void EMfields3D::gpuChebyshevPrecondPoisson(cudaSolverType* d_x,
@@ -3601,27 +3611,25 @@ void EMfields3D::gpuChebyshevPrecondPoisson(cudaSolverType* d_x,
   double rho = 1.0 / (2.0 * sigma - rhoOld);
 
   // ---- Preconditioner: x₀ = 0, so r₀ = b ----
+  const PoissonLocalOperator op = poissonLocalOperator(
+      &get_grid(), poissonLocalGhostRules(&get_vct(), nxc, nyc, nzc));
   cudaSolverType* pY = d_chebY;
   cudaSolverType* pZ = d_chebZ;
-  cudaSolverType* pAy = d_chebTmp;
 
+  // Chebyshev solves (-∇²)⁻¹ b; the last step writes x = -y = (∇²)⁻¹ b.
   // Step 0+1: z = b/θ,  y = f(b, (-∇²)(b))
-  gpuPoissonImageLocal(pAy, d_b);
-  gpuChebyshevStep1(pY, pZ, d_b, pAy, theta, delta, rho, n, solverStream_);
+  gpuChebyshevPoissonStep1(maxIter == 1 ? d_x : pY, pZ, d_b, op, theta, delta,
+                           rho, maxIter == 1 ? -1.0 : 1.0, solverStream_);
 
-  // Steps 2..maxIter
+  // Steps 2..maxIter: z ← f(y, z, b, (-∇²)(y)) in place, then swap y, z
   for (int step = 2; step <= maxIter; step++) {
     rhoOld = rho;
     rho = 1.0 / (2.0 * sigma - rhoOld);
-
-    gpuPoissonImageLocal(pAy, pY);
-    gpuChebyshevStepN(pZ, pY, pZ, d_b, pAy, delta, sigma, rho, rhoOld, n,
-                      solverStream_);
+    const bool last = step == maxIter;
+    gpuChebyshevPoissonStepN(last ? d_x : pZ, pY, pZ, d_b, op, delta, sigma,
+                             rho, rhoOld, last ? -1.0 : 1.0, solverStream_);
     std::swap(pZ, pY);
   }
-
-  // Negate: Chebyshev solved (-∇²)⁻¹ b, we need (∇²)⁻¹ b = -(-∇²)⁻¹ b
-  gpuScaleCopy(d_x, pY, -1.0, n, solverStream_);
 }
 
 // =========================================================================

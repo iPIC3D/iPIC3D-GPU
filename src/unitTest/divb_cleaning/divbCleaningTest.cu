@@ -10,6 +10,17 @@
  *                          minus the transpose of divN2C:
  *                          <divN2C v, psi> + <v, gradC2N psi> = 0; with copy
  *                          ghosts it is not.
+ *   --case poisson-local   the Chebyshev steps of the Poisson preconditioner
+ *                          (gpuChebyshevPoissonStep1/N, -∇² evaluated in the
+ *                          step kernel) against the composed reference
+ *                          unpack + gpuLapC2CLocalKernel + pack + negate +
+ *                          gpuChebyshevStep1/N and a host -∇², for every
+ *                          face-factor combination g in {-1, 0, 1}^6 on small
+ *                          boxes (1-cell directions included), in place and
+ *                          with the negated output of the last step.
+ *   --case poisson-image   gpuLapC2CToKrylov against a host 7-point Laplacian
+ *                          and gpuLapC2CKernel + gpuPhys2Solver1; NaN edge and
+ *                          corner ghosts must not be read.
  *   --case contraction     psi solved exactly with the 7-point zero-ghost
  *                          Laplacian, B -= gradC2N psi on every node: |div B|
  *                          decreases at least by the mode bound 1 - l27/l7.
@@ -17,6 +28,7 @@
  * Array layout as in the code: (i * ny + j) * nz + k, centres 0..nc-1 with
  * ghosts 0 and nc-1, nodes 0..nn-1 = nc with ghost nodes 0 and nn-1. */
 #include "GPUBlas.cuh"
+#include "GPUChebyshev.cuh"
 #include "GPUPhysicsKernels.cuh"
 #include "GPUStencils.cuh"
 #include "cudaTypeDef.cuh"
@@ -25,6 +37,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -322,6 +335,184 @@ static void testContraction() {
         "|div B| after <= (max_k 1 - l27/l7) |div B| before", n1 / n0 - bound);
 }
 
+// ---------------------------------------------------------------------------
+// Poisson operators
+
+/** Largest |a - b| over max |b| (0 when b is zero). */
+static double relDiff(const Vec& a, const Vec& b) {
+  double d = 0, m = 0;
+  for (size_t q = 0; q < a.size(); q++) {
+    d = std::max(d, (double)std::fabs(a[q] - b[q]));
+    m = std::max(m, (double)std::fabs(b[q]));
+  }
+  return m > 0 ? d / m : d;
+}
+
+/** Host -∇² of PoissonLocalOperator on the packed cells. */
+static Vec hostNegLapLocal(const Vec& y, const PoissonLocalOperator& op) {
+  Vec r(y.size());
+  for (int i = 0; i < op.ni; i++)
+    for (int j = 0; j < op.nj; j++)
+      for (int k = 0; k < op.nk; k++) {
+        auto at = [&](int a, int b, int c) {
+          return y[((size_t)a * op.nj + b) * op.nk + c];
+        };
+        const double f = at(i, j, k);
+        const double xm = i > 0 ? at(i - 1, j, k) : op.g[0] * f;
+        const double xp = i < op.ni - 1 ? at(i + 1, j, k) : op.g[1] * f;
+        const double ym = j > 0 ? at(i, j - 1, k) : op.g[2] * f;
+        const double yp = j < op.nj - 1 ? at(i, j + 1, k) : op.g[3] * f;
+        const double zm = k > 0 ? at(i, j, k - 1) : op.g[4] * f;
+        const double zp = k < op.nk - 1 ? at(i, j, k + 1) : op.g[5] * f;
+        r[((size_t)i * op.nj + j) * op.nk + k] =
+            -((xm - 2 * f + xp) * op.invdx2 + (ym - 2 * f + yp) * op.invdy2 +
+              (zm - 2 * f + zp) * op.invdz2);
+      }
+  return r;
+}
+
+static void testPoissonLocal() {
+  std::printf("poisson-local\n");
+  const int shapes[][3] = {{5, 4, 3}, {1, 6, 5}, {6, 1, 5}, {4, 5, 1},
+                           {1, 1, 7}, {1, 1, 1}, {2, 2, 2}, {17, 9, 33}};
+  const T theta = 2.5, delta = 1.5, rho = 0.4, sigma = theta / delta,
+          rhoOld = 0.3;
+  std::mt19937_64 gen(11);
+  double errHost = 0, errStep1 = 0, errZ = 0, errStepN = 0, errNeg = 0;
+  int combos = 0;
+  for (const auto& sh : shapes) {
+    PoissonLocalOperator op;
+    op.ni = sh[0];
+    op.nj = sh[1];
+    op.nk = sh[2];
+    op.invdx2 = 1.3;
+    op.invdy2 = 0.7;
+    op.invdz2 = 2.1;
+    const int n = op.ni * op.nj * op.nk;
+    const int nxc = op.ni + 2, nyc = op.nj + 2, nzc = op.nk + 2;
+    const size_t nCell = (size_t)nxc * nyc * nzc;
+    // every combination on the small boxes, a random sample on the large one
+    const bool all = n <= 64;
+    std::uniform_int_distribution<int> pick(0, 728);
+    for (int c = 0; c < (all ? 729 : 40); c++, combos++) {
+      int code = all ? c : pick(gen);
+      int factor[6];
+      for (int f = 0; f < 6; f++, code /= 3) {
+        factor[f] = code % 3 - 1;
+        op.g[f] = factor[f];
+      }
+      const Vec b = randomVec(n, gen), y = randomVec(n, gen),
+                z = randomVec(n, gen);
+      Dev db(b), dy(y), dz(z);
+      const Vec nanCells(nCell, std::numeric_limits<T>::quiet_NaN());
+
+      // composed reference: Ay = -(pack(lapLocal(unpack(v))))
+      auto refNegLap = [&](const Dev& v) {
+        Dev phys(nanCells), lap(nanCells), out(Vec(n, 0));
+        gpuSolver2Phys1(phys.p, v.p, nxc, nyc, nzc, 0);
+        gpuLapC2CLocalKernel(lap.p, phys.p, nxc, nyc, nzc, op.invdx2, op.invdy2,
+                             op.invdz2, factor, 0);
+        gpuPhys2Solver1(out.p, lap.p, nxc, nyc, nzc, 0);
+        gpuScale(out.p, -1.0, n, 0);
+        return out.get();
+      };
+      const Vec Ab = refNegLap(db), Ay = refNegLap(dy);
+      errHost = std::max(errHost, relDiff(Ay, hostNegLapLocal(y, op)));
+
+      // step 1: reference and fused (output y, then negated output)
+      Dev dAb(Ab), yRef(Vec(n, 0)), zRef(Vec(n, 0));
+      gpuChebyshevStep1(yRef.p, zRef.p, db.p, dAb.p, theta, delta, rho, n, 0);
+      Dev out1(Vec(n, 0)), z1(Vec(n, 0)), outNeg(Vec(n, 0)), z1b(Vec(n, 0));
+      gpuChebyshevPoissonStep1(out1.p, z1.p, db.p, op, theta, delta, rho, 1.0,
+                               0);
+      gpuChebyshevPoissonStep1(outNeg.p, z1b.p, db.p, op, theta, delta, rho,
+                               -1.0, 0);
+      const Vec y1 = yRef.get();
+      Vec y1neg(y1);
+      for (auto& x : y1neg)
+        x = -x;
+      errStep1 = std::max(errStep1, relDiff(out1.get(), y1));
+      errNeg = std::max(errNeg, relDiff(outNeg.get(), y1neg));
+      errZ = std::max(errZ, relDiff(z1.get(), zRef.get()));
+
+      // step N: reference, fused in place (out = z), fused negated output
+      Dev dAy(Ay), wRef(Vec(n, 0));
+      gpuChebyshevStepN(wRef.p, dy.p, dz.p, db.p, dAy.p, delta, sigma, rho,
+                        rhoOld, n, 0);
+      Dev zInPlace(z), outN(Vec(n, 0));
+      gpuChebyshevPoissonStepN(zInPlace.p, dy.p, zInPlace.p, db.p, op, delta,
+                               sigma, rho, rhoOld, 1.0, 0);
+      gpuChebyshevPoissonStepN(outN.p, dy.p, dz.p, db.p, op, delta, sigma, rho,
+                               rhoOld, -1.0, 0);
+      const Vec w = wRef.get();
+      Vec wneg(w);
+      for (auto& x : wneg)
+        x = -x;
+      errStepN = std::max(errStepN, relDiff(zInPlace.get(), w));
+      errNeg = std::max(errNeg, relDiff(outN.get(), wneg));
+    }
+  }
+  std::printf("  %d operator/box combinations\n", combos);
+  check(errHost < 1e-13,
+        "reference -∇² (unpack, gpuLapC2CLocalKernel, pack) "
+        "vs host",
+        errHost);
+  check(errStep1 < 1e-14, "fused step 1 vs reference", errStep1);
+  check(errZ == 0, "fused step 1 z = b/theta vs reference", errZ);
+  check(errStepN < 1e-14, "fused step N in place vs reference", errStepN);
+  check(errNeg < 1e-14, "negated output (last step) vs -reference", errNeg);
+}
+
+static void testPoissonImage() {
+  std::printf("poisson-image\n");
+  const int shapes[][3] = {{7, 6, 5}, {3, 8, 6}, {8, 3, 6},
+                           {6, 7, 3}, {3, 3, 3}, {19, 11, 35}};
+  const T ix2 = 1.7, iy2 = 0.9, iz2 = 2.3;
+  std::mt19937_64 gen(5);
+  double errHost = 0, errOld = 0;
+  bool finite = true;
+  for (const auto& sh : shapes) {
+    const int nxc = sh[0], nyc = sh[1], nzc = sh[2];
+    const int ni = nxc - 2, nj = nyc - 2, nk = nzc - 2, n = ni * nj * nk;
+    // interior and face ghosts random, edge and corner ghosts NaN
+    Vec f = randomVec((size_t)nxc * nyc * nzc, gen);
+    auto idx = [&](int i, int j, int k) {
+      return ((size_t)i * nyc + j) * nzc + k;
+    };
+    for (int i = 0; i < nxc; i++)
+      for (int j = 0; j < nyc; j++)
+        for (int k = 0; k < nzc; k++) {
+          const int ghosts = (i == 0 || i == nxc - 1) +
+                             (j == 0 || j == nyc - 1) +
+                             (k == 0 || k == nzc - 1);
+          if (ghosts >= 2)
+            f[idx(i, j, k)] = std::numeric_limits<T>::quiet_NaN();
+        }
+    Vec host(n);
+    for (int i = 1; i <= ni; i++)
+      for (int j = 1; j <= nj; j++)
+        for (int k = 1; k <= nk; k++) {
+          const double c = f[idx(i, j, k)];
+          host[((size_t)(i - 1) * nj + j - 1) * nk + k - 1] =
+              (f[idx(i - 1, j, k)] - 2 * c + f[idx(i + 1, j, k)]) * ix2 +
+              (f[idx(i, j - 1, k)] - 2 * c + f[idx(i, j + 1, k)]) * iy2 +
+              (f[idx(i, j, k - 1)] - 2 * c + f[idx(i, j, k + 1)]) * iz2;
+        }
+    Dev df(f), dk(Vec(n, 0)), dl(Vec(f.size(), 0)), dk2(Vec(n, 0));
+    gpuLapC2CToKrylov(dk.p, df.p, nxc, nyc, nzc, ix2, iy2, iz2, 0);
+    gpuLapC2CKernel(dl.p, df.p, nxc, nyc, nzc, ix2, iy2, iz2, 0);
+    gpuPhys2Solver1(dk2.p, dl.p, nxc, nyc, nzc, 0);
+    const Vec k = dk.get();
+    for (const T x : k)
+      finite = finite && std::isfinite(x);
+    errHost = std::max(errHost, relDiff(k, host));
+    errOld = std::max(errOld, relDiff(k, dk2.get()));
+  }
+  check(finite, "no edge or corner ghost read (result finite)", finite ? 0 : 1);
+  check(errHost < 1e-14, "gpuLapC2CToKrylov vs host", errHost);
+  check(errOld < 1e-15, "gpuLapC2CToKrylov vs gpuLapC2CKernel + pack", errOld);
+}
+
 int main(int argc, char** argv) {
   std::string which = "all";
   for (int a = 1; a + 1 < argc; a++)
@@ -333,6 +524,10 @@ int main(int argc, char** argv) {
     testAdjoint();
   if (which == "all" || which == "contraction")
     testContraction();
+  if (which == "all" || which == "poisson-local")
+    testPoissonLocal();
+  if (which == "all" || which == "poisson-image")
+    testPoissonImage();
   std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,
               failures == 1 ? "" : "s");
   return failures ? 1 : 0;

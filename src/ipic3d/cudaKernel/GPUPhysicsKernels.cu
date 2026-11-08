@@ -1,7 +1,8 @@
 /**
  * @file GPUPhysicsKernels.cu
  * @brief CUDA kernel implementations for iPIC3D physics operations:
- *        MUdot, PIdot, perfect conductor BCs (fused sustensor).
+ *        MUdot, PIdot, perfect-conductor rows, open-boundary, outflow,
+ *        case-B-fix, planet-charge, Laplacian and block-Jacobi kernels.
  *
  * The MUdot, PIdot and block-Jacobi kernels use the launch shape of
  * GPUPointLaunch.cuh; the others use flat 1D or 2D face launches.
@@ -9,8 +10,6 @@
 
 #include "GPUPhysicsKernels.cuh"
 #include "GPUPointLaunch.cuh"
-
-#ifdef GPU_SOLVER
 
 #define IDX3(i, j, k, ny, nz) ((i) * (ny) * (nz) + (j) * (nz) + (k))
 
@@ -132,7 +131,7 @@ void gpuPIdotSpecies(cudaSolverType* PIX, cudaSolverType* PIY,
 //  the normal row is Ampere's law without curl B, chi_n . E = E^n_n -
 //  4 pi theta dt Jhat_n, with chi the implicit susceptibility at the node.
 //  The image (A x) carries only the part linear in x, the RHS the rest, so
-//  the operator GMRES sees is linear:
+//  the operator the Krylov solvers see is linear:
 //    image_n  = x_n + (chi_na x_a + chi_nb x_b) / chi_nn
 //    source_n = (E^n_n - 4 pi theta dt Jhat_n) / chi_nn
 // =========================================================================
@@ -314,10 +313,10 @@ void gpuPerfectConductorSource(
 #undef IDX3
 
 // =========================================================================
-//  adjustNonPeriodicDensities: cudaSolverType boundary-face values on GPU
+//  Non-periodic particle faces: double the node moments on the face plane
 // =========================================================================
 
-// Kernel: cudaSolverType values on X-face (i = fixedI)
+// Kernel: double the values on the X face plane i = fixedI
 template <typename T>
 __global__ void k_doubleFaceX(T* __restrict__ arr, int fixedI, int nyn,
                               int nzn) {
@@ -328,7 +327,7 @@ __global__ void k_doubleFaceX(T* __restrict__ arr, int fixedI, int nyn,
   arr[(fixedI * nyn + j) * nzn + k] *= 2.0;
 }
 
-// Kernel: cudaSolverType values on Y-face (j = fixedJ)
+// Kernel: double the values on the Y face plane j = fixedJ
 template <typename T>
 __global__ void k_doubleFaceY(T* __restrict__ arr, int fixedJ, int nxn, int nyn,
                               int nzn) {
@@ -339,7 +338,7 @@ __global__ void k_doubleFaceY(T* __restrict__ arr, int fixedJ, int nxn, int nyn,
   arr[(i * nyn + fixedJ) * nzn + k] *= 2.0;
 }
 
-// Kernel: cudaSolverType values on Z-face (k = fixedK)
+// Kernel: double the values on the Z face plane k = fixedK
 template <typename T>
 __global__ void k_doubleFaceZ(T* __restrict__ arr, int fixedK, int nxn, int nyn,
                               int nzn) {
@@ -890,7 +889,8 @@ void gpuFixBcGEMKernel(cudaSolverType* Bxc, cudaSolverType* Byc,
 }
 
 /** Fix node-based B for GEM on 3 Y-boundary layers.
- *  Uses CENTER Y coordinate for the tanh profile (matches CPU).
+ *  Uses the CENTER Y coordinate of the ghost cell for the tanh profile, as
+ *  k_fixBcGEM does.
  *  side: 0=left (j=0,1,2), 1=right (j=nyn-1, nyn-2, nyn-3). */
 template <typename T>
 __global__ void k_fixBnGEM(T* Bxn, T* Byn, T* Bzn, T B0x, T B0y, T B0z,
@@ -937,8 +937,9 @@ void gpuFixBnGEMKernel(cudaSolverType* Bxn, cudaSolverType* Byn,
   cudaErrChk(cudaGetLastError());
 }
 
-/** Fix center-based B for ForceFree on Y-boundary layers.
- *  Bx = B0x*tanh, Bz = B0z/cosh profile on up to 3 layers. */
+/** Fix center-based B for ForceFree on a Y boundary: Bz = B0z/cosh on the
+ *  three cell planes next to the wall; Bx = B0x tanh and By = B0y on the
+ *  ghost plane. */
 template <typename T>
 __global__ void k_fixBforcefree(T* Bxc, T* Byc, T* Bzc, T B0x, T B0y, T B0z,
                                 T yStart, T dy, T LyH, T delta, int side,
@@ -1149,7 +1150,8 @@ void gpuLapC2CLocalKernel(cudaSolverType* lapC, const cudaSolverType* fC,
 }
 
 // =========================================================================
-//  Block-Jacobi preconditioner kernel
+//  Block-Jacobi preconditioner kernel (not used: FGMRESBlockJacobi uses
+//  gpuPrecomputeBlockJacobiInv + gpuApplyBlockJacobiInvKrylov)
 //  Solves D_i * z_i = r_i at each interior node, where
 //    D_i = (1 + δ²/2 * cΣ) I  +  (I + δ²/2 * C) * μ_i
 //  μ_i is the full MUdot susceptibility tensor summed over species.
@@ -1412,5 +1414,3 @@ void gpuApplyBlockJacobiInvKrylov(cudaSolverType* zKrylov,
       zKrylov, rKrylov, Dinv, nxn, nyn, nzn);
   cudaErrChk(cudaGetLastError());
 }
-
-#endif // GPU_SOLVER

@@ -12,8 +12,6 @@
 #include "GPUPointLaunch.cuh"
 #include "GPUStencils.cuh"
 
-#ifdef GPU_SOLVER
-
 /** Indexing macro for row-major [d1][d2][d3] layout. */
 #define IDX(i, j, k, d2, d3) ((i) * (d2) * (d3) + (j) * (d3) + (k))
 
@@ -392,7 +390,7 @@ k_divSymmTensorN2C(T* __restrict__ divCX, T* __restrict__ divCY,
 }
 
 // =========================================================================
-//  Smooth (box stencil) kernel
+//  Smooth (7-point stencil) kernel
 // =========================================================================
 
 template <typename T>
@@ -551,10 +549,10 @@ void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in, int nx,
 //    Interior [2..n-3]: all reads fall in centre interior — no ghost deps.
 //    Boundary [1, n-2]: at least one read hits a ghost centre cell.
 //
-//  smoothStep reads [i±1][j±1][k±1]: same interior range [2..n-3].
+//  smoothStep reads [i±1][j][k], [i][j±1][k], [i][j][k±1]: same interior
+//  range [2..n-3].
 //
-//  Device helper functions are used to avoid duplicating computation code
-//  across the original, interior, and boundary kernel variants.
+//  The interior and boundary variants share one device helper per stencil.
 // =========================================================================
 #ifdef HALO_OVERLAP
 
@@ -929,7 +927,7 @@ void gpuInterpC2N_boundary(cudaSolverType* fN, const cudaSolverType* fC,
 }
 
 // -----------------------------------------------------------------
-//  smoothStep  (6-point box smooth)
+//  smoothStep  (7-point smooth)
 // -----------------------------------------------------------------
 template <typename T>
 __device__ __forceinline__ void
@@ -997,5 +995,3 @@ void gpuSmoothStep_boundary(cudaSolverType* out, const cudaSolverType* in,
 #endif // HALO_OVERLAP
 
 #undef IDX
-
-#endif // GPU_SOLVER

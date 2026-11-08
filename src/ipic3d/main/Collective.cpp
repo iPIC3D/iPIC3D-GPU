@@ -110,9 +110,8 @@ const char* Collective::get_name_of_enum(int in) {
   return enumNames[in];
 }
 
-/*! Read the input file from text file and put the data in a collective wrapper:
- * if it's a restart read from input file basic sim data and load particles and
- * EM field from restart file */
+/*! Read the input file; on a restart also select the checkpoint to load (the
+ * fields and particles are loaded later) */
 void Collective::ReadInput(string inputfile) {
   ConfigFile config(inputfile);
   ReadInput(config);
@@ -246,11 +245,11 @@ void Collective::ReadInput(const ConfigFile& config) {
     if (ns > 5)
       rhoINJECT[5] = rhoINJECT0.f;
 
-    // take the tolerance of the solvers
+    // solver tolerances (CGtol: host CG, not used currently)
     CGtol = config.read<double>("CGtol", 1e-3);
     GMREStol = config.read<double>("GMREStol", 1e-3);
     NiterMover = config.read<int>("NiterMover", 3);
-    // solver selection: "GMRES" (default) or "Chebyshev"
+    // Maxwell solver: "GMRES" (default), "FGMRESBlockJacobi" or "Chebyshev"
     SolverType = config.read<string>("SolverType", "GMRES");
     ChebyshevMaxIter = config.read<int>("ChebyshevMaxIter", 20);
     ChebyshevEigMin = config.read<double>("ChebyshevEigMin", 0.0);
@@ -288,7 +287,6 @@ void Collective::ReadInput(const ConfigFile& config) {
   }
 
   // read everything from input file, if restart is true, overwrite the setting
-  // - bug fixing
 
   restart_status = 0;
   last_cycle = -1;
@@ -694,7 +692,7 @@ void Collective::ReadInput(const ConfigFile& config) {
   bcPfaceZright = config.read<int>("bcPfaceZright", 1);
   bcPfaceZleft = config.read<int>("bcPfaceZleft", 1);
 
-  // E field inflow BC: master switch for applying inflow BCs in GMRes image
+  // E field inflow BC: master switch for the inflow rows of the Maxwell image
   applyInflowBcsEImage = config.read<int>("ApplyInflowBcsEImage", 1);
 
   // Fields on the X-right outflow layer: kept as solved (default), or copied
@@ -944,7 +942,8 @@ void Collective::Print() {
        << endl;
   cout << "Zright : " << bcPfaceZright << " (" << bcPName(bcPfaceZright) << ")"
        << endl;
-  cout << "E inflow BCs in GMRes : " << (applyInflowBcsEImage ? "yes" : "no")
+  cout << "E inflow BCs in Maxwell image : "
+       << (applyInflowBcsEImage ? "yes" : "no")
        << " (applied per-face where bcPface == 2)" << endl;
   if (bcEMfaceXright == 2 && bcPfaceXright == 3)
     cout << "X-right outflow layer fields : "
@@ -957,11 +956,12 @@ void Collective::Print() {
   cout << "---------------------" << endl;
   cout << "Poisson div(E) correction  : " << PoissonCorrection;
   if (PoissonCorrection == "yes")
-    cout << ", every " << PoissonCorrectionCycle << " cycles (in calculateE)";
+    cout << ", every " << PoissonCorrectionCycle
+         << " cycles (in gpuCalculateE)";
   cout << endl;
   cout << "div(B) cleaning            : " << divBCorrection;
   if (divBCorrection == "yes")
-    cout << ", every " << divBCorrectionCycle << " cycles (in calculateB)";
+    cout << ", every " << divBCorrectionCycle << " cycles (in gpuCalculateB)";
   cout << endl;
   if (divBCorrection == "yes" && yes_sal && !sal_tangential_B)
     cout << "WARNING: full B SAL with the global div(B) cleaning: the cleaning "
@@ -1144,12 +1144,10 @@ void Collective::Print() {
   const int nxc_r = nxc_loc - 2, nyc_r = nyc_loc - 2, nzc_r = nzc_loc - 2;
 
   // --- HOST ---
-  // EMfields3D: 50 node-3D + 15 cell-3D + 10*ns node-4D + ns cell-4D +
-  // fieldForPcls + Krylov
-  double hostEMf = (50.0 * gridN + 15.0 * gridC + (10.0 * ns) * gridN +
-                    ns * gridC + gridN * 8.0 + 6.0 * 3 * gridN) *
-                   8;
-  double hostFieldBuf = fieldSize * 24.0 * 8; // pinned field buffer
+  // EMfields3D: 19 node-3D + 4 cell-3D + 20*ns node-4D (10 moments + 10
+  // heat-flux components) + ns cell-4D
+  double hostEMf =
+      (19.0 * gridN + 4.0 * gridC + (20.0 * ns) * gridN + ns * gridC) * 8;
   double hostPcl = 0, hostComm = 0;
   for (int i = 0; i < ns; i++) {
     long long nop_i = (long long)npcel[i] * nxc_r * nyc_r *
@@ -1157,12 +1155,11 @@ void Collective::Print() {
     hostPcl += nop_i * 8.0 * 8;     // 8 SoA arrays * 8 bytes
     hostComm += 0.1 * nop_i * 64.0; // MPI comm buffer (AoS)
   }
-  double hostTotal = (hostEMf + hostFieldBuf + hostPcl + hostComm) / MB;
+  double hostTotal = (hostEMf + hostPcl + hostComm) / MB;
 
   cout << "HOST:   EMfields = " << hostEMf / MB << " MB"
        << ", particles = " << hostPcl / MB << " MB"
-       << ", comm = " << hostComm / MB << " MB"
-       << ", field buf = " << hostFieldBuf / MB << " MB" << endl;
+       << ", comm = " << hostComm / MB << " MB" << endl;
   cout << "        TOTAL = " << hostTotal << " MB (" << hostTotal / 1024
        << " GB)" << endl;
 
@@ -1212,7 +1209,7 @@ void Collective::Print() {
        << (hostTotal + devTotal) / 1024 << " GB)" << endl;
   cout << "---------------------" << endl;
 }
-/*! Print Simulation Parameters */
+/*! Write the build record and simulation parameters to SimulationData.txt */
 void Collective::save(const std::string& header) {
   string temp;
   temp = SaveDirName + "/SimulationData.txt";

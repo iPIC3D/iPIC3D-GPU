@@ -88,10 +88,11 @@ uth = 0.02  0.00894                     # x thermal speeds [required]
 vth = 0.02  0.00894                     # y thermal speeds [required]
 wth = 0.02  0.00894                     # z thermal speeds [required]
 
-# Drift velocity
-u0 = 0.01  0.01                         # x drift speeds [required]
-v0 = 0.0   0.0                          # y drift speeds [required]
-w0 = 0.0   0.0                          # z drift speeds [required]
+# Taylor-Green flow amplitude: u0 of species 0; every species flows with it
+# (v0, w0 unused by this case)
+u0 = 0.01  0.01                         # [required]
+v0 = 0.0   0.0                          # [required]
+w0 = 0.0   0.0                          # [required]
 
 TrackParticleID = 0  0                  # Per-species ID mask [default: all 0]
 

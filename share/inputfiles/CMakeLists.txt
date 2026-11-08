@@ -11,6 +11,7 @@ set(iPIC_resources
   magneticReconnection/testGEM2D_NoHDF5.inp
   magneticReconnection/testGEM2Dsmall.inp
   magneticReconnection/testGEM3Dsmall.inp
+  magneticReconnection/testForceFree2D.inp
   storePersistenceDiagram.py
   NullPoints.inp
   Ram1TestParticle.inp

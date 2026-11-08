@@ -1,12 +1,12 @@
 /**
  * @file GPUPhysicsKernels.cuh
  * @brief GPU kernel declarations for iPIC3D physics operations:
- *        MUdot, PIdot, perfect conductor BCs, and sustensor computation.
+ *        MUdot, PIdot, perfect-conductor rows (implicit susceptibility at
+ *        the face), and the open-boundary, outflow, case-B-fix,
+ *        planet-charge, Laplacian and block-Jacobi kernels.
  *
  * All host wrapper functions are callable from .cpp translation units
  * (they do not use <<<>>> syntax directly).
- *
- * Compile with -DGPU_SOLVER to activate.
  */
 
 #ifndef GPU_PHYSICS_KERNELS_CUH
@@ -16,19 +16,18 @@
 #include "cudaTypeDef.cuh"
 #include <cstddef>
 
-#ifdef GPU_SOLVER
-
 // =========================================================================
 //  MUdot: magnetised susceptibility response  μ·E
-//  Sums over all species.  Output arrays are zeroed then accumulated.
+//  One species per call; the caller (gpuMUdot) loops over species.
 // =========================================================================
 
 /**
- * @brief Compute MUdot = Σ_s ( denom_s * rot_s(E) ) for one species.
+ * @brief One species' term of MUdot = Σ_s ( denom_s * rot_s(E) );
+ * firstSpecies writes, later species add.
  *
  * @param MUdotX/Y/Z  Device output (node-based [nxn][nyn][nzn]).
  * @param vX/Y/Z      Input vector (node-based).
- * @param Bxn/Byn/Bzn Total B at nodes.
+ * @param Bxn/Byn/Bzn B at nodes, without B_ext (the kernel adds it).
  * @param Bx_ext/By_ext/Bz_ext External B at nodes.
  * @param rhons_is    Species density at nodes (single species slice).
  * @param beta        = 0.5 * qom[is] * dt / c
@@ -59,9 +58,9 @@ void gpuMUdotSpecies(cudaSolverType* MUdotX, cudaSolverType* MUdotY,
  *
  * @param PIX/PIY/PIZ Device output (node-based, accumulated).
  * @param vX/Y/Z      Input vector (node-based).
- * @param Bxn/Byn/Bzn Total B at nodes.
+ * @param Bxn/Byn/Bzn B at nodes, without B_ext (the kernel adds it).
  * @param Bx_ext/By_ext/Bz_ext External B at nodes.
- * @param beta         = 0.5 * qom[ns] * dt / c
+ * @param beta         = 0.5 * qom[is] * dt / c
  * @param nxn,nyn,nzn  Grid dimensions.
  * @param stream       CUDA stream.
  */
@@ -122,18 +121,20 @@ void gpuPerfectConductorSource(
     int dir, bool high, cudaStream_t stream = 0);
 
 // =========================================================================
-//  adjustNonPeriodicDensities: doubles boundary-face values for
-//  non-periodic BCs (10 moment arrays per species).
+//  Non-periodic particle faces: doubles boundary-face values (10 moment
+//  arrays per species).
 // =========================================================================
 
 /**
- * @brief GPU version of adjustNonPeriodicDensities for one species.
+ * @brief Double the node moments on the non-periodic particle faces.
  *
  * For each non-periodic boundary face (where the neighbour is MPI_PROC_NULL),
- * doubles the 10 per-species moment values on that face:
- *   rhons, Jxs, Jys, Jzs, pXXsn, pXYsn, pXZsn, pYYsn, pYZsn, pZZsn
+ * doubles the values on the face plane (index 1 or n-2) of every array:
+ * 10 per species (rhons, Jxs, Jys, Jzs, pXXsn, pXYsn, pXZsn, pYYsn, pYZsn,
+ * pZZsn), several species per call.
  *
- * @param ptrs       Array of 10 device pointers (one per moment quantity).
+ * @param nptrs      Number of arrays.
+ * @param d_devPtrs  Device array of nptrs pointers.
  * @param nxn,nyn,nzn  Grid dimensions (node-based, including ghosts).
  * @param xLeftNull  true if X-left neighbour is MPI_PROC_NULL.
  * @param xRightNull true if X-right neighbour is MPI_PROC_NULL.
@@ -296,11 +297,13 @@ void gpuLapC2CLocalKernel(cudaSolverType* lapC, const cudaSolverType* fC,
  * discretised Maxwell operator (including the MUdot tensor summed over
  * all species) and solves D_i z_i = r_i via Cramer's rule.
  *
- * Completely communication-free.
+ * Completely communication-free.  Not used: FGMRESBlockJacobi applies the
+ * precomputed inverse (gpuPrecomputeBlockJacobiInv,
+ * gpuApplyBlockJacobiInvKrylov).
  *
  * @param zX/zY/zZ   Output solution (node-based).
  * @param rX/rY/rZ   Input RHS (node-based).
- * @param Bxn/Byn/Bzn   Total B at nodes.
+ * @param Bxn/Byn/Bzn   B at nodes, without B_ext (the kernel adds it).
  * @param Bx_ext/By_ext/Bz_ext  External B at nodes.
  * @param rhons      Per-species density, flat [ns][nxn*nyn*nzn].
  * @param d_qom      Charge-to-mass ratio per species [ns].
@@ -345,7 +348,5 @@ void gpuApplyBlockJacobiInvKrylov(cudaSolverType* zKrylov,
                                   const cudaSolverType* rKrylov,
                                   const cudaSolverType* Dinv, int nxn, int nyn,
                                   int nzn, cudaStream_t stream = 0);
-
-#endif // GPU_SOLVER
 
 #endif // GPU_PHYSICS_KERNELS_CUH

@@ -1,31 +1,21 @@
 /**
  * @file GPUFieldPacking.cuh
- * @brief GPU kernel for packing field arrays into the cell-centered layout
- *        used by the particle mover.
+ * @brief GPU kernel packing E, B and B_ext into the cell-centered buffer read
+ *        by the particle mover.
  *
- * When GPU_SOLVER is enabled, the E and B fields already reside on the GPU
- * in standard node-based GPUFieldArray3 arrays.  Instead of copying them
- * to the host, packing on the CPU (set_fieldForPclsToCenter), and
- * transferring the packed buffer back, this kernel performs the packing
- * entirely on the GPU — eliminating one D2H and one H2D transfer per cycle.
- *
- * The output layout matches exactly what set_fieldForPclsToCenter produces:
+ * Layout:
  *   out[cellIndex * 24 + nodeOffset * 6 + fieldOffset]
  * where cellIndex = (i * (nyn-1) + j) * nzn + k,
  *       nodeOffset ∈ {0,1,2,3}  for grid points (i,j,k), (i+1,j,k),
  *                                (i+1,j+1,k), (i,j+1,k),
  *       fieldOffset ∈ {0..5}   for Bx+Bx_ext, By+By_ext, Bz+Bz_ext,
  *                                Ex, Ey, Ez.
- *
- * Compile with -DGPU_SOLVER to activate.
  */
 
 #ifndef GPU_FIELD_PACKING_CUH
 #define GPU_FIELD_PACKING_CUH
 
 #include "cudaTypeDef.cuh"
-
-#ifdef GPU_SOLVER
 
 /**
  * @brief Pack node-based E, B, B_ext into the cell-centered mover buffer.
@@ -48,7 +38,5 @@ __global__ void gpuPackFieldForPclsToCenter(
     const cudaSolverType* __restrict__ Bx_ext,
     const cudaSolverType* __restrict__ By_ext,
     const cudaSolverType* __restrict__ Bz_ext, int nxn, int nyn, int nzn);
-
-#endif // GPU_SOLVER
 
 #endif // GPU_FIELD_PACKING_CUH

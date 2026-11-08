@@ -24,6 +24,9 @@
 
 #include "ipicfwd.h"
 
+// Host Krylov solvers on EMfields3D operator images (not used currently: the
+// field solver runs on the GPU).
+
 typedef void (EMfields3D::*FIELD_IMAGE)(double*, double*);
 typedef void (*GENERIC_IMAGE)(double*, double*);
 

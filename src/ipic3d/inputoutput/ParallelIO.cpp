@@ -139,7 +139,7 @@ void WriteOutputParallel(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
   // --- Total rho ---
   if (cfg.writeRhoTot) {
     outputfile.WritePHDF5dataset("Fields", "rho_tot", EMf->getRHOn(), 1, 1, 1,
-                                 gdim, ldim, foff);
+                                 gdim, ldim, foff, 4 * 3.1415926535897);
   }
 
   // --- Per-species J ---
@@ -457,7 +457,7 @@ static std::string vtkPath(CollectiveIO* col, const std::string& tag,
   return ss.str();
 }
 
-// ─── WriteFieldsVTK (new: uses OutputTagConfig, B and E only) ────────
+// ─── WriteFieldsVTK: B and E (OutputTagConfig) ───────────────────────
 
 void WriteFieldsVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
                     VCtopology3D* vct, const string& outputTag, int cycle,
@@ -498,7 +498,7 @@ void WriteFieldsVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
   }
 }
 
-// ─── WriteMomentsVTK (new: uses OutputTagConfig, numeric species naming) ──
+// ─── WriteMomentsVTK: OutputTagConfig, numeric species naming ───────────
 
 void WriteMomentsVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
                      VCtopology3D* vct, const string& outputTag, int cycle,
@@ -797,8 +797,7 @@ static void nbcScalarWrite(EMfields3D* EMf, CollectiveIO* col,
   }
 }
 
-// ─── WriteFieldsVTKNonblk (new: OutputTagConfig, B + E + per-species J +
-// J_tot) ──
+// ─── WriteFieldsVTKNonblk: B, E, per-species J, J_tot (OutputTagConfig) ──
 
 int WriteFieldsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
                          VCtopology3D* vct, int cycle,
@@ -883,8 +882,7 @@ int WriteFieldsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
   return counter;
 }
 
-// ─── WriteMomentsVTKNonblk (new: OutputTagConfig, numeric species naming)
-// ─────
+// ─── WriteMomentsVTKNonblk: OutputTagConfig, numeric species naming ─────
 
 int WriteMomentsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
                           VCtopology3D* vct, int cycle,

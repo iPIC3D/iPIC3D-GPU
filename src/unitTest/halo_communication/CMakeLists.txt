@@ -75,7 +75,7 @@ endif()
 
 target_include_directories(haloCommunicationTest PUBLIC ${include_path})
 target_link_libraries(haloCommunicationTest PRIVATE MPI::MPI_CXX)
-target_compile_definitions(haloCommunicationTest PUBLIC GPU_SOLVER NO_HDF5)
+target_compile_definitions(haloCommunicationTest PUBLIC NO_HDF5)
 if(HALO_OVERLAP)
   target_compile_definitions(haloCommunicationTest PUBLIC HALO_OVERLAP)
 endif()

@@ -4,21 +4,26 @@
 //  GPU Chebyshev semi-iterative solver for the iPIC3D Maxwell system.
 //
 //  Provides two operational modes:
-//    1. Full solver      — replaces GMRES,  uses gpuMaxwellImage  (with MPI)
-//    2. Preconditioner   — communication-free, uses gpuMaxwellImageLocal
+//    1. Full solver      — SolverType = Chebyshev, uses gpuMaxwellImage
+//                          (with MPI)
+//    2. Preconditioner   — communication-free Chebyshev polynomial in the
+//                          rank-local Laplacian for the div(E) / div(B)
+//                          Poisson solves (gpuChebyshevPrecondPoisson,
+//                          gpuPoissonImageLocal)
 //
 //  The Chebyshev iteration approximates  A^{-1} b  via a polynomial in A.
 //  It requires eigenvalue bounds [eigMin, eigMax] of the operator A.
 //  No inner products are needed → no MPI_Allreduce per iteration → ideal
 //  for GPU acceleration.
 //
-//  Algorithm (applied to the NEGATED positive-definite operator -A):
+//  Algorithm, for an operator A with spectrum in [eigMin, eigMax] (the
+//  Poisson preconditioner applies it to -∇² and negates the result):
 //    z = b / theta                                                [step 0]
 //    y = (2*rho/delta) * (2*b - A(b)/theta)                      [step 1]
 //    for n = 2..N:
 //      w = rho_n * (2*sigma*y + (2/delta)*(b - A(y)) - rho_{n-1}*z)
 //      z <- y,  y <- w                                           [rotate]
-//    x += -y                                                     [output]
+//    x += y                                                      [output]
 //
 //  Parameters:
 //    theta = (eigMin + eigMax) / 2
@@ -28,7 +33,6 @@
 // =========================================================================
 #ifndef GPU_CHEBYSHEV_CUH
 #define GPU_CHEBYSHEV_CUH
-#ifdef GPU_SOLVER
 
 #include "cudaTypeDef.cuh"
 
@@ -52,7 +56,5 @@ void gpuChebyshevStepN(cudaSolverType* d_w, const cudaSolverType* d_y,
                        const cudaSolverType* d_Ay, cudaSolverType delta,
                        cudaSolverType sigma, cudaSolverType rho,
                        cudaSolverType rhoOld, int n, cudaStream_t stream);
-
-#endif // GPU_SOLVER
 
 #endif // GPU_CHEBYSHEV_CUH

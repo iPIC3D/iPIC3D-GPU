@@ -76,7 +76,7 @@ endif()
 
 target_include_directories(gpuMaxwellSolverTest PUBLIC ${include_path})
 target_link_libraries(gpuMaxwellSolverTest PRIVATE MPI::MPI_CXX)
-target_compile_definitions(gpuMaxwellSolverTest PUBLIC GPU_SOLVER NO_HDF5)
+target_compile_definitions(gpuMaxwellSolverTest PUBLIC NO_HDF5)
 if(HALO_OVERLAP)
   target_compile_definitions(gpuMaxwellSolverTest PUBLIC HALO_OVERLAP)
 endif()

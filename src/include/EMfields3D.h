@@ -40,24 +40,20 @@
 #include "OutflowBoundary.h"
 #include "cudaTypeDef.cuh"
 
-#ifdef GPU_SOLVER
 #include "GPUFieldArray.cuh"
 #include "GPUHaloComm.cuh"
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
 #include "GPUCycleDiagnostics.cuh"
 #endif
-#endif
-
-// dimension of vectors used in fieldForPcls
-const int DFIELD_3or4 = 4; // 4 pads with garbage but is needed for alignment
 
 /**
  * @brief Electromagnetic fields, sources, and implicit-solver work arrays for
  * one MPI rank.
  *
  * The solver uses this class to initialize case-dependent fields, advance the
- * implicit Maxwell system, accumulate and reduce particle moments, and prepare
- * field buffers consumed by the GPU particle mover.
+ * implicit Maxwell system, reduce the particle moments deposited by the moment
+ * kernels (ghost exchange, species sums, hat functions), and hold the device
+ * field arrays that the particle mover's field packing reads (gpuEx(), ...).
  */
 class EMfields3D // :public Field
 {
@@ -65,7 +61,8 @@ public:
   // ======= Construction and lifetime =======
 
   /**
-   * @brief Construct field storage and solver work arrays for the local domain.
+   * @brief Construct the host field storage for the local domain; the GPU
+   * solver arrays are allocated by gpuSolverAllocate().
    *
    * @param col Collective input/configuration object.
    * @param grid Local grid descriptor.
@@ -120,15 +117,14 @@ public:
    */
   void initEM_rotate(double B, double theta);
   /**
-   * @brief Add a perturbation to the charge density.
+   * @brief Add a perturbation cos(kx x + ky y + phase) to the densities of
+   * species 0 and 1.
    *
    * @param deltaBoB Magnetic perturbation amplitude normalized by the
    * background field.
    * @param kx Perturbation wave number in x.
    * @param ky Perturbation wave number in y.
-   * @param Bx_mod Bx perturbation amplitude.
-   * @param By_mod By perturbation amplitude.
-   * @param Bz_mod Bz perturbation amplitude.
+   * @param Bx_mod, By_mod, Bz_mod Set only the normalisation |B_mod|.
    * @param ne_mod Electron-density perturbation amplitude.
    * @param ne_phase Electron-density perturbation phase.
    * @param ni_mod Ion-density perturbation amplitude.
@@ -176,43 +172,8 @@ public:
   /** @brief Initialize the Taylor-Green configuration. */
   void initTaylorGreen();
 
-  // ======= Solver-facing field updates =======
+  // ======= Host-side moment helpers (initialization, restart, output) =======
 
-  /**
-   * @brief Advance the electric field with the implicit Maxwell solver.
-   *
-   * @param cycle Current simulation cycle.
-   */
-  void calculateE(int cycle);
-  /**
-   * @brief Apply the Poisson image operator used by the linear solver.
-   *
-   * @param image Output image vector.
-   * @param vector Input Krylov vector.
-   */
-  void PoissonImage(double* image, double* vector);
-  /**
-   * @brief Apply the Maxwell image operator used by the linear solver.
-   *
-   * @param im Output image vector.
-   * @param vector Input Krylov vector.
-   */
-  void MaxwellImage(double* im, double* vector);
-  /**
-   * @brief Apply the communication-free local Maxwell image operator, meant
-   * for a preconditioner. Not called at present: the CPU solver runs GMRES
-   * without a preconditioner (calculateE).
-   *
-   * @param im Output image vector.
-   * @param vector Input Krylov vector.
-   */
-  void MaxwellImageLocal(double* im, double* vector);
-  /**
-   * @brief Build the Maxwell right-hand-side source term.
-   *
-   * @param bkrylov Output right-hand-side vector.
-   */
-  void MaxwellSource(double* bkrylov);
   /**
    * @brief Impose a constant charge inside the 3D planet sphere.
    *
@@ -234,199 +195,27 @@ public:
                                      double z_center);
   /** @brief Impose a constant charge in the open-boundary layers. */
   void ConstantChargeOpenBC();
-  /** @brief Alternate constant-charge treatment for open boundaries. */
-  void ConstantChargeOpenBCv2();
-  /**
-   * @brief Advance the magnetic field after the electric-field solve.
-   *
-   * @param cycle Current simulation cycle.
-   */
-  void calculateB(int cycle);
-  /** @brief Divergence cleaning of B: solve lap(PSI) = div(B) with PSI = 0
-   * beyond the physical faces and subtract grad(PSI) from the node B on every
-   * node, as the div(E) correction does. */
-  void applyDivBCleaning();
-  /** @brief Fix magnetic-field boundary values for the GEM challenge. */
-  void fixBcGEM();
-  void fixBnGEM();
-  /** @brief Fix magnetic-field boundary values for the force-free case. */
-  void fixBforcefree();
-
-  // ======= Solver-facing moment post-processing =======
-
-  /**
-   * @brief Apply the implicit pressure tensor to a vector field.
-   *
-   * @param PIdotX Output x component of the tensor product.
-   * @param PIdotY Output y component of the tensor product.
-   * @param PIdotZ Output z component of the tensor product.
-   * @param vectX Input x component.
-   * @param vectY Input y component.
-   * @param vectZ Input z component.
-   * @param ns Species index.
-   */
-  void PIdot(arr3_double PIdotX, arr3_double PIdotY, arr3_double PIdotZ,
-             const_arr3_double vectX, const_arr3_double vectY,
-             const_arr3_double vectZ, int ns);
-  /**
-   * @brief Apply the implicit permeability tensor to a vector field.
-   *
-   * @param MUdotX Output x component of the tensor product.
-   * @param MUdotY Output y component of the tensor product.
-   * @param MUdotZ Output z component of the tensor product.
-   * @param vectX Input x component.
-   * @param vectY Input y component.
-   * @param vectZ Input z component.
-   */
-  void MUdot(arr3_double MUdotX, arr3_double MUdotY, arr3_double MUdotZ,
-             const_arr3_double vectX, const_arr3_double vectY,
-             const_arr3_double vectZ);
-  /** @brief Build the hat quantities used by the implicit field solve. */
-  void calculateHatFunctions();
-
-  /** @brief Interpolate nodal densities to cell centers. */
-  void interpDensitiesN2C();
   /** @brief Zero all density-related fields. */
   void setZeroDensities();
   /** @brief Zero the per-species primary moments. */
   void setZeroPrimaryMoments();
   /** @brief Zero the aggregate moments derived from the primary moments. */
   void setZeroDerivedMoments();
-  /**
-   * @brief Neutralize the species charge on the X-right open outflow layer.
-   *
-   * The field solve sees the outflow layer (layersXright()) as neutral. With
-   * OutflowLayerFields = copy, E and B are copied over it from a reference
-   * plane after every solve, so it carries no field gradient and, by Gauss's
-   * law, must carry no net charge; with OutflowLayerFields = solved the
-   * solver's field, that of a neutral layer, is kept there.  The species
-   * densities on the layer's node planes are replaced by those of the
-   * reference plane, rescaled to a neutral pair of magnitude
-   * (rho_+ + |rho_-|)/2.  Call after the planet charge fix and before
-   * sumOverSpecies().  Does nothing on ranks that do not own an outflow face.
-   * GPU form: gpuNeutralizeOutflowLayer().
-   */
-  void neutralizeOutflowLayer();
-  /**
-   * @brief Copy J_s and the second moments P_s over the X-right outflow layer
-   * from the reference plane (zero-gradient continuation, in both
-   * OutflowLayerFields modes), so the solver's current is flat across the
-   * layer and the
-   * smoothing of J-hat no longer carries the currents of the layer particles
-   * into the kept nodes. Call
-   * next to neutralizeOutflowLayer(); output moments on the layer are these
-   * copies. GPU form: gpuCopyOutflowLayerMoments().
-   */
-  void copyOutflowLayerMoments();
-  /**
-   * @brief rhohat = 0 on every cell beyond the reference node x_s of the
-   * X-right outflow face (the cell straddling x_s, the layer cells and the
-   * ghost cell), so the solver's charge exterior starts at x_s like the
-   * post-solve field copy. Without it the solve builds the field of the
-   * straddling half cell (half the charge of node x_s), the copy removes it
-   * every cycle, and the Gauss residual left behind is spread inward by the
-   * solver's cleaning. With OutflowLayerFields = solved nothing is copied,
-   * and the kept layer field is that of a neutral layer. Called where rhohat
-   * is formed. GPU form: gpuZeroOutflowRhohat().
-   */
-  void zeroOutflowRhohat();
-  /** @brief Sum nodal charge density over all species. */
-  void sumOverSpecies();
   /** @brief Sum nodal current density over all species. */
   void sumOverSpeciesJ();
   /**
-   * @brief Smooth a cell-centered scalar field after interpolation.
-   *
-   * @param vector Field to smooth in place.
-   * @param type Smoothing mode selector.
-   */
-  void smooth(arr3_double vector, int type);
-  /**
-   * @brief Smooth a per-species field after interpolation.
-   *
-   * @param value Constant fill value used by the smoother.
-   * @param vector Per-species field to smooth in place.
-   * @param is Species index.
-   * @param type Smoothing mode selector.
-   */
-  void smooth(double value, arr4_double vector, int is, int type);
-  /** @brief Smooth the electric field components. */
-  void smoothE();
-
-  /** @brief Populate the legacy nodal field buffer used by the particle mover.
-   */
-  void set_fieldForPcls();
-
-  /**
-   * @brief Pack field data into the cell-centered GPU mover buffer.
-   *
-   * The packed layout stores the four XY-plane corner nodes needed by the GPU
-   * mover for each cell slab in Z.
-   *
-   * @param fieldForPclsOnCenter Output packed field buffer.
-   */
-  void set_fieldForPclsToCenter(cudaFieldType* fieldForPclsOnCenter);
-
-  /**
-   * @brief Communicate per-species moments before particle-to-grid reductions.
-   *
-   * @param ns Number of particle species.
-   */
-  void communicateGhostP2G(int ns);
-
-  /**
    * @brief Communicate per-species heat-flux tensor components for output.
    *
-   * Uses the same shared-node summation, non-periodic boundary scaling, and
-   * ghost-node population pattern as communicateGhostP2G().
+   * Sums the shared nodes across ranks, doubles the nodes on non-periodic
+   * particle faces (adjustNonPeriodicHeatFlux), then fills the ghost nodes.
    *
    * @param is Species index.
    */
   void communicateGhostHeatFlux(int is);
 
-  /**
-   * @brief Adjust densities on non-periodic boundaries.
-   *
-   * @param is Species index.
-   */
-  void adjustNonPeriodicDensities(int is);
-  /** @brief Apply the current moment boundary scaling to heat flux. */
+  /** @brief Double the heat flux on the nodes of non-periodic particle faces,
+   * which collect deposits from one side only. */
   void adjustNonPeriodicHeatFlux(int is);
-
-  /*! Perfect conductor boundary conditions LEFT wall */
-  void perfectConductorLeft(arr3_double imageX, arr3_double imageY,
-                            arr3_double imageZ, const_arr3_double vectorX,
-                            const_arr3_double vectorY,
-                            const_arr3_double vectorZ, int dir);
-  /*! Perfect conductor boundary conditions RIGHT wall */
-  void perfectConductorRight(arr3_double imageX, arr3_double imageY,
-                             arr3_double imageZ, const_arr3_double vectorX,
-                             const_arr3_double vectorY,
-                             const_arr3_double vectorZ, int dir);
-  /*! Perfect conductor boundary conditions for source LEFT wall */
-  void perfectConductorLeftS(arr3_double vectorX, arr3_double vectorY,
-                             arr3_double vectorZ, int dir);
-  /*! Perfect conductor boundary conditions for source RIGHT wall */
-  void perfectConductorRightS(arr3_double vectorX, arr3_double vectorY,
-                              arr3_double vectorZ, int dir);
-  /*! Conductor image rows (linear) on every conductor face of this rank
-   *  (conductorFace_): perfectConductorLeft / perfectConductorRight */
-  void perfectConductorImages(arr3_double imageX, arr3_double imageY,
-                              arr3_double imageZ, const_arr3_double vectorX,
-                              const_arr3_double vectorY,
-                              const_arr3_double vectorZ);
-  /*! Conductor RHS rows on every conductor face of this rank
-   *  (conductorFace_): perfectConductorLeftS / perfectConductorRightS */
-  void perfectConductorSources(arr3_double vectorX, arr3_double vectorY,
-                               arr3_double vectorZ);
-
-  /*! Calculate the sysceptibility tensor on the boundary */
-  void sustensorRightX(double** susxx, double** susyx, double** suszx);
-  void sustensorLeftX(double** susxx, double** susyx, double** suszx);
-  void sustensorRightY(double** susxy, double** susyy, double** suszy);
-  void sustensorLeftY(double** susxy, double** susyy, double** suszy);
-  void sustensorRightZ(double** susxz, double** susyz, double** suszz);
-  void sustensorLeftZ(double** susxz, double** susyz, double** suszz);
 
   /*** accessor methods ***/
 
@@ -442,7 +231,6 @@ public:
   double getBy(int X, int Y, int Z) const { return Byn.get(X, Y, Z); }
   double getBz(int X, int Y, int Z) const { return Bzn.get(X, Y, Z); }
   //
-  const_arr4_pfloat get_fieldForPcls() { return fieldForPcls; }
   arr3_double getEx() { return Ex; }
   arr3_double getEy() { return Ey; }
   arr3_double getEz() { return Ez; }
@@ -450,14 +238,12 @@ public:
   arr3_double getBy() { return Byn; }
   arr3_double getBz() { return Bzn; }
 
-  // for parallel vtk
+  // cell-centred B
   arr3_double getBxc() { return Bxc; };
   arr3_double getByc() { return Byc; };
   arr3_double getBzc() { return Bzc; };
 
-  arr3_double getRHOc() { return rhoc; }
   arr3_double getRHOn() { return rhon; }
-  double getRHOc(int X, int Y, int Z) const { return rhoc.get(X, Y, Z); }
   double getRHOn(int X, int Y, int Z) const { return rhon.get(X, Y, Z); }
 
   // densities per species:
@@ -470,7 +256,7 @@ public:
   }
   arr4_double getRHOns() { return rhons; }
   arr4_double getRHOcs() { return rhocs; }
-  // per-species 3D slice accessors for parallel HDF5 output
+  // per-species 3D slice accessors
   arr3_double getRHOcs(int is) {
     return arr3_double(rhocs.fetch_arr4()[is], nxc, nyc, nzc);
   }
@@ -555,7 +341,7 @@ public:
            HeatFlux::componentIndex(is, 0) * nxn * nyn * nzn;
   }
 
-  // per-species 3D slice accessors (node grid) for parallel HDF5 output
+  // per-species 3D slice accessors (node grid)
   arr3_double getpXXsn(int is) {
     return arr3_double(pXXsn.fetch_arr4()[is], nxn, nyn, nzn);
   }
@@ -584,7 +370,7 @@ public:
   arr4_double getJxs() { return Jxs; }
   arr4_double getJys() { return Jys; }
   arr4_double getJzs() { return Jzs; }
-  // per-species 3D slice accessors (node grid) for parallel HDF5 output
+  // per-species 3D slice accessors (node grid)
   arr3_double getJxs(int is) {
     return arr3_double(Jxs.fetch_arr4()[is], nxn, nyn, nzn);
   }
@@ -605,12 +391,24 @@ public:
     return Jzs.get(is, X, Y, Z);
   }
 
-  /*! get the electric field energy */
+  /*! electric field energy of this rank: sum over its owned nodes
+   *  (ownedNodeEnds) of dV |E|^2 / (8 pi) */
+  double getLocalEenergy();
+  /*! magnetic field energy of this rank, with B_ext (owned nodes, as
+   *  getLocalEenergy) */
+  double getLocalBenergy();
+  /*! electric field energy, summed over the ranks */
   double getEenergy();
-  /*! get the magnetic field energy */
+  /*! magnetic field energy, summed over the ranks */
   double getBenergy();
-  /*! get bulk kinetic energy */
+  /*! bulk kinetic energy of species is, summed over the ranks (owned nodes,
+   *  as getLocalEenergy) */
   double getBulkEnergy(int is);
+  /*! Last node this rank owns along x, y, z; the owned nodes are [1, end].
+   *  end = n-3 where the next rank or the periodic image holds node n-2,
+   *  end = n-2 on a non-periodic last rank (node n-2 is the boundary node),
+   *  so that every global node is counted once. */
+  void ownedNodeEnds(int& iEnd, int& jEnd, int& kEnd) const;
 
   /*! print electromagnetic fields info */
   void print(void) const;
@@ -655,7 +453,6 @@ public:
   void freeDataType();
   bool isLittleEndian() { return lEndFlag; };
 
-#ifdef GPU_SOLVER
   // ---- GPU Solver: lifecycle ----
   /** Allocate all GPU-resident field arrays (called once after construction).
    */
@@ -665,15 +462,13 @@ public:
 
   /** Return the dedicated solver CUDA stream. */
   cudaStream_t gpuSolverStream() const { return solverStream_; }
-  /** Synchronise the solver stream (block host until all solver work is done).
-   */
-  void gpuSolverStreamSync() { cudaStreamSynchronize(solverStream_); }
 
   // ---- GPU Solver: host ↔ device synchronisation ----
   /** Copy all primary field arrays from host to device (for initialisation /
    * restart). */
   void gpuSolverSyncH2D(cudaStream_t stream = 0);
-  /** Copy field arrays from device to host (for I/O output). */
+  /** Copy the fields and moments to the host (output, diagnostics, restart,
+   * Catalyst). */
   void gpuSolverSyncD2H(cudaStream_t stream = 0);
   // ---- GPU Solver: GPU-aware MPI halo exchange ----
   /** Center-based halo exchange using GPU-aware MPI (operates on device
@@ -682,11 +477,6 @@ public:
                               int bcFaceXright, int bcFaceXleft,
                               int bcFaceYright, int bcFaceYleft,
                               int bcFaceZright, int bcFaceZleft);
-  /** Batched 3-field center-based halo exchange + BC in one MPI round. */
-  void gpuCommunicateCenterBC_3(int nx, int ny, int nz, GPUFieldArray3& a1,
-                                GPUFieldArray3& a2, GPUFieldArray3& a3,
-                                int bcXR, int bcXL, int bcYR, int bcYL,
-                                int bcZR, int bcZL);
   /** Batched 9-field center-based halo exchange + BC in one MPI round (for
    * fused triple Laplacian). */
   void gpuCommunicateCenterBC_9(int nx, int ny, int nz, GPUFieldArray3& a1,
@@ -756,24 +546,28 @@ public:
                                             int bcZR, int bcZL);
 
   // ---- GPU Solver: field-solver methods ----
-  /** GPU version of calculateE. Falls back to CPU if GPU_SOLVER off. */
+  /** Advance E: div(E) correction (PoissonCorrection), implicit Maxwell
+   * solve, smoothing, halo exchange and the post-solve open-boundary update
+   * (gpuOpenBoundaryInflowE). */
   void gpuCalculateE(int cycle);
-  /** GPU version of calculateB. */
+  /** Advance B by Faraday's law from Eth, apply its boundary conditions and
+   * case fixes, interpolate to the nodes and clean div(B) (divBCorrection). */
   void gpuCalculateB(int cycle);
-  /** GPU version of calculateHatFunctions; cycle=-1 denotes initialization. */
+  /** Build the hat quantities (rhohat, Jhat) of the implicit field solve;
+   * cycle=-1 denotes initialization. */
   void gpuCalculateHatFunctions(int cycle = -1);
-  /** GPU MaxwellImage: A*x callback for GMRES (operates on device Krylov
-   * vectors). */
+  /** Maxwell operator A*x, the Krylov callback of the field solvers
+   * (operates on device Krylov vectors). */
   void gpuMaxwellImage(cudaSolverType* d_im, cudaSolverType* d_vector);
-  /** GPU MaxwellImage (local): communication-free A*x for use as
+  /** Maxwell operator, communication-free: A*x for use as
    * preconditioner (the Richardson sweeps of gpuBlockJacobiPrecond, run when
    * BlockJacobiSweeps > 1). Ghost cells are treated as zero, apart from the
    * X-right ghost cell plane on an outflow face, and physical boundary image
    * corrections are enforced locally so the operator better matches the full
    * Maxwell image. */
   void gpuMaxwellImageLocal(cudaSolverType* d_im, cudaSolverType* d_vector);
-  /** GPU MaxwellSource: build RHS of Maxwell system (result in device Krylov
-   * vector); cycle=-1 is used by direct/unit-test callers. */
+  /** Build the RHS of the Maxwell system (result in device Krylov vector);
+   * cycle=-1 is used by direct/unit-test callers. */
   void gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle = -1);
 
   // ---- GPU Chebyshev Semi-Iterative Solver ----
@@ -796,8 +590,10 @@ public:
                          cudaSolverType eigMax, MPI_Comm fieldcomm);
 
   /** GPU point-block Jacobi preconditioner (communication-free).
-   *  Builds the 3×3 diagonal block D_i of the Maxwell operator at each
-   *  node and solves D_i z_i = r_i via Cramer's rule.
+   *  D is the 3×3 diagonal block of the Maxwell operator at each node; D⁻¹
+   *  is computed once per solve.  With one sweep x = ω D⁻¹ b; otherwise
+   *  x = D⁻¹ b followed by BlockJacobiSweeps − 1 Richardson sweeps
+   *  x += ω D⁻¹ (b − A_local x).
    *  @param d_x  [out] approximate solution (Krylov vector, device)
    *  @param d_b  [in]  right-hand side       (Krylov vector, device)
    */
@@ -834,7 +630,7 @@ public:
                 int is);
   /** GPU smooth: SmoothNiter iterations of box smoothing. */
   void gpuSmooth(GPUFieldArray3& arr, int type);
-  /** GPU smoothE: fused 3-component E-field smoothing. */
+  /** Smooth E: fused 3-component E-field smoothing. */
   void gpuSmoothE();
   /** GPU smooth3: fused 3-component node-field smoothing (for Jhat). */
   void gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
@@ -849,8 +645,11 @@ public:
    *  normal row (gpuPerfectConductorSource). */
   void gpuPerfectConductorSources(cudaSolverType* dX, cudaSolverType* dY,
                                   cudaSolverType* dZ);
-  /** Fused triple Laplacian, the GPU form of 3x operatorLapN2N (X-right
-   * outflow closure included), with ONE batched halo exchange. */
+  /** Laplacian of the Maxwell operator for three components: div(grad),
+   * node -> cell -> node, with the cell gradients exchanged between ranks in
+   * one batched halo exchange and set to 0 in physical ghost cells (BC code
+   * 1). On an outflow face the gradients also cover the X-right ghost cell
+   * plane (operatorCellEnd()), whose ghost rows are filled and kept. */
   void gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
                    GPUFieldArray3& lapB, GPUFieldArray3& fieldB,
                    GPUFieldArray3& lapC, GPUFieldArray3& fieldC);
@@ -869,7 +668,8 @@ public:
                                          int species, cudaStream_t stream);
 #endif
 
-  /** Batched ghost exchange: all species at once (reduces MPI barriers). */
+  /** Batched ghost exchange of the species moments, HALO_MAX_BATCH/10
+   *  species per pass. */
   void gpuCommunicateGhostP2G_AllSpecies(int cycle = -1);
 
   /** Batched GPU halo exchange: exchanges nFields 3D arrays in a single set
@@ -912,33 +712,61 @@ public:
   /** Free persistent GPU halo exchange buffers. */
   void gpuFreeHaloBuffers();
 
-  /** GPU setZeroDerivedMoments: zero Jx/Jy/Jz, Jxh/Jyh/Jzh, rhon, rhoc, rhoh on
-   * device. */
+  /** Zero d_rhon, the one derived moment that is accumulated; the others are
+   * overwritten before they are read (see the definition). */
   void gpuSetZeroDerivedMoments();
 
-  /** GPU neutralizeOutflowLayer: neutral d_rhons on the X-right outflow
-   * layer; call before gpuSumOverSpecies(). */
+  /**
+   * @brief Neutralize the species charge on the X-right open outflow layer.
+   *
+   * The field solve sees the outflow layer (layersXright()) as neutral. With
+   * OutflowLayerFields = copy, E and B are copied over it from a reference
+   * plane after every solve, so it carries no field gradient and, by Gauss's
+   * law, must carry no net charge; with OutflowLayerFields = solved the
+   * solver's field, that of a neutral layer, is kept there.  The species
+   * densities on the layer's node planes are replaced by those of the
+   * reference plane, rescaled to a neutral pair of magnitude
+   * (rho_+ + |rho_-|)/2.  Call after the planet charge fix and before
+   * gpuSumOverSpecies().  Does nothing on ranks that do not own an outflow
+   * face.
+   */
   void gpuNeutralizeOutflowLayer();
 
-  /** GPU copyOutflowLayerMoments: J_s, P_s on the X-right outflow layer
-   * from the reference plane; call next to gpuNeutralizeOutflowLayer(). */
+  /**
+   * @brief Copy J_s and the second moments P_s over the X-right outflow layer
+   * from the reference plane (zero-gradient continuation, in both
+   * OutflowLayerFields modes), so the solver's current is flat across the
+   * layer and the smoothing of J-hat does not carry the currents of the layer
+   * particles into the kept nodes. Call next to gpuNeutralizeOutflowLayer();
+   * output moments on the layer are these copies.
+   */
   void gpuCopyOutflowLayerMoments();
 
-  /** GPU zeroOutflowRhohat: rhohat = 0 beyond the X-right outflow reference
-   * node; called in gpuCalculateHatFunctions(). */
+  /**
+   * @brief rhohat = 0 on every cell beyond the reference node x_s of the
+   * X-right outflow face (the cell straddling x_s, the layer cells and the
+   * ghost cell), so the solver's charge exterior starts at x_s like the
+   * post-solve field copy. Without it the solve builds the field of the
+   * straddling half cell (half the charge of node x_s), the copy removes it
+   * every cycle, and the Gauss residual left behind is spread inward by the
+   * solver's cleaning. With OutflowLayerFields = solved nothing is copied,
+   * and the kept layer field is that of a neutral layer. Called in
+   * gpuCalculateHatFunctions().
+   */
   void gpuZeroOutflowRhohat();
 
-  /** GPU sumOverSpecies: rhon += sum_s(rhons_s) on device. */
+  /** rhon += sum_s(rhons_s) on device. */
   void gpuSumOverSpecies();
 
-  /** GPU sumOverSpeciesJ: Jx/Jy/Jz = sum_s(Jxs/Jys/Jzs)_s on device. */
+  /** Jx/Jy/Jz = sum_s(Jxs/Jys/Jzs)_s on device. */
   void gpuSumOverSpeciesJ();
 
-  /** GPU interpDensitiesN2C: rhoc = interpN2C(rhon) on device. */
+  /** rhoc = interpN2C(rhon) on device. */
   void gpuInterpDensitiesN2C();
 
   // ---- GPU Solver: open boundary conditions ----
-  /** GPU open BC: RHS rows (E0 = -u0 x B0) of the open inflow faces. */
+  /** GPU open BC: RHS rows (E0 = -u0 x B0) of the open inflow faces (only
+   *  with ApplyInflowBcsEImage). */
   void gpuOpenBoundaryInflowESource(cudaSolverType* dX, cudaSolverType* dY,
                                     cudaSolverType* dZ, int nx, int ny, int nz);
   /** GPU open BC: identity image rows of the open inflow faces. */
@@ -948,7 +776,8 @@ public:
                                    const cudaSolverType* vY,
                                    const cudaSolverType* vZ, int nx, int ny,
                                    int nz);
-  /** GPU open BC (post-solve): SAL blend / Dirichlet on E inflow faces, and
+  /** GPU open BC (post-solve): on E inflow faces SAL blend, or without SAL
+   * Dirichlet (X-left) / extrapolation (Y, Z); and
    * on an X-right outflow face the copy over fieldCopyLayersXright() node
    * planes (gpuOutflowCopyE). */
   void gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY,
@@ -960,8 +789,7 @@ public:
                               cudaSolverType* dZ, int nx, int ny, int nz);
 
   // ---- GPU Solver: ghost node on the X-right outflow face ----
-  // GPU forms of outflowGhostNodes / outflowGhostRows (see the X-right open
-  // boundary layer section below).
+  // (see the X-right open boundary layer section below)
   /** Ghost node plane of the node arrays a[0..2] := their face plane on an
    * outflow face; no-op elsewhere. */
   void gpuOutflowGhostNodes(GPUFieldArray3* const a[3]);
@@ -999,8 +827,8 @@ public:
    * periodic direction with one cell is flat, rank interfaces are cut with
    * zero ghosts (block Jacobi). */
   void gpuPoissonImageLocal(cudaSolverType* d_im, cudaSolverType* d_vec);
-  /** Compute exact analytic eigenvalue bounds of the local -∇² operator
-   * (once per simulation). */
+  /** Analytic eigenvalue bounds of the local -∇², eigMin floored at
+   * eigMax / PoissonChebEigRatio and both rescaled (once per simulation). */
   void computePoissonChebyshevEigenvalues();
   /** Chebyshev preconditioner for Poisson (communication-free, analytic
    * eigenvalues). */
@@ -1012,8 +840,9 @@ public:
                                   cudaSolverType tol, MPI_Comm fieldcomm);
   /** GPU Poisson correction for div(E) cleaning. */
   void gpuPoissonCorrection(int cycle);
-  /** GPU div(B) cleaning: solve lap(PSI)=div(B), subtract grad(PSI) from the
-   * node B on every node (see applyDivBCleaning). */
+  /** Divergence cleaning of B: solve lap(PSI) = div(B) with PSI = 0 beyond
+   * the physical faces and subtract grad(PSI) from the node B on every
+   * node, as the div(E) correction does. */
   void gpuApplyDivBCleaning();
 
   // ---- GPU Solver: additional halo exchange ----
@@ -1028,15 +857,9 @@ public:
   GPUFieldArray3& gpuEx() { return d_Ex; }
   GPUFieldArray3& gpuEy() { return d_Ey; }
   GPUFieldArray3& gpuEz() { return d_Ez; }
-  GPUFieldArray3& gpuExth() { return d_Exth; }
-  GPUFieldArray3& gpuEyth() { return d_Eyth; }
-  GPUFieldArray3& gpuEzth() { return d_Ezth; }
   GPUFieldArray3& gpuBxn() { return d_Bxn; }
   GPUFieldArray3& gpuByn() { return d_Byn; }
   GPUFieldArray3& gpuBzn() { return d_Bzn; }
-  GPUFieldArray3& gpuBxc() { return d_Bxc; }
-  GPUFieldArray3& gpuByc() { return d_Byc; }
-  GPUFieldArray3& gpuBzc() { return d_Bzc; }
   GPUFieldArray3& gpuBx_ext() { return d_Bx_ext; }
   GPUFieldArray3& gpuBy_ext() { return d_By_ext; }
   GPUFieldArray3& gpuBz_ext() { return d_Bz_ext; }
@@ -1044,19 +867,23 @@ public:
   GPUFieldArray4& gpuJxs() { return d_Jxs; }
   GPUFieldArray4& gpuJys() { return d_Jys; }
   GPUFieldArray4& gpuJzs() { return d_Jzs; }
-  GPUFieldArray4& gpupXXsn() { return d_pXXsn; }
-  GPUFieldArray4& gpupXYsn() { return d_pXYsn; }
-  GPUFieldArray4& gpupXZsn() { return d_pXZsn; }
-  GPUFieldArray4& gpupYYsn() { return d_pYYsn; }
-  GPUFieldArray4& gpupYZsn() { return d_pYZsn; }
-  GPUFieldArray4& gpupZZsn() { return d_pZZsn; }
-  bool isGpuSolverAllocated() const { return gpuSolverAllocated_; }
-#endif // GPU_SOLVER
 
 public: // accessors
   const Collective& get_col() const { return _col; }
   const Grid& get_grid() const { return _grid; };
   const VirtualTopology3D& get_vct() const { return _vct; }
+
+private: // initialization helpers
+  /** Zero the species currents Jxs/Jys/Jzs and pressures p**sn. With
+   *  fromAmpere, set the species currents to shares of J = (c/4pi) curl(B),
+   *  B the cell-centred field: J_s,x = f_s,x J_x with
+   *  f_s,x = sign(q_s) u0_s / sum_r sign(q_r) u0_r (v0 for y, w0 for z), so
+   *  the drift J_s / (sign(q_s) rho_s) of maxwellianFromSpeciesCurrents is
+   *  u0_s J_x / (N_u rho_s), N_u = sum_r sign(q_r) u0_r; a component whose
+   *  weights sum to 0 gets no current. With varyingThermal, also set the
+   *  diagonal pressures p_s,xx = J_s,x^2 / rho_s + uth_s^2 rho_s (yy, zz
+   *  alike), read by maxwellianFromSpeciesCurrents for the thermal speed. */
+  void initSpeciesCurrents(bool fromAmpere, bool varyingThermal);
 
 private: // X-right open boundary layer
   /** True on ranks owning an X-right open outflow face (bcEMfaceXright = 2,
@@ -1090,21 +917,6 @@ private: // X-right open boundary layer
    *  row, whose face-plane nodes the operator does not exchange, is stood in
    *  for by the adjacent row. */
   void outflowGhostRowRules(int rule[4]) const;
-  /** CPU: ghost node plane of a, b, c := their face plane on an outflow face;
-   *  no-op elsewhere. */
-  void outflowGhostNodes(arr3_double a, arr3_double b, arr3_double c);
-  /** CPU: fill the y/z ghost rows of the X-right ghost cell plane of a by
-   *  outflowGhostRowRules(); no-op elsewhere. */
-  void outflowGhostRows(arr3_double a);
-  /** CPU Laplacian of the Maxwell operator for one component: div(grad),
-   *  node -> cell -> node, with the cell gradients exchanged between ranks
-   *  and set to 0 in physical ghost cells (BC code 1). On an outflow face the
-   *  gradient also covers the X-right ghost cell plane (operatorCellEnd()),
-   *  its ghost rows are filled and the halo BC keeps it. */
-  void operatorLapN2N(arr3_double lapN, const_arr3_double field);
-  /** As operatorLapN2N without communication, for MaxwellImageLocal: ghost
-   *  cells zero apart from the X-right ghost plane. */
-  void operatorLapN2NLocal(arr3_double lapN, const_arr3_double field);
 
   /* ********************************* // VARIABLES
    * ********************************* */
@@ -1135,7 +947,7 @@ private:
   double B1x, B1y, B1z;
   /*! charge to mass ratio array for different species */
   double* qom;
-  /*! Boundary electron speed */
+  /*! u0, v0, w0 of species 0 (E0 = -u0 x B0, TaylorGreen flow) */
   double ue0, ve0, we0;
 
   // KEEP IN MEMORY GUARD CELLS ARE INCLUDED
@@ -1179,30 +991,15 @@ private:
   /** Planet radius */
   double Planet_radius;
 
-  /*! PSI: magnetic potential (indexX, indexY, indexZ), defined on central
-   * points between nodes */
-  array3_double PSI;
-
   /*! PHI: electric potential (indexX, indexY, indexZ), defined on central
    * points between nodes */
   array3_double PHI;
-
-  // Electric field component used to move particles
-  // organized for rapid access in mover_PC()
-  // [This is the information transferred from cluster to booster].
-  array4_pfloat fieldForPcls;
 
   // Electric field components defined on nodes
   //
   array3_double Ex;
   array3_double Ey;
   array3_double Ez;
-
-  // implicit electric field components defined on nodes
-  //
-  array3_double Exth;
-  array3_double Eyth;
-  array3_double Ezth;
 
   // magnetic field components defined on central points between nodes
   //
@@ -1216,47 +1013,18 @@ private:
   array3_double Byn;
   array3_double Bzn;
 
-  // *************************************
-  // TEMPORARY ARRAY
-  // ************************************
-  /*!some temporary arrays (for calculate hat functions) */
-  array3_double tempXC;
-  array3_double tempYC;
-  array3_double tempZC;
+  /*! temporary node arrays of the initializations (initSpeciesCurrents for
+   * GEMHarris and ForceFree, initNullPoints) */
   array3_double tempXN;
   array3_double tempYN;
   array3_double tempZN;
-  /*! other temporary arrays (in MaxwellSource) */
-  array3_double tempC;
-  array3_double tempX;
-  array3_double tempY;
-  array3_double tempZ;
-  array3_double temp2X;
-  array3_double temp2Y;
-  array3_double temp2Z;
-  /*! and some for MaxwellImage */
-  array3_double imageX;
-  array3_double imageY;
-  array3_double imageZ;
-  array3_double Dx;
-  array3_double Dy;
-  array3_double Dz;
-  array3_double vectX;
-  array3_double vectY;
-  array3_double vectZ;
-  array3_double divC;
-  // array3_double arr;
 
   // *******************************************************************************
   // *********** SOURCES **
   // *******************************************************************************
 
-  /*! Charge density, defined on central points of the cell */
-  array3_double rhoc;
   /*! Charge density, defined on nodes */
   array3_double rhon;
-  /*! Implicit charge density, defined on central points of the cell */
-  array3_double rhoh;
   /*! SPECIES: charge density for each species, defined on nodes */
   array4_double rhons;
   /*! SPECIES: charge density for each species, defined on central points of the
@@ -1269,20 +1037,13 @@ private:
   array3_double Jy;
   array3_double Jz;
 
-  // implicit current density defined on nodes
-  //
-  array3_double Jxh;
-  array3_double Jyh;
-  array3_double Jzh;
-
   // species-specific current densities defined on nodes
   //
   array4_double Jxs;
   array4_double Jys;
   array4_double Jzs;
 
-  // magnetic field components defined on nodes
-  //
+  // external magnetic field on nodes
   array3_double Bx_ext;
   array3_double By_ext;
   array3_double Bz_ext;
@@ -1290,11 +1051,6 @@ private:
   array3_double Bx_tot;
   array3_double By_tot;
   array3_double Bz_tot;
-
-  // external current, defined on nodes
-  array3_double Jx_ext;
-  array3_double Jy_ext;
-  array3_double Jz_ext;
 
   // pressure tensor components, defined on nodes
   array4_double pXXsn;
@@ -1305,27 +1061,8 @@ private:
   array4_double pZZsn;
   array4_double heatFlux;
 
-  /*! Field Boundary Condition
-    0 = Dirichlet Boundary Condition: specifies the
-        value on the boundary of the domain
-    1 = Neumann Boundary Condition: specifies the value of
-        derivative on the boundary of the domain
-    2 = Periodic boundary condition */
-
-  // boundary conditions for electrostatic potential
-  //
-  int bcPHIfaceXright;
-  int bcPHIfaceXleft;
-  int bcPHIfaceYright;
-  int bcPHIfaceYleft;
-  int bcPHIfaceZright;
-  int bcPHIfaceZleft;
-
-  /*! Boundary condition for electric field 0 = perfect conductor 1 = magnetic
-   * mirror */
-  //
-  // boundary conditions for EM field
-  //
+  // boundary conditions for EM field: 0 = perfect conductor, 1 = magnetic
+  // mirror, 2 = open
   int bcEMfaceXright;
   int bcEMfaceXleft;
   int bcEMfaceYright;
@@ -1335,8 +1072,8 @@ private:
   // Faces of this rank (0 Xleft, 1 Xright, 2 Yleft, 3 Yright, 4 Zleft,
   // 5 Zright), fixed at construction so the solver loops do not re-evaluate
   // the topology and boundary codes:
-  // - openInflowFace_: bcEMface = 2 with bcPface = 2, X-right excluded (the
-  //   outflow face keeps its operator rows).  With ApplyInflowBcsEImage its
+  // - openInflowFace_: bcEMface = 2 with bcPface = 2, never X-right (an open
+  //   X-right face keeps its operator rows).  With ApplyInflowBcsEImage its
   //   Maxwell rows are the identity (image) and E0 = -u0 x B0 (RHS);
   // - conductorFace_: perfect conductor, bcEMface = 0.
   bool openInflowFace_[6];
@@ -1348,7 +1085,7 @@ private:
   // SAL on B leaves the face-normal component alone (sal_tangential_B)
   int sal_tangential_B;
 
-  /*! GEM Challenge background ion */
+  /*! per-species initial density (4 pi n_s) */
   double* rhoINIT;
   /*! Drift of the species */
   bool* DriftSpecies;
@@ -1359,41 +1096,18 @@ private:
   bool divBCorrection;
   int divBCorrectionCycle;
 
-  // persistent arrays for divB cleaning (avoid per-cycle allocation)
-  array3_double divBwork;
-  array3_double gradPSIX;
-  array3_double gradPSIY;
-  array3_double gradPSIZ;
-  double* xkrylovPoisson_B;
-  double* bkrylovPoisson_B;
+  // Krylov vector lengths: 3 x interior nodes (Maxwell), interior cells
+  // (Poisson)
   int maxwellKrylovSize_ = 0;
   int poissonKrylovSize_ = 0;
-
-  // Persistent arrays for calculateE (avoid per-cycle allocation)
-  double* xkrylovMaxwell;
-  double* bkrylovMaxwell;
-  double* xkrylovPoisson_E;
-  double* bkrylovPoisson_E;
-  array3_double divE_work;
-  array3_double gradPHIX_work;
-  array3_double gradPHIY_work;
-  array3_double gradPHIZ_work;
-
-  // Persistent arrays for PoissonImage (avoid per-GMRES-iteration allocation)
-  array3_double poissonTemp;
-  array3_double poissonIm;
-
-  // Persistent temp buffer for smooth (avoid per-call allocation)
-  array3_double smoothTemp;
 
   /*! RESTART BOOLEAN */
   int restart1;
 
-  /*! CG tolerance criterium for stopping iterations */
-  double CGtol;
-  /*! GMRES tolerance criterium for stopping iterations */
+  /*! tolerance of the Maxwell (GMRES, FGMRES) and Poisson solves */
   double GMREStol;
-  /*! Solver type for Maxwell: "GMRES" or "Chebyshev" */
+  /*! Maxwell solver: "GMRES" (default, also any unknown value),
+   * "FGMRESBlockJacobi" or "Chebyshev" */
   std::string SolverType;
 
   // MPI Derived Datatype for Center Halo Exchange
@@ -1424,27 +1138,12 @@ private:
   MPI_Datatype procviewXYZ, xyzcomp, procview, ghosttype;
   bool lEndFlag;
 
-  void OpenBoundaryInflowB(arr3_double vectorX, arr3_double vectorY,
-                           arr3_double vectorZ,
-
-                           int nx, int ny, int nz);
-  void OpenBoundaryInflowE(arr3_double vectorX, arr3_double vectorY,
-                           arr3_double vectorZ, int nx, int ny, int nz);
-  void OpenBoundaryInflowEImage(arr3_double imageX, arr3_double imageY,
-                                arr3_double imageZ, const_arr3_double vectorX,
-                                const_arr3_double vectorY,
-                                const_arr3_double vectorZ, int nx, int ny,
-                                int nz);
-  void OpenBoundaryInflowESource(arr3_double vectorX, arr3_double vectorY,
-                                 arr3_double vectorZ, int nx, int ny, int nz);
-
-#ifdef GPU_SOLVER
   // =========================================================================
-  //  GPU-resident copies of all field arrays
+  //  Device field arrays of the field solver
   //  -----------------------------------------------------------------------
-  //  Layout is identical to the host arrays (row-major, contiguous), so the
-  //  same MPI derived datatypes can be used with GPU-aware MPI by passing
-  //  the device pointer instead of the host pointer.
+  //  Row-major and contiguous; the arrays that also exist on the host have
+  //  the host layout, so gpuSolverSyncH2D / gpuSolverSyncD2H copy them
+  //  whole.
   // =========================================================================
 
   // Electric field (node-based)
@@ -1456,7 +1155,8 @@ private:
   // Magnetic field (node-based)
   GPUFieldArray3 d_Bxn, d_Byn, d_Bzn;
 
-  // Charge / current densities (node-based, summed over species)
+  // Charge / current densities summed over species (d_rhoc, d_rhoh:
+  // cell-centred; the others node-based)
   GPUFieldArray3 d_rhon, d_rhoc, d_rhoh;
   GPUFieldArray3 d_Jx, d_Jy, d_Jz;
   GPUFieldArray3 d_Jxh, d_Jyh, d_Jzh;
@@ -1472,10 +1172,10 @@ private:
   // Potentials (center-based)
   GPUFieldArray3 d_PHI, d_PSI;
 
-  // External / total B (node-based)
+  // External B (node-based)
   GPUFieldArray3 d_Bx_ext, d_By_ext, d_Bz_ext;
 
-  // Temporary / work arrays (node-based)
+  // Temporary / work arrays (*C: cell-centred; the others node-based)
   GPUFieldArray3 d_tempXC, d_tempYC, d_tempZC;
   GPUFieldArray3 d_tempXN, d_tempYN, d_tempZN;
   GPUFieldArray3 d_tempC;
@@ -1495,7 +1195,7 @@ private:
   GPUKrylovVector d_xkrylovPoisson_B, d_bkrylovPoisson_B;
   GPUKrylovVector d_xkrylovPoisson_E, d_bkrylovPoisson_E;
 
-  // calculateE work arrays
+  // div(E) correction work arrays
   GPUFieldArray3 d_divE_work;
   GPUFieldArray3 d_gradPHIX_work, d_gradPHIY_work, d_gradPHIZ_work;
 
@@ -1505,7 +1205,7 @@ private:
   // Smooth temp buffer
   GPUFieldArray3 d_smoothTemp;
 
-  // Device copy of species q/m for perfectConductor kernels
+  // Device copy of species q/m
   cudaSolverType* d_qom = nullptr;
 
   // Reduction scratch buffer for GPU BLAS dot/norm operations
@@ -1580,8 +1280,8 @@ private:
   // ---- Persistent batched halo-exchange buffers ----
   // 6 directions: 0=XL 1=XR 2=YL 3=YR 4=ZL 5=ZR
   // HALO_MAX_BATCH is the max number of fields per single batched exchange.
-  // Functions with more fields (e.g. gpuCommunicateGhostP2G_AllSpecies)
-  // automatically split into multiple passes of this size.
+  // Callers with more fields split them themselves (e.g.
+  // gpuCommunicateGhostP2G_AllSpecies, HALO_MAX_BATCH/10 species per pass).
   static constexpr int HALO_MAX_BATCH = 64;
   double* d_haloBuf_send_[6] = {}; // contiguous GPU send buffers
   double* d_haloBuf_recv_[6] = {}; // contiguous GPU recv buffers
@@ -1690,7 +1390,6 @@ private:
   // Persistent bounded reductions; allocated only if an enabled cycle runs.
   GPUCycleDiagnostics gpuCycleDiagnostics_;
 #endif
-#endif // GPU_SOLVER
 };
 
 typedef EMfields3D Field;

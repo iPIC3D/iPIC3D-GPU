@@ -26,7 +26,7 @@ def plotScalingTestTimeBreakdown(csvFilePath):
     plt.figure(figsize=(14, 8))  
     bar_width = 0.3  
     index = np.arange(len(threads)) * 1.5  
-    p1 = plt.bar(index, fields_times, bar_width, label='Solver-CPU')
+    p1 = plt.bar(index, fields_times, bar_width, label='Field solver (GPU)')
     p2 = plt.bar(index, GPU_times, bar_width, bottom=fields_times, label='Mover+Moments-GPU')
 
     previous_bottoms = [0] * len(threads)

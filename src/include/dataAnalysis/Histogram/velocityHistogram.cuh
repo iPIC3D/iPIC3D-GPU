@@ -305,8 +305,7 @@ public:
 
   /**
    * @brief Initiate the kernels for histograming, launch the kernels
-   * @details It can be invoked after Moment in the main loop, for the output
-   * and solver are on CPU
+   * @details It can be invoked after Moment in the main loop.
    * @param pclArray Borrowed velocity SoA view for one species.
    * @param species Species index, used for output naming and metadata.
    * @param stream CUDA stream used by the histogram kernels.

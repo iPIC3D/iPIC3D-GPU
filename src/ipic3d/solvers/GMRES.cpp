@@ -33,7 +33,7 @@
 #include <cmath>
 #include <cstring>
 
-// Flexible-GMRES --> allows to a have a flexible preeconditioner
+// Flexible GMRES: the preconditioner may change between iterations.
 void FGMRES(FIELD_IMAGE FunctionImage, FIELD_IMAGE LocalFunctionImage,
             double* xkrylov, int xkrylovlen, const double* b, int m,
             int max_iter, double tol, EMfields3D* field) {
@@ -135,10 +135,8 @@ void FGMRES(FIELD_IMAGE FunctionImage, FIELD_IMAGE LocalFunctionImage,
     // std::cout<< "FGMRES for loop iter: "<< itr <<std::endl;
     while (rho_tol < initial_error && k < m) {
 
-      // Z(:,k) = A^-1 V(:,k)
-      // GMRESasPreconditionerNoComm(&Field::MaxwellImageLocal, Z[k],
-      // xkrylovlen, V[k], 50, 200, tol/1000, field);
-      GMRESasPreconditioner(&Field::MaxwellImage, Z[k], xkrylovlen, V[k], mPrec,
+      // Z(:,k) = A^-1 V(:,k), approximated by an inner GMRES on A
+      GMRESasPreconditioner(FunctionImage, Z[k], xkrylovlen, V[k], mPrec,
                             max_iter, tolPrec, field, rPrec, imPrec, sPrec,
                             csPrec, snPrec, yPrec, HPrec, VPrec);
       // memcpy(Z[k],V[k], sizeof(double)*xkrylovlen);
@@ -349,15 +347,8 @@ void GMRESasPreconditioner(FIELD_IMAGE FunctionImage, double* xkrylov,
       // w= A*V(:,k)
       double* w = V[k + 1];
       (field->*FunctionImage)(w, V[k]);
-      // old code (many MPI_Allreduce calls)
-      //
-      // const double av = normP(w, xkrylovlen);
-      // for (register int j = 0; j <= k; j++) {
-      //  H[j][k] = dotP(w, V[j], xkrylovlen);
-      //  addscale(-H[j][k], w, V[j], xkrylovlen);
-      //}
-
-      // new code to make a single MPI_Allreduce call
+      // Classical Gram-Schmidt with a single MPI_Allreduce for all
+      // projections
       for (int j = 0; j <= k; j++) {
         y[j] = dot(w, V[j], xkrylovlen);
       }
@@ -526,15 +517,8 @@ void GMRESasPreconditionerNoComm(FIELD_IMAGE FunctionImage, double* xkrylov,
       // w= A*V(:,k)
       double* w = V[k + 1];
       (field->*FunctionImage)(w, V[k]);
-      // old code (many MPI_Allreduce calls)
-      //
-      // const double av = normP(w, xkrylovlen);
-      // for (register int j = 0; j <= k; j++) {
-      //  H[j][k] = dotP(w, V[j], xkrylovlen);
-      //  addscale(-H[j][k], w, V[j], xkrylovlen);
-      //}
-
-      // new code to make a single MPI_Allreduce call
+      // Classical Gram-Schmidt with a single MPI_Allreduce for all
+      // projections
       for (int j = 0; j <= k; j++) {
         y[j] = dot(w, V[j], xkrylovlen);
       }
@@ -737,15 +721,8 @@ void GMRES(FIELD_IMAGE FunctionImage, double* xkrylov, int xkrylovlen,
       // w= A*V(:,k)
       double* w = V[k + 1];
       (field->*FunctionImage)(w, V[k]);
-      // old code (many MPI_Allreduce calls)
-      //
-      // const double av = normP(w, xkrylovlen);
-      // for (register int j = 0; j <= k; j++) {
-      //  H[j][k] = dotP(w, V[j], xkrylovlen);
-      //  addscale(-H[j][k], w, V[j], xkrylovlen);
-      //}
-
-      // new code to make a single MPI_Allreduce call
+      // Classical Gram-Schmidt with a single MPI_Allreduce for all
+      // projections
       for (int j = 0; j <= k; j++) {
         y[j] = dot(w, V[j], xkrylovlen);
       }

@@ -39,12 +39,12 @@
  *  Sorted (descending energy): A0 B0 A1 B1 A2 A3 B2
  *  |q| in that order:          0.25 2.5 4 1.5 1 0.5 1   (prefix 0.25 2.75 6.75
  *                                                         8.25 9.25 9.75 10.75)
- *  Weighting the energy by |q| (the old key) would rank A1 above A0.
+ *  Weighting the energy by |q| would rank A1 above A0.
  *
  *  Cycles (an electron is absorbed while it brings the absorbed charge closer
  *  to target = residual + ion charge):
  *    1: ions 10, target 10    → absorb 6 (9.75),  residual +0.25
- *       (the old ">= target" rule absorbed all 7: 10.75)
+ *       (a ">= target" rule would absorb all 7: 10.75)
  *    2: ions 3, no electrons  → absorb 0,         residual +3.25 (limited)
  *    3: no ions, target 3.25  → absorb 2 (2.75),  residual +0.50
  *    4: ions 2,  target 2.5   → absorb 2 (2.75),  residual -0.25

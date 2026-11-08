@@ -233,4 +233,22 @@ void loopY(double* b, double y, double z, double x, double a, double yc,
 void loopZ(double* b, double x, double y, double z, double a, double xc,
            double yc, double zc, double m);
 
+// Krylov <-> physical packing for the host Krylov solvers (not used
+// currently): the interior points [1..n-2] of each axis of [nx][ny][nz]
+// arrays, k fastest; three components are interleaved.
+/** Unpack a scalar Krylov vector into the interior of vectPhys. */
+void solver2phys(arr3_double vectPhys, double* vectSolver, int nx, int ny,
+                 int nz);
+/** Unpack an interleaved 3-component Krylov vector. */
+void solver2phys(arr3_double vectPhys1, arr3_double vectPhys2,
+                 arr3_double vectPhys3, double* vectSolver, int nx, int ny,
+                 int nz);
+/** Pack the interior of vectPhys into a scalar Krylov vector. */
+void phys2solver(double* vectSolver, const arr3_double vectPhys, int nx, int ny,
+                 int nz);
+/** Pack three components into an interleaved Krylov vector. */
+void phys2solver(double* vectSolver, const arr3_double vectPhys1,
+                 const arr3_double vectPhys2, const arr3_double vectPhys3,
+                 int nx, int ny, int nz);
+
 #endif // BASIC_H

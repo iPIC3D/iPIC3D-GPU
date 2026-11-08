@@ -17,11 +17,6 @@
  *
  * No AoS storage, no BlockCommunicator, no MPI_Comm_dup.
  * Communication is handled by the companion ParticleCommInjection class.
- *
- * Memory saved per species vs. old Particles3Dcomm:
- *   12 BlockCommunicators × 4 blocks × 8192 × 64 B  ≈ 24 MiB
- *   + MPI_Comm_dup + 6 persistent MPI_Recv_init
- *   + AoS duplicate _pcls buffer (sizeof(NOP) × 64 B)
  */
 
 #ifndef PARTICLE_SOA_HOST_H
@@ -322,27 +317,20 @@ public:
   /**
    * @brief Populate the species with the default Maxwellian initialization.
    *
-   * @param EMf Field object used to sample drifts and initialization
-   * parameters.
+   * @param EMf Field object providing the species density (rhocs).
    */
   void maxwellian(Field* EMf);
   /**
-   * @brief Populate the null-points/Taylor-Green cases using local
-   * current-driven drift.
+   * @brief Populate with the local drift J_s / (sign(q) rho_s) of the
+   * species currents set by the field initialisation (NullPoints,
+   * TaylorGreen, ForceFree, GEMHarris with currentFromAmpere), J_s and
+   * rho_s interpolated from the cell's nodes to each particle position.
    *
    * @param EMf Field object used to sample local current-driven drifts.
+   * @param varyingThermal Take the thermal speed sqrt(p_ii,s / rho_s -
+   * drift_i^2) from the species pressure instead of uth/vth/wth.
    */
-  void maxwellianNullPoints(Field* EMf);
-  /**
-   * @brief Populate using local Ampere-driven drift and reference-state thermal
-   * velocity.
-   *
-   * Uses Jxs/rhons for the local drift and pXXsn/rhons for local thermal
-   * velocity, matching the ECsim reference-state initialization approach.
-   *
-   * @param EMf Field object with Ampere currents and reference pressure state.
-   */
-  void maxwellianAmpereVaryingThermal(Field* EMf);
+  void maxwellianFromSpeciesCurrents(Field* EMf, bool varyingThermal = false);
   /**
    * @brief Populate the double-Harris configuration.
    *
@@ -358,16 +346,10 @@ public:
   /**
    * @brief Initialize test particles from pitch angle and energy.
    *
-   * @param EMf Field object used to sample magnetic-field direction and
-   * strength.
+   * @param EMf Field object providing the species-0 density for the particle
+   * charge (B is assumed along z).
    */
   void pitch_angle_energy(Field* EMf);
-  /**
-   * @brief Stub for the force-free particle initialization path.
-   *
-   * @param EMf Field object passed through from the solver.
-   */
-  void force_free(Field* EMf);
   /** @brief Load particle data for this species from a restart file. */
   void restartLoad();
 

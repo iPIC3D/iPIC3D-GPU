@@ -4,21 +4,12 @@
  *
  * Provides GPU-allocated 3D/4D arrays that mirror the host array3_double /
  * array4_double layout (row-major, contiguous) but live entirely in device
- * memory.  Host↔device transfers are explicit and only triggered for I/O or
- * diagnostic purposes.
+ * memory.  Host↔device transfers are explicit: initialisation, restart,
+ * output and diagnostics.
  *
- * The MPI halo exchange can pass the raw device pointer directly to
- * GPU-aware MPI calls (using the same MPI derived datatypes already
- * defined in EMfields3D for the host arrays, since the memory layout
- * is identical).
- *
- * All three wrapper types are parameterised on the element type T.
- * Backward-compatible aliases at the bottom of this file map the plain
- * names (GPUFieldArray3, GPUFieldArray4, GPUKrylovVector) to the
- * cudaSolverType instantiation so that existing call-sites compile
- * without modification.
- *
- * Compile with -DGPU_SOLVER to activate.
+ * All three wrapper types are parameterised on the element type T;
+ * GPUFieldArray3, GPUFieldArray4 and GPUKrylovVector are the cudaSolverType
+ * instantiations.
  */
 
 #ifndef GPU_FIELD_ARRAY_CUH
@@ -147,10 +138,7 @@ public:
     }
   }
 
-  // ---- 3D → device pointer with offset (for MPI halo exchange) ----
-  // Returns a pointer offset to element [i3][i2][i1] so that
-  // MPI derived datatypes (which encode strides from the base pointer)
-  // work identically to the host arrays.
+  // ---- 3D → device pointer to element [i3][i2][i1] (not used) ----
   T* ptrAt(size_t i3, size_t i2, size_t i1) {
     return d_ptr_ + (i3 * S2_ + i2) * S1_ + i1;
   }
@@ -329,11 +317,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-//  Backward-compatible type aliases
-//
-//  All existing code that uses GPUFieldArray3, GPUFieldArray4, or
-//  GPUKrylovVector without template arguments continues to compile
-//  unchanged; it receives the cudaSolverType instantiation.
+//  cudaSolverType instantiations
 // ---------------------------------------------------------------------------
 using GPUFieldArray3 = GPUFieldArray3Impl<cudaSolverType>;
 using GPUFieldArray4 = GPUFieldArray4Impl<cudaSolverType>;

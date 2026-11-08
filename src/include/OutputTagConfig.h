@@ -9,11 +9,12 @@
 #include <string>
 
 /**
- * @brief Parsed output tag configuration.
+ * @brief Parsed FieldOutputTag / MomentsOutputTag: the tokens are split on
+ * '+', trimmed and matched exactly; unknown tokens are warned about and
+ * ignored.
  *
- * Replaces the old string-find approach for FieldOutputTag / MomentsOutputTag.
- *
- * Field tags: B, E  (grid-level quantities only)
+ * Field tags: B, E; Je, Ji, Je2, Ji3 (current of species 0-3) and rho (total
+ * charge density).
  *
  * Moments tags use numeric species indexing:
  *   bare name (rho, J, PXX, ..., P, Q)  → all species
@@ -84,7 +85,7 @@ struct OutputTagConfig {
     return false;
   }
 
-  /** Number of scalar moment writes (rho + pressure; excludes J which is
+  /** Number of scalar moment writes (rho, pressure and heat flux; J is a
    * vector). */
   int countMomentWrites() const {
     int n = 0;
@@ -339,7 +340,7 @@ inline bool parseMomentToken(const std::string& tok, int ns,
 }
 
 /**
- * @brief Parse a FieldOutputTag token (legacy backward compat included).
+ * @brief Parse a FieldOutputTag token: B, E, Je, Ji, Je2, Ji3, rho.
  *
  * @return true if the token was recognised.
  */
@@ -354,23 +355,22 @@ inline bool parseFieldToken(const std::string& tok, int ns,
     return true;
   }
 
-  // --- Legacy migration: old field-tag tokens that carried species data ---
-  if (tok == "Je") {
-    cfg.JSpecies.insert(0);
-    return true;
+  // --- species currents (Je, Ji, Je2, Ji3 = species 0-3) ---
+  static const char* const speciesCurrentTokens[] = {"Je", "Ji", "Je2", "Ji3"};
+  for (int si = 0; si < 4; si++) {
+    if (tok != speciesCurrentTokens[si])
+      continue;
+    if (si >= ns)
+      fprintf(stderr,
+              "WARNING: FieldOutputTag token '%s' references "
+              "species %d but ns=%d — ignored.\n",
+              tok.c_str(), si, ns);
+    else
+      cfg.JSpecies.insert(si);
+    return true; // consumed, valid or not
   }
-  if (tok == "Ji") {
-    cfg.JSpecies.insert(1);
-    return true;
-  }
-  if (tok == "Je2") {
-    cfg.JSpecies.insert(2);
-    return true;
-  }
-  if (tok == "Ji3") {
-    cfg.JSpecies.insert(3);
-    return true;
-  }
+
+  // --- total charge density ---
   if (tok == "rho") {
     cfg.writeRhoTot = true;
     return true;

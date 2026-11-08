@@ -221,8 +221,7 @@ static void testAdjoint() {
     if (factor == 0)
       check(rel < 1e-12, "zero ghosts: |<D v, psi> + <v, G psi>| / scale", rel);
     else
-      check(rel > 1e-3, "copy ghosts (old correction): not an adjoint pair",
-            rel);
+      check(rel > 1e-3, "copy ghosts: not an adjoint pair", rel);
   }
 }
 

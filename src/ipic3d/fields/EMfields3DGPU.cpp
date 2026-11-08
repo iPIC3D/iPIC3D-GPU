@@ -20,13 +20,10 @@
  */
 
 // =========================================================================
-//  EMfields3DGPU.cpp  –  GPU solver methods for EMfields3D
-//
-//  Extracted from EMfields3D.cpp for modularity.  All code here lives
-//  inside  #ifdef GPU_SOLVER  and is compiled only when that flag is on.
+//  EMfields3DGPU.cpp  –  field solver of EMfields3D, on the GPU: device
+//  arrays, host <-> device sync, Maxwell and Poisson operators and solvers,
+//  moment post-processing and the field boundary conditions.
 // =========================================================================
-
-#ifdef GPU_SOLVER
 
 #include "Collective.h"
 #include "Com3DNonblk.h"
@@ -45,20 +42,6 @@
 #include "GPUSolverMPITypes.h"
 #include "GPUStencils.cuh"
 #include "cudaTypeDef.cuh"
-
-#ifdef HALO_OVERLAP
-// Forward declarations for BC face functions (defined in GPUHaloComm.cu).
-// Cannot include GPUHaloComm.cuh here because it contains __global__ decls
-// and this file is compiled by the host compiler.
-void gpuBCface(int nx, int ny, int nz, GPUFieldArray3& gpuArr, int bcFaceXright,
-               int bcFaceXleft, int bcFaceYright, int bcFaceYleft,
-               int bcFaceZright, int bcFaceZleft, const VirtualTopology3D* vct,
-               cudaStream_t stream);
-void gpuBCface_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
-                 int bcFaceXright, int bcFaceXleft, int bcFaceYright,
-                 int bcFaceYleft, int bcFaceZright, int bcFaceZleft,
-                 const VirtualTopology3D* vct, cudaStream_t stream);
-#endif // HALO_OVERLAP
 
 #include <algorithm>
 #include <chrono>
@@ -179,7 +162,7 @@ void EMfields3D::gpuSolverAllocate() {
   d_Byn = GPUFieldArray3(nxn, nyn, nzn);
   d_Bzn = GPUFieldArray3(nxn, nyn, nzn);
 
-  // ---- Charge / current densities (node-based, summed over species) ----
+  // ---- Charge / current densities summed over species ----
   d_rhon = GPUFieldArray3(nxn, nyn, nzn);
   d_rhoc = GPUFieldArray3(nxc, nyc, nzc);
   d_rhoh = GPUFieldArray3(nxc, nyc, nzc);
@@ -254,7 +237,7 @@ void EMfields3D::gpuSolverAllocate() {
   d_xkrylovPoisson_E = GPUKrylovVector(nPoissonKrylov);
   d_bkrylovPoisson_E = GPUKrylovVector(nPoissonKrylov);
 
-  // ---- calculateE work arrays ----
+  // ---- div(E) correction work arrays ----
   d_divE_work = GPUFieldArray3(nxc, nyc, nzc);
   d_gradPHIX_work = GPUFieldArray3(nxn, nyn, nzn);
   d_gradPHIY_work = GPUFieldArray3(nxn, nyn, nzn);
@@ -428,7 +411,7 @@ void EMfields3D::gpuSolverFree() {
   d_xkrylovPoisson_E.free();
   d_bkrylovPoisson_E.free();
 
-  // calculateE work
+  // div(E) correction work
   d_divE_work.free();
   d_gradPHIX_work.free();
   d_gradPHIY_work.free();
@@ -657,9 +640,6 @@ void EMfields3D::gpuSolverSyncH2D(cudaStream_t stream) {
   d_Ex.copyFromHostAsync(Ex.fetch_arr(), stream);
   d_Ey.copyFromHostAsync(Ey.fetch_arr(), stream);
   d_Ez.copyFromHostAsync(Ez.fetch_arr(), stream);
-  d_Exth.copyFromHostAsync(Exth.fetch_arr(), stream);
-  d_Eyth.copyFromHostAsync(Eyth.fetch_arr(), stream);
-  d_Ezth.copyFromHostAsync(Ezth.fetch_arr(), stream);
 
   // Magnetic field
   d_Bxc.copyFromHostAsync(Bxc.fetch_arr(), stream);
@@ -671,14 +651,9 @@ void EMfields3D::gpuSolverSyncH2D(cudaStream_t stream) {
 
   // Charge / current densities
   d_rhon.copyFromHostAsync(rhon.fetch_arr(), stream);
-  d_rhoc.copyFromHostAsync(rhoc.fetch_arr(), stream);
-  d_rhoh.copyFromHostAsync(rhoh.fetch_arr(), stream);
   d_Jx.copyFromHostAsync(Jx.fetch_arr(), stream);
   d_Jy.copyFromHostAsync(Jy.fetch_arr(), stream);
   d_Jz.copyFromHostAsync(Jz.fetch_arr(), stream);
-  d_Jxh.copyFromHostAsync(Jxh.fetch_arr(), stream);
-  d_Jyh.copyFromHostAsync(Jyh.fetch_arr(), stream);
-  d_Jzh.copyFromHostAsync(Jzh.fetch_arr(), stream);
 
   // Per-species densities
   d_rhons.copyFromHostAsync(rhons.fetch_arr(), stream);
@@ -694,9 +669,8 @@ void EMfields3D::gpuSolverSyncH2D(cudaStream_t stream) {
   d_pYZsn.copyFromHostAsync(pYZsn.fetch_arr(), stream);
   d_pZZsn.copyFromHostAsync(pZZsn.fetch_arr(), stream);
 
-  // Potentials
+  // Potential
   d_PHI.copyFromHostAsync(PHI.fetch_arr(), stream);
-  d_PSI.copyFromHostAsync(PSI.fetch_arr(), stream);
 
   // External B
   d_Bx_ext.copyFromHostAsync(Bx_ext.fetch_arr(), stream);
@@ -707,13 +681,11 @@ void EMfields3D::gpuSolverSyncH2D(cudaStream_t stream) {
 }
 
 void EMfields3D::gpuSolverSyncD2H(cudaStream_t stream) {
-  // Only copy field data needed for I/O or particle mover
+  // Fields and moments needed on the host by output, diagnostics, restart
+  // checkpoints and Catalyst
   d_Ex.copyToHostAsync(Ex.fetch_arr(), stream);
   d_Ey.copyToHostAsync(Ey.fetch_arr(), stream);
   d_Ez.copyToHostAsync(Ez.fetch_arr(), stream);
-  d_Exth.copyToHostAsync(Exth.fetch_arr(), stream);
-  d_Eyth.copyToHostAsync(Eyth.fetch_arr(), stream);
-  d_Ezth.copyToHostAsync(Ezth.fetch_arr(), stream);
 
   d_Bxc.copyToHostAsync(Bxc.fetch_arr(), stream);
   d_Byc.copyToHostAsync(Byc.fetch_arr(), stream);
@@ -723,7 +695,6 @@ void EMfields3D::gpuSolverSyncD2H(cudaStream_t stream) {
   d_Bzn.copyToHostAsync(Bzn.fetch_arr(), stream);
 
   d_rhon.copyToHostAsync(rhon.fetch_arr(), stream);
-  d_rhoc.copyToHostAsync(rhoc.fetch_arr(), stream);
   d_Jx.copyToHostAsync(Jx.fetch_arr(), stream);
   d_Jy.copyToHostAsync(Jy.fetch_arr(), stream);
   d_Jz.copyToHostAsync(Jz.fetch_arr(), stream);
@@ -770,7 +741,6 @@ void EMfields3D::gpuSolverSyncD2H(cudaStream_t stream) {
   }
 
   d_PHI.copyToHostAsync(PHI.fetch_arr(), stream);
-  d_PSI.copyToHostAsync(PSI.fetch_arr(), stream);
 
   cudaStreamSynchronize(stream);
 }
@@ -993,7 +963,7 @@ void EMfields3D::gpuPerfectConductorImages(
 void EMfields3D::gpuPerfectConductorSources(cudaSolverType* dX,
                                             cudaSolverType* dY,
                                             cudaSolverType* dZ) {
-  // CPU perfectConductor*S uses ebc = -(ue0,ve0,we0) x (B0x,B0y,B0z).
+  // ebc = -(ue0,ve0,we0) x (B0x,B0y,B0z): the tangential E on the walls.
   const cudaSolverType ebc0 = -(ve0 * B0z - we0 * B0y);
   const cudaSolverType ebc1 = -(we0 * B0x - ue0 * B0z);
   const cudaSolverType ebc2 = -(ue0 * B0y - ve0 * B0x);
@@ -1056,7 +1026,7 @@ void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
   const int bcXr = operatorBCXright(1);
 
 #ifdef HALO_OVERLAP
-  // ---- Begin halo exchange: pack faces + post MPI ----
+  // ---- Begin halo exchange: pack faces on the halo stream ----
   cudaSolverType* ptrs9[9] = {
       d_tempXC.devPtr(),   d_tempYC.devPtr(),      d_tempZC.devPtr(),
       d_divC.devPtr(),     d_poissonTemp.devPtr(), d_poissonIm.devPtr(),
@@ -1064,7 +1034,7 @@ void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
   gpuBatchedHaloBeginExchange(ptrs9, 9, nxc, nyc, nzc, true, false, false,
                               solverStream_);
 
-  // ---- Interior divC2N while MPI is in flight ----
+  // ---- Interior divC2N while the faces are packed ----
   gpuDivC2N_interior(lapA.devPtr(), d_tempXC.devPtr(), d_tempYC.devPtr(),
                      d_tempZC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
                      solverStream_);
@@ -1075,7 +1045,7 @@ void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
                      d_tempC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
                      solverStream_);
 
-  // ---- End halo exchange: MPI_Waitall + unpack + edges/corners ----
+  // ---- End halo exchange: MPI faces, edges and corners + unpack ----
   gpuBatchedHaloEndExchange();
 
   // ---- BC face application (type 1; an X-right outflow plane is kept) ----
@@ -1105,7 +1075,7 @@ void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
                      solverStream_);
 
 #else
-  // ---- Original blocking path ----
+  // ---- Blocking path (without HALO_OVERLAP) ----
   gpuCommunicateCenterBC_9(nxc, nyc, nzc, d_tempXC, d_tempYC, d_tempZC, d_divC,
                            d_poissonTemp, d_poissonIm, d_divBwork, d_divE_work,
                            d_tempC, bcXr, 1, 1, 1, 1, 1);
@@ -1128,7 +1098,7 @@ void EMfields3D::gpuLapN2N_3(GPUFieldArray3& lapA, GPUFieldArray3& fieldA,
 }
 
 // =========================================================================
-//  GPU MaxwellImage:  im = A * vector  (Krylov ↔ Krylov)
+//  gpuMaxwellImage:  im = A * vector  (Krylov ↔ Krylov)
 // =========================================================================
 
 void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
@@ -1175,7 +1145,7 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
   gpuBatchedHaloBeginExchange(ptr1, 1, nxc, nyc, nzc, true, false, false,
                               solverStream_);
 
-  // ---- Interior gradC2N while MPI is in flight ----
+  // ---- Interior gradC2N while the faces are packed ----
   gpuGradC2N_interior(d_tempX.devPtr(), d_tempY.devPtr(), d_tempZ.devPtr(),
                       d_divC.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
                       solverStream_);
@@ -1219,7 +1189,7 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
   gpuPerfectConductorImages(d_imageX, d_imageY, d_imageZ, d_vectX, d_vectY,
                             d_vectZ);
 
-  // OpenBC: apply inflow BCs to GMRES image if enabled
+  // OpenBC: identity rows of the open inflow faces in the Maxwell image
   if (get_col().getApplyInflowBcsEImage())
     gpuOpenBoundaryInflowEImage(
         d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(),
@@ -1231,7 +1201,7 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
 }
 
 // =========================================================================
-//  GPU MaxwellImageLocal:  communication-free  im = A * vector
+//  gpuMaxwellImageLocal:  communication-free  im = A * vector
 //
 //  Computes a local approximation to gpuMaxwellImage:
 //    • NO MPI communication  (halo exchanges skipped)
@@ -1240,12 +1210,13 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
 //
 //  Intended for use as a GPU-local preconditioner in FGMRES.
 //
-//  Pipeline (2 + ns kernel launches):
+//  Pipeline:
 //    1. gpuSolver2Phys3         — unpack Krylov → vectX/Y/Z
 //    2. gpuMUdot                — D = μ̂·E  (ns species sub-launches)
 //    3. gpuMaxwellLocalCenterOps — fused 3×gradN2C + divN2C
 //    4. gpuMaxwellLocalNodeFused — fused 3×divC2N + gradC2N
-//                                  + arithmetic + phys2solver → d_im
+//                                  + arithmetic + Krylov packing → d_im
+//    5. unpack, physical-boundary image corrections, repack
 //
 //  Scratch arrays used (all pre-allocated in gpuSolverAllocate):
 //    Node-sized:  d_vectX/Y/Z, d_Dx/Y/Z           (input/work)
@@ -1341,7 +1312,7 @@ void EMfields3D::gpuMaxwellImageLocal(cudaSolverType* d_im,
   //   lapY = divC2N(grad(Ey))       — from 3 center arrays
   //   lapZ = divC2N(grad(Ez))       — from 3 center arrays
   //   gdivX/Y/Z = gradC2N(div(D))  — from 1 center array
-  //   im = dt²·(-lap - gdiv) + D + E
+  //   im = delt²·(-lap - gdiv) + D + E
   // Output is packed into Krylov space first, then boundary corrections are
   // applied after unpacking to node arrays.
   gpuMaxwellLocalNodeFused(
@@ -1353,8 +1324,8 @@ void EMfields3D::gpuMaxwellImageLocal(cudaSolverType* d_im,
       d_Dy.devPtr(), d_Dz.devPtr(), nxn, nyn, nzn, _invdx, _invdy, _invdz,
       delt * delt, solverStream_);
 
-  // Match the CPU local operator: enforce boundary image corrections on the
-  // unpacked node fields, then repack to Krylov space.
+  // Boundary image rows on the unpacked node fields, then repack to Krylov
+  // space.
   gpuSolver2Phys3(d_imageX.devPtr(), d_imageY.devPtr(), d_imageZ.devPtr(), d_im,
                   nxn, nyn, nzn, solverStream_);
 
@@ -1437,9 +1408,9 @@ cudaSolverType EMfields3D::gpuEstimateMaxEigenvalue(
 //  The recurrence operates on the residual  r₀ = b - A·x₀  and produces
 //  a correction  δx ≈ A⁻¹·r₀.  Final result: x = x₀ + δx.
 //
-//  The polynomial applies to the NEGATED operator -A (positive eigenvalues
-//  mapped to the standard Chebyshev interval), matching the formulation
-//  in the Poisson Chebyshev solver.
+//  The recurrence applies A itself, whose eigenvalues lie in
+//  [eigMin, eigMax] > 0.  (The Poisson preconditioner instead uses -∇² and
+//  negates its result.)
 // =========================================================================
 
 void EMfields3D::gpuChebyshevSolve(
@@ -1478,7 +1449,7 @@ void EMfields3D::gpuChebyshevSolve(
   (this->*GpuImage)(d_chebTmp, d_x);                    // tmp = A·x₀
   gpuSubRes(d_chebW, d_b, d_chebTmp, n, solverStream_); // w = b - A·x₀ = r₀
 
-  // ---- Optional: print initial residual norm ----
+  // ---- Print the initial residual norm ----
   gpuNorm2_async(d_chebW, n, d_blasScratch, &h_gmresReduceLocal[0],
                  solverStream_);
   cudaErrChk(cudaStreamSynchronize(solverStream_));
@@ -1550,7 +1521,7 @@ void EMfields3D::gpuChebyshevSolve(
 }
 
 // =========================================================================
-//  GPU MaxwellSource:  build RHS of Maxwell system
+//  gpuMaxwellSource:  build RHS of Maxwell system
 // =========================================================================
 
 void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
@@ -1576,14 +1547,10 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
   gpuCommunicateCenterBC_3mixed(nxc, nyc, nzc, d_Bxc, col->bcBx, d_Byc,
                                 col->bcBy, d_Bzc, col->bcBz);
 
-  // Case-specific B fixes (before curl, matching CPU MaxwellSource order)
-  {
-    const string& simCase = col->getCase();
-    if (simCase == "ForceFree")
-      gpuFixBforcefree();
-    // CPU MaxwellSource intentionally does not call fixBnGEM here: the source
-    // curl below reads cell-centered B only.
-  }
+  // Case-specific B fix before the curl (gpuFixBnGEM is not needed: the source
+  // curl below reads cell-centered B only)
+  if (col->getCase() == "ForceFree")
+    gpuFixBforcefree();
 
   // OpenBC: apply inflow BCs on center B
   gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
@@ -1696,7 +1663,7 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
 //
 //  Performance-critical design choices:
 //    • All host-side small arrays (H, g, cs, sn, y, reduction buffers)
-//      are PINNED and PERSISTENT — allocated once in gpuSolverInit().
+//      are PINNED and PERSISTENT — allocated once in gpuSolverAllocate().
 //    • D→H reduction copies use async memcpy into pinned memory.
 //    • Stream syncs are batched: ONE sync per Arnoldi step (before
 //      MPI_Allreduce) plus ONE for the post-ortho norm.
@@ -1814,7 +1781,8 @@ gpuGMRES_impl(EMfields3D* field,
                     mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
       H[(k + 1) * m + k] = sqrt(global_wNorm);
 
-      // Re-orthogonalise if needed (matches CPU GMRES)
+      // Re-orthogonalise when the projections cancelled ||w|| down to
+      // round-off of its pre-orthogonalisation norm
       double av = sqrt(h_reduceGlobal[k + 1]); // pre-ortho ||w||
       const double delta = 0.001;
       if (av + delta * H[(k + 1) * m + k] == av) {
@@ -1942,8 +1910,8 @@ void EMfields3D::gpuEnsureFGMRESWorkspace(int m, int n) {
 //  GPU FGMRES(m):  restarted right-preconditioned GMRES
 //
 //  Parameterised implementation shared by all FGMRES variants.
-//  Differs from gpuGMRES_impl by using a Z-basis (Z[k] = M⁻¹ V[k])
-//  and recomputing the true residual after each restart.
+//  Differs from gpuGMRES_impl by the Z basis (Z[k] = M⁻¹ V[k]); the
+//  solution update uses Z.
 // =========================================================================
 
 static void
@@ -2147,19 +2115,9 @@ gpuFGMRES_impl(EMfields3D* field,
 //  Approximately solves  A·x ≈ b  using a 3×3 block-diagonal D and the
 //  communication-free local operator A_local.
 //
-//  • sweeps == 1  →  x = ω D⁻¹ b  (original damped Jacobi)
-//  • sweeps > 1   →  Chebyshev semi-iteration on D⁻¹ A_local x = D⁻¹ b
-//
-//  The Chebyshev recurrence replaces the former Richardson (damped Jacobi)
-//  sweeps with a 3-term polynomial recurrence whose coefficients are
-//  derived from analytic eigenvalue bounds of D⁻¹ A_local:
-//
-//      λ_min ≈ 1 / diagScalar   (stencil diagonal analysis)
-//      λ_max ≤ 2                (Gershgorin bound)
-//
-//  For the same number of sweeps the Chebyshev polynomial reduces the
-//  error by the minimax factor  T_k(σ)⁻¹  vs  (1−ω/λ_max)^k  for
-//  Richardson, giving ≈ 2-3× faster residual reduction per sweep.
+//  • sweeps == 1  →  x = ω D⁻¹ b  (damped Jacobi)
+//  • sweeps > 1   →  x = D⁻¹ b, then sweeps − 1 Richardson (weighted Jacobi)
+//                    steps x += ω D⁻¹ (b − A_local x)
 //
 //  D^{-1} is precomputed once per field solve (9 doubles/node) and applied
 //  via a fused Krylov kernel (no pack/unpack overhead).
@@ -2211,7 +2169,7 @@ void EMfields3D::gpuBlockJacobiPrecond(cudaSolverType* d_x,
                                solverStream_);
 
   if (nSweeps <= 1) {
-    // Single sweep: scale by ω (original damped-Jacobi behavior)
+    // Single sweep: scale by ω (damped Jacobi)
     if (omega != 1.0) {
       gpuScale(d_x, omega, (size_t)n, solverStream_);
     }
@@ -2226,9 +2184,7 @@ void EMfields3D::gpuBlockJacobiPrecond(cudaSolverType* d_x,
   //      r = b − A_local(x)
   //      x += ω · D⁻¹ r
   //
-  //  Unlike the Chebyshev three-term recurrence, Richardson iteration
-  //  does not amplify errors at subdomain-boundary nodes where A_local
-  //  reads zeros from ghost cells.  The convergence factor per sweep
+  //  The convergence factor per sweep
   //  is max|1 − ω·λ| over eigenvalues λ of D⁻¹A_local, which stays
   //  ≤ 1 for ω ∈ (0, 2/λ_max) — no divergence even when some λ ≈ 0.
   // ==================================================================
@@ -2296,7 +2252,7 @@ void EMfields3D::gpuFGMRES_BlockJacobiPrecond(cudaSolverType* d_x, int n,
 }
 
 // =========================================================================
-//  GPU calculateE: full E-field solver
+//  gpuCalculateE: full E-field solver
 // =========================================================================
 
 void EMfields3D::gpuCalculateE(int cycle) {
@@ -2437,7 +2393,7 @@ void EMfields3D::gpuCalculateE(int cycle) {
 }
 
 // =========================================================================
-//  GPU calculateB: Faraday update
+//  gpuCalculateB: Faraday update
 // =========================================================================
 
 void EMfields3D::gpuCalculateB(int cycle) {
@@ -2632,7 +2588,7 @@ void EMfields3D::gpuCalculateB(int cycle) {
 }
 
 // =========================================================================
-//  GPU calculateHatFunctions: compute Jhat and rhohat
+//  gpuCalculateHatFunctions: compute Jhat and rhohat
 // =========================================================================
 
 void EMfields3D::gpuCalculateHatFunctions(int cycle) {
@@ -2664,20 +2620,20 @@ void EMfields3D::gpuCalculateHatFunctions(int cycle) {
               -dt / 2.0, centSize, solverStream_);
 
 #ifdef HALO_OVERLAP
-    // --- overlap: begin face exchange for 3 centre fields ---
+    // --- overlap: begin halo exchange for 3 centre fields ---
     cudaSolverType* hatPtrs[3] = {d_tempXC.devPtr(), d_tempYC.devPtr(),
                                   d_tempZC.devPtr()};
     gpuBatchedHaloBeginExchange(hatPtrs, 3, nxc, nyc, nzc,
                                 /*offsetZero=*/true, /*faceOnly=*/false,
                                 /*isParticle=*/true, solverStream_);
-    // --- interior interpC2N while faces in flight ---
+    // --- interior interpC2N while the faces are packed ---
     gpuInterpC2N_interior(d_tempXN.devPtr(), d_tempXC.devPtr(), nxn, nyn, nzn,
                           solverStream_);
     gpuInterpC2N_interior(d_tempYN.devPtr(), d_tempYC.devPtr(), nxn, nyn, nzn,
                           solverStream_);
     gpuInterpC2N_interior(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn,
                           solverStream_);
-    // --- end exchange: wait + unpack + edges + corners ---
+    // --- end exchange: MPI faces, edges and corners + unpack ---
     gpuBatchedHaloEndExchange();
     // BC
     gpuBCface_P(nxc, nyc, nzc, d_tempXC, 2, 2, 2, 2, 2, 2, &get_vct(),
@@ -2849,7 +2805,7 @@ void EMfields3D::gpuScatterMomentsD2D(cudaMomentType* momentsSrc, int species,
 }
 
 // =========================================================================
-//  GPU CommunicateGhostP2G – ALL species batched
+//  gpuCommunicateGhostP2G_AllSpecies – ALL species batched
 //  Processes species in chunks of HALO_MAX_BATCH / 10 . Each chunk runs the
 //  full 3-phase sequence (additive halo → boundary adjust → copy halo)
 //  independently.
@@ -2899,7 +2855,7 @@ void EMfields3D::gpuCommunicateGhostP2G_AllSpecies(int cycle) {
     }
 #endif
 
-    // Phase 2: adjust non-periodic boundary densities
+    // Phase 2: adjust the moments on the non-periodic boundary faces
     gpuAdjustNonPeriodicDensities(nFields, d_ptrArray_, nxn, nyn, nzn,
                                   vct->getXleft_neighbor_P() == MPI_PROC_NULL,
                                   vct->getXright_neighbor_P() == MPI_PROC_NULL,
@@ -2918,7 +2874,7 @@ void EMfields3D::gpuCommunicateGhostP2G_AllSpecies(int cycle) {
 }
 
 // =========================================================================
-//  GPU setZeroDerivedMoments
+//  gpuSetZeroDerivedMoments
 // =========================================================================
 
 void EMfields3D::gpuSetZeroDerivedMoments() {
@@ -2939,7 +2895,7 @@ void EMfields3D::gpuSetZeroDerivedMoments() {
 }
 
 // =========================================================================
-//  GPU neutralizeOutflowLayer: neutral rhons on the X-right outflow layer
+//  gpuNeutralizeOutflowLayer: neutral rhons on the X-right outflow layer
 // =========================================================================
 
 void EMfields3D::gpuNeutralizeOutflowLayer() {
@@ -2951,7 +2907,7 @@ void EMfields3D::gpuNeutralizeOutflowLayer() {
 }
 
 // =========================================================================
-//  GPU copyOutflowLayerMoments: J_s, P_s on the X-right outflow layer
+//  gpuCopyOutflowLayerMoments: J_s, P_s on the X-right outflow layer
 // =========================================================================
 
 void EMfields3D::gpuCopyOutflowLayerMoments() {
@@ -2970,7 +2926,7 @@ void EMfields3D::gpuCopyOutflowLayerMoments() {
 }
 
 // =========================================================================
-//  GPU zeroOutflowRhohat: no predicted charge beyond x_s
+//  gpuZeroOutflowRhohat: no predicted charge beyond x_s
 // =========================================================================
 
 void EMfields3D::gpuZeroOutflowRhohat() {
@@ -3027,7 +2983,7 @@ void EMfields3D::gpuOutflowGhostRows(cudaSolverType* const a[], int n) {
 }
 
 // =========================================================================
-//  GPU sumOverSpecies: rhon = Σ_s rhons_s
+//  gpuSumOverSpecies: rhon = Σ_s rhons_s
 // =========================================================================
 
 void EMfields3D::gpuSumOverSpecies() {
@@ -3037,7 +2993,7 @@ void EMfields3D::gpuSumOverSpecies() {
 }
 
 // =========================================================================
-//  GPU sumOverSpeciesJ: J = sum_s(J_s)
+//  gpuSumOverSpeciesJ: J = sum_s(J_s)
 // =========================================================================
 
 void EMfields3D::gpuSumOverSpeciesJ() {
@@ -3055,7 +3011,7 @@ void EMfields3D::gpuSumOverSpeciesJ() {
 }
 
 // =========================================================================
-//  GPU interpDensitiesN2C: rhoc = interp(rhon)
+//  gpuInterpDensitiesN2C: rhoc = interp(rhon)
 // =========================================================================
 
 void EMfields3D::gpuInterpDensitiesN2C() {
@@ -3063,7 +3019,7 @@ void EMfields3D::gpuInterpDensitiesN2C() {
 }
 
 // =========================================================================
-//  GPU OpenBoundaryInflowESource: RHS rows (E0) of the open inflow faces
+//  gpuOpenBoundaryInflowESource: RHS rows (E0) of the open inflow faces
 // =========================================================================
 
 void EMfields3D::gpuOpenBoundaryInflowESource(cudaSolverType* dX,
@@ -3084,7 +3040,7 @@ void EMfields3D::gpuOpenBoundaryInflowESource(cudaSolverType* dX,
 }
 
 // =========================================================================
-//  GPU OpenBoundaryInflowEImage: identity rows on the open inflow faces
+//  gpuOpenBoundaryInflowEImage: identity rows on the open inflow faces
 // =========================================================================
 
 void EMfields3D::gpuOpenBoundaryInflowEImage(
@@ -3099,7 +3055,7 @@ void EMfields3D::gpuOpenBoundaryInflowEImage(
 }
 
 // =========================================================================
-//  GPU OpenBoundaryInflowE: SAL blend / Dirichlet on E inflow faces
+//  gpuOpenBoundaryInflowE: SAL blend / Dirichlet on E inflow faces
 // =========================================================================
 
 void EMfields3D::gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY,
@@ -3121,7 +3077,8 @@ void EMfields3D::gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY,
         col->getBcPfaceXleft() == 2)
       gpuSALBlendLayers3(dX, dY, dZ, injE[0], injE[1], injE[2], 0, 0,
                          n_layers_sal, invNL, 1, nx, ny, nz, solverStream_);
-    // Xright: outflow — copy from interior reference plane (bcPface==3)
+    // Xright outflow face: gpuOutflowCopyE (reference-plane copy, or only
+    // the ghost node with OutflowLayerFields = solved)
     gpuOutflowCopyE(dX, dY, dZ);
     if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
         col->getBcPfaceYleft() == 2)
@@ -3168,7 +3125,7 @@ void EMfields3D::gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY,
 }
 
 // =========================================================================
-//  GPU OpenBoundaryInflowB: SAL blend / extrapolation on center B
+//  gpuOpenBoundaryInflowB: SAL blend / extrapolation on center B
 // =========================================================================
 
 void EMfields3D::gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
@@ -3240,7 +3197,7 @@ void EMfields3D::gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
 }
 
 // =========================================================================
-//  GPU fixBcGEM / fixBnGEM / fixBforcefree
+//  gpuFixBcGEM / gpuFixBnGEM / gpuFixBforcefree
 // =========================================================================
 
 void EMfields3D::gpuFixBcGEM() {
@@ -3283,7 +3240,7 @@ void EMfields3D::gpuFixBforcefree() {
 }
 
 // =========================================================================
-//  GPU ConstantChargePlanet
+//  gpuConstantChargePlanet / gpuConstantChargePlanet2DPlaneXZ
 // =========================================================================
 
 void EMfields3D::gpuConstantChargePlanet(double R, double x_center,
@@ -3299,6 +3256,8 @@ void EMfields3D::gpuConstantChargePlanet(double R, double x_center,
 
 void EMfields3D::gpuConstantChargePlanet2DPlaneXZ(double R, double x_center,
                                                   double z_center) {
+  // x-z plane: one cell in y, the kernel writes the node planes j = 1, 2
+  assert_eq(nyn, 4);
   for (int is = 0; is < ns; is++) {
     double sign_q = qom[is] / fabs(qom[is]);
     double val = sign_q * rhoINIT[is] / FourPI;
@@ -3312,15 +3271,15 @@ void EMfields3D::gpuConstantChargePlanet2DPlaneXZ(double R, double x_center,
 //  Ghost rule of the Poisson operator at physical (non-periodic) faces,
 //  in gpuBCface order: Xright, Xleft, Yright, Yleft, Zright, Zleft.
 //  0 = antisymmetric (ghost = -cell), 1 = zero ghost, 2 = copy (ghost = cell).
-//  Zero ghosts on every face, for both div(E) and div(B) cleaning, as in the
-//  CPU Grid3DCU::lapC2Cpoisson.  The communication-free operator of the
-//  Chebyshev preconditioner takes its physical-face rules from this table.
+//  Zero ghosts on every face, for both div(E) and div(B) cleaning.  The
+//  communication-free operator of the Chebyshev preconditioner takes its
+//  physical-face rules from this table.
 // =========================================================================
 
 static constexpr int kPoissonBCface[6] = {1, 1, 1, 1, 1, 1};
 
 // =========================================================================
-//  GPU PoissonImage: A*x for Poisson solver (center Laplacian)
+//  gpuPoissonImage: A*x for Poisson solver (center Laplacian)
 // =========================================================================
 
 void EMfields3D::gpuPoissonImage(cudaSolverType* d_im, cudaSolverType* d_vec) {
@@ -3410,7 +3369,7 @@ poissonLocalGhostRules(const VirtualTopology3D* vct, int nxc, int nyc,
 }
 
 // =========================================================================
-//  GPU PoissonImageLocal: -∇²·x (positive eigenvalues, NO communication)
+//  gpuPoissonImageLocal: -∇²·x (positive eigenvalues, NO communication)
 //  The ghost layer is never read: gpuLapC2CLocalKernel applies the face
 //  rules of poissonLocalGhostRules instead.
 // =========================================================================
@@ -3514,8 +3473,8 @@ void EMfields3D::computePoissonChebyshevEigenvalues() {
   // positive on [0, eigMax], with p(0) = T_k'(σ) / (δ T_k(σ)), so the null
   // space (constants) is only scaled: the preconditioner stays symmetric,
   // definite and non-singular, as flexible GMRES requires.  If every
-  // direction is flat the operator is zero and the preconditioner is the
-  // identity (gpuChebyshevPrecondPoisson).
+  // direction is flat the operator is zero and the preconditioner is minus
+  // the identity, the sign of x ≈ (∇²)⁻¹ b (gpuChebyshevPrecondPoisson).
   if (singular)
     rawEigMin = minNonZero;
 
@@ -3532,7 +3491,7 @@ void EMfields3D::computePoissonChebyshevEigenvalues() {
   if (poissonChebEigRatio > 0.0 && rawEigMax / poissonChebEigRatio > rawEigMin)
     rawEigMin = rawEigMax / poissonChebEigRatio;
 
-  // Apply rescaling (as in chebyshevIterationAlpaka.hpp)
+  // Rescale the bounds by PoissonChebRescaleEigMin / PoissonChebRescaleEigMax
   poissonChebEigMin = rawEigMin * poissonChebRescaleEigMin;
   poissonChebEigMax = rawEigMax * poissonChebRescaleEigMax;
 
@@ -3574,7 +3533,7 @@ void EMfields3D::computePoissonChebyshevEigenvalues() {
         poissonChebRescaleEigMax, rules.nCell[0], rules.nCell[1],
         rules.nCell[2], faces.c_str(),
         rawEigMax == 0.0
-            ? "  [zero operator: identity preconditioner]"
+            ? "  [zero operator: -identity preconditioner]"
             : (singular ? "  [singular: eigMin = smallest non-zero eigenvalue]"
                         : ""));
     if (range[0] != -range[1] || range[2] != -range[3])
@@ -3625,9 +3584,9 @@ void EMfields3D::gpuChebyshevPrecondPoisson(cudaSolverType* d_x,
   double delta = (eigMax - eigMin) * 0.5;
 
   // Degenerate spectra (see computePoissonChebyshevEigenvalues): a zero
-  // operator (every direction flat) gets the identity; a single eigenvalue
-  // (one cell in every direction) gets the exact inverse b / θ, which is
-  // the first Chebyshev iterate.
+  // operator (every direction flat) gets minus the identity; a single
+  // eigenvalue (one cell in every direction) gets the exact inverse -b / θ,
+  // which is the first Chebyshev iterate.
   if (!(eigMax > 0.0)) {
     gpuScaleCopy(d_x, d_b, -1.0, n, solverStream_);
     return;
@@ -3685,7 +3644,7 @@ void EMfields3D::gpuFGMRES_PoissonChebyshev(cudaSolverType* d_x, int n,
 }
 
 // =========================================================================
-//  GPU PoissonCorrection (div(E) cleaning)
+//  gpuPoissonCorrection (div(E) cleaning)
 // =========================================================================
 
 void EMfields3D::gpuPoissonCorrection(int cycle) {
@@ -3757,7 +3716,7 @@ void EMfields3D::gpuPoissonCorrection(int cycle) {
 }
 
 // =========================================================================
-//  GPU applyDivBCleaning
+//  gpuApplyDivBCleaning: lap(PSI) = div(B), B -= grad(PSI)
 // =========================================================================
 
 void EMfields3D::gpuApplyDivBCleaning() {
@@ -3830,5 +3789,3 @@ void EMfields3D::gpuApplyDivBCleaning() {
   gpuCommunicateCenterBC_3mixed(nxc, nyc, nzc, d_Bxc, col->bcBx, d_Byc,
                                 col->bcBy, d_Bzc, col->bcBz);
 }
-
-#endif // GPU_SOLVER

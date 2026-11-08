@@ -30,11 +30,9 @@ developers: Stefano Markidis, Giovanni Lapenta
 
 #include "ipicfwd.h"
 
-// These declarations are currently needed because Field is not anymore a class
-// CG needs a pointer to the function that solves the fields.
-//
-// To avoid changing all the code we typedef Field as of type EMfields3D (which
-// is not derived anymore from Field). This will be improved in future releases.
+// Host conjugate gradient (not used currently: the field solver runs on the
+// GPU). CG takes a pointer to an EMfields3D member function (the operator
+// image); Field is EMfields3D.
 
 class EMfields3D;
 typedef EMfields3D Field;

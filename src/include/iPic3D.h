@@ -20,7 +20,7 @@
  */
 
 /***************************************************************************
-  iPIC3D.cpp  -  Main file for 3D simulation
+  iPic3D.h  -  c_Solver, the top-level solver
   -------------------
  ************************************************************************** */
 
@@ -150,7 +150,10 @@ public:
    * @param species Species index.
    * @param doMomentsInLauncher True when moments are deposited in the same
    * async path.
-   * @return Status code from the launch path.
+   * @param waitForHeatFlux Wait until the heat-flux kernel has read this
+   * species' particles.
+   * @return Number of particles removed from the stayed prefix (MPI exiting
+   * + deleted + planet).
    */
   int cudaLauncherAsync(int species, bool doMomentsInLauncher,
                         bool waitForHeatFlux);
@@ -158,7 +161,7 @@ public:
    * @brief Launch mover and moment work for all species asynchronously.
    *
    * @param cycle Current simulation cycle.
-   * @return True when the mover pipeline completed successfully.
+   * @return Always false.
    */
   bool ParticlesMoverMomentAsync(int cycle);
   /**
@@ -166,7 +169,7 @@ public:
    * injections.
    *
    * @param cycle Current simulation cycle.
-   * @return True when the exchange path completed successfully.
+   * @return Always false.
    */
   bool MoverAwaitAndPclExchange(int cycle);
   void processPlanetParticles();
@@ -245,23 +248,13 @@ private:
   void pad_particle_capacities();
   void sortParticles();
   /**
-   * @brief Pack the current field interpolation buffer and copy it to the GPU.
+   * @brief Pack the current fields into the mover's device buffer.
    *
-   * @param synchronizeCopy Wait for the H2D copy before returning.
+   * @param synchronize Wait for the packing kernel before returning.
    */
-  void refreshFieldForPclsDeviceBuffer(bool synchronizeCopy);
-  /**
-   * @brief Copy one species' moment buffer from device to host.
-   *
-   * @param species Species index.
-   * @param stream CUDA stream used for the asynchronous copy.
-   */
-  void copyMomentsD2H(int species, cudaStream_t stream);
-  /** @brief Copy one species' communicated rho/J bulk moments to the GPU
-   * (host→device, GPU_SOLVER=OFF). */
-  void copyHeatFluxBulkH2D(int species, cudaStream_t stream);
-  /** @brief Copy one species' rho/J bulk moments device→device from GPU solver
-   * arrays (GPU_SOLVER=ON). */
+  void refreshFieldForPclsDeviceBuffer(bool synchronize);
+  /** @brief Copy one species' rho/J bulk moments device→device from the
+   * field solver's arrays. */
   void copyHeatFluxBulkD2D(int species, cudaStream_t stream);
   /** @brief Copy one species' heat-flux tensor from device to host storage. */
   void copyHeatFluxD2H(int species, cudaStream_t stream);
@@ -335,9 +328,8 @@ private:
 
   int cudaDeviceOnNode; // the device this rank should use
   cudaStream_t* streams;
-  cudaStream_t planetStream;   // dedicated stream for planet BC processing
-  cudaStream_t outputStream;   // dedicated stream for output D->H copies
-  cudaStream_t fieldH2DStream; // dedicated stream for fieldForPcl H->D copy
+  cudaStream_t planetStream; // dedicated stream for planet BC processing
+  cudaStream_t outputStream; // dedicated stream for output D->H copies
 
   std::future<int>* exitingResults;
   int* stayedParticle; // stayed particles for each species
@@ -346,7 +338,7 @@ private:
   particleArrayCUDA**
       pclsArrayHostPtr; // array of pointers to host-resident metadata objects
   departureArrayType** departureArrayHostPtr; // for every species
-  hashedSum** hashedSumArrayHostPtr;          // species * 8
+  hashedSum** hashedSumArrayHostPtr;          // [ns][HASHED_SUM_NUM]
   exitingArray** exitingArrayHostPtr;         // species
   arrayCUDA<SpeciesParticle>**
       incomingStagingHostPtr;              // per-species AoS staging for H→D
@@ -370,7 +362,7 @@ private:
   particleArrayCUDA** pclsArrayCUDAPtr; // array of pointers to device-resident
                                         // particle metadata
   departureArrayType** departureArrayCUDAPtr; // for every species
-  hashedSum** hashedSumArrayCUDAPtr;          // species * 8
+  hashedSum** hashedSumArrayCUDAPtr;          // [ns][HASHED_SUM_NUM]
   exitingArray** exitingArrayCUDAPtr;         // species
   arrayCUDA<SpeciesParticle>**
       incomingStagingCUDAPtr; // per-species device copy of staging metadata
@@ -388,10 +380,9 @@ private:
   cudaTypeArray1<cudaMomentType>* heatFluxCUDAPtr; // for every species
   // [rho,Jx,Jy,Jz][nxn][nyn][nzn] communicated lower moments per species.
   cudaTypeArray1<cudaMomentType>* heatFluxBulkCUDAPtr; // for every species
-  // Packed field-interpolation buffer copied from host for mover kernels.
+  // Packed field-interpolation buffer for the mover kernels, filled on the
+  // device by gpuPackFieldForPclsToCenter.
   cudaTypeArray1<cudaFieldType> fieldForPclCUDAPtr; // for all species
-
-  cudaTypeArray1<cudaFieldType> fieldForPclHostPtr;
 
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
   // Lazily allocated, persistent bounded buffers for opt-in cycle tracing.
@@ -401,24 +392,22 @@ private:
   ThreadPool* threadPoolPtr;
 
   cudaEvent_t event0, eventOutputCopy;
-  cudaEvent_t solverDoneEvent; ///< recorded on solverStream_ after field solve;
-                               ///< GPU_SOLVER only
+  cudaEvent_t solverDoneEvent; ///< recorded on solverStream_ after field solve
   cudaEvent_t momentsPipelineDoneEvt; ///< recorded on solverStream_ at end of
-                                      ///< MomentsAwait() GPU pipeline (after
+                                      ///< the MomentsAwait() pipeline (after
                                       ///< gpuCalculateHatFunctions); guards
                                       ///< heatFluxStream D2D reads of
-                                      ///< d_rhons/d_Jxs/d_Jys/d_Jzs. GPU_SOLVER
-                                      ///< + heatFlux only.
-  // Per-species end-of-cycle event, recorded on streams[i] right after
-  // copyMomentsD2H(i, streams[i]) at the end of MoverAwaitAndPclExchange.
-  // Captures both: (a) all in-place SoA writes for cycle i are complete,
-  // and (b) per-species moment D->H copy has finished. Used by:
+                                      ///< d_rhons/d_Jxs/d_Jys/d_Jzs. Heat
+                                      ///< flux only.
+  // Per-species end-of-cycle event, recorded on streams[i] right after the
+  // moment scatter (gpuScatterMomentsD2D) at the end of
+  // MoverAwaitAndPclExchange. Captures both: (a) all in-place SoA writes for
+  // cycle i are complete, and (b) the species' moments are in the field
+  // solver's arrays. Used by:
   //   - MomentsAwait()        (host-side cudaEventSynchronize)
   //   - outputCopyAsync()     (cudaStreamWaitEvent on outputStream)
   cudaEvent_t* cycleEndEvent; // [ns]
-  // Persistent per-species replacements for the previously per-call
-  // event1/event2 created inside cudaLauncherAsync. Hoisted out to avoid
-  // per-cycle create/destroy overhead.
+  // Per-species events of cudaLauncherAsync, created once in initCUDA.
   cudaEvent_t* moverHashedReadyEvt; // [ns] : recorded on streams[i]   after
                                     // mover writes hashedSums
   cudaEvent_t* auxHashedReadyEvt;   // [ns] : recorded on streams[i+ns] after

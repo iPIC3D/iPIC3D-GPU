@@ -266,17 +266,17 @@ def print_report(cfg: Input) -> None:
     print(f"Yright : {bc_p_yr} ({bc_p_name(bc_p_yr)})")
     print(f"Zleft  : {bc_p_zl} ({bc_p_name(bc_p_zl)})")
     print(f"Zright : {bc_p_zr} ({bc_p_name(bc_p_zr)})")
-    print(f"E inflow BCs in GMRes : {'yes' if apply_inflow else 'no'} (applied per-face where bcPface == 2)")
+    print(f"E inflow BCs in Maxwell image : {'yes' if apply_inflow else 'no'} (applied per-face where bcPface == 2)")
     print("---------------------")
     print("Field Corrections")
     print("---------------------")
     line = f"Poisson div(E) correction  : {poisson}"
     if poisson == "yes":
-        line += f", every {poisson_cycle} cycles (in calculateE)"
+        line += f", every {poisson_cycle} cycles (in gpuCalculateE)"
     print(line)
     line = f"div(B) cleaning            : {divb}"
     if divb == "yes":
-        line += f", every {divb_cycle} cycles (in calculateB)"
+        line += f", every {divb_cycle} cycles (in gpuCalculateB)"
     print(line)
     print("---------------------")
     print("Planet Boundary")

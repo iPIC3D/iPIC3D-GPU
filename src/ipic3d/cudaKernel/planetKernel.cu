@@ -491,13 +491,9 @@ __device__ inline cudaCommonType planetRngUniform(uint32_t& state) {
  *        uniform direction on the OUTWARD hemisphere while preserving
  *        the original speed |v|.
  *
- *        NOTE: this is NOT identical to the legacy CPU function
- *        rotateAndCountParticlesInsideSphere(). The legacy code samples
- *        theta uniformly in [0, pi) (global frame) then rejects the inward
- *        hemisphere, producing a non-uniform p(Omega) ~ 1/sin(theta).
- *        This kernel samples cos(theta) uniformly in (0, 1) in the LOCAL
- *        frame (z_local = outward normal), giving a truly uniform
- *        distribution on the outward hemisphere.
+ *        The kernel samples cos(theta) uniformly in (0, 1) in the LOCAL
+ *        frame (z_local = outward normal), giving a uniform distribution on
+ *        the outward hemisphere.
  *
  *        The hemisphere sampling is done without a rejection loop:
  *        a random direction is generated in a local frame whose z-axis
@@ -505,8 +501,7 @@ __device__ inline cudaCommonType planetRngUniform(uint32_t& state) {
  *        orthonormal basis (t1, t2, n).
  *        This avoids warp/wavefront divergence on both NVIDIA and AMD GPUs.
  *
- *        Position is reset to the sphere surface (unlike the legacy
- *        code which left it inside).
+ *        Position is reset to the sphere surface.
  *
  * @param planetArrs Device array of per-species planet buffers.
  * @param nElecSpecies Number of electron species present in `planetArrs`.

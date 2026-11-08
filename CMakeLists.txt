@@ -63,8 +63,8 @@ endif()
 
 option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA, ON for HIP
 
-set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for (minimum 75 for double atomicAdd)")
-set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture to compile for (e.g. gfx90a, gfx940, gfx1100)")
+set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for (minimum 75)")
+set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture to compile for (e.g. gfx90a, gfx942, gfx1100)")
 
 option(TIME_TASKS "Print per-cycle and cumulative task timings" OFF)
 set(BENCHMARK_MODE "0" CACHE STRING
@@ -76,22 +76,13 @@ if(NOT "${BENCHMARK_MODE}" MATCHES "^[012]$")
           "BENCHMARK_MODE must be 0, 1, or 2; got '${BENCHMARK_MODE}'")
 endif()
 option(USE_OPENMP "Use OpenMP in supported loops" ON) # must delete all cmake cache if you change this option
-option(GPU_SOLVER "Run the entire field solver on GPU (requires CUDA-aware MPI)" OFF)
-option(HALO_OVERLAP "Enable halo-computation overlap in the GPU field solver (requires GPU_SOLVER)" OFF)
+option(HALO_OVERLAP "Overlap halo exchanges with computation in the field solver" OFF)
 option(GPU_CYCLE_DIAGNOSTICS
        "Instrument one GPU timestep and the Maxwell RHS that consumes it"
        OFF)
 set(GPU_DIAGNOSTIC_CYCLE "1" CACHE STRING
     "Producer cycle instrumented by GPU_CYCLE_DIAGNOSTICS (-1 means every cycle)")
 option(BUILD_UTESTS "Build unit tests" OFF)
-
-if(HALO_OVERLAP AND NOT GPU_SOLVER)
-  message(FATAL_ERROR "HALO_OVERLAP requires GPU_SOLVER=ON")
-endif()
-
-if(GPU_CYCLE_DIAGNOSTICS AND NOT GPU_SOLVER)
-  message(FATAL_ERROR "GPU_CYCLE_DIAGNOSTICS requires GPU_SOLVER=ON")
-endif()
 
 if(NOT "${GPU_DIAGNOSTIC_CYCLE}" MATCHES "^-?[0-9]+$")
   message(FATAL_ERROR
@@ -316,7 +307,7 @@ else()
   enable_language(CUDA)
 
   if(CUDA_ARCH LESS 75)
-    message(FATAL_ERROR "CUDA_ARCH=${CUDA_ARCH} is too low. Minimum 75 is required for double-precision atomicAdd.")
+    message(FATAL_ERROR "CUDA_ARCH=${CUDA_ARCH} is too low. Minimum 75 is required.")
   endif()
 
   set_target_properties(iPIC3Dlib PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
@@ -411,11 +402,6 @@ if(USE_ADIOS2)
   target_compile_definitions(iPIC3Dlib PUBLIC USE_ADIOS2)
 endif()
 
-if(GPU_SOLVER)
-  target_compile_definitions(iPIC3Dlib PUBLIC GPU_SOLVER)
-  message(STATUS "GPU field solver enabled – requires CUDA-aware MPI at runtime")
-endif()
-
 if(GPU_CYCLE_DIAGNOSTICS)
   target_compile_definitions(
     iPIC3Dlib PUBLIC
@@ -447,7 +433,7 @@ else()
       "CUDA ${CMAKE_CUDA_COMPILER_ID} ${CMAKE_CUDA_COMPILER_VERSION}")
 endif()
 set(ipic3d_build_options "${ipic3d_device_option}")
-foreach(opt GPU_SOLVER HALO_OVERLAP BENCHMARK_MODE USE_OPENMP USE_HDF5
+foreach(opt HALO_OVERLAP BENCHMARK_MODE USE_OPENMP USE_HDF5
             USE_PHDF5 USE_ADIOS2 USE_CATALYST USE_BATSRUS TIME_TASKS
             GPU_CYCLE_DIAGNOSTICS)
   string(APPEND ipic3d_build_options " ${opt}=${${opt}}")
@@ -553,8 +539,7 @@ message(STATUS "  GPU backend                 : HIP  (arch=${HIP_ARCH})")
 else()
   message(STATUS "  GPU backend                 : CUDA  (arch=sm_${CUDA_ARCH})")
 endif()
-message(STATUS "  GPU solver                  : ${GPU_SOLVER}  (entire field solver on GPU, requires CUDA-aware MPI at runtime)")
-message(STATUS "  GPU halo overlap            : ${HALO_OVERLAP}  (overlap halo communication with computation in GPU field solver, requires GPU_SOLVER=ON)")
+message(STATUS "  GPU halo overlap            : ${HALO_OVERLAP}  (overlap halo communication with computation in the field solver)")
 message(STATUS "  GPU cycle diagnostics       : ${GPU_CYCLE_DIAGNOSTICS}  (producer cycle=${GPU_DIAGNOSTIC_CYCLE})")
 message(STATUS "  HDF5 output                 : ${USE_HDF5}")
 message(STATUS "  HDF5_INCLUDE_DIRS           : ${HDF5_INCLUDE_DIRS}")

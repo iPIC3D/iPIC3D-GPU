@@ -3,14 +3,12 @@
  * @brief GPU-aware MPI halo communication for iPIC3D GPU field solver.
  *
  * Mirrors the functionality of Com3DNonblk.cpp / BcFields3D.cpp but operates
- * directly on device-resident GPUFieldArray3 buffers via GPU-aware MPI.
- * MPI derived datatypes (already defined in EMfields3D for the host arrays)
- * are reused because the memory layout is identical.
+ * directly on device-resident GPUFieldArray3 buffers.  Exchanges pack faces,
+ * edges and corners into contiguous device buffers (GPUBatchedHaloComm.cu)
+ * and pass them to CUDA-aware MPI.
  *
  * Local self-copies (periodic, same-rank neighbours) and boundary-condition
  * application (BCface) are implemented as CUDA kernels.
- *
- * Compile with -DGPU_SOLVER to activate.
  */
 
 #ifndef GPU_HALO_COMM_CUH
@@ -23,9 +21,9 @@
 //  CUDA kernels for local self-copy (periodic same-rank neighbours)
 // =========================================================================
 
-/** Source-plane offset: 0 for center exchange, 1 for node-copy exchange. */
-
-/** Copy ghost faces for periodic X self-neighbour. */
+/** Copy ghost faces for periodic X self-neighbour.  offset (all self-copy
+ *  kernels): source-plane offset, 0 for center exchange, 1 for node-copy
+ *  exchange. */
 __global__ void gpuSelfCopyFaceX(cudaSolverType* __restrict__ arr, int nx,
                                  int ny, int nz, int offset);
 
@@ -199,8 +197,8 @@ void gpuBCface(int nx, int ny, int nz, GPUFieldArray3& gpuArr, int bcFaceXright,
 /**
  * @brief Apply face boundary conditions (particle version) on GPU array.
  *
- * GPU counterpart of BCface_P() in BcFields3D.cpp.
- * For now identical to gpuBCface.
+ * GPU counterpart of BCface_P() in BcFields3D.cpp: same face kernels as
+ * gpuBCface, with physical faces found from the particle-topology neighbours.
  */
 void gpuBCface_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
                  int bcFaceXright, int bcFaceXleft, int bcFaceYright,

@@ -7,7 +7,7 @@
  *
  *   k_maxwellLocalCenterOps  — fuses 3×gradN2C + divN2C  (center-level)
  *   k_maxwellLocalNodeFused  — fuses 3×divC2N + gradC2N + arithmetic
- *                               + phys2solver packing     (node-level)
+ *                               + Krylov packing          (node-level)
  *
  * Ghost cells are assumed to be zero (set by caller).
  * Boundary image corrections are not applied in these kernels; callers can
@@ -19,8 +19,6 @@
 
 #include "GPUMaxwellLocal.cuh"
 #include "GPUPointLaunch.cuh"
-
-#ifdef GPU_SOLVER
 
 // =========================================================================
 //  Kernel 1:  Fused center-level operations
@@ -152,7 +150,7 @@ __global__ void k_maxwellLocalCenterOps(
 //    3× divC2N  (Laplacians from 9 center gradient arrays)
 //    1× gradC2N (gradient of divD)
 //    negate, subtract, scale(dt²), add D, add E
-//    phys2solver packing (directly into Krylov vector)
+//    Krylov packing (directly into the Krylov vector)
 //
 //  Each thread processes one interior node (i,j,k).
 //
@@ -260,7 +258,7 @@ __global__ void k_maxwellLocalNodeFused(
   // ================================================================
   //  Arithmetic:  im = dt² * (-lap - gdiv) + D + E
   //
-  //  Matches the CPU MaxwellImage computation:
+  //  In the order of operations of gpuMaxwellImage:
   //    image = -lap(E)                         [negate]
   //    image -= grad(div(μ·E))                 [subtract]
   //    image *= dt²                            [scale]
@@ -281,7 +279,7 @@ __global__ void k_maxwellLocalNodeFused(
   T imZ = dt2 * (-lapZ - gdivZ) + dzv + ez;
 
   // ================================================================
-  //  Pack to Krylov solver vector (phys2solver interleaved layout)
+  //  Pack to the Krylov vector (interleaved layout of gpuPhys2Solver3)
   //    sol_idx = ((i-1)*(ny2) + (j-1)) * nz2 + (k-1)
   //    d_im[sol_idx*3 + 0/1/2] = imX/imY/imZ
   // ================================================================
@@ -334,5 +332,3 @@ void gpuMaxwellLocalNodeFused(
       vZ, dX, dY, dZ, nxn, nyn, nzn, invdx, invdy, invdz, dt2);
   cudaErrChk(cudaGetLastError());
 }
-
-#endif // GPU_SOLVER

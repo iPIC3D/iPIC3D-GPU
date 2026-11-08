@@ -5,7 +5,6 @@
 //  All kernels operate on flat Krylov vectors (interleaved Ex,Ey,Ez at
 //  interior nodes).
 // =========================================================================
-#ifdef GPU_SOLVER
 
 #include "GPUChebyshev.cuh"
 
@@ -68,5 +67,3 @@ void gpuChebyshevStepN(cudaSolverType* d_w, const cudaSolverType* d_y,
   k_chebyshevStepN<<<nblk, BLK, 0, stream>>>(d_w, d_y, d_z, d_b, d_Ay, fY, fB,
                                              fAy, fZ, n);
 }
-
-#endif // GPU_SOLVER

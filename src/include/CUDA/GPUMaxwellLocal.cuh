@@ -8,29 +8,24 @@
  * may apply boundary image corrections after unpacking. Ghost cells are
  * assumed to be zero.
  *
- * Intended use: GPU-local preconditioner for the GMRES Maxwell solver.
+ * Used by the block-Jacobi preconditioner of FGMRES (Richardson sweeps,
+ * BlockJacobiSweeps > 1).
  *
  * The operator computed is:
  *   A·E = Δt² [ -∇²E - ∇(∇·(μ̂·E)) ] + μ̂·E + E
  *
  * Pipeline (called from EMfields3D::gpuMaxwellImageLocal):
- *   1. gpuSolver2Phys3          — unpack Krylov → vectX/Y/Z (existing)
- *   2. gpuMUdot                 — D = μ̂·E  (existing, ns species)
+ *   1. gpuSolver2Phys3          — unpack Krylov → vectX/Y/Z
+ *   2. gpuMUdot                 — D = μ̂·E  (ns species)
  *   3. gpuMaxwellLocalCenterOps — fused: 3×gradN2C + divN2C → 10 center arrays
  *   4. gpuMaxwellLocalNodeFused — fused: 3×divC2N + gradC2N + arithmetic
- *                                  + phys2solver packing → d_im
- *
- * Total kernel launches: 2 + ns  (solver2phys, ns×MUdot, center, node).
- *
- * Compile with -DGPU_SOLVER to activate.
+ *                                  + Krylov packing → d_im
  */
 
 #ifndef GPU_MAXWELL_LOCAL_CUH
 #define GPU_MAXWELL_LOCAL_CUH
 
 #include "cudaTypeDef.cuh"
-
-#ifdef GPU_SOLVER
 
 // =========================================================================
 //  Fused center-level operations
@@ -70,7 +65,7 @@ void gpuMaxwellLocalCenterOps(
 // =========================================================================
 
 /**
- * @brief Fused divC2N(lap) + gradC2N(divD) + arithmetic + phys2solver.
+ * @brief Fused divC2N(lap) + gradC2N(divD) + arithmetic + Krylov packing.
  *
  * For each interior node (i,j,k) with 1 ≤ i ≤ nxn-2, etc.:
  *   - Reads the 8 surrounding center cells for 9 gradient arrays
@@ -103,7 +98,5 @@ void gpuMaxwellLocalNodeFused(
     const cudaSolverType* dZ, int nxn, int nyn, int nzn, cudaSolverType invdx,
     cudaSolverType invdy, cudaSolverType invdz, cudaSolverType dt2,
     cudaStream_t stream = 0);
-
-#endif // GPU_SOLVER
 
 #endif // GPU_MAXWELL_LOCAL_CUH

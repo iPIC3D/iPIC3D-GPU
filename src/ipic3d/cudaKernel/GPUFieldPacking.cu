@@ -1,12 +1,10 @@
 /**
  * @file GPUFieldPacking.cu
- * @brief CUDA kernel implementations for GPU field packing and moment
- *        unpacking.  See GPUFieldPacking.cuh for documentation.
+ * @brief GPU field packing for the particle mover.  See
+ *        GPUFieldPacking.cuh for documentation.
  */
 
 #include "GPUFieldPacking.cuh"
-
-#ifdef GPU_SOLVER
 
 // =========================================================================
 //  gpuPackFieldForPclsToCenter
@@ -83,5 +81,3 @@ __global__ void gpuPackFieldForPclsToCenter(
 
 #undef SRC
 }
-
-#endif // GPU_SOLVER

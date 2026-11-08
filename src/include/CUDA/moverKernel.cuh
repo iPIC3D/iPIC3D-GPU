@@ -41,8 +41,6 @@ public: // common parameter
 
   int NiterMover;
 
-  int DFIELD_3or4;
-
   cudaParticleType umax, umin, vmax, vmin, wmax, wmin;
 
   // moverOutflowParameter outflowParam;
@@ -74,10 +72,9 @@ public:
   __host__ moverParameter(ParticleSoAHost* pclHost, VirtualTopology3D* vct)
       : dt(pclHost->timeStep_), qom(pclHost->chargeOverMass_),
         c(pclHost->speedOfLight_), NiterMover(pclHost->numMoverIterations_),
-        DFIELD_3or4(::DFIELD_3or4), umax(pclHost->velocityCapMaxX_),
-        umin(pclHost->velocityCapMinX_), vmax(pclHost->velocityCapMaxY_),
-        vmin(pclHost->velocityCapMinY_), wmax(pclHost->velocityCapMaxZ_),
-        wmin(pclHost->velocityCapMinZ_) {
+        umax(pclHost->velocityCapMaxX_), umin(pclHost->velocityCapMinX_),
+        vmax(pclHost->velocityCapMaxY_), vmin(pclHost->velocityCapMinY_),
+        wmax(pclHost->velocityCapMaxZ_), wmin(pclHost->velocityCapMinZ_) {
     // create the particle array, stream 0
     pclsArray = particleArrayCUDA(pclHost).copyToDevice();
     departureArray = departureArrayType(pclHost->getNOP() * 1.5).copyToDevice();
@@ -100,11 +97,10 @@ public:
                           hashedSum* hashedSumArrayCUDAPtr)
       : dt(pclHost->timeStep_), qom(pclHost->chargeOverMass_),
         c(pclHost->speedOfLight_), NiterMover(pclHost->numMoverIterations_),
-        DFIELD_3or4(::DFIELD_3or4), umax(pclHost->velocityCapMaxX_),
-        umin(pclHost->velocityCapMinX_), vmax(pclHost->velocityCapMaxY_),
-        vmin(pclHost->velocityCapMinY_), wmax(pclHost->velocityCapMaxZ_),
-        wmin(pclHost->velocityCapMinZ_) {
-    // create the particle array, stream 0
+        umax(pclHost->velocityCapMaxX_), umin(pclHost->velocityCapMinX_),
+        vmax(pclHost->velocityCapMaxY_), vmin(pclHost->velocityCapMinY_),
+        wmax(pclHost->velocityCapMaxZ_), wmin(pclHost->velocityCapMinZ_) {
+    // use the existing device buffers
     pclsArray = pclsArrayCUDAPtr;
     departureArray = departureArrayCUDAPtr;
     hashedSumArray = hashedSumArrayCUDAPtr;

@@ -9,8 +9,6 @@
 #include <cstdio>
 #include <cstdlib>
 
-#ifdef GPU_SOLVER
-
 // =========================================================================
 //  Kernel configuration
 // =========================================================================
@@ -770,5 +768,3 @@ void gpuBlasFreeScratch(cudaSolverType* d_scratch) {
   if (d_scratch)
     cudaFree(d_scratch);
 }
-
-#endif // GPU_SOLVER

@@ -3,14 +3,9 @@
  * @brief Implementation of GPU-aware MPI halo communication and BC kernels.
  *
  * This file mirrors the logic of Com3DNonblk.cpp and BcFields3D.cpp, but
- * operates directly on device pointers (GPUFieldArray3).  MPI derived
- * datatypes from EMfields3D are reused because the contiguous row-major
- * layout on the GPU is identical to the host layout.
- *
- * Compile with -DGPU_SOLVER to activate.
+ * operates directly on device pointers (GPUFieldArray3).  The exchanges go
+ * through the batched pack/unpack of GPUBatchedHaloComm.cu.
  */
-
-#ifdef GPU_SOLVER
 
 #include "EMfields3D.h"
 #include "GPUHaloComm.cuh"
@@ -842,9 +837,8 @@ void gpuBCface_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
                  int bcFaceXright, int bcFaceXleft, int bcFaceYright,
                  int bcFaceYleft, int bcFaceZright, int bcFaceZleft,
                  const VirtualTopology3D* vct, cudaStream_t stream) {
-  // BCface_P uses particle-topology neighbours but same BC logic.
-  // For field solver, particle topology is not used; delegate to gpuBCface
-  // with the field topology neighbour checks already handled.
+  // Same face kernels as gpuBCface; physical faces are found with the
+  // particle-topology neighbours.
   cudaSolverType* d = gpuArr.devPtr();
 
   if (vct->getXleft_neighbor_P() == MPI_PROC_NULL) {
@@ -974,29 +968,9 @@ void EMfields3D::gpuCommunicateCenterBoxStencilBC(
 }
 
 // =========================================================================
-//  Batched 3-field communicate wrappers
-//
-//  These perform ONE batched halo exchange for 3 fields at once (nFields=3)
-//  instead of 3 sequential exchanges, eliminating 2 complete rounds of
-//  cudaStreamSynchronize + MPI_Waitall barriers per call.
+//  Multi-field communicate wrappers: one batched exchange for 3 or 9
+//  arrays, then the face BCs of each.
 // =========================================================================
-
-void EMfields3D::gpuCommunicateCenterBC_3(int nx, int ny, int nz,
-                                          GPUFieldArray3& a1,
-                                          GPUFieldArray3& a2,
-                                          GPUFieldArray3& a3, int bcXR,
-                                          int bcXL, int bcYR, int bcYL,
-                                          int bcZR, int bcZL) {
-  cudaSolverType* ptrs[3] = {a1.devPtr(), a2.devPtr(), a3.devPtr()};
-  gpuBatchedHaloExchange(ptrs, 3, nx, ny, nz, true, false, false, false,
-                         solverStream_);
-  gpuBCface(nx, ny, nz, a1, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct,
-            solverStream_);
-  gpuBCface(nx, ny, nz, a2, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct,
-            solverStream_);
-  gpuBCface(nx, ny, nz, a3, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct,
-            solverStream_);
-}
 
 void EMfields3D::gpuCommunicateCenterBC_P_3(int nx, int ny, int nz,
                                             GPUFieldArray3& a1,
@@ -1089,5 +1063,3 @@ void EMfields3D::gpuCommunicateCenterBC_9(
   gpuBCface(nx, ny, nz, a9, bcXR, bcXL, bcYR, bcYL, bcZR, bcZL, &_vct,
             solverStream_);
 }
-
-#endif // GPU_SOLVER

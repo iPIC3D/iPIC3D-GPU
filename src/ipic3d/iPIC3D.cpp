@@ -77,7 +77,9 @@ static int runSimulation(int argc, char** argv) {
     KCode.ScheduleHeatFlux(i);
 #endif
 
-    // DA analysis runs async on GPU while CalculateField runs on CPU.
+    // DA analysis runs on its own host thread, on the per-species particle
+    // streams, while CalculateField runs the field solve on the solver
+    // stream.
     // t_field is sampled *before* DA.waitForAnalysis() so that field=
     // reflects only the field solver and not particle-count-dependent
     // analysis wait time.
@@ -91,7 +93,8 @@ static int runSimulation(int argc, char** argv) {
 #endif
     auto t_da_wait = std::chrono::high_resolution_clock::now();
 
-    // Launch mover kernels; moments are computed after the sort.
+    // Launch the mover kernels (moments: in the launcher, or after the sort
+    // on sorting cycles).
     KCode.ParticlesMoverMomentAsync(i);
 #if IPIC3D_COMPILE_DISK_OUTPUT
     // Use otherwise-idle CPU time for output while the GPU mover runs.

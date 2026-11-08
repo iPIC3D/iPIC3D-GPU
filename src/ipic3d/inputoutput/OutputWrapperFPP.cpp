@@ -118,7 +118,7 @@ void OutputWrapperFPP::append_restart(int cycle, const string& restartDir) {
 
   hdf5_agent.open(restart_file);
   output_mgr.output("proc_topology ", cycle);
-  output_mgr.output("Eall + Ball + rhos + Js + pressure", cycle);
+  output_mgr.output("Eall + Ball + rhos + Jsall + pressure", cycle);
   string particleTag = "position + velocity + q";
   if (col_->anyRegularParticleID()) {
     particleTag += " + ID";

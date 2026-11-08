@@ -2,22 +2,18 @@
  * @file GPUStencils.cuh
  * @brief GPU stencil kernels for the iPIC3D GPU field solver.
  *
- * Provides GPU counterparts of all Grid3DCU stencil operations:
- *   gradC2N, gradN2C, divN2C, divC2N, curlC2N, curlN2C,
- *   interpC2N, interpN2C, divSymmTensorN2C, smooth (box stencil).
+ * Node and cell stencils: gradC2N, gradN2C, divN2C, divC2N, curlC2N,
+ *   curlN2C, interpC2N, interpN2C, divSymmTensorN2C, and the 7-point
+ *   smoothing step.
  *
  * All kernels operate on flat device pointers (row-major [nx][ny][nz]).
  * Grid dimensions include ghost cells.
- *
- * Compile with -DGPU_SOLVER to activate.
  */
 
 #ifndef GPU_STENCILS_CUH
 #define GPU_STENCILS_CUH
 
 #include "cudaTypeDef.cuh"
-
-#ifdef GPU_SOLVER
 
 // =========================================================================
 //  Gradient operations
@@ -131,9 +127,8 @@ void gpuInterpN2C(cudaSolverType* fieldC, const cudaSolverType* fieldN, int nxc,
  *   divCY = d(pXY)/dx + d(pYY)/dy + d(pYZ)/dz
  *   divCZ = d(pXZ)/dx + d(pYZ)/dy + d(pZZ)/dz
  *
- * Tensor components are species-sliced: pXX[is] starts at pXX_base +
- * is*nxn*nyn*nzn. Output on center grid, interior i=1..nxc-2. is = species
- * offset into the 4D arrays (pXX = pXX_4D + is*nxn*nyn*nzn).
+ * The caller passes the species slices of the tensor components. Output on
+ * center grid, interior i=1..nxc-2.
  */
 void gpuDivSymmTensorN2C(cudaSolverType* divCX, cudaSolverType* divCY,
                          cudaSolverType* divCZ, const cudaSolverType* pXX,
@@ -144,11 +139,11 @@ void gpuDivSymmTensorN2C(cudaSolverType* divCX, cudaSolverType* divCY,
                          cudaSolverType invdz, cudaStream_t stream = 0);
 
 // =========================================================================
-//  Smoothing (box stencil)
+//  Smoothing (7-point stencil)
 // =========================================================================
 
 /**
- * Single iteration of 6-point box smooth:
+ * Single iteration of the 7-point smooth:
  *   out[i][j][k] = alpha * in[i][j][k] + beta3D * (6 neighbours)
  *
  * Both 'in' and 'out' must be on the same grid (node- or center-based).
@@ -217,7 +212,5 @@ void gpuSmoothStep_boundary(cudaSolverType* out, const cudaSolverType* in,
                             cudaSolverType beta3D, cudaStream_t stream = 0);
 
 #endif // HALO_OVERLAP
-
-#endif // GPU_SOLVER
 
 #endif // GPU_STENCILS_CUH

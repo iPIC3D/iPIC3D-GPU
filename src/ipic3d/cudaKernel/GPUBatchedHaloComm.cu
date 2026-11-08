@@ -2,15 +2,10 @@
  * @file GPUBatchedHaloComm.cu
  * @brief Batched GPU halo exchange with explicit pack/unpack.
  *
- * Replaces MPI derived datatypes on device memory with explicit CUDA
- * pack/unpack kernels followed by contiguous MPI transfers.  Multiple
+ * Explicit CUDA pack/unpack kernels and contiguous MPI transfers.  Multiple
  * field arrays are batched into single MPI messages to minimise the
  * number of MPI calls per exchange.
- *
- * Compile with -DGPU_SOLVER to activate.
  */
-
-#ifdef GPU_SOLVER
 
 #include "EMfields3D.h"
 #include "GPUHaloComm.cuh" // single-array self-copy kernels, BC kernels
@@ -290,7 +285,7 @@ __global__ void k_batchAddCorner(cudaSolverType* const* __restrict__ fields,
 // =========================================================================
 //  BATCHED HALO EXCHANGE
 //
-//  Replaces gpuNBDerivedHaloComm for multiple arrays at once.
+//  The halo exchange of NBDerivedHaloComm, for several arrays at once.
 //  Uses explicit CUDA pack/unpack into persistent contiguous GPU buffers
 //  followed by MPI_Isend/Irecv of contiguous data.
 // =========================================================================
@@ -925,4 +920,3 @@ void EMfields3D::gpuBatchedHaloEndExchange() {
 }
 
 #endif // HALO_OVERLAP
-#endif // GPU_SOLVER

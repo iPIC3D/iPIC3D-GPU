@@ -83,7 +83,7 @@ private:
   VCtopology3D* vct;
   Grid3DCU* grid;
   EMfields3D* EMf;
-  ParticleSoAHost** part; // now we only copy from the CPU buffer
+  ParticleSoAHost** part; // host particle buffers
   // particleArrayCUDA **pclsArrayHostPtr;
   ParticleSoAHost** testpart;
   const RestartParticleCellMetadata* restartParticleCellMetadata = nullptr;

@@ -1,9 +1,8 @@
 /**
  * ParticleCommInjection.cpp — MPI particle exchange engine implementation.
  *
- * Adapts the communication, BC, and injection methods from the former
- * Particles3Dcomm + Particles3D into a standalone comm engine that
- * operates on an AoS comm buffer and AoS BlockCommunicator blocks.
+ * Particle communication, BC and injection methods, operating on an AoS comm
+ * buffer and AoS BlockCommunicator blocks.
  */
 
 #include "ParticleCommInjection.h"

@@ -4,13 +4,12 @@
  *
  * Element-wise vector operations (fill, scale, sum, sub, addscale, neg)
  * and reduction operations (dot product, norm) on flat device arrays.
- * Also provides GPU kernels for phys2solver / solver2phys conversion.
+ * Also provides the Krylov <-> physical packing kernels (gpuPhys2Solver*,
+ * gpuSolver2Phys*).
  *
  * All operations work on raw device pointers (cudaSolverType*) and can be
  * used with GPUFieldArray3::devPtr(), GPUFieldArray4::speciesPtr(), and
  * GPUKrylovVector::devPtr().
- *
- * Compile with -DGPU_SOLVER to activate.
  */
 
 #ifndef GPU_BLAS_CUH
@@ -18,8 +17,6 @@
 
 #include "cudaTypeDef.cuh"
 #include <cstddef>
-
-#ifdef GPU_SOLVER
 
 // =========================================================================
 //  Element-wise operations (flat device pointers, size n)
@@ -171,7 +168,7 @@ void gpuBatchedDotNorm(const cudaSolverType* w, const cudaSolverType* V_base,
 // =========================================================================
 
 /**
- * GPU phys2solver: pack 3 node-based 3D fields [nx][ny][nz] into a single
+ * Pack 3 node-based 3D fields [nx][ny][nz] into a single
  * interleaved 1D Krylov vector of length 3*(nx-2)*(ny-2)*(nz-2).
  *
  * Krylov index: ((i-1)*(ny-2)*(nz-2) + (j-1)*(nz-2) + (k-1))*3 + comp
@@ -183,14 +180,14 @@ void gpuPhys2Solver3(cudaSolverType* d_solver, const cudaSolverType* d_physX,
                      cudaStream_t stream = 0);
 
 /**
- * GPU phys2solver for a single scalar field (Poisson).
+ * Pack a single scalar field (Poisson).
  * Krylov index: (i-1)*(ny-2)*(nz-2) + (j-1)*(nz-2) + (k-1)
  */
 void gpuPhys2Solver1(cudaSolverType* d_solver, const cudaSolverType* d_phys,
                      int nx, int ny, int nz, cudaStream_t stream = 0);
 
 /**
- * GPU solver2phys: unpack 1D Krylov vector into 3 node-based fields.
+ * Unpack the 1D Krylov vector into 3 node-based fields.
  * Populates interior points [1..nx-2][1..ny-2][1..nz-2], ghosts untouched.
  */
 void gpuSolver2Phys3(cudaSolverType* d_physX, cudaSolverType* d_physY,
@@ -198,7 +195,7 @@ void gpuSolver2Phys3(cudaSolverType* d_physX, cudaSolverType* d_physY,
                      int nx, int ny, int nz, cudaStream_t stream = 0);
 
 /**
- * GPU solver2phys for a single scalar field (Poisson).
+ * Unpack a single scalar field (Poisson).
  */
 void gpuSolver2Phys1(cudaSolverType* d_phys, const cudaSolverType* d_solver,
                      int nx, int ny, int nz, cudaStream_t stream = 0);
@@ -213,7 +210,5 @@ void gpuBlasAllocScratch(cudaSolverType** d_scratch);
 
 /** Free the scratch buffer. */
 void gpuBlasFreeScratch(cudaSolverType* d_scratch);
-
-#endif // GPU_SOLVER
 
 #endif // GPU_BLAS_CUH

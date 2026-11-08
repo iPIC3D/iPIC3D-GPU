@@ -987,11 +987,6 @@ WaveLevelResult runObliqueWaveLevel(int cells, const TestInput& baseInput,
   initializeObliqueWave(fields, grid, wave);
   const cudaStream_t stream = fields.gpuSolverStream();
   fields.gpuSolverSyncH2D(stream);
-  // Corrections are disabled and the first E solve overwrites Eth; initialize
-  // its device mirrors anyway so the complete starting state is deterministic.
-  fields.gpuExth().setAll(0.0, stream);
-  fields.gpuEyth().setAll(0.0, stream);
-  fields.gpuEzth().setAll(0.0, stream);
 
   for (int cycle = 0; cycle < steps; cycle++) {
     fields.gpuCalculateE(cycle);

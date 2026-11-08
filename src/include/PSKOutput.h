@@ -348,7 +348,6 @@ public:
     Jx,Jy,Jz
     Jsall --> to write all Js (current densities for each species) components
     Jxs,Jys,Jzs
-    rho -> net charge density
     rhos -> charge densities for each species
     pressure -> pressure tensor for each species
     position -> particle position (x,y)
@@ -356,9 +355,13 @@ public:
     q -> particle charge
     ID -> particle ID for tracked species
     k_energy -> kinetic energy for each species
-    B_energy -> energy of magnetic field
-    E_energy -> energy of electric field
+    B_energy -> magnetic field energy of this rank
+    E_energy -> electric field energy of this rank
 
+    The solver requests collective, total_topology, proc_topology,
+    particle_cell_metadata, last_cycle and the restart tag
+    "Eall + Ball + rhos + Jsall + pressure"; the other tags are not requested
+    currently.
 */
 
   void output(const string& tag, int cycle) {
@@ -745,7 +748,7 @@ public:
       }
     }
 
-    // rhos (number density for species s) is written without ghost cells and
+    // rhos (charge density of species s) is written without ghost cells and
     // defined in nodes No scale factor is applied here: this path is used by
     // the restart writer, and the reader (RestartReader.cpp) loads the raw
     // value directly into rhons.
@@ -762,7 +765,7 @@ public:
       }
     }
 
-    // rho (number density ) is written without ghost cells and defined in nodes
+    // rho (net charge density) is not written by output(tag)
     //    if (tag.find("rho", 0) != string::npos) {
     //      this->output_adaptor.write("/moments/rho/cycle_" + cc.str(),
     //      PSK::Dimens(_grid->getNXN() - 2, _grid->getNYN() - 2,
@@ -829,45 +832,21 @@ public:
       }
     }
 
-    // magnetic energy (taken on nodes)
-    if (tag.find("B_energy", 0) != string::npos) {
-      double B_en;
-      B_en = 0;
-      for (int i = 1; i < _grid->getNXN(); i++) // get rid of ghost cells
-        for (int j = 1; j < _grid->getNYN(); j++)
-          for (int k = 1; k < _grid->getNYN(); k++)
-            // B_en += _field->getBx(i, j, k) * _field->getBx(i, j, k) +
-            // _field->getBy(i, j, k) * _field->getBy(i, j, k) +
-            // _field->getBz(i, j, k) * _field->getBz(i, j, k);
-            B_en += _field->getBxTot(i, j, k) * _field->getBxTot(i, j, k) +
-                    _field->getByTot(i, j, k) * _field->getByTot(i, j, k) +
-                    _field->getBzTot(i, j, k) * _field->getBzTot(i, j, k);
-      B_en = B_en / 32 / atan(1.0); // here there should be a getfourPI for the
-                                    // right value of pi
-      this->output_adaptor.write("/energy/magnetic/cycle_" + cc.str(), B_en);
-    }
-
-    // electric energy (taken on nodes)
-    if (tag.find("E_energy", 0) != string::npos) {
-      double E_en;
-      E_en = 0;
-      for (int i = 1; i < _grid->getNXN(); i++) // get rid of ghost cells
-        for (int j = 1; j < _grid->getNYN(); j++)
-          for (int k = 1; k < _grid->getNYN(); k++)
-            E_en += _field->getEx(i, j, k) * _field->getEx(i, j, k) +
-                    _field->getEy(i, j, k) * _field->getEy(i, j, k) +
-                    _field->getEz(i, j, k) * _field->getEz(i, j, k);
-      E_en = E_en / 32 / atan(1.0); // here there should be a getfourPI for the
-                                    // right value of pi
-      this->output_adaptor.write("/energy/electric/cycle_" + cc.str(), E_en);
-    }
+    // magnetic and electric energy of this rank (owned nodes); the sums over
+    // the ranks are Benergy / Eenergy of ConservedQuantities.txt
+    if (tag.find("B_energy", 0) != string::npos)
+      this->output_adaptor.write("/energy/magnetic/cycle_" + cc.str(),
+                                 _field->getLocalBenergy());
+    if (tag.find("E_energy", 0) != string::npos)
+      this->output_adaptor.write("/energy/electric/cycle_" + cc.str(),
+                                 _field->getLocalEenergy());
   }
 
   /**
    * @brief Write field and moment data controlled by OutputTagConfig.
    *
-   * Replaces the legacy string-based dispatch for field/moment output.
-   * Uses the same HDF5 dataset paths as the old code for compatibility.
+   * Writes the selected datasets under /fields and /moments, the paths
+   * output(tag) also uses.
    */
   void outputFieldsMoments(const OutputTagConfig& cfg, int cycle) {
     stringstream cc;
@@ -912,7 +891,7 @@ public:
     // --- Total rho ---
     if (cfg.writeRhoTot) {
       this->output_adaptor.write("/moments/rho/cycle_" + cc.str(), dims,
-                                 _field->getRHOn());
+                                 _field->getRHOn(), 4 * 3.1415926535897);
     }
 
     // --- Per-species J ---

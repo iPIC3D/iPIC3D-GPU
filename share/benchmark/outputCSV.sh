@@ -16,7 +16,7 @@ for dir in */; do
         fieldsTime=$(grep "Task Total\[fields\]:" "$logFile" | awk -F':' '{print $2}' | sed 's/s//;s/ //g')
         particlesTime=$(grep "Task Total\[particles\]:" "$logFile" | awk -F':' '{print $2}' | sed 's/s//;s/ //g')
         momentsTime=$(grep "Task Total\[moments\]:" "$logFile" | awk -F':' '{print $2}' | sed 's/s//;s/ //g')
-        simulationTime=$(grep "Simulation Time:" "$logFile" | awk -F' ' '{print $3}')
+        simulationTime=$(grep -E "Simulation Time *:" "$logFile" | sed -E 's/.*Simulation Time *: *([^ ]+) sec.*/\1/')
 
         fieldsTime=${fieldsTime:-"NA"}
         particlesTime=${particlesTime:-"NA"}

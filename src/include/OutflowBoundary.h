@@ -1,7 +1,7 @@
 /**
  * @file OutflowBoundary.h
- * @brief Codes shared by the CPU and GPU field solvers for the X-right open
- *        outflow face (bcEMfaceXright = 2, bcPfaceXright = 3).
+ * @brief Codes of the field solver for the X-right open outflow face
+ *        (bcEMfaceXright = 2, bcPfaceXright = 3).
  *
  * The Maxwell operator closes an outflow face with a zero-gradient ghost
  * node: the ghost node plane of its node work arrays, which is not part of

@@ -43,7 +43,6 @@ else()
   list(APPEND include_path ${INCLUDE_CODE_DIR}/hip)
 endif()
 target_include_directories(divbCleaningTest PUBLIC ${include_path})
-target_compile_definitions(divbCleaningTest PUBLIC GPU_SOLVER)
 
 if(NOT HIP_ON)
   set_property(TARGET divbCleaningTest PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})

@@ -369,11 +369,6 @@ void proddiv(arr3_double vect1, const arr3_double vect2, double alfa,
                      vect5.get(i, j, k) * vect6.get(i, j, k)) +
              beta * vect7.get(i, j, k) * vect8.get(i, j, k)) /
             (1 + gamma * vect9.get(i, j, k));
-
-  // questo mi convince veramente poco!!!!!!!!!!!!!! CAZZO!!!!!!!!!!!!!!!!!!
-  // ***vect1++ = (***vect2++ + alfa*((***vect3++)*(***vect4++) -
-  // (***vect5++)*(***vect6++)) +
-  // beta*(***vect7++)*(***vect8++))/(1+gamma*(***vect9++));
 }
 /** method to calculate the opposite of a vector */
 void neg(arr3_double vect, int nx, int ny, int nz) {
@@ -630,4 +625,58 @@ void loopZ(double* b, double x, double y, double z, double a, double xc,
   b[0] = Bx;
   b[1] = By;
   b[2] = Bz;
+}
+
+void solver2phys(arr3_double vectPhys, double* vectSolver, int nx, int ny,
+                 int nz) {
+#pragma omp parallel for collapse(2)
+  for (int i = 1; i < nx - 1; i++)
+    for (int j = 1; j < ny - 1; j++) {
+      int idx = (i - 1) * (ny - 2) + (j - 1);
+      for (int k = 1; k < nz - 1; k++)
+        vectPhys[i][j][k] = vectSolver[idx * (nz - 2) + (k - 1)];
+    }
+}
+
+void solver2phys(arr3_double vectPhys1, arr3_double vectPhys2,
+                 arr3_double vectPhys3, double* vectSolver, int nx, int ny,
+                 int nz) {
+#pragma omp parallel for collapse(2)
+  for (int i = 1; i < nx - 1; i++)
+    for (int j = 1; j < ny - 1; j++) {
+      int idx = (i - 1) * (ny - 2) + (j - 1);
+      for (int k = 1; k < nz - 1; k++) {
+        int idy = (idx * (nz - 2) + (k - 1)) * 3;
+        vectPhys1[i][j][k] = vectSolver[idy];
+        vectPhys2[i][j][k] = vectSolver[idy + 1];
+        vectPhys3[i][j][k] = vectSolver[idy + 2];
+      }
+    }
+}
+
+void phys2solver(double* vectSolver, const arr3_double vectPhys, int nx, int ny,
+                 int nz) {
+#pragma omp parallel for collapse(2)
+  for (int i = 1; i < nx - 1; i++)
+    for (int j = 1; j < ny - 1; j++) {
+      int idx = (i - 1) * (ny - 2) + (j - 1);
+      for (int k = 1; k < nz - 1; k++)
+        vectSolver[idx * (nz - 2) + (k - 1)] = vectPhys.get(i, j, k);
+    }
+}
+
+void phys2solver(double* vectSolver, const arr3_double vectPhys1,
+                 const arr3_double vectPhys2, const arr3_double vectPhys3,
+                 int nx, int ny, int nz) {
+#pragma omp parallel for collapse(2)
+  for (int i = 1; i < nx - 1; i++)
+    for (int j = 1; j < ny - 1; j++) {
+      int idx = (i - 1) * (ny - 2) + (j - 1);
+      for (int k = 1; k < nz - 1; k++) {
+        int idy = (idx * (nz - 2) + (k - 1)) * 3;
+        vectSolver[idy] = vectPhys1.get(i, j, k);
+        vectSolver[idy + 1] = vectPhys2.get(i, j, k);
+        vectSolver[idy + 2] = vectPhys3.get(i, j, k);
+      }
+    }
 }

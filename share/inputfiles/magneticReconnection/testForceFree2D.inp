@@ -1,0 +1,175 @@
+# Publications that use results from iPIC3D need to properly cite
+# 'S. Markidis, G. Lapenta, and Rizwan-uddin. "Multi-scale simulations of
+# plasma with iPIC3D." Mathematics and Computers in Simulation 80.7 (2010): 1509-1519.'
+#
+# Copyright 2015 KTH Royal Institute of Technology
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#         http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Runtime input options configured for this small 2D force-free current sheet test
+# (B0z = B0x makes the sheet force-free).
+# Controls for other cases or disabled features are kept at inert defaults.
+# Compile-time constants in iPIC3Dlib.cu are not input-file options.
+# Brackets show the value used when a key is omitted; required keys have no default.
+
+# %%%%%%%%%%%%%%%%%%%% RUN AND I/O %%%%%%%%%%%%%%%%%%%%
+SaveDirName    = data                   # Fresh-run output directory [default: data]
+RestartDirName = data                   # Checkpoint directory [default: data]
+Case           = ForceFree              # Case-sensitive initialization case [required]
+SimulationName = testForceFree2D        # Output dataset name [required]
+# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk.
+WriteMethod    = pvtk                   # [required]
+
+# %%%%%%%%%%%%%%%%%%%% TIME INTEGRATION %%%%%%%%%%%%%%%%%%%%
+dt      = 0.15                          # Time step [required]
+ncycles = 3000                          # Cycles in this run [required]
+th      = 1.0                           # Implicit decentering parameter [default: 1.0]
+c       = 1.0                           # Normalized light speed [default: 1.0]
+
+# %%%%%%%%%%%%%%%%%%%% INITIAL FIELDS %%%%%%%%%%%%%%%%%%%%
+# Harris-sheet asymptotic field (B0x) and peak of the sheet's
+# Bz = B0z/cosh((y-Ly/2)/delta).
+B0x = 0.0195                            # [default: 0.0]
+B0y = 0.0                               # [default: 0.0]
+B0z = 0.0195                            # [default: 0.0]
+
+delta = 0.5                             # Current-sheet half-thickness [default: 0.5]
+
+Smooth      = 0.2                       # Smoothing coefficient; 1 disables [default: 1.0]
+SmoothNiter = 6                         # Smoothing passes [default: 6]
+
+PoissonCorrection      = no             # Exact "yes" enables div(E) cleaning [default: no]
+PoissonCorrectionCycle = 10             # div(E) cleaning interval [default: 10]
+divBCorrection         = no             # Exact "yes" enables div(B) cleaning [default: no]
+divBCorrectionCycle    = 10             # div(B) cleaning interval [default: 10]
+
+# %%%%%%%%%%%%%%%%%%%% DOMAIN AND TOPOLOGY %%%%%%%%%%%%%%%%%%%%
+Lx = 20                                 # Global x length [default: 10.0]
+Ly = 10                                 # Global y length [default: 10.0]
+Lz = 10                                 # Global z length [default: 10.0]
+
+nxc = 64                                # Global x cells [default: 64]
+nyc = 32                                # Global y cells [default: 64]
+nzc = 1                                 # Global z cells [default: 64]
+
+# XLEN*YLEN*ZLEN must equal the MPI process count.
+XLEN = 4                                # MPI subdomains in x [default: 1]
+YLEN = 2                                # MPI subdomains in y [default: 1]
+ZLEN = 1                                # MPI subdomains in z [default: 1]
+
+# Periodicity; omitted particle flags inherit these values. 1=periodic, 0=nonperiodic.
+PERIODICX = 1                           # [default: true]
+PERIODICY = 0                           # [default: true]
+PERIODICZ = 1                           # [default: true]
+
+# %%%%%%%%%%%%%%%%%%%% PARTICLES %%%%%%%%%%%%%%%%%%%%
+# Species: e-, i+.
+ns = 2                                  # Total species count [required]
+
+# Initial density
+rhoINIT   = 1.0  1.0                    # Initial densities [required]
+rhoINJECT = 0.0  0.0                    # Boundary injection densities [required]
+
+npcelx = 3  3                           # Particles per cell in x [required]
+npcely = 3  3                           # Particles per cell in y [required]
+npcelz = 3  3                           # Particles per cell in z [required]
+
+# qom = charge to mass ratio for different species
+#     e        i
+qom = -64.0    1.0                      # [required]
+
+# Thermal velocity
+uth = 0.045  0.0126                     # x thermal speeds [required]
+vth = 0.045  0.0126                     # y thermal speeds [required]
+wth = 0.045  0.0126                     # z thermal speeds [required]
+
+# Weights of the current split: species s carries the share
+# sign(q_s) u0_s / sum_r sign(q_r) u0_r of J_x = (c/4pi) (curl B)_x (v0 for
+# J_y, w0 for J_z), and drifts with J_s / (sign(q_s) rho_s)
+u0 = 0.0065  -0.0325                    # x current-split weights [required]
+v0 = 0.0     0.0                        # y current-split weights [required]
+w0 = 0.0065  -0.0325                    # z current-split weights [required]
+
+TrackParticleID = 1  1                  # Per-species ID mask [default: all 0]
+
+SortingCycle = 1                        # GPU cell-sort interval; 0 disables [default: 0]
+
+# %%%%%%%%%%%%%%%%%%%% VELOCITY SPECTRA %%%%%%%%%%%%%%%%%%%%
+# Generates 2D (v_par, v_perp with respect to B field) velocity spectra
+# Spectra are generated per macrocell
+# Requires compile-time MACROCELL_SPECTRA_ENABLE switch = True in /src/include/dataAnalysis/dataAnalysisConfig.cuh
+# Default MACROCELL_SPECTRA_ENABLE = True
+# Runs only when VelocitySpectra = 1 and all three macrocell sizes are > 0.
+VelocitySpectra        = 0              # Runtime master switch; 0 disables [default: 0]
+MacrocellNx            = 0              # Macrocell x size in local cells [default: 0]
+MacrocellNy            = 0              # Macrocell y size in local cells [default: 0]
+MacrocellNz            = 0              # Macrocell z size in local cells [default: 0]
+VelocitySpectraSpecies = 0 0            # Per-species enable mask [default: all 0]
+
+# %%%%%%%%%%%%%%%%%%%% BOUNDARY CONDITIONS %%%%%%%%%%%%%%%%%%%%
+# Phi BC (not used by the field solver).
+bcPHIfaceXright = 1                     # [default: 1]
+bcPHIfaceXleft  = 1                     # [default: 1]
+bcPHIfaceYright = 1                     # [default: 1]
+bcPHIfaceYleft  = 1                     # [default: 1]
+bcPHIfaceZright = 1                     # [default: 1]
+bcPHIfaceZleft  = 1                     # [default: 1]
+
+# EM BC: 0=conductor, 1=magnetic mirror, 2=open/inflow.
+bcEMfaceXright = 0                      # [required]
+bcEMfaceXleft  = 0                      # [required]
+bcEMfaceYright = 0                      # [required]
+bcEMfaceYleft  = 0                      # [required]
+bcEMfaceZright = 0                      # [required]
+bcEMfaceZleft  = 0                      # [required]
+
+yes_sal      = 0                        # Enable absorbing layers [default: 0]
+n_layers_sal = 3                        # Layer thickness in cells [default: 3]
+
+# Particle BC: 0=exit, 1=mirror, 2=reemit, 3=open outflow, 4=open inflow.
+bcPfaceXright = 1                       # [default: 1]
+bcPfaceXleft  = 1                       # [default: 1]
+bcPfaceYright = 1                       # [default: 1]
+bcPfaceYleft  = 1                       # [default: 1]
+bcPfaceZright = 1                       # [default: 1]
+bcPfaceZleft  = 1                       # [default: 1]
+
+ApplyInflowBcsEImage = 1                # Include inflow E terms [default: 1]
+
+# %%%%%%%%%%%%%%%%%%%% NUMERICAL SOLVERS %%%%%%%%%%%%%%%%%%%%
+CGtol      = 1E-3                       # Host CG tolerance (not used) [default: 1e-3]
+GMREStol   = 1E-3                       # Maxwell and Poisson GMRES/FGMRES tolerance [default: 1e-3]
+NiterMover = 3                          # Predictor-corrector iterations [default: 3]
+
+# Maxwell solver: GMRES, FGMRESBlockJacobi or Chebyshev.
+SolverType = GMRES                      # [default: GMRES]
+
+# Chebyshev preconditioner of the div(E)/div(B) Poisson solves.
+PoissonChebMaxIter       = 10           # Polynomial degree = value + 1 [default: 10]
+PoissonChebRescaleEigMin = 1.0          # Lower-bound multiplier [default: 1.0]
+PoissonChebRescaleEigMax = 1.0          # Upper-bound multiplier [default: 1.0]
+
+# %%%%%%%%%%%%%%%%%%%% OUTPUT AND RESTART %%%%%%%%%%%%%%%%%%%%
+# Tags are joined with +; an empty tag writes nothing.
+# FieldOutputTag: B, E; Je, Ji, Je2, Ji3 (species 0-3 current), rho (total).
+# MomentsOutputTag: rho, J, P (PXX..PZZ), Q (heat flux) or one component
+# (PXX, Qxyz, ...) for all species; append a species index (rho0, J1, P2)
+# for one species or _tot (rho_tot, J_tot, P_tot, Q_tot) for the sum.
+# ParticlesOutputTag: position, velocity, q, ID.
+FieldOutputCycle       = 100                  # Field/moment interval; <=0 disables [default: 100]
+FieldOutputTag         = B+E                  # Grid fields [default: empty]
+MomentsOutputTag       = rho+J0+J1+P          # Species moments [default: empty]
+ParticlesOutputCycle   = 45                   # Particle interval; <=0 disables [default: 0]
+ParticlesOutputTag     = position+velocity+q  # Particle fields [default: empty]
+DiagnosticsOutputCycle = 100                  # Scalar interval [default: FieldOutputCycle]
+RestartOutputCycle     = 100                  # Checkpoint interval; <=0 disables [default: 5000]
+CallFinalize           = 1                    # Final checkpoint if restart output enabled [default: true]

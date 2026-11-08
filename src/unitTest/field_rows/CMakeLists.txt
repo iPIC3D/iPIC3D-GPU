@@ -40,7 +40,6 @@ else()
   list(APPEND include_path ${INCLUDE_CODE_DIR}/hip)
 endif()
 target_include_directories(fieldRowsTest PUBLIC ${include_path})
-target_compile_definitions(fieldRowsTest PUBLIC GPU_SOLVER)
 
 if(NOT HIP_ON)
   set_property(TARGET fieldRowsTest PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})

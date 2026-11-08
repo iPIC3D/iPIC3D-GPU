@@ -1,8 +1,6 @@
 /**
- * ParticleSoAHost.cpp — Unified SoA host container implementation.
- *
- * Merges all init, diagnostics, sort, BC config, and injection methods
- * from the former Particles3D, Particles3Dcomm, and ParticleSoAHost.
+ * ParticleSoAHost.cpp — SoA host container implementation: particle
+ * initialisation, diagnostics, sorting, BC configuration and AoS append.
  */
 
 #include "ParticleSoAHost.h"
@@ -194,13 +192,47 @@ void ParticleSoAHost::maxwellian(Field* EMf) {
   }
 }
 
+namespace {
+/** Node values of field f at the 8 nodes of cell (i, j, k):
+ *  c[a][b][d] = f(i + a, j + b, k + d). */
+void cellNodeValues(const const_arr3_double& f, int i, int j, int k,
+                    double c[2][2][2]) {
+  for (int a = 0; a < 2; a++)
+    for (int b = 0; b < 2; b++)
+      for (int d = 0; d < 2; d++)
+        c[a][b][d] = f.get(i + a, j + b, k + d);
+}
+
+/** Trilinear interpolation of the 8 node values c of a cell at the
+ *  fractional position (fx, fy, fz) in [0, 1]^3 within the cell. */
+inline double trilinear(const double c[2][2][2], double fx, double fy,
+                        double fz) {
+  const double gx = 1.0 - fx, gy = 1.0 - fy, gz = 1.0 - fz;
+  return gx * (gy * (gz * c[0][0][0] + fz * c[0][0][1]) +
+               fy * (gz * c[0][1][0] + fz * c[0][1][1])) +
+         fx * (gy * (gz * c[1][0][0] + fz * c[1][0][1]) +
+               fy * (gz * c[1][1][0] + fz * c[1][1][1]));
+}
+} // namespace
+
 /**
- * @brief Populate the null-points/Taylor-Green cases with local current-driven
- * drift.
+ * @brief Populate with a Maxwellian whose drift is the local drift of the
+ * species currents set by the field initialisation.
  *
- * @param EMf Field object used to sample density and local current.
+ * The drift of each particle is J_s / (sign(q) rho_s), with rho_s and J_s
+ * interpolated trilinearly from the 8 nodes of its cell to its position.
+ * With varyingThermal, the thermal speed is sqrt(p_ii,s / rho_s - drift_i^2)
+ * with p_ii,s interpolated the same way (the ECsim reference-state
+ * initialisation); otherwise it is the species uth/vth/wth.
+ *
+ * @param EMf Field object providing the species density, current and, with
+ * varyingThermal, pressure.
+ * @param varyingThermal Take the thermal speed from the species pressure.
  */
-void ParticleSoAHost::maxwellianNullPoints(Field* EMf) {
+void ParticleSoAHost::maxwellianFromSpeciesCurrents(Field* EMf,
+                                                    bool varyingThermal) {
+  assert_eq(getNOP(), 0);
+
   const int nxr = numCellsX_ - 2;
   const int nyr = numCellsY_ - 2;
   const int nzr = numCellsZ_ - 2;
@@ -212,88 +244,16 @@ void ParticleSoAHost::maxwellianNullPoints(Field* EMf) {
   const double chargeFactor =
       chargeSign * grid_->getVOL() / numParticlesPerCell_;
 
-  prepareSoAForNOP(nop);
-
-#pragma omp parallel
-  {
-    const int tid = omp_get_thread_num();
-    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 +
-                        tid * 1049);
-
-#pragma omp for collapse(3) schedule(static)
-    for (int i = 1; i < numCellsX_ - 1; i++)
-      for (int j = 1; j < numCellsY_ - 1; j++)
-        for (int k = 1; k < numCellsZ_ - 1; k++) {
-          const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
-          const int idxBase = cellIdx * numParticlesPerCell_;
-          const double chargePerParticle =
-              chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
-
-          // Jxs from initGEMHarris/initNullPoints stores the Ampere current in
-          // the field convention (unsigned rhons).  The moment kernel deposits
-          // Jzs_moment = sign(q)*rhons*v, so drift = Jzs / (sign(q)*rhons).
-          const double signedRho =
-              chargeSign * EMf->getRHOns(i, j, k, speciesNumber_);
-          double localDriftX = EMf->getJxs(i, j, k, speciesNumber_) / signedRho;
-          double localDriftY = EMf->getJys(i, j, k, speciesNumber_) / signedRho;
-          double localDriftZ = EMf->getJzs(i, j, k, speciesNumber_) / signedRho;
-
-          for (int ii = 0; ii < numPclPerCellX_; ++ii)
-            for (int jj = 0; jj < numPclPerCellY_; ++jj)
-              for (int kk = 0; kk < numPclPerCellZ_; ++kk) {
-                const int subIdx =
-                    (ii * numPclPerCellY_ + jj) * numPclPerCellZ_ + kk;
-                const int idx = idxBase + subIdx;
-
-                double velX, velY, velZ;
-                sample_maxwellian(velX, velY, velZ, thermalVelocityX_,
-                                  thermalVelocityY_, thermalVelocityZ_,
-                                  localDriftX, localDriftY, localDriftZ, rng);
-
-                u[idx] = velX;
-                v[idx] = velY;
-                w[idx] = velZ;
-                q[idx] = chargePerParticle;
-                x[idx] = (ii + .5) * (gridSpacingX_ / numPclPerCellX_) +
-                         grid_->getXN(i, j, k);
-                y[idx] = (jj + .5) * (gridSpacingY_ / numPclPerCellY_) +
-                         grid_->getYN(i, j, k);
-                z[idx] = (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) +
-                         grid_->getZN(i, j, k);
-                if (trackParticleID_)
-                  id[idx] =
-                      particleIDGenerator_.idFromSequence(baseSequence + idx);
-              }
-        }
-  }
-}
-
-/**
- * @brief Populate using local Ampere-driven drift and reference-state thermal
- * velocity.
- *
- * Drift: v_drift = Jxs/rhons per cell (from currentFromAmpere).
- * Thermal: vth = sqrt(pXXsn/rhons - (Jxs/rhons)^2) per cell.
- * Matches the ECsim reference-state initialization (at id=0 this gives global
- * uth algebraically, but preserves the mechanism for discrete numerical effects
- * and future extension to non-trivial pressure profiles).
- *
- * @param EMf Field object with Ampere currents and reference pressure state.
- */
-void ParticleSoAHost::maxwellianAmpereVaryingThermal(Field* EMf) {
-  assert_eq(getNOP(), 0);
-
-  const int nxr = numCellsX_ - 2;
-  const int nyr = numCellsY_ - 2;
-  const int nzr = numCellsZ_ - 2;
-  const int nop = nxr * nyr * nzr * numParticlesPerCell_;
-  const auto baseSequence =
-      trackParticleID_ ? particleIDGenerator_.reserveHostSequenceBlock(nop)
-                       : ParticleIDGenerator::counter_type{0};
-  const double chargeSign =
-      chargeOverMass_ / fabs(chargeOverMass_); // +1 ions, -1 electrons
-  const double chargeFactor =
-      chargeSign * grid_->getVOL() / numParticlesPerCell_;
+  // The field initialisation (initSpeciesCurrents for GEMHarris and
+  // ForceFree, initNullPoints, initTaylorGreen) stores J_s in the field
+  // convention, with unsigned rhons.  The moment kernel deposits
+  // sign(q)*rhons*v, so the drift is J_s / (sign(q)*rhons).
+  const int s = speciesNumber_;
+  const arr3_double rho = EMf->getRHOns(s);
+  const arr3_double jx = EMf->getJxs(s), jy = EMf->getJys(s),
+                    jz = EMf->getJzs(s);
+  const arr3_double pxx = EMf->getpXXsn(s), pyy = EMf->getpYYsn(s),
+                    pzz = EMf->getpZZsn(s);
 
   prepareSoAForNOP(nop);
 
@@ -310,37 +270,19 @@ void ParticleSoAHost::maxwellianAmpereVaryingThermal(Field* EMf) {
           const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
           const int idxBase = cellIdx * numParticlesPerCell_;
           const double chargePerParticle =
-              chargeFactor * EMf->getRHOcs(i, j, k, speciesNumber_);
+              chargeFactor * EMf->getRHOcs(i, j, k, s);
 
-          // Local drift velocity from Ampere current.
-          // Jxs is stored in the Ampere/field convention (no charge sign),
-          // but rhons during init is always positive (unsigned).  The moment
-          // kernel deposits Jzs_moment = sign(q)*rho*v, so to recover the
-          // physical drift velocity we must divide by sign(q)*rho.
-          const double rho = EMf->getRHOns(i, j, k, speciesNumber_);
-          const double signedRho = chargeSign * rho;
-          const double localDriftX =
-              EMf->getJxs(i, j, k, speciesNumber_) / signedRho;
-          const double localDriftY =
-              EMf->getJys(i, j, k, speciesNumber_) / signedRho;
-          const double localDriftZ =
-              EMf->getJzs(i, j, k, speciesNumber_) / signedRho;
-
-          // Local thermal velocity from reference pressure state:
-          // vth_i = sqrt(p_ii / rho - (J_i / rho)^2)
-          const double pxx = EMf->getpXXsn(i, j, k, speciesNumber_);
-          const double pyy = EMf->getpYYsn(i, j, k, speciesNumber_);
-          const double pzz = EMf->getpZZsn(i, j, k, speciesNumber_);
-          const double vthX2 = pxx / rho - localDriftX * localDriftX;
-          const double vthY2 = pyy / rho - localDriftY * localDriftY;
-          const double vthZ2 = pzz / rho - localDriftZ * localDriftZ;
-          // Guard against negative values from floating-point round-off
-          const double localVthX =
-              (vthX2 > 0.0) ? sqrt(vthX2) : thermalVelocityX_;
-          const double localVthY =
-              (vthY2 > 0.0) ? sqrt(vthY2) : thermalVelocityY_;
-          const double localVthZ =
-              (vthZ2 > 0.0) ? sqrt(vthZ2) : thermalVelocityZ_;
+          double cRho[2][2][2], cJx[2][2][2], cJy[2][2][2], cJz[2][2][2];
+          double cPxx[2][2][2], cPyy[2][2][2], cPzz[2][2][2];
+          cellNodeValues(rho, i, j, k, cRho);
+          cellNodeValues(jx, i, j, k, cJx);
+          cellNodeValues(jy, i, j, k, cJy);
+          cellNodeValues(jz, i, j, k, cJz);
+          if (varyingThermal) {
+            cellNodeValues(pxx, i, j, k, cPxx);
+            cellNodeValues(pyy, i, j, k, cPyy);
+            cellNodeValues(pzz, i, j, k, cPzz);
+          }
 
           for (int ii = 0; ii < numPclPerCellX_; ++ii)
             for (int jj = 0; jj < numPclPerCellY_; ++jj)
@@ -349,10 +291,36 @@ void ParticleSoAHost::maxwellianAmpereVaryingThermal(Field* EMf) {
                     (ii * numPclPerCellY_ + jj) * numPclPerCellZ_ + kk;
                 const int idx = idxBase + subIdx;
 
+                const double fx = (ii + .5) / numPclPerCellX_;
+                const double fy = (jj + .5) / numPclPerCellY_;
+                const double fz = (kk + .5) / numPclPerCellZ_;
+                const double rhoP = trilinear(cRho, fx, fy, fz);
+                const double signedRho = chargeSign * rhoP;
+                const double driftX = trilinear(cJx, fx, fy, fz) / signedRho;
+                const double driftY = trilinear(cJy, fx, fy, fz) / signedRho;
+                const double driftZ = trilinear(cJz, fx, fy, fz) / signedRho;
+
+                double vthX = thermalVelocityX_, vthY = thermalVelocityY_,
+                       vthZ = thermalVelocityZ_;
+                if (varyingThermal) {
+                  const double vthX2 =
+                      trilinear(cPxx, fx, fy, fz) / rhoP - driftX * driftX;
+                  const double vthY2 =
+                      trilinear(cPyy, fx, fy, fz) / rhoP - driftY * driftY;
+                  const double vthZ2 =
+                      trilinear(cPzz, fx, fy, fz) / rhoP - driftZ * driftZ;
+                  // Keep uth/vth/wth where round-off makes the square negative
+                  if (vthX2 > 0.0)
+                    vthX = sqrt(vthX2);
+                  if (vthY2 > 0.0)
+                    vthY = sqrt(vthY2);
+                  if (vthZ2 > 0.0)
+                    vthZ = sqrt(vthZ2);
+                }
+
                 double velX, velY, velZ;
-                sample_maxwellian(velX, velY, velZ, localVthX, localVthY,
-                                  localVthZ, localDriftX, localDriftY,
-                                  localDriftZ, rng);
+                sample_maxwellian(velX, velY, velZ, vthX, vthY, vthZ, driftX,
+                                  driftY, driftZ, rng);
 
                 u[idx] = velX;
                 v[idx] = velY;
@@ -528,7 +496,8 @@ void ParticleSoAHost::maxwellianHumpPerturbation(Field* EMf) {
 /**
  * @brief Initialize test particles from pitch angle and energy.
  *
- * @param EMf Field object used to sample reference density.
+ * @param EMf Field object providing the species-0 density for the particle
+ * charge (B is assumed along z).
  */
 void ParticleSoAHost::pitch_angle_energy(Field* EMf) {
   assert_eq(getNOP(), 0);
@@ -602,18 +571,6 @@ void ParticleSoAHost::pitch_angle_energy(Field* EMf) {
          << ", qom " << chargeOverMass_ << ", npcel " << nop << endl;
     cout << "------------------------------------------" << endl;
   }
-}
-
-/**
- * @brief Force-free particle initialization stub.
- *
- * The solver can select this path, but the actual particle initialization logic
- * is intentionally left unimplemented in the current code.
- *
- * @param EMf Field object passed through from the solver.
- */
-void ParticleSoAHost::force_free(Field* EMf) {
-  eprintf("force_free was not properly implemented and needs to be revised.");
 }
 
 /**

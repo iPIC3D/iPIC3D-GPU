@@ -8,11 +8,11 @@
  * The conventional test checks every semantically defined array entry,
  * including faces, edges, corners, and MPI_PROC_NULL face/edge ghosts.  The
  * eight corners outside a nonperiodic global domain are intentionally ignored:
- * the legacy CPU routine documents those as boundary-condition workspace and
- * may overwrite them before a caller applies its boundary conditions.  The
- * additive test builds an independent global-node sum with MPI_Allreduce and
- * checks every physical node.  Integer-valued inputs keep all expected sums
- * exactly representable in double precision.
+ * NBDerivedHaloComm does not define them; they are left to the boundary
+ * conditions applied afterwards.  The additive test builds an independent
+ * global-node sum with MPI_Allreduce and checks every physical node.
+ * Integer-valued inputs keep all expected sums exactly representable in double
+ * precision.
  */
 
 #include <mpi.h>

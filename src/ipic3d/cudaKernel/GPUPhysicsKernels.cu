@@ -3,27 +3,16 @@
  * @brief CUDA kernel implementations for iPIC3D physics operations:
  *        MUdot, PIdot, perfect conductor BCs (fused sustensor).
  *
- * All kernels use a 3D thread-block layout (8×8×4 = 256) for 3D grids,
- * or a 2D layout for boundary face operations.
+ * The MUdot, PIdot and block-Jacobi kernels use the launch shape of
+ * GPUPointLaunch.cuh; the others use flat 1D or 2D face launches.
  */
 
 #include "GPUPhysicsKernels.cuh"
+#include "GPUPointLaunch.cuh"
 
 #ifdef GPU_SOLVER
 
-// =========================================================================
-//  Thread-block configuration
-// =========================================================================
-static constexpr int BX = 8;
-static constexpr int BY = 8;
-static constexpr int BZ = 4;
-
 #define IDX3(i, j, k, ny, nz) ((i) * (ny) * (nz) + (j) * (nz) + (k))
-
-static inline dim3 interiorGrid3D(int nxn, int nyn, int nzn) {
-  return dim3(((nxn - 2) + BX - 1) / BX, ((nyn - 2) + BY - 1) / BY,
-              ((nzn - 2) + BZ - 1) / BZ);
-}
 
 // =========================================================================
 //  MUdot kernel
@@ -39,9 +28,9 @@ k_MUdotSpecies(T* __restrict__ MUdotX, T* __restrict__ MUdotY,
                const T* __restrict__ By_ext, const T* __restrict__ Bz_ext,
                const T* __restrict__ rhons_is, T beta, T prefactor, int nxn,
                int nyn, int nzn, bool firstSpecies) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
@@ -80,9 +69,8 @@ void gpuMUdotSpecies(cudaSolverType* MUdotX, cudaSolverType* MUdotY,
                      const cudaSolverType* rhons_is, cudaSolverType beta,
                      cudaSolverType prefactor, int nxn, int nyn, int nzn,
                      bool firstSpecies, cudaStream_t stream) {
-  dim3 grid = interiorGrid3D(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_MUdotSpecies<<<grid, block, 0, stream>>>(
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_MUdotSpecies<<<L.grid, L.block, 0, stream>>>(
       MUdotX, MUdotY, MUdotZ, vX, vY, vZ, Bxn, Byn, Bzn, Bx_ext, By_ext, Bz_ext,
       rhons_is, beta, prefactor, nxn, nyn, nzn, firstSpecies);
   cudaErrChk(cudaGetLastError());
@@ -101,9 +89,9 @@ k_PIdotSpecies(T* __restrict__ PIX, T* __restrict__ PIY, T* __restrict__ PIZ,
                const T* __restrict__ Bx_ext, const T* __restrict__ By_ext,
                const T* __restrict__ Bz_ext, T beta, int nxn, int nyn,
                int nzn) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
@@ -130,11 +118,10 @@ void gpuPIdotSpecies(cudaSolverType* PIX, cudaSolverType* PIY,
                      const cudaSolverType* By_ext, const cudaSolverType* Bz_ext,
                      cudaSolverType beta, int nxn, int nyn, int nzn,
                      cudaStream_t stream) {
-  dim3 grid = interiorGrid3D(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_PIdotSpecies<<<grid, block, 0, stream>>>(PIX, PIY, PIZ, vX, vY, vZ, Bxn,
-                                             Byn, Bzn, Bx_ext, By_ext, Bz_ext,
-                                             beta, nxn, nyn, nzn);
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_PIdotSpecies<<<L.grid, L.block, 0, stream>>>(PIX, PIY, PIZ, vX, vY, vZ, Bxn,
+                                                 Byn, Bzn, Bx_ext, By_ext,
+                                                 Bz_ext, beta, nxn, nyn, nzn);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -1187,9 +1174,9 @@ k_BlockJacobiPrecond(T* __restrict__ zX, T* __restrict__ zY, T* __restrict__ zZ,
                      T wy,         // 1 + δ²/2 / hy²
                      T wz,         // 1 + δ²/2 / hz²
                      int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
@@ -1278,9 +1265,8 @@ void gpuBlockJacobiPrecondKernel(
     cudaSolverType c_val, cudaSolverType delt, cudaSolverType FourPI,
     cudaSolverType diagScalar, cudaSolverType wx, cudaSolverType wy,
     cudaSolverType wz, int nxn, int nyn, int nzn, cudaStream_t stream) {
-  dim3 grid = interiorGrid3D(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_BlockJacobiPrecond<<<grid, block, 0, stream>>>(
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_BlockJacobiPrecond<<<L.grid, L.block, 0, stream>>>(
       zX, zY, zZ, rX, rY, rZ, Bxn, Byn, Bzn, Bx_ext, By_ext, Bz_ext, rhons,
       d_qom, ns, dt, c_val, delt, FourPI, diagScalar, wx, wy, wz, nxn, nyn,
       nzn);
@@ -1300,9 +1286,9 @@ __global__ void k_PrecomputeBlockJacobiInv(
     const T* __restrict__ rhons, const T* __restrict__ d_qom, int ns, T dt,
     T c_val, T delt, T FourPI, T diagScalar, T wx, T wy, T wz, int nxn, int nyn,
     int nzn) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
@@ -1363,9 +1349,8 @@ void gpuPrecomputeBlockJacobiInv(
     cudaSolverType FourPI, cudaSolverType diagScalar, cudaSolverType wx,
     cudaSolverType wy, cudaSolverType wz, int nxn, int nyn, int nzn,
     cudaStream_t stream) {
-  dim3 grid = interiorGrid3D(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_PrecomputeBlockJacobiInv<<<grid, block, 0, stream>>>(
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_PrecomputeBlockJacobiInv<<<L.grid, L.block, 0, stream>>>(
       Dinv, Bxn, Byn, Bzn, Bx_ext, By_ext, Bz_ext, rhons, d_qom, ns, dt, c_val,
       delt, FourPI, diagScalar, wx, wy, wz, nxn, nyn, nzn);
   cudaErrChk(cudaGetLastError());
@@ -1382,9 +1367,9 @@ __global__ void k_ApplyBlockJacobiInvKrylov(T* __restrict__ zKrylov,
                                             const T* __restrict__ rKrylov,
                                             const T* __restrict__ Dinv, int nxn,
                                             int nyn, int nzn) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
@@ -1422,10 +1407,9 @@ void gpuApplyBlockJacobiInvKrylov(cudaSolverType* zKrylov,
                                   const cudaSolverType* rKrylov,
                                   const cudaSolverType* Dinv, int nxn, int nyn,
                                   int nzn, cudaStream_t stream) {
-  dim3 grid = interiorGrid3D(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_ApplyBlockJacobiInvKrylov<<<grid, block, 0, stream>>>(zKrylov, rKrylov,
-                                                          Dinv, nxn, nyn, nzn);
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_ApplyBlockJacobiInvKrylov<<<L.grid, L.block, 0, stream>>>(
+      zKrylov, rKrylov, Dinv, nxn, nyn, nzn);
   cudaErrChk(cudaGetLastError());
 }
 

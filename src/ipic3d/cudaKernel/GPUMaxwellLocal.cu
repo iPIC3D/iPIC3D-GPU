@@ -18,25 +18,9 @@
  */
 
 #include "GPUMaxwellLocal.cuh"
+#include "GPUPointLaunch.cuh"
 
 #ifdef GPU_SOLVER
-
-// =========================================================================
-//  Thread-block configuration (matches GPUStencils.cu)
-// =========================================================================
-static constexpr int BX = 8;
-static constexpr int BY = 8;
-static constexpr int BZ = 4; // 8×8×4 = 256 threads
-
-// =========================================================================
-//  Helpers
-// =========================================================================
-
-/** Compute 3D grid covering interior cells: i ∈ [1, n-2]. */
-static inline dim3 interiorGrid(int nx, int ny, int nz) {
-  return dim3(((nx - 2) + BX - 1) / BX, ((ny - 2) + BY - 1) / BY,
-              ((nz - 2) + BZ - 1) / BZ);
-}
 
 // =========================================================================
 //  Kernel 1:  Fused center-level operations
@@ -58,9 +42,9 @@ __global__ void k_maxwellLocalCenterOps(
     const T* __restrict__ vZ, const T* __restrict__ dX,
     const T* __restrict__ dY, const T* __restrict__ dZ, int nxc, int nyc,
     int nzc, int nyn, int nzn, T invdx, T invdy, T invdz) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxc - 2 || j > nyc - 2 || k > nzc - 2)
     return;
 
@@ -193,9 +177,9 @@ __global__ void k_maxwellLocalNodeFused(
     const T* __restrict__ vZ, const T* __restrict__ dX,
     const T* __restrict__ dY, const T* __restrict__ dZ, int nxn, int nyn,
     int nzn, T invdx, T invdy, T invdz, T dt2) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
@@ -325,9 +309,8 @@ void gpuMaxwellLocalCenterOps(
     int nzc, cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
     cudaStream_t stream) {
   int nyn = nyc + 1, nzn = nzc + 1;
-  dim3 grid = interiorGrid(nxc, nyc, nzc);
-  dim3 block(BX, BY, BZ);
-  k_maxwellLocalCenterOps<<<grid, block, 0, stream>>>(
+  const PointLaunch L = pointLaunch(nxc - 2, nyc - 2, nzc - 2);
+  k_maxwellLocalCenterOps<<<L.grid, L.block, 0, stream>>>(
       gExX, gExY, gExZ, gEyX, gEyY, gEyZ, gEzX, gEzY, gEzZ, divD, vX, vY, vZ,
       dX, dY, dZ, nxc, nyc, nzc, nyn, nzn, invdx, invdy, invdz);
   cudaErrChk(cudaGetLastError());
@@ -345,9 +328,8 @@ void gpuMaxwellLocalNodeFused(
     const cudaSolverType* dZ, int nxn, int nyn, int nzn, cudaSolverType invdx,
     cudaSolverType invdy, cudaSolverType invdz, cudaSolverType dt2,
     cudaStream_t stream) {
-  dim3 grid = interiorGrid(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_maxwellLocalNodeFused<<<grid, block, 0, stream>>>(
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_maxwellLocalNodeFused<<<L.grid, L.block, 0, stream>>>(
       d_im, gExX, gExY, gExZ, gEyX, gEyY, gEyZ, gEzX, gEzY, gEzZ, divD, vX, vY,
       vZ, dX, dY, dZ, nxn, nyn, nzn, invdx, invdy, invdz, dt2);
   cudaErrChk(cudaGetLastError());

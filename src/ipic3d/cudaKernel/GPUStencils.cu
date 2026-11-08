@@ -3,35 +3,19 @@
  * @brief CUDA kernel implementations for all grid stencil operations.
  *        See GPUStencils.cuh for API documentation.
  *
- * All kernels use a 3D thread-block layout (8×8×4 = 256 threads) mapped
- * to the interior grid points.  Each thread computes one output point.
+ * Each thread computes one output point, with the launch shape of
+ * GPUPointLaunch.cuh (k, the contiguous index, on threadIdx.x).
  * The flat row-major index [i][j][k] = i*ny*nz + j*nz + k is used for
  * both node-based and center-based grids.
  */
 
+#include "GPUPointLaunch.cuh"
 #include "GPUStencils.cuh"
 
 #ifdef GPU_SOLVER
 
-// =========================================================================
-//  Thread-block configuration for 3D stencils
-// =========================================================================
-static constexpr int BX = 8;
-static constexpr int BY = 8;
-static constexpr int BZ = 4; // 8*8*4 = 256
-
 /** Indexing macro for row-major [d1][d2][d3] layout. */
 #define IDX(i, j, k, d2, d3) ((i) * (d2) * (d3) + (j) * (d3) + (k))
-
-/**
- * Compute 3D grid dimensions for interior points.
- * Interior range: i ∈ [1, nx-2], j ∈ [1, ny-2], k ∈ [1, nz-2].
- * Number of interior points along each axis: nx-2, ny-2, nz-2.
- */
-static inline dim3 stencilGrid(int nx, int ny, int nz) {
-  return dim3(((nx - 2) + BX - 1) / BX, ((ny - 2) + BY - 1) / BY,
-              ((nz - 2) + BZ - 1) / BZ);
-}
 
 // =========================================================================
 //  Gradient kernels
@@ -47,9 +31,9 @@ __global__ void k_gradC2N(T* __restrict__ gradXN, T* __restrict__ gradYN,
                           T* __restrict__ gradZN, const T* __restrict__ C,
                           int nxn, int nyn, int nzn, int nyc, int nzc, T invdx,
                           T invdy, T invdz) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
@@ -87,9 +71,9 @@ __global__ void k_gradN2C(T* __restrict__ gradXC, T* __restrict__ gradYC,
                           T* __restrict__ gradZC, const T* __restrict__ N,
                           int iLo, int iHi, int nyc, int nzc, int nyn, int nzn,
                           T invdx, T invdy, T invdz) {
-  int i = blockIdx.x * BX + threadIdx.x + iLo;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + iLo;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > iHi || j > nyc - 2 || k > nzc - 2)
     return;
 
@@ -128,9 +112,9 @@ __global__ void k_divN2C(T* __restrict__ divC, const T* __restrict__ vecXN,
                          const T* __restrict__ vecYN,
                          const T* __restrict__ vecZN, int iLo, int iHi, int nyc,
                          int nzc, int nyn, int nzn, T invdx, T invdy, T invdz) {
-  int i = blockIdx.x * BX + threadIdx.x + iLo;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + iLo;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > iHi || j > nyc - 2 || k > nzc - 2)
     return;
 
@@ -164,9 +148,9 @@ __global__ void k_divC2N(T* __restrict__ divN, const T* __restrict__ vecXC,
                          const T* __restrict__ vecYC,
                          const T* __restrict__ vecZC, int nxn, int nyn, int nzn,
                          int nyc, int nzc, T invdx, T invdy, T invdz) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
@@ -201,9 +185,9 @@ k_curlC2N(T* __restrict__ curlXN, T* __restrict__ curlYN,
           T* __restrict__ curlZN, const T* __restrict__ vecXC,
           const T* __restrict__ vecYC, const T* __restrict__ vecZC, int nxn,
           int nyn, int nzn, int nyc, int nzc, T invdx, T invdy, T invdz) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
@@ -257,9 +241,9 @@ k_curlN2C(T* __restrict__ curlXC, T* __restrict__ curlYC,
           T* __restrict__ curlZC, const T* __restrict__ vecXN,
           const T* __restrict__ vecYN, const T* __restrict__ vecZN, int nxc,
           int nyc, int nzc, int nyn, int nzn, T invdx, T invdy, T invdz) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxc - 2 || j > nyc - 2 || k > nzc - 2)
     return;
 
@@ -315,9 +299,9 @@ template <typename T>
 __global__ void k_interpC2N(T* __restrict__ fieldN,
                             const T* __restrict__ fieldC, int nxn, int nyn,
                             int nzn, int nyc, int nzc) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
@@ -333,9 +317,9 @@ template <typename T>
 __global__ void k_interpN2C(T* __restrict__ fieldC,
                             const T* __restrict__ fieldN, int nxc, int nyc,
                             int nzc, int nyn, int nzn) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxc - 2 || j > nyc - 2 || k > nzc - 2)
     return;
 
@@ -369,9 +353,9 @@ k_divSymmTensorN2C(T* __restrict__ divCX, T* __restrict__ divCY,
                    const T* __restrict__ pYY, const T* __restrict__ pYZ,
                    const T* __restrict__ pZZ, int nxc, int nyc, int nzc,
                    int nyn, int nzn, T invdx, T invdy, T invdz) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxc - 2 || j > nyc - 2 || k > nzc - 2)
     return;
 
@@ -414,9 +398,9 @@ k_divSymmTensorN2C(T* __restrict__ divCX, T* __restrict__ divCY,
 template <typename T>
 __global__ void k_smoothStep(T* __restrict__ out, const T* __restrict__ in,
                              int nx, int ny, int nz, T alpha, T beta3D) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nx - 2 || j > ny - 2 || k > nz - 2)
     return;
 
@@ -437,18 +421,11 @@ void gpuGradC2N(cudaSolverType* gradXN, cudaSolverType* gradYN,
                 int nyn, int nzn, cudaSolverType invdx, cudaSolverType invdy,
                 cudaSolverType invdz, cudaStream_t stream) {
   int nyc = nyn - 1, nzc = nzn - 1;
-  dim3 grid = stencilGrid(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_gradC2N<<<grid, block, 0, stream>>>(gradXN, gradYN, gradZN, scFieldC, nxn,
-                                        nyn, nzn, nyc, nzc, invdx, invdy,
-                                        invdz);
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_gradC2N<<<L.grid, L.block, 0, stream>>>(gradXN, gradYN, gradZN, scFieldC,
+                                            nxn, nyn, nzn, nyc, nzc, invdx,
+                                            invdy, invdz);
   cudaErrChk(cudaGetLastError());
-}
-
-/** Grid for cells iLo..iHi along x and the interior along y and z. */
-static inline dim3 cellRangeGrid(int iLo, int iHi, int nyc, int nzc) {
-  return dim3((iHi - iLo + 1 + BX - 1) / BX, ((nyc - 2) + BY - 1) / BY,
-              ((nzc - 2) + BZ - 1) / BZ);
 }
 
 void gpuGradN2C(cudaSolverType* gradXC, cudaSolverType* gradYC,
@@ -460,11 +437,10 @@ void gpuGradN2C(cudaSolverType* gradXC, cudaSolverType* gradYC,
   if (iHi < iLo)
     return;
   int nyn = nyc + 1, nzn = nzc + 1;
-  dim3 grid = cellRangeGrid(iLo, iHi, nyc, nzc);
-  dim3 block(BX, BY, BZ);
-  k_gradN2C<<<grid, block, 0, stream>>>(gradXC, gradYC, gradZC, scFieldN, iLo,
-                                        iHi, nyc, nzc, nyn, nzn, invdx, invdy,
-                                        invdz);
+  const PointLaunch L = pointLaunch(iHi - iLo + 1, nyc - 2, nzc - 2);
+  k_gradN2C<<<L.grid, L.block, 0, stream>>>(gradXC, gradYC, gradZC, scFieldN,
+                                            iLo, iHi, nyc, nzc, nyn, nzn, invdx,
+                                            invdy, invdz);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -478,10 +454,10 @@ void gpuDivN2C(cudaSolverType* divC, const cudaSolverType* vecXN,
   if (iHi < iLo)
     return;
   int nyn = nyc + 1, nzn = nzc + 1;
-  dim3 grid = cellRangeGrid(iLo, iHi, nyc, nzc);
-  dim3 block(BX, BY, BZ);
-  k_divN2C<<<grid, block, 0, stream>>>(divC, vecXN, vecYN, vecZN, iLo, iHi, nyc,
-                                       nzc, nyn, nzn, invdx, invdy, invdz);
+  const PointLaunch L = pointLaunch(iHi - iLo + 1, nyc - 2, nzc - 2);
+  k_divN2C<<<L.grid, L.block, 0, stream>>>(divC, vecXN, vecYN, vecZN, iLo, iHi,
+                                           nyc, nzc, nyn, nzn, invdx, invdy,
+                                           invdz);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -491,10 +467,9 @@ void gpuDivC2N(cudaSolverType* divN, const cudaSolverType* vecXC,
                cudaSolverType invdy, cudaSolverType invdz,
                cudaStream_t stream) {
   int nyc = nyn - 1, nzc = nzn - 1;
-  dim3 grid = stencilGrid(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_divC2N<<<grid, block, 0, stream>>>(divN, vecXC, vecYC, vecZC, nxn, nyn, nzn,
-                                       nyc, nzc, invdx, invdy, invdz);
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_divC2N<<<L.grid, L.block, 0, stream>>>(divN, vecXC, vecYC, vecZC, nxn, nyn,
+                                           nzn, nyc, nzc, invdx, invdy, invdz);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -505,11 +480,10 @@ void gpuCurlC2N(cudaSolverType* curlXN, cudaSolverType* curlYN,
                 cudaSolverType invdy, cudaSolverType invdz,
                 cudaStream_t stream) {
   int nyc = nyn - 1, nzc = nzn - 1;
-  dim3 grid = stencilGrid(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_curlC2N<<<grid, block, 0, stream>>>(curlXN, curlYN, curlZN, vecXC, vecYC,
-                                        vecZC, nxn, nyn, nzn, nyc, nzc, invdx,
-                                        invdy, invdz);
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_curlC2N<<<L.grid, L.block, 0, stream>>>(curlXN, curlYN, curlZN, vecXC,
+                                            vecYC, vecZC, nxn, nyn, nzn, nyc,
+                                            nzc, invdx, invdy, invdz);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -520,31 +494,28 @@ void gpuCurlN2C(cudaSolverType* curlXC, cudaSolverType* curlYC,
                 cudaSolverType invdy, cudaSolverType invdz,
                 cudaStream_t stream) {
   int nyn = nyc + 1, nzn = nzc + 1;
-  dim3 grid = stencilGrid(nxc, nyc, nzc);
-  dim3 block(BX, BY, BZ);
-  k_curlN2C<<<grid, block, 0, stream>>>(curlXC, curlYC, curlZC, vecXN, vecYN,
-                                        vecZN, nxc, nyc, nzc, nyn, nzn, invdx,
-                                        invdy, invdz);
+  const PointLaunch L = pointLaunch(nxc - 2, nyc - 2, nzc - 2);
+  k_curlN2C<<<L.grid, L.block, 0, stream>>>(curlXC, curlYC, curlZC, vecXN,
+                                            vecYN, vecZN, nxc, nyc, nzc, nyn,
+                                            nzn, invdx, invdy, invdz);
   cudaErrChk(cudaGetLastError());
 }
 
 void gpuInterpC2N(cudaSolverType* fieldN, const cudaSolverType* fieldC, int nxn,
                   int nyn, int nzn, cudaStream_t stream) {
   int nyc = nyn - 1, nzc = nzn - 1;
-  dim3 grid = stencilGrid(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_interpC2N<<<grid, block, 0, stream>>>(fieldN, fieldC, nxn, nyn, nzn, nyc,
-                                          nzc);
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_interpC2N<<<L.grid, L.block, 0, stream>>>(fieldN, fieldC, nxn, nyn, nzn,
+                                              nyc, nzc);
   cudaErrChk(cudaGetLastError());
 }
 
 void gpuInterpN2C(cudaSolverType* fieldC, const cudaSolverType* fieldN, int nxc,
                   int nyc, int nzc, cudaStream_t stream) {
   int nyn = nyc + 1, nzn = nzc + 1;
-  dim3 grid = stencilGrid(nxc, nyc, nzc);
-  dim3 block(BX, BY, BZ);
-  k_interpN2C<<<grid, block, 0, stream>>>(fieldC, fieldN, nxc, nyc, nzc, nyn,
-                                          nzn);
+  const PointLaunch L = pointLaunch(nxc - 2, nyc - 2, nzc - 2);
+  k_interpN2C<<<L.grid, L.block, 0, stream>>>(fieldC, fieldN, nxc, nyc, nzc,
+                                              nyn, nzn);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -556,9 +527,8 @@ void gpuDivSymmTensorN2C(cudaSolverType* divCX, cudaSolverType* divCY,
                          cudaSolverType invdx, cudaSolverType invdy,
                          cudaSolverType invdz, cudaStream_t stream) {
   int nyn = nyc + 1, nzn = nzc + 1;
-  dim3 grid = stencilGrid(nxc, nyc, nzc);
-  dim3 block(BX, BY, BZ);
-  k_divSymmTensorN2C<<<grid, block, 0, stream>>>(
+  const PointLaunch L = pointLaunch(nxc - 2, nyc - 2, nzc - 2);
+  k_divSymmTensorN2C<<<L.grid, L.block, 0, stream>>>(
       divCX, divCY, divCZ, pXX, pXY, pXZ, pYY, pYZ, pZZ, nxc, nyc, nzc, nyn,
       nzn, invdx, invdy, invdz);
   cudaErrChk(cudaGetLastError());
@@ -567,9 +537,9 @@ void gpuDivSymmTensorN2C(cudaSolverType* divCX, cudaSolverType* divCY,
 void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in, int nx,
                    int ny, int nz, cudaSolverType alpha, cudaSolverType beta3D,
                    cudaStream_t stream) {
-  dim3 grid = stencilGrid(nx, ny, nz);
-  dim3 block(BX, BY, BZ);
-  k_smoothStep<<<grid, block, 0, stream>>>(out, in, nx, ny, nz, alpha, beta3D);
+  const PointLaunch L = pointLaunch(nx - 2, ny - 2, nz - 2);
+  k_smoothStep<<<L.grid, L.block, 0, stream>>>(out, in, nx, ny, nz, alpha,
+                                               beta3D);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -587,13 +557,6 @@ void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in, int nx,
 //  across the original, interior, and boundary kernel variants.
 // =========================================================================
 #ifdef HALO_OVERLAP
-
-// Helper: grid dims covering a ranged sub-volume [lo..hi] per axis.
-static inline dim3 rangedGrid(int iLo, int iHi, int jLo, int jHi, int kLo,
-                              int kHi) {
-  return dim3(((iHi - iLo + 1) + BX - 1) / BX, ((jHi - jLo + 1) + BY - 1) / BY,
-              ((kHi - kLo + 1) + BZ - 1) / BZ);
-}
 
 // -----------------------------------------------------------------
 //  divC2N  (centre → node divergence)
@@ -629,9 +592,9 @@ k_divC2N_interior(T* __restrict__ divN, const T* __restrict__ vXC,
                   const T* __restrict__ vYC, const T* __restrict__ vZC, int nxn,
                   int nyn, int nzn, int nyc, int nzc, T invdx, T invdy, T invdz,
                   int iLo, int iHi, int jLo, int jHi, int kLo, int kHi) {
-  int i = blockIdx.x * BX + threadIdx.x + iLo;
-  int j = blockIdx.y * BY + threadIdx.y + jLo;
-  int k = blockIdx.z * BZ + threadIdx.z + kLo;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + iLo;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + jLo;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + kLo;
   if (i > iHi || j > jHi || k > kHi)
     return;
   d_divC2N(divN, vXC, vYC, vZC, i, j, k, nyn, nzn, nyc, nzc, invdx, invdy,
@@ -644,9 +607,9 @@ k_divC2N_boundary(T* __restrict__ divN, const T* __restrict__ vXC,
                   const T* __restrict__ vYC, const T* __restrict__ vZC, int nxn,
                   int nyn, int nzn, int nyc, int nzc, T invdx, T invdy, T invdz,
                   int sILo, int sIHi, int sJLo, int sJHi, int sKLo, int sKHi) {
-  int i = blockIdx.x * BX + threadIdx.x + 1;
-  int j = blockIdx.y * BY + threadIdx.y + 1;
-  int k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
   if (i >= sILo && i <= sIHi && j >= sJLo && j <= sJHi && k >= sKLo &&
@@ -665,9 +628,9 @@ void gpuDivC2N_interior(cudaSolverType* divN, const cudaSolverType* vXC,
   if (iLo > iHi || jLo > jHi || kLo > kHi)
     return;
   int nyc = nyn - 1, nzc = nzn - 1;
-  dim3 grid = rangedGrid(iLo, iHi, jLo, jHi, kLo, kHi);
-  dim3 block(BX, BY, BZ);
-  k_divC2N_interior<<<grid, block, 0, stream>>>(
+  const PointLaunch L =
+      pointLaunch(iHi - iLo + 1, jHi - jLo + 1, kHi - kLo + 1);
+  k_divC2N_interior<<<L.grid, L.block, 0, stream>>>(
       divN, vXC, vYC, vZC, nxn, nyn, nzn, nyc, nzc, invdx, invdy, invdz, iLo,
       iHi, jLo, jHi, kLo, kHi);
   cudaErrChk(cudaGetLastError());
@@ -679,9 +642,8 @@ void gpuDivC2N_boundary(cudaSolverType* divN, const cudaSolverType* vXC,
                         cudaSolverType invdy, cudaSolverType invdz,
                         cudaStream_t stream) {
   int nyc = nyn - 1, nzc = nzn - 1;
-  dim3 grid = stencilGrid(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_divC2N_boundary<<<grid, block, 0, stream>>>(
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_divC2N_boundary<<<L.grid, L.block, 0, stream>>>(
       divN, vXC, vYC, vZC, nxn, nyn, nzn, nyc, nzc, invdx, invdy, invdz, 2,
       nxn - 3, 2, nyn - 3, 2, nzn - 3);
   cudaErrChk(cudaGetLastError());
@@ -716,9 +678,9 @@ __global__ void k_gradC2N_interior(T* __restrict__ gXN, T* __restrict__ gYN,
                                    int nxn, int nyn, int nzn, int nyc, int nzc,
                                    T invdx, T invdy, T invdz, int iLo, int iHi,
                                    int jLo, int jHi, int kLo, int kHi) {
-  int i = blockIdx.x * BX + threadIdx.x + iLo,
-      j = blockIdx.y * BY + threadIdx.y + jLo,
-      k = blockIdx.z * BZ + threadIdx.z + kLo;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + iLo,
+      j = blockIdx.y * blockDim.y + threadIdx.y + jLo,
+      k = blockIdx.x * blockDim.x + threadIdx.x + kLo;
   if (i > iHi || j > jHi || k > kHi)
     return;
   d_gradC2N(gXN, gYN, gZN, C, i, j, k, nyn, nzn, nyc, nzc, invdx, invdy, invdz);
@@ -731,9 +693,9 @@ __global__ void k_gradC2N_boundary(T* __restrict__ gXN, T* __restrict__ gYN,
                                    T invdx, T invdy, T invdz, int sILo,
                                    int sIHi, int sJLo, int sJHi, int sKLo,
                                    int sKHi) {
-  int i = blockIdx.x * BX + threadIdx.x + 1,
-      j = blockIdx.y * BY + threadIdx.y + 1,
-      k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1,
+      j = blockIdx.y * blockDim.y + threadIdx.y + 1,
+      k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
   if (i >= sILo && i <= sIHi && j >= sJLo && j <= sJHi && k >= sKLo &&
@@ -751,9 +713,9 @@ void gpuGradC2N_interior(cudaSolverType* gXN, cudaSolverType* gYN,
   if (iLo > iHi || jLo > jHi || kLo > kHi)
     return;
   int nyc = nyn - 1, nzc = nzn - 1;
-  dim3 grid = rangedGrid(iLo, iHi, jLo, jHi, kLo, kHi);
-  dim3 block(BX, BY, BZ);
-  k_gradC2N_interior<<<grid, block, 0, stream>>>(
+  const PointLaunch L =
+      pointLaunch(iHi - iLo + 1, jHi - jLo + 1, kHi - kLo + 1);
+  k_gradC2N_interior<<<L.grid, L.block, 0, stream>>>(
       gXN, gYN, gZN, C, nxn, nyn, nzn, nyc, nzc, invdx, invdy, invdz, iLo, iHi,
       jLo, jHi, kLo, kHi);
   cudaErrChk(cudaGetLastError());
@@ -765,9 +727,8 @@ void gpuGradC2N_boundary(cudaSolverType* gXN, cudaSolverType* gYN,
                          cudaSolverType invdy, cudaSolverType invdz,
                          cudaStream_t stream) {
   int nyc = nyn - 1, nzc = nzn - 1;
-  dim3 grid = stencilGrid(nxn, nyn, nzn);
-  dim3 block(BX, BY, BZ);
-  k_gradC2N_boundary<<<grid, block, 0, stream>>>(
+  const PointLaunch L = pointLaunch(nxn - 2, nyn - 2, nzn - 2);
+  k_gradC2N_boundary<<<L.grid, L.block, 0, stream>>>(
       gXN, gYN, gZN, C, nxn, nyn, nzn, nyc, nzc, invdx, invdy, invdz, 2,
       nxn - 3, 2, nyn - 3, 2, nzn - 3);
   cudaErrChk(cudaGetLastError());
@@ -793,9 +754,9 @@ __global__ void
 k_interpC2N_interior(T* __restrict__ fN, const T* __restrict__ fC, int nxn,
                      int nyn, int nzn, int nyc, int nzc, int iLo, int iHi,
                      int jLo, int jHi, int kLo, int kHi) {
-  int i = blockIdx.x * BX + threadIdx.x + iLo,
-      j = blockIdx.y * BY + threadIdx.y + jLo,
-      k = blockIdx.z * BZ + threadIdx.z + kLo;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + iLo,
+      j = blockIdx.y * blockDim.y + threadIdx.y + jLo,
+      k = blockIdx.x * blockDim.x + threadIdx.x + kLo;
   if (i > iHi || j > jHi || k > kHi)
     return;
   d_interpC2N(fN, fC, i, j, k, nyn, nzn, nyc, nzc);
@@ -909,9 +870,9 @@ void gpuInterpC2N_range(cudaSolverType* fN, const cudaSolverType* fC, int nxn,
   if (iLo > iHi || jLo > jHi || kLo > kHi)
     return;
   int nyc = nyn - 1, nzc = nzn - 1;
-  dim3 grid = rangedGrid(iLo, iHi, jLo, jHi, kLo, kHi);
-  dim3 block(BX, BY, BZ);
-  k_interpC2N_interior<<<grid, block, 0, stream>>>(
+  const PointLaunch L =
+      pointLaunch(iHi - iLo + 1, jHi - jLo + 1, kHi - kLo + 1);
+  k_interpC2N_interior<<<L.grid, L.block, 0, stream>>>(
       fN, fC, nxn, nyn, nzn, nyc, nzc, iLo, iHi, jLo, jHi, kLo, kHi);
   cudaErrChk(cudaGetLastError());
 }
@@ -987,9 +948,9 @@ __global__ void
 k_smoothStep_interior(T* __restrict__ out, const T* __restrict__ in, int nx,
                       int ny, int nz, T alpha, T beta3D, int iLo, int iHi,
                       int jLo, int jHi, int kLo, int kHi) {
-  int i = blockIdx.x * BX + threadIdx.x + iLo,
-      j = blockIdx.y * BY + threadIdx.y + jLo,
-      k = blockIdx.z * BZ + threadIdx.z + kLo;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + iLo,
+      j = blockIdx.y * blockDim.y + threadIdx.y + jLo,
+      k = blockIdx.x * blockDim.x + threadIdx.x + kLo;
   if (i > iHi || j > jHi || k > kHi)
     return;
   d_smoothStep(out, in, i, j, k, ny, nz, alpha, beta3D);
@@ -1000,9 +961,9 @@ __global__ void
 k_smoothStep_boundary(T* __restrict__ out, const T* __restrict__ in, int nx,
                       int ny, int nz, T alpha, T beta3D, int sILo, int sIHi,
                       int sJLo, int sJHi, int sKLo, int sKHi) {
-  int i = blockIdx.x * BX + threadIdx.x + 1,
-      j = blockIdx.y * BY + threadIdx.y + 1,
-      k = blockIdx.z * BZ + threadIdx.z + 1;
+  int i = blockIdx.z * blockDim.z + threadIdx.z + 1,
+      j = blockIdx.y * blockDim.y + threadIdx.y + 1,
+      k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nx - 2 || j > ny - 2 || k > nz - 2)
     return;
   if (i >= sILo && i <= sIHi && j >= sJLo && j <= sJHi && k >= sKLo &&
@@ -1017,9 +978,9 @@ void gpuSmoothStep_interior(cudaSolverType* out, const cudaSolverType* in,
   int iLo = 2, iHi = nx - 3, jLo = 2, jHi = ny - 3, kLo = 2, kHi = nz - 3;
   if (iLo > iHi || jLo > jHi || kLo > kHi)
     return;
-  dim3 grid = rangedGrid(iLo, iHi, jLo, jHi, kLo, kHi);
-  dim3 block(BX, BY, BZ);
-  k_smoothStep_interior<<<grid, block, 0, stream>>>(
+  const PointLaunch L =
+      pointLaunch(iHi - iLo + 1, jHi - jLo + 1, kHi - kLo + 1);
+  k_smoothStep_interior<<<L.grid, L.block, 0, stream>>>(
       out, in, nx, ny, nz, alpha, beta3D, iLo, iHi, jLo, jHi, kLo, kHi);
   cudaErrChk(cudaGetLastError());
 }
@@ -1027,9 +988,8 @@ void gpuSmoothStep_interior(cudaSolverType* out, const cudaSolverType* in,
 void gpuSmoothStep_boundary(cudaSolverType* out, const cudaSolverType* in,
                             int nx, int ny, int nz, cudaSolverType alpha,
                             cudaSolverType beta3D, cudaStream_t stream) {
-  dim3 grid = stencilGrid(nx, ny, nz);
-  dim3 block(BX, BY, BZ);
-  k_smoothStep_boundary<<<grid, block, 0, stream>>>(
+  const PointLaunch L = pointLaunch(nx - 2, ny - 2, nz - 2);
+  k_smoothStep_boundary<<<L.grid, L.block, 0, stream>>>(
       out, in, nx, ny, nz, alpha, beta3D, 2, nx - 3, 2, ny - 3, 2, nz - 3);
   cudaErrChk(cudaGetLastError());
 }

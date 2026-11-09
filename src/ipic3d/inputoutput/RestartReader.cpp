@@ -1100,15 +1100,18 @@ void warnIfDifferentBuild(const RestartCheckpoint& checkpoint) {
 } // namespace
 
 RestartCheckpoint
-RestartReader::resolveLatestCheckpoint(const std::string& restartDir) {
+RestartReader::resolveCheckpoint(const std::string& restartDir,
+                                 const std::string& requestedSlot,
+                                 std::string& report) {
   const std::string backend = RestartSlotManager::backendName();
   if (backend.empty()) {
     eprintf("Restart requires compiling with USE_ADIOS2 or HDF5 (without "
             "NO_HDF5).");
   }
+  const bool root = MPIdata::get_rank() == 0;
 
 #if !defined(USE_ADIOS2) && !defined(NO_HDF5)
-  if (MPIdata::get_rank() == 0) {
+  if (root) {
     printf("\n");
     printf("==================================================================="
            "======\n");
@@ -1119,23 +1122,55 @@ RestartReader::resolveLatestCheckpoint(const std::string& restartDir) {
   }
 #endif
 
-  RestartCheckpoint checkpoint =
-      RestartSlotManager::resolveLatest(restartDir, backend);
-  if (checkpoint.found) {
-    if (MPIdata::get_rank() == 0) {
-      std::cout << "[*] Restart checkpoint ("
-                << restartBackendLabel(checkpoint.backend) << ") = restart_"
-                << checkpoint.slot << ", cycle label = " << checkpoint.cycle
-                << std::endl;
-      warnIfDifferentBuild(checkpoint);
+  // Rank 0 checks the slots (manifests and every rank file) and chooses;
+  // the other ranks load the chosen slot, so a file system that shows the
+  // ranks different states cannot split the run between two checkpoints.
+  report.clear();
+  RestartCheckpoint checkpoint;
+  char chosen = 0;
+  if (root) {
+    checkpoint =
+        RestartSlotManager::resolve(restartDir, backend, requestedSlot, report);
+    if (checkpoint.found)
+      chosen = checkpoint.slot[0];
+  }
+#ifndef NO_MPI
+  MPI_Bcast(&chosen, 1, MPI_CHAR, 0, MPIdata::get_PicGlobalComm());
+#endif
+
+  if (chosen == 0) {
+    if (root) {
+      std::cout << "ERROR: no usable restart checkpoint in " << restartDir
+                << " (legacy flat restarts are unsupported).\n"
+                << report << std::flush;
+    }
+    MPIdata::exit(1);
+  }
+
+  if (!root) {
+    std::string reason;
+    checkpoint = RestartSlotManager::loadSlot(
+        restartDir, backend, std::string(1, chosen), false, reason);
+    if (!checkpoint.found) {
+      eprintf("ERROR: cannot read restart_%c selected by rank 0: %s", chosen,
+              reason.c_str());
     }
     return checkpoint;
   }
 
-  eprintf("ERROR: no restart checkpoint found in %s. "
-          "Legacy flat restarts are unsupported.",
-          restartDir.c_str());
-  return RestartCheckpoint();
+  std::cout << "[*] Restart checkpoint ("
+            << restartBackendLabel(checkpoint.backend) << ") = restart_"
+            << checkpoint.slot << ", cycle label = " << checkpoint.cycle
+            << " (requested: "
+            << (requestedSlot.empty() ? std::string("latest")
+                                      : "restart_" + requestedSlot)
+            << ")" << std::endl;
+  std::istringstream lines(report);
+  for (std::string line; std::getline(lines, line);)
+    std::cout << "    WARNING: " << line << "\n";
+  std::cout << std::flush;
+  warnIfDifferentBuild(checkpoint);
+  return checkpoint;
 }
 
 // ===========================================================================

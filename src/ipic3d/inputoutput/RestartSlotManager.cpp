@@ -196,69 +196,56 @@ bool parseCheckpointBlock(const std::string& block, const std::string& rootDir,
   checkpoint.generation = generation;
   checkpoint.buildVersion = buildVersion;
   checkpoint.buildSignature = buildSignature;
-  if (!parseMeshMetadata(block, checkpoint.mesh)) {
-    eprintf("ERROR: restart checkpoint restart_%s is missing or has "
-            "invalid mesh metadata",
-            slot.c_str());
-  }
+  // An invalid mesh leaves checkpoint.mesh.valid false; callers decide.
+  parseMeshMetadata(block, checkpoint.mesh);
   return true;
 }
 
-bool checkpointMatchesManifest(const RestartCheckpoint& checkpoint) {
-  const fs::path manifestPath = fs::path(checkpoint.dataDir) / "manifest.json";
-  const std::string manifest = readTextFile(manifestPath);
-  if (manifest.empty()) {
-    eprintf("ERROR: restart checkpoint restart_%s is missing %s",
-            checkpoint.slot.c_str(), manifestPath.string().c_str());
-  }
-
-  RestartCheckpoint manifestCheckpoint;
-  if (!parseCheckpointBlock(manifest, checkpoint.rootDir, checkpoint.backend,
-                            manifestCheckpoint)) {
-    return false;
-  }
-
-  if (manifestCheckpoint.slot != checkpoint.slot)
-    return false;
-  if (manifestCheckpoint.cycle != checkpoint.cycle)
-    return false;
-  if (manifestCheckpoint.generation != checkpoint.generation)
-    return false;
-  if (manifestCheckpoint.nranks != checkpoint.nranks)
-    return false;
-  return true;
+std::string otherSlot(const std::string& slot) {
+  return slot == "A" ? "B" : "A";
 }
 
-bool checkpointHasAllRankFiles(const RestartCheckpoint& checkpoint) {
+/** Number of missing rank files of a checkpoint; the first one in `first`. */
+int countMissingRankFiles(const RestartCheckpoint& checkpoint,
+                          std::string& first) {
+  int missing = 0;
   for (int rank = 0; rank < checkpoint.nranks; ++rank) {
     const fs::path rankFile =
         fs::path(checkpoint.dataDir) /
         RestartSlotManager::rankFileName(checkpoint.backend, rank);
-    if (!fs::exists(rankFile))
-      return false;
+    if (!fs::exists(rankFile)) {
+      if (missing == 0)
+        first = rankFile.filename().string();
+      ++missing;
+    }
   }
-  return true;
+  return missing;
 }
 
-bool validateCheckpoint(const RestartCheckpoint& checkpoint,
-                        const std::string& backend) {
-  if (!checkpoint.found)
-    return false;
-  if (checkpoint.slot != "A" && checkpoint.slot != "B")
-    return false;
-  if (checkpoint.backend != backend)
-    return false;
-  if (checkpoint.cycle < 0)
-    return false;
-  if (checkpoint.nranks <= 0)
-    return false;
-  if (!checkpoint.mesh.valid)
-    return false;
-  if (!fs::is_directory(checkpoint.dataDir))
-    return false;
-  if (!checkpointMatchesManifest(checkpoint))
-    return false;
-  return checkpointHasAllRankFiles(checkpoint);
+/** The "slot" named by the "latest" object of latest_restart.json, or "". */
+std::string latestSlotName(const std::string& rootDir) {
+  const std::string text =
+      readTextFile(fs::path(rootDir) / "latest_restart.json");
+  std::string block, slot;
+  if (!text.empty() && extractObject(text, "latest", block) &&
+      extractString(block, "slot", slot) && (slot == "A" || slot == "B"))
+    return slot;
+  return std::string();
+}
+
+/** Highest "generation" of the two slot manifests; 0 if neither has one. */
+long long highestGeneration(const std::string& rootDir) {
+  long long highest = 0;
+  for (const char* slot : {"A", "B"}) {
+    long long generation = 0;
+    if (extractLongLong(
+            readTextFile(fs::path(RestartSlotManager::slotDir(rootDir, slot)) /
+                         "manifest.json"),
+            "generation", generation) &&
+        generation > highest)
+      highest = generation;
+  }
+  return highest;
 }
 
 void writeTextAtomically(const fs::path& path, const std::string& text) {
@@ -394,13 +381,25 @@ std::string latestJson(const RestartWriteTarget& target) {
 
 void RestartSlotManager::init(const std::string& rootDir,
                               const std::string& backend, int rank, int nranks,
-                              const RestartMeshMetadata& mesh) {
+                              const RestartMeshMetadata& mesh,
+                              const std::string& restartSlot) {
   rootDir_ = rootDir;
   backend_ = backend;
   rank_ = rank;
   nranks_ = nranks;
   mesh_ = mesh;
-  latest_ = resolveLatest(rootDir_, backend_);
+  // A fresh run starts in slot A. A restarted run continues from the slot it
+  // read, so the next checkpoint goes to the other slot and the restart
+  // source survives it.
+  if (!restartSlot.empty()) {
+    std::string reason;
+    latest_ = loadSlot(rootDir_, backend_, restartSlot, false, reason);
+    if (!latest_.found) {
+      eprintf("ERROR: restart slot restart_%s became unreadable: %s",
+              restartSlot.c_str(), reason.c_str());
+    }
+  }
+  maxGeneration_ = highestGeneration(rootDir_);
   initialized_ = true;
 }
 
@@ -420,27 +419,37 @@ RestartWriteTarget RestartSlotManager::beginWrite(int cycle) {
   target.buildVersion = iPic3D::build::version();
   target.buildSignature = iPic3D::build::signature();
 
-  if (!latest_.found) {
-    target.slot = "A";
-    target.generation = 1;
-  } else {
-    target.slot = latest_.slot == "A" ? "B" : "A";
-    target.generation = latest_.generation + 1;
-  }
+  // A new checkpoint gets a generation above every one in the root, also
+  // when the run continues from a slot older than the other one.
+  target.slot = latest_.found ? otherSlot(latest_.slot) : "A";
+  target.generation = maxGeneration_ + 1;
 
   target.dataDir = slotDir(rootDir_, target.slot);
   target.rankFilePath =
       (fs::path(target.dataDir) / rankFileName(backend_, rank_)).string();
 
   fs::create_directories(target.dataDir);
+  if (rank_ == 0) {
+    // Mark the slot incomplete before any rank file is replaced.
+    std::error_code ec;
+    fs::remove(fs::path(target.dataDir) / "manifest.json", ec);
+    if (ec) {
+      eprintf("ERROR: could not remove old restart manifest in %s",
+              target.dataDir.c_str());
+    }
+  }
+
+  return target;
+}
+
+void RestartSlotManager::prepareRankFile(
+    const RestartWriteTarget& target) const {
   std::error_code ec;
   fs::remove_all(target.rankFilePath, ec);
   if (ec) {
     eprintf("ERROR: could not remove old restart rank file: %s",
             target.rankFilePath.c_str());
   }
-
-  return target;
 }
 
 void RestartSlotManager::publishIfRoot(const RestartWriteTarget& target) const {
@@ -465,33 +474,130 @@ void RestartSlotManager::completeLocal(const RestartWriteTarget& target) {
   latest_.mesh = target.mesh;
   latest_.buildVersion = target.buildVersion;
   latest_.buildSignature = target.buildSignature;
+  maxGeneration_ = target.generation;
 }
 
-RestartCheckpoint
-RestartSlotManager::resolveLatest(const std::string& rootDir,
-                                  const std::string& backend) {
-  const fs::path latestPath = fs::path(rootDir) / "latest_restart.json";
-  const std::string latestText = readTextFile(latestPath);
-  if (latestText.empty())
+RestartCheckpoint RestartSlotManager::loadSlot(const std::string& rootDir,
+                                               const std::string& backend,
+                                               const std::string& slot,
+                                               bool checkRankFiles,
+                                               std::string& reason) {
+  const std::string dataDir = slotDir(rootDir, slot);
+  if (!fs::is_directory(dataDir)) {
+    reason = "directory " + dataDir + " does not exist";
     return RestartCheckpoint();
-
-  std::string latestBlock;
-  RestartCheckpoint latest;
-  if (extractObject(latestText, "latest", latestBlock) &&
-      parseCheckpointBlock(latestBlock, rootDir, backend, latest) &&
-      validateCheckpoint(latest, backend)) {
-    return latest;
+  }
+  const std::string manifest =
+      readTextFile(fs::path(dataDir) / "manifest.json");
+  if (manifest.empty()) {
+    reason = "no manifest.json (the slot was never completed, or its rewrite "
+             "was cut off)";
+    return RestartCheckpoint();
   }
 
-  std::string previousBlock;
-  RestartCheckpoint previous;
-  if (extractObject(latestText, "previous", previousBlock) &&
-      parseCheckpointBlock(previousBlock, rootDir, backend, previous) &&
-      validateCheckpoint(previous, backend)) {
-    return previous;
+  std::string savedBackend;
+  extractString(manifest, "backend", savedBackend);
+  if (!savedBackend.empty() && savedBackend != backend) {
+    reason = "written by the " + savedBackend + " backend, this build reads " +
+             backend;
+    return RestartCheckpoint();
   }
 
-  return RestartCheckpoint();
+  RestartCheckpoint checkpoint;
+  if (!parseCheckpointBlock(manifest, rootDir, backend, checkpoint)) {
+    reason = "manifest.json is malformed";
+    return RestartCheckpoint();
+  }
+  if (checkpoint.slot != slot) {
+    reason = "manifest.json belongs to restart_" + checkpoint.slot;
+    return RestartCheckpoint();
+  }
+  if (checkpoint.cycle < 0 || checkpoint.nranks <= 0 ||
+      !checkpoint.mesh.valid) {
+    reason = "manifest.json has an invalid cycle, rank count or mesh";
+    return RestartCheckpoint();
+  }
+  if (checkRankFiles) {
+    std::string first;
+    const int missing = countMissingRankFiles(checkpoint, first);
+    if (missing > 0) {
+      reason = std::to_string(missing) + " of " +
+               std::to_string(checkpoint.nranks) +
+               " rank files are missing (first: " + first + ")";
+      return RestartCheckpoint();
+    }
+  }
+  return checkpoint;
+}
+
+RestartCheckpoint RestartSlotManager::resolve(const std::string& rootDir,
+                                              const std::string& backend,
+                                              const std::string& requestedSlot,
+                                              std::string& report) {
+  report.clear();
+
+  // The slot tried first; the other one is the fallback.
+  std::string first, firstLabel;
+  if (!requestedSlot.empty()) {
+    first = requestedSlot;
+    firstLabel = "requested restart_" + first;
+  } else if (!(first = latestSlotName(rootDir)).empty()) {
+    firstLabel = "latest restart_" + first;
+  } else {
+    // No usable latest_restart.json: the slot whose manifest has the higher
+    // generation is the latest one; it is checked in full below.
+    std::string ignored;
+    const RestartCheckpoint a = loadSlot(rootDir, backend, "A", false, ignored);
+    const RestartCheckpoint b = loadSlot(rootDir, backend, "B", false, ignored);
+    first = (b.found && (!a.found || b.generation > a.generation)) ? "B" : "A";
+    firstLabel = "newest restart_" + first;
+    report += "latest_restart.json is missing or names no slot; trying the "
+              "slots by generation.\n";
+  }
+  const std::string second = otherSlot(first);
+
+  std::string reason;
+  RestartCheckpoint chosen = loadSlot(rootDir, backend, first, true, reason);
+  if (!chosen.found) {
+    report += firstLabel + " is not usable: " + reason + "\n";
+    std::string secondReason;
+    chosen = loadSlot(rootDir, backend, second, true, secondReason);
+    if (!chosen.found) {
+      report += "restart_" + second + " is not usable: " + secondReason + "\n";
+      return RestartCheckpoint();
+    }
+    report += "Falling back to restart_" + second + ".\n";
+    return chosen;
+  }
+
+  // The next checkpoint goes to the other slot; say so if it holds a usable
+  // checkpoint newer than the one the run continues from.
+  std::string ignored;
+  const RestartCheckpoint other =
+      loadSlot(rootDir, backend, second, true, ignored);
+  if (other.found && other.generation > chosen.generation) {
+    report += "restart_" + second + " holds a newer checkpoint (cycle " +
+              std::to_string(other.cycle) +
+              "); the first checkpoint of this run will overwrite it.\n";
+  }
+  return chosen;
+}
+
+bool RestartSlotManager::parseSlotName(const std::string& text,
+                                       std::string& slot) {
+  if (text.empty() || text == "latest") {
+    slot.clear();
+    return true;
+  }
+  if (text == "A" || text == "a") {
+    slot = "A";
+    return true;
+  }
+  if (text == "B" || text == "b") {
+    slot = "B";
+    return true;
+  }
+  return false;
 }
 
 RestartCheckpoint RestartSlotManager::readManifest(const std::string& dataDir,

@@ -714,10 +714,12 @@ void Collective::ReadInput(const ConfigFile& config) {
     RestartReadDirName = RestartDirName;
     restart_status = 1;
 
-    // Resolve the selected A/B restart checkpoint.
-    RestartCheckpoint checkpoint =
-        RestartReader::resolveLatestCheckpoint(RestartDirName);
+    // Resolve the A/B restart checkpoint: the requested slot, or the latest,
+    // falling back to the other slot when it is not usable.
+    RestartCheckpoint checkpoint = RestartReader::resolveCheckpoint(
+        RestartDirName, RestartSlotRequest, RestartSelectionReport);
     RestartReadDirName = checkpoint.dataDir;
+    RestartReadSlot = checkpoint.slot;
     last_cycle = checkpoint.cycle;
   }
 }
@@ -753,31 +755,60 @@ void Collective::read_particles_restart(const VCtopology3D* vct,
                                getRestartReadDirName(), last_cycle);
 }
 
-/*! constructor */
+/*! constructor: parse the command line, then read the input file.
+ *
+ * Arguments, in any order: the input file (default "inputfile") and, for a
+ * restart, one of
+ *   restart | restart=latest | restart=A | restart=B | restart A | restart B
+ * where A and B are the checkpoint slots restart_A and restart_B. */
 Collective::Collective(int argc, char** argv) {
-  if (argc < 2) {
-    inputfile = "inputfile";
-    RESTART1 = false;
-  } else if (argc < 3) {
-    inputfile = argv[1];
-    RESTART1 = false;
-  } else {
-    if (strcmp(argv[1], "restart") == 0) {
-      inputfile = argv[2];
-      RESTART1 = true;
-    } else if (strcmp(argv[2], "restart") == 0) {
-      inputfile = argv[1];
-      RESTART1 = true;
-    } else {
-      cout << "Error: syntax error in mpirun arguments. Did you mean to "
-              "'restart' ?"
-           << endl;
-      return;
+  RESTART1 = false;
+  std::vector<std::string> inputs;
+  std::string error;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    const bool bare = arg == "restart";
+    const bool withValue = arg.rfind("restart=", 0) == 0;
+    if (!bare && !withValue) {
+      inputs.push_back(arg);
+      continue;
     }
-
-    if (MPIdata::get_rank() == 0)
-      std::cout << "Restarting..." << endl;
+    if (RESTART1) {
+      error = "the restart option is given more than once";
+      break;
+    }
+    RESTART1 = true;
+    if (withValue) {
+      const std::string value = arg.substr(std::string("restart=").size());
+      if (!RestartSlotManager::parseSlotName(value, RestartSlotRequest)) {
+        error = "unknown restart slot '" + value + "' (use A, B or latest)";
+        break;
+      }
+    } else if (i + 1 < argc) {
+      // "restart A": take the next argument when it names a slot
+      std::string slot;
+      const std::string next = argv[i + 1];
+      if (!next.empty() && RestartSlotManager::parseSlotName(next, slot)) {
+        RestartSlotRequest = slot;
+        ++i;
+      }
+    }
   }
+  if (error.empty() && inputs.size() > 1)
+    error = "more than one input file given ('" + inputs[0] + "', '" +
+            inputs[1] + "')";
+  if (!error.empty()) {
+    if (MPIdata::get_rank() == 0)
+      std::cout << "Error in the command line: " << error << ".\n"
+                << "Usage: iPIC3D <input file> [restart | restart=A | "
+                   "restart=B | restart=latest]"
+                << std::endl;
+    MPIdata::exit(1);
+  }
+  inputfile = inputs.empty() ? std::string("inputfile") : inputs[0];
+
+  if (RESTART1 && MPIdata::get_rank() == 0)
+    std::cout << "Restarting..." << endl;
   ReadInput(inputfile);
   init_derived_parameters();
 }

@@ -34,14 +34,19 @@ public:
    *
    * Restart layouts use RestartDirName/restart_A or restart_B plus
    * latest_restart.json metadata. Older flat restart layouts are not
-   * supported.
+   * supported. Rank 0 selects the slot (RestartSlotManager::resolve) and
+   * broadcasts it, so every rank reads the same checkpoint; the run stops
+   * if no slot is usable.
    *
-   * @param restartDir  User-provided restart root directory.
-   * @return            Checkpoint metadata, including the directory that
-   *                    contains rank-local restart files.
+   * @param restartDir    User-provided restart root directory.
+   * @param requestedSlot "A" or "B" from the command line, "" for the latest.
+   * @param report        On rank 0: the slots passed over and why, or "".
+   * @return              Checkpoint metadata, including the directory that
+   *                      contains rank-local restart files.
    */
-  static RestartCheckpoint
-  resolveLatestCheckpoint(const std::string& restartDir);
+  static RestartCheckpoint resolveCheckpoint(const std::string& restartDir,
+                                             const std::string& requestedSlot,
+                                             std::string& report);
 
   // ---------------------------------------------------------------
   // Field restart

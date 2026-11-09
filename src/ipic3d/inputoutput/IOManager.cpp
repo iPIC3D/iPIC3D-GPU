@@ -143,9 +143,12 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
       (restart_cycle_ > 0 || col->getCallFinalize())) {
     const RestartMeshMetadata restartMesh =
         makeCurrentRestartMeshMetadata(col, vct, grid, ns);
-    restartSlots_.init(
-        col->getRestartDirName(), RestartSlotManager::backendName(),
-        vct->getCartesian_rank(), MPIdata::get_nprocs(), restartMesh);
+    // Continue from the slot the restart read ("" for a fresh run): the next
+    // checkpoint goes to the other slot.
+    restartSlots_.init(col->getRestartDirName(),
+                       RestartSlotManager::backendName(),
+                       vct->getCartesian_rank(), MPIdata::get_nprocs(),
+                       restartMesh, col->getRestartReadSlot());
   }
 #ifndef USE_ADIOS2
   if (fieldBackend_ == FieldBackend::ADIOS2) {
@@ -398,7 +401,13 @@ void IOManager::writeRestart(int cycle) {
   if (restartBackend_ == RestartBackend::NONE)
     return;
 
+  // Rank 0 removes the slot's manifest; only then may the ranks replace
+  // their files, so an interrupted write leaves a slot marked incomplete.
   RestartWriteTarget target = restartSlots_.beginWrite(cycle);
+#ifndef NO_MPI
+  MPI_Barrier(MPIdata::get_PicGlobalComm());
+#endif
+  restartSlots_.prepareRankFile(target);
 
   switch (restartBackend_) {
 

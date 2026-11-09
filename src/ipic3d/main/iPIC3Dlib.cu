@@ -173,9 +173,9 @@ static std::string copyInputToOutput(const std::string& input,
  * @brief Build identity (BuildInfo.h) and run environment, as printed at
  *        startup and written at the top of SimulationData.txt.
  */
-static std::string provenanceReport(const std::string& input,
+static std::string provenanceReport(const Collective& col,
                                     const std::string& inputCopy, int nprocs,
-                                    bool restart, int firstCycle) {
+                                    int firstCycle) {
   std::ostringstream out;
   out << "---------------------------\n"
       << "-  Build and run          -\n"
@@ -210,15 +210,21 @@ static std::string provenanceReport(const std::string& input,
     out << "GPUs (rank 0)  : " << deviceCount << " x " << prop.name
         << ", runtime " << runtime << ", driver " << driver << "\n";
   }
-  out << "Input file     : " << input;
+  out << "Input file     : " << col.getinputfile();
   if (!inputCopy.empty())
     out << " (copy: " << inputCopy << ")";
   out << "\n"
       << "Start          : ";
-  if (restart)
-    out << "restart at cycle " << firstCycle << "\n";
-  else
+  if (col.getRestart_status() != 0) {
+    out << "restart at cycle " << firstCycle << " from "
+        << col.getRestartReadDirName() << "\n";
+    // slot-selection notes: fallbacks and a newer slot about to be replaced
+    std::istringstream notes(col.getRestartSelectionReport());
+    for (std::string line; std::getline(notes, line);)
+      out << "Restart note   : " << line << "\n";
+  } else {
     out << "fresh run\n";
+  }
   return out.str();
 }
 // MPIdata* iPic3D::c_Solver::mpi=0;
@@ -368,8 +374,7 @@ int c_Solver::Init(int argc, char** argv) {
                                   restart_status != 0, first_cycle);
 #endif
     const std::string provenance =
-        provenanceReport(col->getinputfile(), inputCopy, nprocs,
-                         restart_status != 0, first_cycle);
+        provenanceReport(*col, inputCopy, nprocs, first_cycle);
     cout << provenance;
 
     MPIdata::instance().Print();

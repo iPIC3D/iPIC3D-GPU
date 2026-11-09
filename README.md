@@ -184,6 +184,16 @@ mpirun -np 8 ./iPIC3D ../share/inputfiles/myInput.inp restart
 
 Without `restart`, the simulation always starts fresh from the initial conditions.
 
+By default a restart reads the latest checkpoint. To read a given slot (see [Restart files](#restart-files)), name it:
+
+```shell
+mpirun -np 8 ./iPIC3D ../share/inputfiles/myInput.inp restart=B   # or: restart B
+mpirun -np 8 ./iPIC3D ../share/inputfiles/myInput.inp restart=A   # or: restart A
+mpirun -np 8 ./iPIC3D ../share/inputfiles/myInput.inp restart=latest  # same as restart
+```
+
+If the requested slot is not usable, the run falls back to the other slot and says so at startup. An unknown slot name, a repeated `restart` or a second input file stops the run with a usage message.
+
 ### Restart files
 
 `RestartDirName` is the restart root directory. New checkpoints are written into two reusable slots under that root:
@@ -195,14 +205,35 @@ RestartDirName/
   restart_B/
 ```
 
-Each checkpoint rewrites the slot that is not currently marked latest. After every rank closes its rank file, the code enters an MPI barrier; then rank 0 writes `restart_A/manifest.json` or `restart_B/manifest.json` and atomically replaces `latest_restart.json`.
+Each checkpoint goes to the slot not holding the run's previous checkpoint: a fresh run starts with `restart_A`, and the first checkpoint after a restart goes to the slot that was not read. Writing a checkpoint takes four steps:
+
+1. Rank 0 removes the slot's `manifest.json`, marking the slot incomplete.
+2. All ranks pass an MPI barrier, then replace their rank files.
+3. All ranks pass a second barrier after closing their rank files.
+4. Rank 0 writes `restart_A/manifest.json` or `restart_B/manifest.json` and atomically replaces `latest_restart.json`.
+
+A write cut off before step 4 therefore leaves the slot without a manifest. Each checkpoint gets a `generation` one above the highest in the restart root, so the newest checkpoint always has the highest generation.
 
 The rank-file format depends on the compile-time backend:
 
 - **ADIOS2** (`USE_ADIOS2=ON`, default): `restart_A/restart_<rank>.bp` or `restart_B/restart_<rank>.bp`.
 - **Serial HDF5** (`USE_ADIOS2=OFF`, `USE_HDF5=ON`): `restart_A/restart<rank>.hdf` or `restart_B/restart<rank>.hdf`.
 
-On restart, the reader uses `latest_restart.json` to select the newest valid slot. If that slot is incomplete, it tries the previous slot recorded in the metadata. A `RestartDirName` without `latest_restart.json` and slot manifests is rejected. The slot manifest records the cycle label, backend, source rank count, and mesh metadata used for compatibility checks and remapping.
+On restart, rank 0 selects the slot and broadcasts the choice, so every rank reads the same checkpoint:
+
+- With `restart=A` or `restart=B`, it tries that slot, then the other one.
+- With `restart` or `restart=latest`, it tries the slot that `latest_restart.json` names as latest, then the other one. Without a usable `latest_restart.json`, it tries the slot whose manifest has the higher generation first.
+
+A slot is usable when all of these hold:
+
+- its `manifest.json` exists and names that slot;
+- the manifest was written by the restart backend of this build;
+- the manifest has a valid cycle, rank count and mesh;
+- a rank file exists for each of the `nranks` ranks the manifest records.
+
+Startup prints the slot read and the slot requested. It also prints notes: every slot passed over, with the reason, and, when the other slot holds a newer checkpoint, that the run's first checkpoint will overwrite it. The slot read and these notes are written at the top of `SimulationData.txt` too. If no slot is usable, the run stops and lists why. The slot manifest records the cycle label, backend, source rank count, and mesh metadata used for compatibility checks and remapping.
+
+Restarting from the older slot starts a new branch of the run: its first checkpoint replaces the newer slot. Copy that slot elsewhere first if you need to keep it.
 
 ### Restart remapping
 

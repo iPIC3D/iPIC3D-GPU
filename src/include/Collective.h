@@ -240,6 +240,10 @@ public:
   string getSaveDirName() const { return (SaveDirName); }
   string getRestartDirName() const { return (RestartDirName); }
   string getRestartReadDirName() const { return (RestartReadDirName); }
+  /** Slot the restart reads ("A" or "B"); "" for a fresh run. */
+  string getRestartReadSlot() const { return (RestartReadSlot); }
+  /** On rank 0: slots passed over during the selection and why, or "". */
+  string getRestartSelectionReport() const { return (RestartSelectionReport); }
   string getinputfile() const { return (inputfile); }
   string getCase() const { return (Case); }
   string getSimName() const { return (SimName); }
@@ -484,6 +488,12 @@ private:
   string RestartDirName;
   /*! directory containing the rank-local files selected for restart input */
   string RestartReadDirName;
+  /*! restart slot requested on the command line ("A", "B"; "" = latest) */
+  string RestartSlotRequest;
+  /*! restart slot actually read ("A" or "B"; "" for a fresh run) */
+  string RestartReadSlot;
+  /*! rank 0: why slots were passed over while selecting the restart */
+  string RestartSelectionReport;
   /*! restart_status 0 --> no restart; 1--> restart, create new; 2--> restart,
    * append; */
   int restart_status;

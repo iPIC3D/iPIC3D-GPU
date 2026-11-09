@@ -173,6 +173,10 @@ public:
   double getSmooth() const { return (Smooth); }
   int getSmoothNiter() const { return SmoothNiter; }
   bool getHaloOverlap() const { return haloOverlap; }
+  double getSolverSourceGrowthLimit() const { return solverSourceGrowthLimit; }
+  bool getSolverStopOnNonConvergence() const {
+    return solverStopOnNonConvergence;
+  }
   int getNcycles() const { return (ncycles); }
   int getNs() const { return (ns); }
   int getNsTestPart() const { return (nstestpart); }
@@ -344,6 +348,15 @@ private:
    *  smoothing and the B / hat-moment interpolation with the computation that
    *  does not read the exchanged values (HaloOverlap, default 0) */
   bool haloOverlap;
+  /*! Field-solver guard: stop the run when the 2-norm of the Maxwell
+   *  right-hand side grows by more than this factor from one cycle to the
+   *  next, or is not finite; <= 0 disables the growth test
+   *  (SolverSourceGrowthLimit, default 100) */
+  double solverSourceGrowthLimit;
+  /*! Field-solver guard: stop the run when a Krylov field solve (Maxwell
+   *  GMRES/FGMRES, div(E)/div(B) cleaning) ends without converging; false
+   *  only warns (SolverStopOnNonConvergence, default 1) */
+  bool solverStopOnNonConvergence;
   /*! number of time cycles */
   int ncycles;
   /*! macrocell size (interior cells) for the (v_par,v_perp) spectra

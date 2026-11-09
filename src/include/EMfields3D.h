@@ -69,6 +69,14 @@ public:
    *  solves) are blocking. */
   enum class HaloMode { Blocking, Overlap };
 
+  /** Outcome of a Krylov solve, read by the field-solver guard after the
+   *  solve: whether the true residual met the tolerance, and the ||b|| the
+   *  solver computes anyway for its status line (-1 when not computed). */
+  struct KrylovSolveStatus {
+    bool converged = true;
+    double normB = -1.0;
+  };
+
   // ======= Construction and lifetime =======
 
   /**
@@ -639,9 +647,11 @@ public:
    *  Right-preconditioned flexible GMRES: Z[k] = M⁻¹ V[k], w = A Z[k].
    *  Uses gpuBlockJacobiPrecond as the preconditioner.
    */
-  void gpuFGMRES_BlockJacobiPrecond(cudaSolverType* d_x, int n,
-                                    cudaSolverType* d_b, int m, int max_iter,
-                                    cudaSolverType tol, MPI_Comm fieldcomm);
+  KrylovSolveStatus gpuFGMRES_BlockJacobiPrecond(cudaSolverType* d_x, int n,
+                                                 cudaSolverType* d_b, int m,
+                                                 int max_iter,
+                                                 cudaSolverType tol,
+                                                 MPI_Comm fieldcomm);
 
   /** Power iteration to estimate the largest eigenvalue of A.
    *  @param GpuImage  operator callback A·v
@@ -859,15 +869,29 @@ public:
   void gpuChebyshevPrecondPoisson(cudaSolverType* d_x, cudaSolverType* d_b);
   /** GPU FGMRES(m) with Chebyshev preconditioner for Poisson (divergence
    * cleaning). */
-  void gpuFGMRES_PoissonChebyshev(cudaSolverType* d_x, int n,
-                                  cudaSolverType* d_b, int m, int max_iter,
-                                  cudaSolverType tol, MPI_Comm fieldcomm);
+  KrylovSolveStatus gpuFGMRES_PoissonChebyshev(cudaSolverType* d_x, int n,
+                                               cudaSolverType* d_b, int m,
+                                               int max_iter, cudaSolverType tol,
+                                               MPI_Comm fieldcomm);
   /** GPU Poisson correction for div(E) cleaning. */
   void gpuPoissonCorrection(int cycle);
   /** Divergence cleaning of B: solve lap(PSI) = div(B) with PSI = 0 beyond
    * the physical faces and subtract grad(PSI) from the node B on every
    * node, as the div(E) correction does. */
-  void gpuApplyDivBCleaning();
+  void gpuApplyDivBCleaning(int cycle);
+
+  // ---- Field-solver guard (SolverSourceGrowthLimit,
+  //      SolverStopOnNonConvergence) ----
+  /** Stop the run if the Maxwell right-hand side norm is not finite or grew
+   *  by more than SolverSourceGrowthLimit since the previous E solve.
+   *  normB < 0 (not computed by the solver) is not checked. */
+  void checkMaxwellSource(double normB, int cycle);
+  /** Stop the run if a field solve did not converge and
+   *  SolverStopOnNonConvergence is set (the solver has already warned). */
+  void checkSolverConverged(bool converged, const char* solve, int cycle);
+  /** Print why on rank 0 and abort every rank, before the result of the
+   *  failed solve is used and before any further output or checkpoint. */
+  [[noreturn]] void stopForSolverFailure(const std::string& reason) const;
 
   // ---- GPU Solver: additional halo exchange ----
   /** Center box-stencil halo exchange using field communicator. */
@@ -976,6 +1000,9 @@ private:
   int SmoothNiter;
   /*! Halo mode of the field solver (input HaloOverlap) */
   bool haloOverlap_;
+  /*! ||b|| of the previous Maxwell solve (field-solver guard); 0 before the
+   *  first one */
+  double previousMaxwellSourceNorm_ = 0.0;
   /*! delt = c*th*dt */
   double delt;
   /*! number of particles species */

@@ -49,6 +49,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -1598,7 +1599,71 @@ static void gmresCheckFinite(double err, const char* label, int restart) {
   }
 }
 
-static void
+// =========================================================================
+//  Field-solver guard
+//
+//  The values tested are global (reduced over the field communicator), so
+//  every rank takes the same decision.  The run stops with MPI_Abort, not a
+//  normal finalize: the final checkpoint of CallFinalize would otherwise
+//  overwrite a good restart slot with the corrupted state.
+// =========================================================================
+
+void EMfields3D::checkMaxwellSource(double normB, int cycle) {
+  if (normB < 0.0) // not computed (Chebyshev iteration)
+    return;
+  const double limit = get_col().getSolverSourceGrowthLimit();
+  const double previous = previousMaxwellSourceNorm_;
+  previousMaxwellSourceNorm_ = normB;
+  const bool finite = std::isfinite(normB);
+  // previous == 0: first solve of the run, or a zero source
+  const bool jump = limit > 0.0 && previous > 0.0 && normB > limit * previous;
+  if (finite && !jump)
+    return;
+  std::ostringstream reason;
+  reason << "the Maxwell right-hand side norm ||b|| is " << normB
+         << " at cycle " << cycle;
+  if (finite)
+    reason << ", " << normB / previous << " times the " << previous
+           << " of the previous cycle (SolverSourceGrowthLimit = " << limit
+           << ")";
+  stopForSolverFailure(reason.str());
+}
+
+void EMfields3D::checkSolverConverged(bool converged, const char* solve,
+                                      int cycle) {
+  if (converged || !get_col().getSolverStopOnNonConvergence())
+    return;
+  std::ostringstream reason;
+  reason << "the " << solve << " solve did not converge at cycle " << cycle
+         << " (SolverStopOnNonConvergence = 1)";
+  stopForSolverFailure(reason.str());
+}
+
+void EMfields3D::stopForSolverFailure(const std::string& reason) const {
+  const VirtualTopology3D* vct = &get_vct();
+  if (vct->getCartesian_rank() == 0) {
+    std::cout
+        << "\n"
+        << "==============================================================="
+           "==========\n"
+        << "  SOLVER GUARD: " << reason << ".\n"
+        << "  Stopping before this solution is used. No further output "
+           "or checkpoint\n"
+        << "  is written; the restart slots keep the checkpoints written "
+           "before.\n"
+        << "==============================================================="
+           "==========\n"
+        << std::flush;
+  }
+  // Let rank 0 print before any rank aborts the job.
+  MPI_Barrier(vct->getFieldComm());
+  MPI_Abort(vct->getFieldComm(), EXIT_FAILURE);
+  std::abort(); // not reached
+}
+
+// Returns ||b|| and whether the true residual fell below tol * ||r0|| within
+// max_iter restarts (or r0 = 0).
+static EMfields3D::KrylovSolveStatus
 gpuGMRES_impl(EMfields3D* field,
               void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*),
               cudaSolverType* d_x, int n, cudaSolverType* d_b, int m,
@@ -1637,24 +1702,23 @@ gpuGMRES_impl(EMfields3D* field,
                 mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
   initial_error = sqrt(initial_error);
   gmresCheckFinite(initial_error, "GMRES", 0);
-  if (initial_error < 1e-30)
-    return;
 
-  int gmresRank;
-  MPI_Comm_rank(fieldcomm, &gmresRank);
-
-  // Compute ||b|| for status print (async, combined sync)
+  // ||b||: printed, and returned for the field-solver guard
   gpuNorm2_async(d_b, n, d_scratch, &h_reduceLocal[0], stream);
   cudaErrChk(cudaStreamSynchronize(stream));
   double normb;
   MPI_Allreduce(&h_reduceLocal[0], &normb, 1, mpiTypeOf<cudaSolverType>(),
                 MPI_SUM, fieldcomm);
-  normb = sqrt(normb);
-  if (normb == 0.0)
-    normb = 1.0;
+  EMfields3D::KrylovSolveStatus status;
+  status.normB = sqrt(normb);
+  if (initial_error < 1e-30)
+    return status;
+
+  int gmresRank;
+  MPI_Comm_rank(fieldcomm, &gmresRank);
   if (gmresRank == 0)
     printf("Initial residual: %g norm b vector (source) = %g\n", initial_error,
-           normb);
+           status.normB);
 
   gpuScale(d_gmresV, 1.0 / initial_error, n, stream);
   double error = initial_error;
@@ -1784,13 +1848,15 @@ gpuGMRES_impl(EMfields3D* field,
         printf(
             "GMRES converged at restart # %d; iteration #%d with error: %g\n",
             restart, kEnd, error / initial_error);
-      return;
+      return status;
     }
     gpuScale(d_gmresV, 1.0 / error, n, stream);
   }
   if (gmresRank == 0)
     std::cout << "  [GMRES] WARNING: did not converge after " << max_iter
-              << " restarts" << std::endl;
+              << " restarts, error: " << error / initial_error << std::endl;
+  status.converged = false;
+  return status;
 }
 
 // =========================================================================
@@ -1832,7 +1898,9 @@ void EMfields3D::gpuEnsureFGMRESWorkspace(int m, int n) {
 //  solution update uses Z.
 // =========================================================================
 
-static void
+// Returns ||b|| and whether the true residual fell below tol * ||r0|| within
+// max_iter restarts (or r0 = 0).
+static EMfields3D::KrylovSolveStatus
 gpuFGMRES_impl(EMfields3D* field,
                void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*),
                void (EMfields3D::*GpuPrecond)(cudaSolverType*, cudaSolverType*),
@@ -1876,23 +1944,23 @@ gpuFGMRES_impl(EMfields3D* field,
                 mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
   initial_error = sqrt(initial_error);
   gmresCheckFinite(initial_error, label, 0);
-  if (initial_error < 1e-30)
-    return;
 
-  int rank;
-  MPI_Comm_rank(fieldcomm, &rank);
-
+  // ||b||: printed, and returned for the field-solver guard
   gpuNorm2_async(d_b, n, d_scratch, &h_reduceLocal[0], stream);
   cudaErrChk(cudaStreamSynchronize(stream));
   double normb;
   MPI_Allreduce(&h_reduceLocal[0], &normb, 1, mpiTypeOf<cudaSolverType>(),
                 MPI_SUM, fieldcomm);
-  normb = sqrt(normb);
-  if (normb == 0.0)
-    normb = 1.0;
+  EMfields3D::KrylovSolveStatus status;
+  status.normB = sqrt(normb);
+  if (initial_error < 1e-30)
+    return status;
+
+  int rank;
+  MPI_Comm_rank(fieldcomm, &rank);
   if (rank == 0)
     printf("  [%s] Initial residual: %g  norm(b) = %g\n", label, initial_error,
-           normb);
+           status.normB);
 
   double rho_tol = initial_error * tol;
   gpuScale(d_gmresV, 1.0 / initial_error, n, stream);
@@ -2017,7 +2085,7 @@ gpuFGMRES_impl(EMfields3D* field,
       if (rank == 0)
         printf("  [%s] Converged at restart #%d, iteration #%d, error: %g\n",
                label, restart, kk, error / initial_error);
-      return;
+      return status;
     }
     gpuScale(d_gmresV, 1.0 / error, n, stream);
   }
@@ -2025,6 +2093,8 @@ gpuFGMRES_impl(EMfields3D* field,
   if (rank == 0)
     printf("  [%s] WARNING: did not converge after %d restarts, error: %g\n",
            label, max_iter, error / initial_error);
+  status.converged = false;
+  return status;
 }
 
 // =========================================================================
@@ -2139,10 +2209,9 @@ void EMfields3D::gpuBlockJacobiPrecond(cudaSolverType* d_x,
 //  GPU FGMRES(m) with Block-Jacobi preconditioner
 // =========================================================================
 
-void EMfields3D::gpuFGMRES_BlockJacobiPrecond(cudaSolverType* d_x, int n,
-                                              cudaSolverType* d_b, int m,
-                                              int max_iter, cudaSolverType tol,
-                                              MPI_Comm fieldcomm) {
+EMfields3D::KrylovSolveStatus EMfields3D::gpuFGMRES_BlockJacobiPrecond(
+    cudaSolverType* d_x, int n, cudaSolverType* d_b, int m, int max_iter,
+    cudaSolverType tol, MPI_Comm fieldcomm) {
   // Diagnostic: print diagScalar so user can evaluate regime
   {
     const Grid* grid = &get_grid();
@@ -2161,12 +2230,12 @@ void EMfields3D::gpuFGMRES_BlockJacobiPrecond(cudaSolverType* d_x, int n,
   blockJacobiDinvStale = true;
   gpuEnsureFGMRESWorkspace(m, n);
 
-  gpuFGMRES_impl(this, gpuMaxwellImageFn(), &EMfields3D::gpuBlockJacobiPrecond,
-                 d_x, n, d_b, m, max_iter, tol, d_blasScratch, d_gmresV,
-                 d_gmresW, gmresVAlloc, d_fgmresZ, fgmresZAlloc, fieldcomm,
-                 solverStream_, h_gmresReduceLocal, h_gmresReduceGlobal,
-                 h_gmresH, h_gmresG, h_gmresCS, h_gmresSN, h_gmresY,
-                 "FGMRES+BlockJacobi");
+  return gpuFGMRES_impl(
+      this, gpuMaxwellImageFn(), &EMfields3D::gpuBlockJacobiPrecond, d_x, n,
+      d_b, m, max_iter, tol, d_blasScratch, d_gmresV, d_gmresW, gmresVAlloc,
+      d_fgmresZ, fgmresZAlloc, fieldcomm, solverStream_, h_gmresReduceLocal,
+      h_gmresReduceGlobal, h_gmresH, h_gmresG, h_gmresCS, h_gmresSN, h_gmresY,
+      "FGMRES+BlockJacobi");
 }
 
 // =========================================================================
@@ -2247,6 +2316,10 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateE(int cycle) {
 
   MPI_Comm fieldcomm = vct->getFieldComm();
 
+  // The guard reads the status of the Krylov solvers after the solve, so it
+  // adds no work to it; the Chebyshev iteration reports nothing (unchecked).
+  KrylovSolveStatus status;
+  const char* solve = "Maxwell GMRES";
   if (SolverType == "Chebyshev") {
     // Chebyshev semi-iterative solver
     double eigMin = (chebEigMin > 0.0) ? chebEigMin : 1.0;
@@ -2262,17 +2335,24 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateE(int cycle) {
     // FGMRES(20) with communication-free block-Jacobi preconditioner
     if (vct->getCartesian_rank() == 0)
       cout << "*** MAXWELL SOLVER [GPU FGMRES+BlockJacobi] ***" << endl;
-    gpuFGMRES_BlockJacobiPrecond(d_xkrylovMaxwell.devPtr(), nMaxwell,
-                                 d_bkrylovMaxwell.devPtr(), 20, 200, GMREStol,
-                                 fieldcomm);
+    status = gpuFGMRES_BlockJacobiPrecond(d_xkrylovMaxwell.devPtr(), nMaxwell,
+                                          d_bkrylovMaxwell.devPtr(), 20, 200,
+                                          GMREStol, fieldcomm);
+    solve = "Maxwell FGMRES+BlockJacobi";
   } else {
     // Default: GMRES(20) solver
-    gpuGMRES_impl(this, gpuMaxwellImageFn(), d_xkrylovMaxwell.devPtr(),
-                  nMaxwell, d_bkrylovMaxwell.devPtr(), 20, 200, GMREStol,
-                  d_blasScratch, d_gmresV, d_gmresW, gmresVAlloc, fieldcomm,
-                  solverStream_, h_gmresReduceLocal, h_gmresReduceGlobal,
-                  h_gmresH, h_gmresG, h_gmresCS, h_gmresSN, h_gmresY);
+    status =
+        gpuGMRES_impl(this, gpuMaxwellImageFn(), d_xkrylovMaxwell.devPtr(),
+                      nMaxwell, d_bkrylovMaxwell.devPtr(), 20, 200, GMREStol,
+                      d_blasScratch, d_gmresV, d_gmresW, gmresVAlloc, fieldcomm,
+                      solverStream_, h_gmresReduceLocal, h_gmresReduceGlobal,
+                      h_gmresH, h_gmresG, h_gmresCS, h_gmresSN, h_gmresY);
   }
+  // Before the solution is unpacked: a ||b|| jump explains a failed solve,
+  // so it is tested first.
+  checkMaxwellSource(status.normB, cycle);
+  checkSolverConverged(status.converged, solve, cycle);
+
   // Krylov → physical: Exth, Eyth, Ezth
   gpuSolver2Phys3(d_Exth.devPtr(), d_Eyth.devPtr(), d_Ezth.devPtr(),
                   d_xkrylovMaxwell.devPtr(), nxn, nyn, nzn, solverStream_);
@@ -2525,7 +2605,7 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateB(int cycle) {
 
   // Divergence cleaning: lap(PSI) = div(B), B = B - grad(PSI)
   if (divBCorrection && cycle % divBCorrectionCycle == 0)
-    gpuApplyDivBCleaning();
+    gpuApplyDivBCleaning(cycle);
 }
 
 // =========================================================================
@@ -3584,19 +3664,19 @@ void EMfields3D::gpuChebyshevPrecondPoisson(cudaSolverType* d_x,
 //  FGMRES(m) for Poisson with Chebyshev preconditioner
 // =========================================================================
 
-void EMfields3D::gpuFGMRES_PoissonChebyshev(cudaSolverType* d_x, int n,
-                                            cudaSolverType* d_b, int m,
-                                            int max_iter, cudaSolverType tol,
-                                            MPI_Comm fieldcomm) {
+EMfields3D::KrylovSolveStatus
+EMfields3D::gpuFGMRES_PoissonChebyshev(cudaSolverType* d_x, int n,
+                                       cudaSolverType* d_b, int m, int max_iter,
+                                       cudaSolverType tol, MPI_Comm fieldcomm) {
   computePoissonChebyshevEigenvalues();
   gpuEnsureFGMRESWorkspace(m, n);
 
-  gpuFGMRES_impl(this, &EMfields3D::gpuPoissonImage,
-                 &EMfields3D::gpuChebyshevPrecondPoisson, d_x, n, d_b, m,
-                 max_iter, tol, d_blasScratch, d_gmresV, d_gmresW, gmresVAlloc,
-                 d_fgmresZ, fgmresZAlloc, fieldcomm, solverStream_,
-                 h_gmresReduceLocal, h_gmresReduceGlobal, h_gmresH, h_gmresG,
-                 h_gmresCS, h_gmresSN, h_gmresY, "FGMRES+Poisson");
+  return gpuFGMRES_impl(
+      this, &EMfields3D::gpuPoissonImage,
+      &EMfields3D::gpuChebyshevPrecondPoisson, d_x, n, d_b, m, max_iter, tol,
+      d_blasScratch, d_gmresV, d_gmresW, gmresVAlloc, d_fgmresZ, fgmresZAlloc,
+      fieldcomm, solverStream_, h_gmresReduceLocal, h_gmresReduceGlobal,
+      h_gmresH, h_gmresG, h_gmresCS, h_gmresSN, h_gmresY, "FGMRES+Poisson");
 }
 
 // =========================================================================
@@ -3647,9 +3727,10 @@ void EMfields3D::gpuPoissonCorrection(int cycle) {
 
   // Solve
   MPI_Comm fieldcomm = vct->getFieldComm();
-  gpuFGMRES_PoissonChebyshev(d_xkrylovPoisson_E.devPtr(), nPoisson,
-                             d_bkrylovPoisson_E.devPtr(), 20, 200, GMREStol,
-                             fieldcomm);
+  const KrylovSolveStatus status = gpuFGMRES_PoissonChebyshev(
+      d_xkrylovPoisson_E.devPtr(), nPoisson, d_bkrylovPoisson_E.devPtr(), 20,
+      200, GMREStol, fieldcomm);
+  checkSolverConverged(status.converged, "div(E) cleaning FGMRES", cycle);
 
   // Solution → physical
   gpuSolver2Phys1(d_PHI.devPtr(), d_xkrylovPoisson_E.devPtr(), nxc, nyc, nzc,
@@ -3675,7 +3756,7 @@ void EMfields3D::gpuPoissonCorrection(int cycle) {
 //  gpuApplyDivBCleaning: lap(PSI) = div(B), B -= grad(PSI)
 // =========================================================================
 
-void EMfields3D::gpuApplyDivBCleaning() {
+void EMfields3D::gpuApplyDivBCleaning(int cycle) {
   const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
@@ -3706,9 +3787,10 @@ void EMfields3D::gpuApplyDivBCleaning() {
 
   // Solve
   MPI_Comm fieldcomm = vct->getFieldComm();
-  gpuFGMRES_PoissonChebyshev(d_xkrylovPoisson_B.devPtr(), nPoisson,
-                             d_bkrylovPoisson_B.devPtr(), 20, 200, GMREStol,
-                             fieldcomm);
+  const KrylovSolveStatus status = gpuFGMRES_PoissonChebyshev(
+      d_xkrylovPoisson_B.devPtr(), nPoisson, d_bkrylovPoisson_B.devPtr(), 20,
+      200, GMREStol, fieldcomm);
+  checkSolverConverged(status.converged, "div(B) cleaning FGMRES", cycle);
 
   // Solution → physical
   gpuSolver2Phys1(d_PSI.devPtr(), d_xkrylovPoisson_B.devPtr(), nxc, nyc, nzc,

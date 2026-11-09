@@ -367,10 +367,8 @@ Some cases apply additional boundary-condition fixes during the time loop:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `SolverType` | `GMRES` | Maxwell solver: `GMRES` (GMRES(20)), `FGMRESBlockJacobi` (FGMRES(20) with the communication-free point-block Jacobi preconditioner) or `Chebyshev` (Chebyshev iteration). Any other value runs GMRES. |
+| `SolverType` | `GMRES` | Maxwell solver: `GMRES` (GMRES(20)) or `FGMRESBlockJacobi` (FGMRES(20) with the communication-free point-block Jacobi preconditioner) |
 | `GMREStol` | `1e-3` | Relative residual tolerance of the Maxwell solve and of the Poisson solves of the ∇·E and ∇·B corrections |
-| `ChebyshevMaxIter` | `20` | Chebyshev iterations (`SolverType = Chebyshev`) |
-| `ChebyshevEigMin`, `ChebyshevEigMax` | `0`, `0` | Eigenvalue bounds of the Chebyshev iteration; `ChebyshevEigMin ≤ 0` uses 1, `ChebyshevEigMax ≤ 0` estimates the bound by power iteration |
 | `BlockJacobiSweeps`, `BlockJacobiOmega` | `1`, `1.0` | Richardson sweeps and relaxation factor of the block-Jacobi preconditioner (`SolverType = FGMRESBlockJacobi`) |
 | `PoissonCorrection`, `PoissonCorrectionCycle` | `no`, `10` | ∇·E correction (`yes` enables) and its interval in cycles |
 | `divBCorrection`, `divBCorrectionCycle` | `no`, `10` | ∇·B cleaning (`yes` enables) and its interval in cycles |
@@ -379,10 +377,14 @@ Some cases apply additional boundary-condition fixes during the time loop:
 | `PoissonChebRescaleEigMin`, `PoissonChebRescaleEigMax` | `1.0`, `1.0` | Factors applied to its lower and upper eigenvalue bounds |
 | `Smooth`, `SmoothNiter` | `1.0`, `6` | Smoothing coefficient (`1` disables) and number of passes, applied to E after each solve and to the hat moments |
 | `HaloOverlap` | `0` | `1` overlaps the halo exchanges of the field solver (Maxwell image, smoothing, B and hat-moment interpolation) with the computation that does not read the exchanged values; same results as `0`. Meant for multi-rank runs: on a single rank there is no MPI to hide and the extra boundary-layer launches can make it slower. The Maxwell image overlaps on ranks with at least 3 cells along every axis, except an axis of a single cell that is periodic onto the rank itself (one rank along it, as y of an x-z run; then only its node stage overlaps); other ranks use the blocking exchange |
+| `SolverSourceGrowthLimit` | `100` | Stops the run when the 2-norm ‖b‖ of the Maxwell right-hand side is not finite or exceeds this factor times its value in the previous cycle; `0` disables the growth test. Between cycles ‖b‖ normally changes by tens of percent, and by up to a few times in the first cycles and on ∇·E correction cycles; a corrupted moment or field makes it jump by orders of magnitude. ‖b‖ is the norm the GMRES and FGMRES solvers compute for their status line, tested after the solve, so the check adds no work |
+| `SolverStopOnNonConvergence` | `1` | `1` stops the run when a Krylov field solve (Maxwell GMRES or FGMRES, ∇·E or ∇·B correction) reaches 200 restarts without meeting `GMREStol`; `0` only prints the solver's warning and uses the unconverged solution |
+
+Either guard prints the reason on rank 0 and stops all ranks with `MPI_Abort` before the result of the failed solve is used. No further output or checkpoint is written, the final one included, so the restart slots keep the checkpoints written before the failure.
 
 ### Boundary rows of the implicit field solve
 
-The Maxwell solve for E(n+θ) (GMRES, FGMRES with block Jacobi, or Chebyshev, selected by `SolverType`) needs a linear operator: the image M·v that the solver evaluates on its own basis vectors must hold no constant term. Each boundary condition is therefore split into its linear part, which goes in the image row, and its constant part, which goes in the right-hand-side row.
+The Maxwell solve for E(n+θ) (GMRES or FGMRES with block Jacobi, selected by `SolverType`) needs a linear operator: the image M·v that the solver evaluates on its own basis vectors must hold no constant term. Each boundary condition is therefore split into its linear part, which goes in the image row, and its constant part, which goes in the right-hand-side row.
 
 | face | image row | right-hand-side row |
 |---|---|---|

@@ -394,6 +394,19 @@ void ParticleCommInjection::applyBCsLocally(vector_SpeciesParticle& pclList,
 // 6 face BC methods (virtual, operating on AoS blocks from BlockCommunicator)
 // ========================================================================
 
+void ParticleCommInjection::reemissionVelocity(double vel[3], int axis,
+                                               double inward) {
+  sample_maxwellian(vel[0], vel[1], vel[2], thermalVelocityX_,
+                    thermalVelocityY_, thermalVelocityZ_, bcRng_);
+  // Flux-weighted normal speed of a thermal wall (Rayleigh distribution,
+  // mean sqrt(pi/2) v_th): the particles crossing a surface per unit time
+  // are weighted by |v_n| (Cartwright et al. 2000)
+  const double vth[3] = {thermalVelocityX_, thermalVelocityY_,
+                         thermalVelocityZ_};
+  vel[axis] =
+      inward * vth[axis] * sqrt(-2.0 * log(sample_clopen_u_double(bcRng_)));
+}
+
 void ParticleCommInjection::apply_Xleft_BC(vector_SpeciesParticle& pcls,
                                            int start) {
   const int size = pcls.size();
@@ -412,9 +425,7 @@ void ParticleCommInjection::apply_Xleft_BC(vector_SpeciesParticle& pcls,
       SpeciesParticle& pcl = pcls[pidx];
       pcl.fetch_x() *= -1;
       double vel[3];
-      sample_maxwellian(vel[0], vel[1], vel[2], thermalVelocityX_,
-                        thermalVelocityY_, thermalVelocityZ_, bcRng_);
-      vel[0] = fabs(vel[0]);
+      reemissionVelocity(vel, 0, 1.0);
       pcl.set_u(vel);
     }
     break;
@@ -446,9 +457,7 @@ void ParticleCommInjection::apply_Yleft_BC(vector_SpeciesParticle& pcls,
       SpeciesParticle& pcl = pcls[pidx];
       pcl.fetch_y() *= -1;
       double vel[3];
-      sample_maxwellian(vel[0], vel[1], vel[2], thermalVelocityX_,
-                        thermalVelocityY_, thermalVelocityZ_, bcRng_);
-      vel[1] = fabs(vel[1]);
+      reemissionVelocity(vel, 1, 1.0);
       pcl.set_u(vel);
     }
     break;
@@ -480,9 +489,7 @@ void ParticleCommInjection::apply_Zleft_BC(vector_SpeciesParticle& pcls,
       SpeciesParticle& pcl = pcls[pidx];
       pcl.fetch_z() *= -1;
       double vel[3];
-      sample_maxwellian(vel[0], vel[1], vel[2], thermalVelocityX_,
-                        thermalVelocityY_, thermalVelocityZ_, bcRng_);
-      vel[2] = fabs(vel[2]);
+      reemissionVelocity(vel, 2, 1.0);
       pcl.set_u(vel);
     }
     break;
@@ -516,9 +523,7 @@ void ParticleCommInjection::apply_Xrght_BC(vector_SpeciesParticle& pcls,
       cudaParticleType& posX = pcl.fetch_x();
       posX = 2 * domainLengthX_ - posX;
       double vel[3];
-      sample_maxwellian(vel[0], vel[1], vel[2], thermalVelocityX_,
-                        thermalVelocityY_, thermalVelocityZ_, bcRng_);
-      vel[0] = -fabs(vel[0]);
+      reemissionVelocity(vel, 0, -1.0);
       pcl.set_u(vel);
     }
     break;
@@ -552,9 +557,7 @@ void ParticleCommInjection::apply_Yrght_BC(vector_SpeciesParticle& pcls,
       cudaParticleType& posY = pcl.fetch_y();
       posY = 2 * domainLengthY_ - posY;
       double vel[3];
-      sample_maxwellian(vel[0], vel[1], vel[2], thermalVelocityX_,
-                        thermalVelocityY_, thermalVelocityZ_, bcRng_);
-      vel[1] = -fabs(vel[1]);
+      reemissionVelocity(vel, 1, -1.0);
       pcl.set_u(vel);
     }
     break;
@@ -588,9 +591,7 @@ void ParticleCommInjection::apply_Zrght_BC(vector_SpeciesParticle& pcls,
       cudaParticleType& posZ = pcl.fetch_z();
       posZ = 2 * domainLengthZ_ - posZ;
       double vel[3];
-      sample_maxwellian(vel[0], vel[1], vel[2], thermalVelocityX_,
-                        thermalVelocityY_, thermalVelocityZ_, bcRng_);
-      vel[2] = -fabs(vel[2]);
+      reemissionVelocity(vel, 2, -1.0);
       pcl.set_u(vel);
     }
     break;
@@ -862,7 +863,9 @@ int ParticleCommInjection::computeInjectionCount() const {
 int ParticleCommInjection::computeInjectionCountImpl() const {
   using namespace BCparticles;
 
-  if (!vct_->isBoundaryProcess_P())
+  // only species with rhoINJECT > 0 are re-injected (all are deleted in the
+  // layers: deleteRepopulateInjection)
+  if (!vct_->isBoundaryProcess_P() || !(injectionDensity_ > 0.0))
     return 0;
 
   const bool repopXleft =
@@ -946,7 +949,8 @@ void ParticleCommInjection::fillInjectionParameter(
     param->particleIDGenerator = hostParticles_.getParticleIDGenerator();
   }
 
-  if (!vct_->isBoundaryProcess_P())
+  // computeInjectionCountImpl decides whether this rank injects the species
+  if (cachedInjectionCount_ == 0)
     return;
 
   const bool repopXleft =
@@ -1064,6 +1068,7 @@ void ParticleCommInjection::fillInjectionParameter(
     param->pclOffset[faceIdx] = total;
     total += param->faces[faceIdx].nCells * numParticlesPerCell_;
   }
+  assert_eq(total, cachedInjectionCount_);
   param->totalInjected = total;
-  param->enabled = (total > 0);
+  param->enabled = true;
 }

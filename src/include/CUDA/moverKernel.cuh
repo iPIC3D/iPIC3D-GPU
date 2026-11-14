@@ -53,7 +53,8 @@ public: // common parameter
   OpenBCAppendCounters openBCAppendCounters;
   ParticleIDGenerator particleIDGenerator;
 
-  // For repopulate injection, XLeft, XRight, YLeft, YRight, ZLeft, ZRight
+  // Repopulation layers of the REEMISSION faces (deleteRepopulateInjection);
+  // XLeft, XRight, YLeft, YRight, ZLeft, ZRight
   bool doRepopulateInjection;
   bool doRepopulateInjectionSide[6];
   cudaCommonType repopulateBoundary[6];

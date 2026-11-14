@@ -240,6 +240,13 @@ private:
   /** One-time computation of injection count (called from constructor). */
   int computeInjectionCountImpl() const;
 
+  /** Velocity of a particle re-emitted by a REEMISSION face normal to axis
+   *  (0, 1, 2): Maxwellian tangential components, the flux-weighted normal
+   *  speed, directed into the domain (inward = +1 on a left face, -1 on a
+   *  right face).  A fallback: the mover deletes the particles before they
+   *  reach such a face (deleteRepopulateInjection). */
+  void reemissionVelocity(double vel[3], int axis, double inward);
+
   // --- Borrowed references from ParticleSoAHost ---
   ParticleSoAHost& hostParticles_;
   const CollectiveIO* col_;

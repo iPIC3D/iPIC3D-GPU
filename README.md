@@ -388,7 +388,7 @@ The Maxwell solve for E(n+θ) (GMRES or FGMRES with block Jacobi, selected by `S
 
 | face | image row | right-hand-side row |
 |---|---|---|
-| open inflow face (`bcEMface* = 2`, `bcPface* = 2`, X-right excluded), with `ApplyInflowBcsEImage = 1` (default) | v | E0 = −u0×B0 |
+| open inflow face (`bcEMface* = 2`, `bcPface* = 2`, X-right excluded), with `ApplyInflowBcsEImage = 1` (default) | v | E0 = −(u0×B0)/c |
 | perfect conductor (`bcEMface* = 0`), tangential components | v_t | E0_t |
 | perfect conductor, normal component n (Ampère's law without curl B, χ_n·E = Eⁿ_n − 4πθΔt Ĵ_n, χ_n the row n of the implicit susceptibility that `MUdot` applies in the interior) | v_n + (χ_na v_a + χ_nb v_b)/χ_nn | (Eⁿ_n − 4πθΔt Ĵ_n)/χ_nn |
 | every other face, among them the open X-right face and open faces with `bcPface* ≠ 2` or `ApplyInflowBcsEImage = 0` | the operator's | the physical right-hand side |
@@ -397,7 +397,7 @@ With the constants on the right-hand side, the image is the linear map that the 
 
 ### Boundary injection (reemission faces)
 
-On a non-periodic face with `bcPface* = 2`, for every species with `rhoINJECT > 0`, every particle that ends a push in the last 3 cells before the face is deleted. The GPU then refills those cells with a drifting Maxwellian (`rhoINJECT`, the species' drift and thermal speeds), every cycle and with the same number of particles per cell as the initial loading (`npcel*`). Each injected particle draws its numbers from its own Philox stream. The key is set by the cycle and the species, and the stream number is set by the particle's global cell and sub-cell. So ranks inject different plasma, the injected plasma does not depend on `XLEN`/`YLEN`/`ZLEN`, and a restart repeats the injection of every cycle.
+On a non-periodic face with `bcPface* = 2`, every particle of every species that ends a push in the last 3 cells before the face is deleted, so planetary species leave the domain there. For every species with `rhoINJECT > 0`, the GPU then refills those cells with a drifting Maxwellian (`rhoINJECT`, the species' drift and thermal speeds), every cycle and with the same number of particles per cell as the initial loading (`npcel*`). Each injected particle draws its numbers from its own Philox stream. The key is set by the cycle and the species, and the stream number is set by the particle's global cell and sub-cell. So ranks inject different plasma, the injected plasma does not depend on `XLEN`/`YLEN`/`ZLEN`, and a restart repeats the injection of every cycle.
 
 ### Open outflow boundary (X-right)
 

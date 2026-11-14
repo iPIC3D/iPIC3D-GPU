@@ -841,9 +841,9 @@ void ParticleSoAHost::sort_particles_parallel(int* cellCount, int* cellOffset) {
 // ======= Boundary-condition configuration queries =======
 
 /**
- * @brief Build reemission-boundary configuration for the GPU mover.
+ * @brief Build the repopulation-layer configuration of the GPU mover.
  *
- * @param doRepopulateInjection Output global flag enabling repopulation logic.
+ * @param doRepopulateInjection Output global flag enabling the deletion.
  * @param doRepopulateInjectionSide Output per-face repopulation flags.
  * @param repopulateBoundary Output per-face repopulation boundary positions.
  */

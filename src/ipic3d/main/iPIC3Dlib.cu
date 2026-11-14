@@ -785,13 +785,11 @@ int c_Solver::initCUDA() {
     // Only applies on boundary ranks (where the neighbor is MPI_PROC_NULL).
     particlesHost[i]->fillExitBCFlags(moverParamHostPtr[i]->isExitBC);
 
-    if (col->getRHOinject(i) > 0.0)
-      particlesHost[i]->repopulate_particlesInfo(
-          &moverParamHostPtr[i]->doRepopulateInjection,
-          moverParamHostPtr[i]->doRepopulateInjectionSide,
-          moverParamHostPtr[i]->repopulateBoundary);
-    else
-      moverParamHostPtr[i]->doRepopulateInjection = false;
+    // every species, also those not re-injected (deleteRepopulateInjection)
+    particlesHost[i]->repopulate_particlesInfo(
+        &moverParamHostPtr[i]->doRepopulateInjection,
+        moverParamHostPtr[i]->doRepopulateInjectionSide,
+        moverParamHostPtr[i]->repopulateBoundary);
 
     if (caseType_ == CaseType::Dipole) {
       moverParamHostPtr[i]->doSphere = 1;
@@ -2401,13 +2399,12 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
   // Pre-expand the SoA for stayed + injected + estimated MPI incoming, set
   // NOP, and launch the GPU injection kernels, which write the SoA tail.
 
-  // Compute per-species injection count (cheap, cached).
+  // Per-species injection count (cached; 0 unless this rank owns a
+  // REEMISSION face and the species has rhoINJECT > 0).
   // Declared at function scope so Phase 3G can also use it.
   std::vector<int> injectedBCS(ns, 0);
-  for (int i = 0; i < ns; i++) {
-    if (moverParamHostPtr[i]->doRepopulateInjection)
-      injectedBCS[i] = particlesCommInj[i]->computeInjectionCount();
-  }
+  for (int i = 0; i < ns; i++)
+    injectedBCS[i] = particlesCommInj[i]->computeInjectionCount();
   {
 
     for (int i = 0; i < ns; i++) {

@@ -637,7 +637,11 @@ __device__ uint32_t deleteAppendOpenBCOutflow(
 }
 
 /**
- * @brief Delete particles that enter repopulation-injection depletion layers.
+ * @brief Delete particles that end the push in the repopulation layers, the 3
+ * cells before a REEMISSION face.
+ *
+ * Applies to every species: the particles leave the domain there, and
+ * injectionKernel refills the layers with the species that have rhoINJECT > 0.
  *
  * @param xpcl Particle x position after the mover.
  * @param ypcl Particle y position after the mover.

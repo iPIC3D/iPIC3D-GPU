@@ -421,9 +421,10 @@ public:
   // ===== BC configuration queries (for GPU kernel setup) =====
 
   /**
-   * @brief Fill repopulate-injection info for GPU kernel configuration.
+   * @brief Fill the repopulation layers of the GPU mover: the 3 cells before
+   * each REEMISSION face of this rank (deleteRepopulateInjection).
    *
-   * @param doRepopulateInjection Output flag that enables repopulation logic.
+   * @param doRepopulateInjection Output flag that enables the deletion.
    * @param doRepopulateInjectionSide Output per-face enable flags.
    * @param repopulateBoundary Output per-face repopulation boundary positions.
    */

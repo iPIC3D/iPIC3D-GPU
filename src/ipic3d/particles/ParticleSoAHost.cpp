@@ -537,15 +537,17 @@ void ParticleSoAHost::pitch_angle_energy(Field* EMf) {
                     (ii * numPclPerCellY_ + jj) * numPclPerCellZ_ + kk;
                 const int idx = idxBase + subIdx;
 
-                // velocity — assumes B is along z
-                const double totalMomentum =
-                    sqrt((energy_ + 1) * (energy_ + 1) - 1);
-                const double parallelVelocity =
-                    totalMomentum * cos(pitchAngle_);
-                const double perpMomentum = totalMomentum * sin(pitchAngle_);
+                // velocity — assumes B is along z.  energy_ is the kinetic
+                // energy in units of m c^2: gamma = 1 + energy_ and
+                // |v| = c sqrt(1 - 1 / gamma^2)
+                const double gamma = 1.0 + energy_;
+                const double speed =
+                    speedOfLight_ * sqrt(1.0 - 1.0 / (gamma * gamma));
+                const double parallelVelocity = speed * cos(pitchAngle_);
+                const double perpVelocity = speed * sin(pitchAngle_);
                 const double gyroPhase = 2 * M_PI * sample_u_double(rng);
-                const double velX = perpMomentum * cos(gyroPhase);
-                const double velY = perpMomentum * sin(gyroPhase);
+                const double velX = perpVelocity * cos(gyroPhase);
+                const double velY = perpVelocity * sin(gyroPhase);
 
                 u[idx] = velX;
                 v[idx] = velY;

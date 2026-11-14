@@ -287,7 +287,7 @@ For a periodic checkpoint triggered at loop cycle `N`, the payload is the state 
 
 - **Particles** are the host SoA mirror staged by `outputCopyAsync(N - 1)`, after the previous mover/exchange completed. They represent the particle state at the cycle-`N` boundary.
 - **B** is saved before `CalculateB(N)`, so it represents `B^N`.
-- **E** is saved after `CalculateField(N)`, so it represents `E^{N+1}`.
+- **E** represents `E^N`: `CalculateField(N)` solves for `E^{N+θ}` into separate arrays, and `E` is advanced to `E^{N+1}` only at the end of `CalculateB(N)`. Checkpoints written by builds up to `a115269` hold `E^{N+1}` instead.
 - **rho, J, and pressure moments** are the moment arrays available at the cycle-`N` boundary, before the cycle-`N` particle mover/exchange has completed.
 
 For a final checkpoint, the payload is written after the last cycle has completed and after a fresh particle copy. If the last executed loop cycle is `L`, the checkpoint contains particles, B, E, and moments at the boundary for cycle `L + 1`, and it is labeled `L + 1`.

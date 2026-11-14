@@ -15,6 +15,9 @@ constexpr cudaTypeDouble PC_err_2 = 1E-12; // square of error tolerance
 
 __device__ constexpr bool cap_velocity() { return false; }
 
+/** Safety cap of the particle speed, |v| < kVelocityCapOverC c. */
+constexpr commonType kVelocityCapOverC = 0.9999;
+
 // ======= Inline mover helpers =======
 
 /**
@@ -40,22 +43,24 @@ __device__ __forceinline__ void markForDeletion(moverParameter* moverParam,
  * @brief Clamp finite superluminal velocities and delete non-finite particles.
  *
  * Operates on register-resident velocity components. Finite velocities with
- * |v/c| above the safety cap are rescaled back below it; NaN and Inf values
+ * |v| at or above the safety cap are rescaled back to it; NaN and Inf values
  * are marked for deletion because they would poison later gamma and moment
  * calculations.
  *
  * @param ufinal In-out x-velocity component.
  * @param vfinal In-out y-velocity component.
  * @param wfinal In-out z-velocity component.
+ * @param v2max Square of the cap, in the units of the components
+ *        ((kVelocityCapOverC c)^2 for physical velocities).
  * @param moverParam Device-side mover parameter bundle.
  * @param pidx Particle index in the species SoA buffer.
  * @return True if the particle was deleted and the caller should return.
  */
 __device__ __forceinline__ bool
 capVelocityOrDelete(commonType& ufinal, commonType& vfinal, commonType& wfinal,
-                    moverParameter* moverParam, uint32_t pidx) {
+                    commonType v2max, moverParameter* moverParam,
+                    uint32_t pidx) {
   const commonType v2 = ufinal * ufinal + vfinal * vfinal + wfinal * wfinal;
-  constexpr commonType v2max = 0.9999 * 0.9999; // max allowed |v/c|^2
   if (!(v2 < v2max)) {
     if (isfinite(v2)) {
       const commonType scale = sqrt(v2max / v2);
@@ -173,8 +178,11 @@ __global__ void moverKernel(moverParameter* moverParam,
   if (pidx >= pclsArray->getNOP())
     return;
 
-  const commonType dto2 = .5 * moverParam->dt,
-                   qdto2mc = moverParam->qom * dto2 / moverParam->c;
+  // Gaussian Lorentz force q (E + v x B / c): the half-step E kick is
+  // q dt / (2 m) E, the rotation vector q dt / (2 m c) B
+  const commonType dto2 = .5 * moverParam->dt;
+  const commonType qdto2m = moverParam->qom * dto2;
+  const commonType qdto2mc = qdto2m / moverParam->c;
 
   // Early exit for particles already deleted (e.g. during merging)
   if (moverParam->departureArray->getArray()[pidx].dest != 0) {
@@ -227,10 +235,9 @@ __global__ void moverKernel(moverParameter* moverParam,
     const commonType omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
     const commonType denom = 1.0 / (1.0 + omsq);
     // solve the position equation
-    const commonType ut = uorig + qdto2mc * Exl;
-    const commonType vt = vorig + qdto2mc * Eyl;
-    const commonType wt = worig + qdto2mc * Ezl;
-    // const commonType udotb = ut * Bxl + vt * Byl + wt * Bzl;
+    const commonType ut = uorig + qdto2m * Exl;
+    const commonType vt = vorig + qdto2m * Eyl;
+    const commonType wt = worig + qdto2m * Ezl;
     const commonType udotOm = ut * Omx + vt * Omy + wt * Omz;
     // solve the velocity equation
     uavg = (ut + (vt * Omz - wt * Omy + udotOm * Omx)) * denom;
@@ -261,7 +268,9 @@ __global__ void moverKernel(moverParameter* moverParam,
   // Cap velocity to prevent superluminal particles.
   // The non-relativistic Boris pusher has no intrinsic speed-of-light limit,
   // so extreme E fields can produce |v| >= c.
-  if (capVelocityOrDelete(ufinal, vfinal, wfinal, moverParam, pidx))
+  const commonType vmax = kVelocityCapOverC * moverParam->c;
+  if (capVelocityOrDelete(ufinal, vfinal, wfinal, vmax * vmax, moverParam,
+                          pidx))
     return;
 
   // Write final state to SoA
@@ -308,13 +317,18 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
     return;
   }
 
-  // Load particle state from SoA and keep it in registers across all subcycles.
+  // Load particle state from SoA and keep it in registers across all
+  // subcycles.  The push works in units of c: cur_u/v/w hold beta = v / c
+  // (gamma = 1 / sqrt(1 - beta^2), momentum u = gamma beta), and positions
+  // advance with c beta.
+  const commonType c = moverParam->c;
+  const commonType invc = 1.0 / c;
   commonType cur_x = pclsArray->getX()[pidx];
   commonType cur_y = pclsArray->getY()[pidx];
   commonType cur_z = pclsArray->getZ()[pidx];
-  commonType cur_u = pclsArray->getU()[pidx];
-  commonType cur_v = pclsArray->getV()[pidx];
-  commonType cur_w = pclsArray->getW()[pidx];
+  commonType cur_u = pclsArray->getU()[pidx] * invc;
+  commonType cur_v = pclsArray->getV()[pidx] * invc;
+  commonType cur_w = pclsArray->getW()[pidx] * invc;
 
   // first step: evaluate local B magnitude
   commonType weights[8];
@@ -329,19 +343,22 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
                                 sampled_field[2] * sampled_field[2]);
 
   // evaluate dt_substep and number of sub cycles
-  commonType dt_sub =
-      M_PI * moverParam->c / (4 * fabs(moverParam->qom) * B_mag);
+  commonType dt_sub = M_PI * c / (4 * fabs(moverParam->qom) * B_mag);
   const int sub_cycles = (int)(moverParam->dt / dt_sub) + 1;
   dt_sub = moverParam->dt / (commonType)(sub_cycles);
 
   const commonType dto2_sub = .5 * dt_sub;
-  const commonType qdto2mc_sub = moverParam->qom * dto2_sub / moverParam->c;
+  const commonType qdto2mc_sub = moverParam->qom * dto2_sub / c;
+  // position steps for a velocity in units of c
+  const commonType cdto2_sub = c * dto2_sub;
+  const commonType cdt_sub = c * dt_sub;
 
   // Safety: check initial velocity before entering subcycle loop.
-  // If v² >= 1 or NaN (e.g. from MPI injection or previous-cycle noise),
-  // gamma0 = 1/sqrt(1-v²) would produce NaN, cascading through the mover.
+  // If beta² >= 1 or NaN (e.g. from MPI injection or previous-cycle noise),
+  // gamma0 = 1/sqrt(1-beta²) would produce NaN, cascading through the mover.
   // After subcycle 0, the velocity cap (S2) at the end of each subcycle
-  // guarantees v² < v2max < 1, so this check is only needed once.
+  // guarantees beta² < kVelocityCapOverC² < 1, so this check is only needed
+  // once.
   {
     const commonType v2_init = cur_u * cur_u + cur_v * cur_v + cur_w * cur_w;
     if (!(v2_init < 1.0)) {
@@ -381,40 +398,38 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
       sampleFieldsAtPosition<6>(xavg, yavg, zavg, grid, fieldForPcls, weights,
                                 cx, cy, cz, sampled_field);
 
-      commonType& Bxl = sampled_field[0];
-      commonType& Byl = sampled_field[1];
-      commonType& Bzl = sampled_field[2];
-      commonType& Exl = sampled_field[3];
-      commonType& Eyl = sampled_field[4];
-      commonType& Ezl = sampled_field[5];
-      const commonType Omx = qdto2mc_sub * Bxl;
-      const commonType Omy = qdto2mc_sub * Byl;
-      const commonType Omz = qdto2mc_sub * Bzl;
+      const commonType Bxl = sampled_field[0];
+      const commonType Byl = sampled_field[1];
+      const commonType Bzl = sampled_field[2];
+      const commonType Exl = sampled_field[3];
+      const commonType Eyl = sampled_field[4];
+      const commonType Ezl = sampled_field[5];
 
-      // end interpolation
-      const commonType omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
-      commonType denom = 1.0 / (1.0 + omsq);
-      // solve the position equation
+      // half electric kick: u~ = gamma(m) beta(m) + (q h / 2 m c) E
       const commonType ut = uorig * gamma0 + qdto2mc_sub * Exl;
       const commonType vt = vorig * gamma0 + qdto2mc_sub * Eyl;
       const commonType wt = worig * gamma0 + qdto2mc_sub * Ezl;
-
       gamma1 = sqrt(1.0 + ut * ut + vt * vt + wt * wt);
-      Bxl /= gamma1;
-      Byl /= gamma1;
-      Bzl /= gamma1;
-      denom /= gamma1;
 
-      // const commonType udotb = ut * Bxl + vt * Byl + wt * Bzl;
+      // rotation vector w / gamma~ with w = (q h / 2 m c) B (Peng et al.
+      // 2015, Eq. 2.8): the relativistic gyrofrequency is Omega / gamma
+      const commonType qdto2mcg = qdto2mc_sub / gamma1;
+      const commonType Omx = qdto2mcg * Bxl;
+      const commonType Omy = qdto2mcg * Byl;
+      const commonType Omz = qdto2mcg * Bzl;
+      const commonType omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
+      // beta_bar = alpha(w / gamma~) u~ / gamma~
+      const commonType denom = 1.0 / ((1.0 + omsq) * gamma1);
+
       const commonType udotOm = ut * Omx + vt * Omy + wt * Omz;
       // solve the velocity equation
       uavg = (ut + (vt * Omz - wt * Omy + udotOm * Omx)) * denom;
       vavg = (vt + (wt * Omx - ut * Omz + udotOm * Omy)) * denom;
       wavg = (wt + (ut * Omy - vt * Omx + udotOm * Omz)) * denom;
       // update average position
-      xavg = xorig + uavg * dto2_sub;
-      yavg = yorig + vavg * dto2_sub;
-      zavg = zorig + wavg * dto2_sub;
+      xavg = xorig + uavg * cdto2_sub;
+      yavg = yorig + vavg * cdto2_sub;
+      zavg = zorig + wavg * cdto2_sub;
 
       currErr = computePCError(uavg, vavg, wavg, uavg_old, vavg_old, wavg_old);
       // capture the new velocity for the next iteration
@@ -442,38 +457,46 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
 
     const commonType delta_rel = cfb * cfb - 4.0 * cfa * cfc;
 
-    // update velocity in registers
+    // update position and velocity in registers
+    cur_x = xorig + uavg * cdt_sub;
+    cur_y = yorig + vavg * cdt_sub;
+    cur_z = zorig + wavg * cdt_sub;
     if (delta_rel < 0.0) {
-      cur_x = xorig + uavg * dt_sub;
-      cur_y = yorig + vavg * dt_sub;
-      cur_z = zorig + wavg * dt_sub;
-      cur_u = (2.0 * gamma1) * uavg - uorig * gamma0;
-      cur_v = (2.0 * gamma1) * vavg - vorig * gamma0;
-      cur_w = (2.0 * gamma1) * wavg - worig * gamma0;
+      // Unreachable in exact arithmetic (cfa > 0 because |beta_bar| < 1, and
+      // cfc < 0); only round-off with |beta_bar| -> 1 lands here.  Estimate
+      // the momentum u(m+1) = 2 gamma~ beta_bar - u(m) and store it as a
+      // velocity, beta = u / sqrt(1 + u^2), which keeps |beta| < 1.
+      const commonType un = (2.0 * gamma1) * uavg - ut;
+      const commonType vn = (2.0 * gamma1) * vavg - vt;
+      const commonType wn = (2.0 * gamma1) * wavg - wt;
+      const commonType invGammaNew =
+          1.0 / sqrt(1.0 + un * un + vn * vn + wn * wn);
+      cur_u = un * invGammaNew;
+      cur_v = vn * invGammaNew;
+      cur_w = wn * invGammaNew;
     } else {
       const commonType gamma1_rel = (-cfb + sqrt(delta_rel)) / 2.0 / cfa;
-      cur_x = xorig + uavg * dt_sub;
-      cur_y = yorig + vavg * dt_sub;
-      cur_z = zorig + wavg * dt_sub;
       cur_u = (1.0 + gamma0 / gamma1_rel) * uavg - ut / gamma1_rel;
       cur_v = (1.0 + gamma0 / gamma1_rel) * vavg - vt / gamma1_rel;
       cur_w = (1.0 + gamma0 / gamma1_rel) * wavg - wt / gamma1_rel;
     }
 
     // Cap velocity to prevent superluminal particles.
-    // If |v|^2 >= 1, the next subcycle's gamma = 1/sqrt(1-v^2) -> NaN.
-    if (capVelocityOrDelete(cur_u, cur_v, cur_w, moverParam, pidx))
+    // If beta^2 >= 1, the next subcycle's gamma = 1/sqrt(1-beta^2) -> NaN.
+    if (capVelocityOrDelete(cur_u, cur_v, cur_w,
+                            kVelocityCapOverC * kVelocityCapOverC, moverParam,
+                            pidx))
       return;
 
   } // end iteration over subcycles
 
-  // Write final state to SoA once
+  // Write final state to SoA once (velocities back from units of c)
   pclsArray->getX()[pidx] = cur_x;
   pclsArray->getY()[pidx] = cur_y;
   pclsArray->getZ()[pidx] = cur_z;
-  pclsArray->getU()[pidx] = cur_u;
-  pclsArray->getV()[pidx] = cur_v;
-  pclsArray->getW()[pidx] = cur_w;
+  pclsArray->getU()[pidx] = cur_u * c;
+  pclsArray->getV()[pidx] = cur_v * c;
+  pclsArray->getW()[pidx] = cur_w * c;
 
   // prepare the departure array
   prepareDepartureArray(cur_x, cur_y, cur_z, pclsArray, pidx, moverParam,

@@ -390,27 +390,6 @@ k_divSymmTensorN2C(T* __restrict__ divCX, T* __restrict__ divCY,
 }
 
 // =========================================================================
-//  Smooth (7-point stencil) kernel
-// =========================================================================
-
-template <typename T>
-__global__ void k_smoothStep(T* __restrict__ out, const T* __restrict__ in,
-                             int nx, int ny, int nz, T alpha, T beta3D) {
-  int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
-  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
-  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  if (i > nx - 2 || j > ny - 2 || k > nz - 2)
-    return;
-
-#define IN(ii, jj, kk) in[IDX(ii, jj, kk, ny, nz)]
-  out[IDX(i, j, k, ny, nz)] =
-      alpha * IN(i, j, k) +
-      beta3D * (IN(i - 1, j, k) + IN(i + 1, j, k) + IN(i, j - 1, k) +
-                IN(i, j + 1, k) + IN(i, j, k - 1) + IN(i, j, k + 1));
-#undef IN
-}
-
-// =========================================================================
 //  Host wrappers
 // =========================================================================
 
@@ -532,15 +511,6 @@ void gpuDivSymmTensorN2C(cudaSolverType* divCX, cudaSolverType* divCY,
   cudaErrChk(cudaGetLastError());
 }
 
-void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in, int nx,
-                   int ny, int nz, cudaSolverType alpha, cudaSolverType beta3D,
-                   cudaStream_t stream) {
-  const PointLaunch L = pointLaunch(nx - 2, ny - 2, nz - 2);
-  k_smoothStep<<<L.grid, L.block, 0, stream>>>(out, in, nx, ny, nz, alpha,
-                                               beta3D);
-  cudaErrChk(cudaGetLastError());
-}
-
 // =========================================================================
 //  Interior / boundary stencil variants (HaloMode::Overlap)
 //
@@ -548,9 +518,6 @@ void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in, int nx,
 //  centre[i-1..i][j-1..j][k-1..k] for node output at [i][j][k].
 //    Interior [2..n-3]: all reads fall in centre interior — no ghost deps.
 //    Boundary [1, n-2]: at least one read hits a ghost centre cell.
-//
-//  smoothStep reads [i±1][j][k], [i][j±1][k], [i][j][k±1]: same interior
-//  range [2..n-3].
 //
 //  The interior and boundary variants share one device helper per stencil.
 // =========================================================================
@@ -925,9 +892,12 @@ void gpuInterpC2N_boundary(cudaSolverType* fN, const cudaSolverType* fC,
                           nzn - 3, stream);
 }
 
-// -----------------------------------------------------------------
-//  smoothStep  (7-point smooth)
-// -----------------------------------------------------------------
+// =========================================================================
+//  Smoothing pass (gpuSmoothFields): the 7-point smooth of 1 or 3 fields in
+//  one launch over all points, the interior or the shell
+// =========================================================================
+
+/** The 7-point smooth of one field at one point. */
 template <typename T>
 __device__ __forceinline__ void
 d_smoothStep(T* __restrict__ out, const T* __restrict__ in, int i, int j, int k,
@@ -940,55 +910,64 @@ d_smoothStep(T* __restrict__ out, const T* __restrict__ in, int i, int j, int k,
 #undef INS
 }
 
-template <typename T>
-__global__ void
-k_smoothStep_interior(T* __restrict__ out, const T* __restrict__ in, int nx,
-                      int ny, int nz, T alpha, T beta3D, int iLo, int iHi,
-                      int jLo, int jHi, int kLo, int kHi) {
-  int i = blockIdx.z * blockDim.z + threadIdx.z + iLo,
-      j = blockIdx.y * blockDim.y + threadIdx.y + jLo,
-      k = blockIdx.x * blockDim.x + threadIdx.x + kLo;
-  if (i > iHi || j > jHi || k > kHi)
+/** One smoothing pass of the N fields at the points of `points` (a PointBox
+ *  for All and Interior, the PointList of the three shell slabs for Shell),
+ *  with the arithmetic of d_smoothStep. */
+template <int N, typename Points>
+__global__ void k_smoothFields(SmoothFields<N> f, int ny, int nz,
+                               cudaSolverType alpha, cudaSolverType beta3D,
+                               Points points) {
+  int i, j, k;
+  if (!pointOf(points, i, j, k))
     return;
-  d_smoothStep(out, in, i, j, k, ny, nz, alpha, beta3D);
+#pragma unroll
+  for (int c = 0; c < N; c++)
+    d_smoothStep(f.out[c], f.in[c], i, j, k, ny, nz, alpha, beta3D);
 }
 
-template <typename T>
-__global__ void
-k_smoothStep_boundary(T* __restrict__ out, const T* __restrict__ in, int nx,
-                      int ny, int nz, T alpha, T beta3D, int sILo, int sIHi,
-                      int sJLo, int sJHi, int sKLo, int sKHi) {
-  int i = blockIdx.z * blockDim.z + threadIdx.z + 1,
-      j = blockIdx.y * blockDim.y + threadIdx.y + 1,
-      k = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  if (i > nx - 2 || j > ny - 2 || k > nz - 2)
-    return;
-  if (i >= sILo && i <= sIHi && j >= sJLo && j <= sJHi && k >= sKLo &&
-      k <= sKHi)
-    return;
-  d_smoothStep(out, in, i, j, k, ny, nz, alpha, beta3D);
+template <int N>
+void gpuSmoothFields(const SmoothFields<N>& fields, int nx, int ny, int nz,
+                     cudaSolverType alpha, cudaSolverType beta3D,
+                     SmoothRegion region, cudaStream_t stream) {
+  const PointBox all = {pointRange(1, nx - 2), pointRange(1, ny - 2),
+                        pointRange(1, nz - 2)};
+  const PointBox interior = {pointRange(2, nx - 3), pointRange(2, ny - 3),
+                             pointRange(2, nz - 3)};
+  auto launchBox = [&](const PointBox& box) {
+    if (box.empty())
+      return;
+    const PointLaunch L = pointLaunch(box);
+    k_smoothFields<N, PointBox>
+        <<<L.grid, L.block, 0, stream>>>(fields, ny, nz, alpha, beta3D, box);
+    cudaErrChk(cudaGetLastError());
+  };
+  if (region == SmoothRegion::All ||
+      (region == SmoothRegion::Shell && interior.empty())) {
+    launchBox(all);
+  } else if (region == SmoothRegion::Interior) {
+    launchBox(interior);
+  } else {
+    // All minus Interior: the two x layers whole, the two y layers inside
+    // the x range of Interior, the two z layers inside its x and y ranges.
+    // Interior is not empty, so each axis has at least 3 points and the two
+    // layers of a run are distinct.
+    const PointBox slabs[3] = {
+        {pointRuns(1, 1, nx - 2, nx - 2), all.j, all.k},
+        {interior.i, pointRuns(1, 1, ny - 2, ny - 2), all.k},
+        {interior.i, interior.j, pointRuns(1, 1, nz - 2, nz - 2)}};
+    const PointList shell = pointList(slabs, 3);
+    const PointLaunch L = pointLaunch(shell);
+    k_smoothFields<N, PointList>
+        <<<L.grid, L.block, 0, stream>>>(fields, ny, nz, alpha, beta3D, shell);
+    cudaErrChk(cudaGetLastError());
+  }
 }
 
-void gpuSmoothStep_interior(cudaSolverType* out, const cudaSolverType* in,
-                            int nx, int ny, int nz, cudaSolverType alpha,
-                            cudaSolverType beta3D, cudaStream_t stream) {
-  int iLo = 2, iHi = nx - 3, jLo = 2, jHi = ny - 3, kLo = 2, kHi = nz - 3;
-  if (iLo > iHi || jLo > jHi || kLo > kHi)
-    return;
-  const PointLaunch L =
-      pointLaunch(iHi - iLo + 1, jHi - jLo + 1, kHi - kLo + 1);
-  k_smoothStep_interior<<<L.grid, L.block, 0, stream>>>(
-      out, in, nx, ny, nz, alpha, beta3D, iLo, iHi, jLo, jHi, kLo, kHi);
-  cudaErrChk(cudaGetLastError());
-}
-
-void gpuSmoothStep_boundary(cudaSolverType* out, const cudaSolverType* in,
-                            int nx, int ny, int nz, cudaSolverType alpha,
-                            cudaSolverType beta3D, cudaStream_t stream) {
-  const PointLaunch L = pointLaunch(nx - 2, ny - 2, nz - 2);
-  k_smoothStep_boundary<<<L.grid, L.block, 0, stream>>>(
-      out, in, nx, ny, nz, alpha, beta3D, 2, nx - 3, 2, ny - 3, 2, nz - 3);
-  cudaErrChk(cudaGetLastError());
-}
+template void gpuSmoothFields<1>(const SmoothFields<1>&, int, int, int,
+                                 cudaSolverType, cudaSolverType, SmoothRegion,
+                                 cudaStream_t);
+template void gpuSmoothFields<3>(const SmoothFields<3>&, int, int, int,
+                                 cudaSolverType, cudaSolverType, SmoothRegion,
+                                 cudaStream_t);
 
 #undef IDX

@@ -3,6 +3,7 @@
 ## Table of Contents
 
 - [1. Unit System](#1-unit-system)
+  - [1.1 Speed of Light Input c](#11-speed-of-light-input-c)
 - [2. Maxwell's Equations (Gaussian CGS Form)](#2-maxwells-equations-gaussian-cgs-form)
 - [3. Internal Storage Convention](#3-internal-storage-convention)
   - [3.1 Density Initialization](#31-density-initialization)
@@ -35,7 +36,8 @@
 ## 1. Unit System
 
 iPIC3D uses **normalized Gaussian CGS** units. All quantities are normalized to
-ion plasma parameters:
+ion plasma parameters. The table is for the default `c = 1`; see
+[Section 1.1](#11-speed-of-light-input-c) for other values.
 
 | Quantity         | Normalization                                  | Value |
 |------------------|------------------------------------------------|-------|
@@ -57,6 +59,30 @@ convenience quantities equal to $4\pi \times n_s$ for each species. They are
 input number-density magnitudes, not signed charge densities; the species sign
 enters later through `qom` when particle charges are assigned and moments are
 deposited.
+
+### 1.1 Speed of Light Input c
+
+The input `c` (default 1) is the speed of light in code units. Any `c > 0`
+works: the field solve, both particle movers and the drift field
+$\mathbf{E}_0 = -\mathbf{u}_0\times\mathbf{B}_0/c$ use the Gaussian equations
+with $c$ as a parameter. Both movers cap $|\mathbf{v}|$ at $0.9999\,c$.
+
+`rhoINIT` and `qom` alone fix $\omega_{pi} = 1$, so time stays in
+$\omega_{pi}^{-1}$. The input `c` sets the speed unit $V_0 = c_{\text{phys}}/c$,
+where $c_{\text{phys}}$ is the physical speed of light:
+
+| Quantity | Unit for any `c`                              | With `c = 1`  |
+|----------|-----------------------------------------------|---------------|
+| Speed    | $V_0 = c_{\text{phys}}/c$                     | $c_{\text{phys}}$ |
+| Length   | $V_0/\omega_{pi} = d_i/c$                     | $d_i$         |
+| Time     | $\omega_{pi}^{-1}$                            | same          |
+| Energy   | $m_i V_0^2$                                   | $m_i c_{\text{phys}}^2$ |
+| E, B     | $B_{\text{ref}} = \sqrt{4\pi n_{\text{ref}} m_i V_0^2}$ | see [Section 7.1](#71-fields) |
+
+The ion inertial length is therefore $c$ code lengths. Thermal and drift speeds,
+`dt`, the box size and the fields in the input file are all in these units.
+Equilibria that involve $c$ must be set for the chosen value, e.g. the Harris
+drifts $\sum_s q_s n_s w_{0,s} = cB_0/(4\pi\delta)$.
 
 ---
 
@@ -201,11 +227,11 @@ Key parameters and their relationship to physical units:
 | `rhoINJECT`      | $4\pi \times n_{\text{inject},s}$ (injected number-density magnitude) | `q ∝ rhoINJECT / 4π`, sign from `qom` |
 | `B0x, B0y, B0z`  | Physical $\mathbf{B}_0$ (= Alfvén speed)   | Used directly             |
 | `uth, vth, wth`  | Thermal speeds $v_{th} = \sqrt{kT/m}$      | Used directly             |
-| `u0, v0, w0`     | Drift velocities (per species); current-split weights for `ForceFree` and `GEMHarris` with `currentFromAmpere = 1`; for species 0 also the `TaylorGreen` flow amplitude and $E_0 = -\mathbf{u}_0\times\mathbf{B}_0$ (open faces, `Dipole`) | Used directly             |
+| `u0, v0, w0`     | Drift velocities (per species); current-split weights for `ForceFree` and `GEMHarris` with `currentFromAmpere = 1`; for species 0 also the `TaylorGreen` flow amplitude and $E_0 = -\mathbf{u}_0\times\mathbf{B}_0/c$ (open faces, conductor walls, `Dipole`) | Used directly             |
 | `qom`            | Charge-to-mass ratio $q/m$ (sign matters)  | Used directly             |
 | `dt`             | Time step in $\omega_{pi}^{-1}$            | Used directly             |
-| `Lx, Ly, Lz`    | Box size in $d_i$                          | Used directly             |
-| `c`              | Speed of light (should be 1.0)             | Used directly             |
+| `Lx, Ly, Lz`    | Box size in $d_i/c$ ($d_i$ for `c = 1`)    | Used directly             |
+| `c`              | Speed of light, any `c > 0` ([Section 1.1](#11-speed-of-light-input-c)) | Used directly |
 
 `rhoINIT` and `rhoINJECT` set density magnitudes only. They do not encode the
 sign of the species charge.
@@ -254,13 +280,14 @@ In Gaussian CGS, E and B share dimensions (statV/cm = Gauss). Code values are
 dimensionless ratios $B_{\text{code}} = B_{\text{CGS}} / B_{\text{ref}}$, where
 the dimensional reference quantities are:
 
-$$B_{\text{ref}} = \sqrt{4\pi\, n_{\text{ref}}\, m_i\, c^2}, \qquad E_{\text{ref}} = B_{\text{ref}}$$
+$$B_{\text{ref}} = \sqrt{4\pi\, n_{\text{ref}}\, m_i\, V_0^2}, \qquad E_{\text{ref}} = B_{\text{ref}}$$
 
 with $n_{\text{ref}}$ [$\text{cm}^{-3}$] the physical ion density for `rhoINIT = 1`,
-$m_i$ [g] the ion mass, and $c$ [cm/s] the speed of light.
-$E_{\text{ref}} = B_{\text{ref}}$ because E and B share dimensions in Gaussian CGS
-and the velocity normalization is $c$. In the fully normalized system
-($n_0 = 1/(4\pi)$, $m_i = 1$, $c = 1$) these reduce to $B_{\text{ref}} = E_{\text{ref}} = 1$,
+$m_i$ [g] the ion mass, and $V_0 = c_{\text{phys}}/c$ [cm/s] the speed unit
+([Section 1.1](#11-speed-of-light-input-c)); $V_0$ is the speed of light for `c = 1`.
+$E_{\text{ref}} = B_{\text{ref}}$ because E and B share dimensions in Gaussian CGS.
+In the fully normalized system
+($n_0 = 1/(4\pi)$, $m_i = 1$, $V_0 = 1$) these reduce to $B_{\text{ref}} = E_{\text{ref}} = 1$,
 so code values are directly the dimensionless field strengths. For example,
 `B0x = 0.0195` means $B_{0x} = 0.0195 \times B_{\text{ref}}$ in Gauss.
 
@@ -317,8 +344,8 @@ not empty) writes:
 
 | Quantity | Tag | Description | Units |
 |----------|-----|-------------|-------|
-| Position | `position` | $x, y, z$ | $d_i$ |
-| Velocity | `velocity` | $u, v, w$ | $c$ |
+| Position | `position` | $x, y, z$ | $d_i/c$ ($d_i$ for `c = 1`) |
+| Velocity | `velocity` | $u, v, w$ | $V_0 = c_{\text{phys}}/c$ |
 | Charge | `q` | Particle charge weight | physical (carries $1/(4\pi)$ factor) |
 | ID | `ID` | Particle tracking ID (species with `TrackParticleID` only) | integer |
 
@@ -430,7 +457,7 @@ density, not the unsigned `rhoINIT` input quantity.
 | Derived quantity | Formula using disk values | Notes |
 |-----------------|--------------------------|-------|
 | **Bulk velocity** | $\mathbf{V}_s = \mathbf{J}_s / ({\rho} _{s,\text{disk}} / 4\pi)$ | Uses species density |
-| **Hall E-field** | $\mathbf{J} \times \mathbf{B} / (\rho_{e,\text{disk}} / 4\pi)$ | Uses electron density |
+| **Hall E-field** | $-\mathbf{J} \times \mathbf{B} / (c\,\rho_{e,\text{disk}} / 4\pi)$ | Uses the signed (negative) electron density |
 | **E·J dissipation** | $\mathbf{E} \cdot \mathbf{J}$ | Both physical, use directly |
 | **Alfvén speed** | $v_A = B_0 / \sqrt{\lvert \rho_{\text{disk}} \rvert / \lvert q/m \rvert}$ | Uses density magnitude. For ions ($\lvert q/m \rvert=1$, `rhoINIT=1`): $v_A = B_0$ |
 | **Species gas pressure** | $p_s = v_{th,s}^2 \times \lvert \rho_{s,\text{disk}} \rvert / (4\pi\,\lvert q/m \rvert_s)$ | Use density magnitude because on-disk $\rho_s$ is signed |

@@ -1019,6 +1019,19 @@ void EMfields3D::gpuCommunicateNodeBC_3mixed(int nx, int ny, int nz,
             &_vct, solverStream_);
 }
 
+void EMfields3D::gpuCommunicateNodeBC_6mixed(int nx, int ny, int nz,
+                                             GPUFieldArray3* const a[6],
+                                             const int* const bc[6]) {
+  cudaSolverType* ptrs[6];
+  for (int f = 0; f < 6; f++)
+    ptrs[f] = a[f]->devPtr();
+  gpuBatchedHaloExchange(ptrs, 6, nx, ny, nz, false, false, false, false,
+                         solverStream_);
+  for (int f = 0; f < 6; f++)
+    gpuBCface(nx, ny, nz, *a[f], bc[f][0], bc[f][1], bc[f][2], bc[f][3],
+              bc[f][4], bc[f][5], &_vct, solverStream_);
+}
+
 void EMfields3D::gpuCommunicateNodeBoxStencilBC_3mixed(
     int nx, int ny, int nz, GPUFieldArray3& a1, const int* bc1,
     GPUFieldArray3& a2, const int* bc2, GPUFieldArray3& a3, const int* bc3) {

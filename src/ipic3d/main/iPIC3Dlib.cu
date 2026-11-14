@@ -1501,7 +1501,8 @@ void c_Solver::CalculateMoments() {
 void c_Solver::CalculateField(int cycle) {
   timeTasks_set_main_task(TimeTasks::FIELDS);
 
-  // The results stay in the device arrays (d_Ex, d_Exth, ...)
+  // E(n+theta) in d_Exth (Faraday) and, smoothed, in gpuExForPcls() (mover);
+  // d_Ex keeps E^n until CalculateB
   EMf->gpuCalculateE(cycle);
   // Record event so particle packing can wait for solver completion
   cudaErrChk(cudaEventRecord(solverDoneEvent, EMf->gpuSolverStream()));
@@ -1595,8 +1596,8 @@ void c_Solver::finishHeatFluxForOutput(int cycle) {
  * can request a host-side wait when the buffer must be ready immediately.
  */
 void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronize) {
-  // gpuCalculateE / gpuCalculateB leave the fields in d_Ex etc.; the packing
-  // kernel reads them there.
+  // The mover samples E(n+theta) (gpuExForPcls: smoothed when smoothing is
+  // on) and B^n at the nodes plus the external field.
   //
   // Re-record solverDoneEvent here to capture the *current* tail of
   // solverStream_, not just the E-solver tail from the last CalculateField().
@@ -1620,11 +1621,12 @@ void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronize) {
     const int blockSize = 256;
     const int gridDim = (ncells + blockSize - 1) / blockSize;
     gpuPackFieldForPclsToCenter<<<gridDim, blockSize, 0, streams[0]>>>(
-        fieldForPclCUDAPtr, EMf->gpuEx().devPtr(), EMf->gpuEy().devPtr(),
-        EMf->gpuEz().devPtr(), EMf->gpuBxn().devPtr(), EMf->gpuByn().devPtr(),
-        EMf->gpuBzn().devPtr(), EMf->gpuBx_ext().devPtr(),
-        EMf->gpuBy_ext().devPtr(), EMf->gpuBz_ext().devPtr(), grid->getNXN(),
-        grid->getNYN(), grid->getNZN());
+        fieldForPclCUDAPtr, EMf->gpuExForPcls().devPtr(),
+        EMf->gpuEyForPcls().devPtr(), EMf->gpuEzForPcls().devPtr(),
+        EMf->gpuBxn().devPtr(), EMf->gpuByn().devPtr(), EMf->gpuBzn().devPtr(),
+        EMf->gpuBx_ext().devPtr(), EMf->gpuBy_ext().devPtr(),
+        EMf->gpuBz_ext().devPtr(), grid->getNXN(), grid->getNYN(),
+        grid->getNZN());
   }
   cudaErrChk(cudaEventRecord(event0, streams[0]));
   if (synchronize) {
@@ -2759,7 +2761,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
 void c_Solver::CalculateB(int cycle) {
   timeTasks_set_main_task(TimeTasks::FIELDS);
 
-  // The results stay in the device arrays (d_Bxc, d_Bxn, ...)
+  // B(n+1) in d_Bxc, d_Bxn, ..., then E^n -> E(n+1) in d_Ex
   EMf->gpuCalculateB(cycle);
 }
 
@@ -2942,7 +2944,8 @@ void c_Solver::WriteOutput(int cycle) {
   if (restartOutputDue) {
     // Periodic restarts are written before the current iteration is completed.
     // The checkpoint label remains the triggering loop cycle, so a checkpoint
-    // labeled N restarts by executing cycle N again.
+    // labeled N restarts by executing cycle N again: it holds E^N (d_Ex is
+    // advanced only in CalculateB), B^N and the particles at N.
     // eventOutputCopy is pre-recorded once at init on outputStream and re-
     // recorded by every outputCopyAsync() that actually issues copies. The
     // synchronize below is therefore always well-defined. First-cycle output

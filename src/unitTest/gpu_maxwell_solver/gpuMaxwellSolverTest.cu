@@ -985,6 +985,7 @@ void runPeriodicCase(EMfields3D& fields, const TestInput& input, Check& check) {
   setElectricFields(fields, input.periodicElectric());
   fields.gpuSolverSyncH2D(stream);
   fields.gpuCalculateE(0);
+  fields.gpuAdvanceE(); // E^n -> E(n+1), normally done by gpuCalculateB
   fields.gpuSolverSyncD2H(stream);
   const FieldArray electric = electricFields(fields);
   checkConstantElectric(electric, check, input.periodicElectric(),
@@ -1045,6 +1046,7 @@ void runManufacturedCase(EMfields3D& fields, Grid3DCU& grid,
 
   solverToElectric(fields, oldElectric, grid, stream);
   fields.gpuCalculateE(0);
+  fields.gpuAdvanceE(); // E^n -> E(n+1), normally done by gpuCalculateB
   fields.gpuSolverSyncD2H(stream);
   checkManufactured(fields, check, grid, input);
 }

@@ -147,6 +147,9 @@ void EMfields3D::gpuSolverAllocate() {
     }
   } rollback{this};
 
+  // The device memory estimate (Collective::Print, scripts/ipic_preflight.py)
+  // counts the arrays allocated below: keep it in step with them.
+
   // ---- Electric field (node-based) ----
   d_Ex = GPUFieldArray3(nxn, nyn, nzn);
   d_Ey = GPUFieldArray3(nxn, nyn, nzn);
@@ -154,6 +157,11 @@ void EMfields3D::gpuSolverAllocate() {
   d_Exth = GPUFieldArray3(nxn, nyn, nzn);
   d_Eyth = GPUFieldArray3(nxn, nyn, nzn);
   d_Ezth = GPUFieldArray3(nxn, nyn, nzn);
+  if (smoothingOn()) { // without smoothing the mover samples Exth itself
+    d_ExthSmooth = GPUFieldArray3(nxn, nyn, nzn);
+    d_EythSmooth = GPUFieldArray3(nxn, nyn, nzn);
+    d_EzthSmooth = GPUFieldArray3(nxn, nyn, nzn);
+  }
 
   // ---- Magnetic field ----
   d_Bxc = GPUFieldArray3(nxc, nyc, nzc);
@@ -349,6 +357,9 @@ void EMfields3D::gpuSolverFree() {
   d_Exth.free();
   d_Eyth.free();
   d_Ezth.free();
+  d_ExthSmooth.free();
+  d_EythSmooth.free();
+  d_EzthSmooth.free();
 
   // Magnetic field
   d_Bxc.free();
@@ -798,177 +809,158 @@ void EMfields3D::gpuPIdot(GPUFieldArray3& PIX, GPUFieldArray3& PIY,
                   d_Bz_ext.devPtr(), beta, nxn, nyn, nzn, solverStream_);
 }
 
-template <EMfields3D::HaloMode M>
-void EMfields3D::gpuSmooth(GPUFieldArray3& arr, int type) {
-  if (Smooth == 1.0)
-    return;
+// =========================================================================
+//  Smoothing passes: rhoc (gpuSmooth), Jhat (gpuSmooth3), E (gpuSmoothE)
+// =========================================================================
 
+template <EMfields3D::HaloMode M, int N, typename Begin, typename End>
+void EMfields3D::gpuSmoothPasses(GPUFieldArray3* const src[N],
+                                 GPUFieldArray3* const dst[N],
+                                 GPUFieldArray3* const scratch[N], int nx,
+                                 int ny, int nz, Begin&& begin, End&& end) {
   const double alpha = Smooth;
   const double beta3D = (1.0 - alpha) / 6.0;
-
-  int nx, ny, nz;
-  if (type == 0) {
-    nx = nxc;
-    ny = nyc;
-    nz = nzc;
-  } else {
-    nx = nxn;
-    ny = nyn;
-    nz = nzn;
-  }
-
-  size_t fieldSize = (size_t)nx * ny * nz;
-  bool isCenter = (type == 0);
-
-  for (int icount = 1; icount < SmoothNiter + 1; icount++) {
-    if constexpr (M == HaloMode::Overlap) {
-      cudaSolverType* ptr1[1] = {arr.devPtr()};
-      gpuBatchedHaloBeginExchange(ptr1, 1, nx, ny, nz, isCenter, true, true,
-                                  solverStream_);
-      gpuSmoothStep_interior(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz,
-                             alpha, beta3D, solverStream_);
-      gpuBatchedHaloEndExchange();
-      gpuBCface_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
-      gpuSmoothStep_boundary(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz,
-                             alpha, beta3D, solverStream_);
-    } else {
-      if (type == 0)
-        gpuCommunicateCenterBoxStencilBC_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2);
-      else
-        gpuCommunicateNodeBoxStencilBC_P(nx, ny, nz, arr, 2, 2, 2, 2, 2, 2);
-      gpuSmoothStep(d_smoothTemp.devPtr(), arr.devPtr(), nx, ny, nz, alpha,
-                    beta3D, solverStream_);
+  const int passes = SmoothNiter;
+  // Pass p writes dst when passes - 1 - p (+ flip) is even, the scratch
+  // otherwise, so the last pass writes dst.  In place with an odd count the
+  // first pass would write the array it reads: flip the parity, end in the
+  // scratch and copy back once.
+  const int flip = (src[0] == dst[0] && passes % 2 == 1) ? 1 : 0;
+  GPUFieldArray3* const* in = src;
+  for (int p = 0; p < passes; p++) {
+    GPUFieldArray3* const* out =
+        (passes - 1 - p + flip) % 2 == 0 ? dst : scratch;
+    SmoothFields<N> f;
+    for (int c = 0; c < N; c++) {
+      f.out[c] = out[c]->devPtr();
+      f.in[c] = in[c]->devPtr();
     }
-    gpuEq(arr.devPtr(), d_smoothTemp.devPtr(), fieldSize, solverStream_);
+    if constexpr (M == HaloMode::Overlap) {
+      begin(in);
+      gpuSmoothFields<N>(f, nx, ny, nz, alpha, beta3D, SmoothRegion::Interior,
+                         solverStream_);
+      end(in);
+      gpuSmoothFields<N>(f, nx, ny, nz, alpha, beta3D, SmoothRegion::Shell,
+                         solverStream_);
+    } else {
+      end(in);
+      gpuSmoothFields<N>(f, nx, ny, nz, alpha, beta3D, SmoothRegion::All,
+                         solverStream_);
+    }
+    in = out;
   }
+  if (in[0] != dst[0])
+    for (int c = 0; c < N; c++)
+      gpuEq(dst[c]->devPtr(), in[c]->devPtr(), (size_t)nx * ny * nz,
+            solverStream_);
 }
 
-template <EMfields3D::HaloMode M> void EMfields3D::gpuSmoothE() {
-  if (Smooth == 1.0)
+template <EMfields3D::HaloMode M>
+void EMfields3D::gpuSmooth(GPUFieldArray3& arr, int type) {
+  if (!smoothingOn())
     return;
+  const bool isCenter = (type == 0);
+  const int nx = isCenter ? nxc : nxn;
+  const int ny = isCenter ? nyc : nyn;
+  const int nz = isCenter ? nzc : nzn;
 
+  // the node-sized d_smoothTemp viewed with the shape of arr
+  GPUFieldArray3 tmp =
+      GPUFieldArray3::wrapDevice(d_smoothTemp.devPtr(), nx, ny, nz);
+  GPUFieldArray3* const fields[1] = {&arr};
+  GPUFieldArray3* const scratch[1] = {&tmp};
+  auto begin = [&](GPUFieldArray3* const* in) {
+    cudaSolverType* ptr[1] = {in[0]->devPtr()};
+    gpuBatchedHaloBeginExchange(ptr, 1, nx, ny, nz, isCenter, true, true,
+                                solverStream_);
+  };
+  auto end = [&](GPUFieldArray3* const* in) {
+    if constexpr (M == HaloMode::Overlap) {
+      gpuBatchedHaloEndExchange();
+      gpuBCface_P(nx, ny, nz, *in[0], 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
+    } else if (isCenter) {
+      gpuCommunicateCenterBoxStencilBC_P(nx, ny, nz, *in[0], 2, 2, 2, 2, 2, 2);
+    } else {
+      gpuCommunicateNodeBoxStencilBC_P(nx, ny, nz, *in[0], 2, 2, 2, 2, 2, 2);
+    }
+  };
+  gpuSmoothPasses<M, 1>(fields, fields, scratch, nx, ny, nz, begin, end);
+}
+
+template <EMfields3D::HaloMode M>
+void EMfields3D::gpuSmoothE(GPUFieldArray3* const src[3],
+                            GPUFieldArray3* const dst[3]) {
   const Collective* col = &get_col();
-  const double alpha = Smooth;
-  const double beta3D = (1.0 - alpha) / 6.0;
-  size_t nodeSize = (size_t)nxn * nyn * nzn;
 
   // X-right outflow face: continue every component past the face with zero
   // gradient, instead of the open-face ghost E_x = 0
-  int bcEx[6], bcEy[6], bcEz[6];
+  int bc[3][6];
   for (int f = 0; f < 6; f++) {
-    bcEx[f] = col->bcEx[f];
-    bcEy[f] = col->bcEy[f];
-    bcEz[f] = col->bcEz[f];
+    bc[0][f] = col->bcEx[f];
+    bc[1][f] = col->bcEy[f];
+    bc[2][f] = col->bcEz[f];
   }
   if (ownsOutflowFaceXright())
-    bcEx[0] = bcEy[0] = bcEz[0] = 2;
+    bc[0][0] = bc[1][0] = bc[2][0] = 2;
 
-  for (int icount = 1; icount < SmoothNiter + 1; icount++) {
+  GPUFieldArray3* const scratch[3] = {&d_tempX, &d_tempY, &d_tempZ};
+  auto begin = [&](GPUFieldArray3* const* in) {
+    cudaSolverType* ptrs[3] = {in[0]->devPtr(), in[1]->devPtr(),
+                               in[2]->devPtr()};
+    gpuBatchedHaloBeginExchange(ptrs, 3, nxn, nyn, nzn, false, true, false,
+                                solverStream_);
+  };
+  auto end = [&](GPUFieldArray3* const* in) {
     if constexpr (M == HaloMode::Overlap) {
-      cudaSolverType* eptrs[3] = {d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr()};
-      gpuBatchedHaloBeginExchange(eptrs, 3, nxn, nyn, nzn, false, true, false,
-                                  solverStream_);
-      gpuSmoothStep_interior(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn,
-                             alpha, beta3D, solverStream_);
-      gpuSmoothStep_interior(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn,
-                             alpha, beta3D, solverStream_);
-      gpuSmoothStep_interior(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn,
-                             alpha, beta3D, solverStream_);
       gpuBatchedHaloEndExchange();
-      gpuBCface(nxn, nyn, nzn, d_Ex, bcEx[0], bcEx[1], bcEx[2], bcEx[3],
-                bcEx[4], bcEx[5], &_vct, solverStream_);
-      gpuBCface(nxn, nyn, nzn, d_Ey, bcEy[0], bcEy[1], bcEy[2], bcEy[3],
-                bcEy[4], bcEy[5], &_vct, solverStream_);
-      gpuBCface(nxn, nyn, nzn, d_Ez, bcEz[0], bcEz[1], bcEz[2], bcEz[3],
-                bcEz[4], bcEz[5], &_vct, solverStream_);
-      gpuSmoothStep_boundary(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn,
-                             alpha, beta3D, solverStream_);
-      gpuSmoothStep_boundary(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn,
-                             alpha, beta3D, solverStream_);
-      gpuSmoothStep_boundary(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn,
-                             alpha, beta3D, solverStream_);
+      for (int c = 0; c < 3; c++)
+        gpuBCface(nxn, nyn, nzn, *in[c], bc[c][0], bc[c][1], bc[c][2], bc[c][3],
+                  bc[c][4], bc[c][5], &_vct, solverStream_);
     } else {
       // Batched: 3 fields in 1 MPI round instead of 3 sequential exchanges
-      gpuCommunicateNodeBoxStencilBC_3mixed(nxn, nyn, nzn, d_Ex, bcEx, d_Ey,
-                                            bcEy, d_Ez, bcEz);
-      gpuSmoothStep(d_tempX.devPtr(), d_Ex.devPtr(), nxn, nyn, nzn, alpha,
-                    beta3D, solverStream_);
-      gpuSmoothStep(d_tempY.devPtr(), d_Ey.devPtr(), nxn, nyn, nzn, alpha,
-                    beta3D, solverStream_);
-      gpuSmoothStep(d_tempZ.devPtr(), d_Ez.devPtr(), nxn, nyn, nzn, alpha,
-                    beta3D, solverStream_);
+      gpuCommunicateNodeBoxStencilBC_3mixed(nxn, nyn, nzn, *in[0], bc[0],
+                                            *in[1], bc[1], *in[2], bc[2]);
     }
-
-    gpuEq(d_Ex.devPtr(), d_tempX.devPtr(), nodeSize, solverStream_);
-    gpuEq(d_Ey.devPtr(), d_tempY.devPtr(), nodeSize, solverStream_);
-    gpuEq(d_Ez.devPtr(), d_tempZ.devPtr(), nodeSize, solverStream_);
-  }
+  };
+  gpuSmoothPasses<M, 3>(src, dst, scratch, nxn, nyn, nzn, begin, end);
 }
 
 template <EMfields3D::HaloMode M>
 void EMfields3D::gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2,
                             GPUFieldArray3& a3, int type) {
-  if (Smooth == 1.0)
+  if (!smoothingOn())
     return;
+  const bool isCenter = (type == 0);
+  const int nx = isCenter ? nxc : nxn;
+  const int ny = isCenter ? nyc : nyn;
+  const int nz = isCenter ? nzc : nzn;
 
-  const double alpha = Smooth;
-  const double beta3D = (1.0 - alpha) / 6.0;
-
-  int nx, ny, nz;
-  if (type == 0) {
-    nx = nxc;
-    ny = nyc;
-    nz = nzc;
-  } else {
-    nx = nxn;
-    ny = nyn;
-    nz = nzn;
-  }
-
-  size_t fieldSize = (size_t)nx * ny * nz;
-  bool isCenter = (type == 0);
-
-  for (int icount = 1; icount < SmoothNiter + 1; icount++) {
+  // the node-sized d_temp2X/Y/Z viewed with the shape of the fields
+  GPUFieldArray3 t1 = GPUFieldArray3::wrapDevice(d_temp2X.devPtr(), nx, ny, nz);
+  GPUFieldArray3 t2 = GPUFieldArray3::wrapDevice(d_temp2Y.devPtr(), nx, ny, nz);
+  GPUFieldArray3 t3 = GPUFieldArray3::wrapDevice(d_temp2Z.devPtr(), nx, ny, nz);
+  GPUFieldArray3* const fields[3] = {&a1, &a2, &a3};
+  GPUFieldArray3* const scratch[3] = {&t1, &t2, &t3};
+  auto begin = [&](GPUFieldArray3* const* in) {
+    cudaSolverType* ptrs[3] = {in[0]->devPtr(), in[1]->devPtr(),
+                               in[2]->devPtr()};
+    gpuBatchedHaloBeginExchange(ptrs, 3, nx, ny, nz, isCenter, true, true,
+                                solverStream_);
+  };
+  auto end = [&](GPUFieldArray3* const* in) {
     if constexpr (M == HaloMode::Overlap) {
-      cudaSolverType* s3ptrs[3] = {a1.devPtr(), a2.devPtr(), a3.devPtr()};
-      gpuBatchedHaloBeginExchange(s3ptrs, 3, nx, ny, nz, isCenter, true, true,
-                                  solverStream_);
-      gpuSmoothStep_interior(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha,
-                             beta3D, solverStream_);
-      gpuSmoothStep_interior(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha,
-                             beta3D, solverStream_);
-      gpuSmoothStep_interior(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha,
-                             beta3D, solverStream_);
       gpuBatchedHaloEndExchange();
-      gpuBCface_P(nx, ny, nz, a1, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
-      gpuBCface_P(nx, ny, nz, a2, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
-      gpuBCface_P(nx, ny, nz, a3, 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
-      gpuSmoothStep_boundary(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha,
-                             beta3D, solverStream_);
-      gpuSmoothStep_boundary(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha,
-                             beta3D, solverStream_);
-      gpuSmoothStep_boundary(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha,
-                             beta3D, solverStream_);
+      for (int c = 0; c < 3; c++)
+        gpuBCface_P(nx, ny, nz, *in[c], 2, 2, 2, 2, 2, 2, &_vct, solverStream_);
+    } else if (isCenter) { // batched: 3 fields in 1 MPI round
+      gpuCommunicateCenterBoxStencilBC_P_3(nx, ny, nz, *in[0], *in[1], *in[2],
+                                           2, 2, 2, 2, 2, 2);
     } else {
-      // Batched: 3 fields in 1 MPI round
-      if (type == 0)
-        gpuCommunicateCenterBoxStencilBC_P_3(nx, ny, nz, a1, a2, a3, 2, 2, 2, 2,
-                                             2, 2);
-      else
-        gpuCommunicateNodeBoxStencilBC_P_3(nx, ny, nz, a1, a2, a3, 2, 2, 2, 2,
-                                           2, 2);
-      gpuSmoothStep(d_temp2X.devPtr(), a1.devPtr(), nx, ny, nz, alpha, beta3D,
-                    solverStream_);
-      gpuSmoothStep(d_temp2Y.devPtr(), a2.devPtr(), nx, ny, nz, alpha, beta3D,
-                    solverStream_);
-      gpuSmoothStep(d_temp2Z.devPtr(), a3.devPtr(), nx, ny, nz, alpha, beta3D,
-                    solverStream_);
+      gpuCommunicateNodeBoxStencilBC_P_3(nx, ny, nz, *in[0], *in[1], *in[2], 2,
+                                         2, 2, 2, 2, 2);
     }
-
-    gpuEq(a1.devPtr(), d_temp2X.devPtr(), fieldSize, solverStream_);
-    gpuEq(a2.devPtr(), d_temp2Y.devPtr(), fieldSize, solverStream_);
-    gpuEq(a3.devPtr(), d_temp2Z.devPtr(), fieldSize, solverStream_);
-  }
+  };
+  gpuSmoothPasses<M, 3>(fields, fields, scratch, nx, ny, nz, begin, end);
 }
 
 void EMfields3D::gpuPerfectConductorImages(cudaSolverType* d_im,
@@ -989,10 +981,9 @@ void EMfields3D::gpuPerfectConductorImages(cudaSolverType* d_im,
 void EMfields3D::gpuPerfectConductorSources(cudaSolverType* dX,
                                             cudaSolverType* dY,
                                             cudaSolverType* dZ) {
-  // ebc = -(ue0,ve0,we0) x (B0x,B0y,B0z): the tangential E on the walls.
-  const cudaSolverType ebc0 = -(ve0 * B0z - we0 * B0y);
-  const cudaSolverType ebc1 = -(we0 * B0x - ue0 * B0z);
-  const cudaSolverType ebc2 = -(ue0 * B0y - ve0 * B0x);
+  // ebc = -(u0 x B0) / c: the tangential E on the walls.
+  double ebc[3];
+  driftElectricField(ebc);
   const cudaSolverType* E[3] = {d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr()};
   const cudaSolverType* J[3] = {d_Jxh.devPtr(), d_Jyh.devPtr(), d_Jzh.devPtr()};
   for (int f = 0; f < 6; f++) {
@@ -1002,8 +993,8 @@ void EMfields3D::gpuPerfectConductorSources(cudaSolverType* dX,
     ::gpuPerfectConductorSource(
         dX, dY, dZ, E[dir], J[dir], d_Bxn.devPtr(), d_Byn.devPtr(),
         d_Bzn.devPtr(), d_Bx_ext.devPtr(), d_By_ext.devPtr(), d_Bz_ext.devPtr(),
-        d_rhons.devPtr(), d_qom, ns, dt, c, th, FourPI, delt, ebc0, ebc1, ebc2,
-        nxn, nyn, nzn, dir, f % 2 == 1, solverStream_);
+        d_rhons.devPtr(), d_qom, ns, dt, c, th, FourPI, delt, ebc[0], ebc[1],
+        ebc[2], nxn, nyn, nzn, dir, f % 2 == 1, solverStream_);
   }
 }
 
@@ -2254,6 +2245,10 @@ void EMfields3D::gpuCalculateB(int cycle) {
     gpuCalculateB<HaloMode::Overlap>(cycle);
   else
     gpuCalculateB<HaloMode::Blocking>(cycle);
+  // E^n is kept through the mover and the output of this cycle (checkpoints,
+  // field files and diagnostics see E^n with B^n and the particles at n);
+  // after Faraday's law Exth is free, so theta = 1 is a buffer swap
+  gpuAdvanceE();
 }
 
 void EMfields3D::gpuCalculateHatFunctions(int cycle) {
@@ -2275,7 +2270,6 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateE(int cycle) {
     cout << "*** E CALCULATION [GPU] ***" << endl;
 
   const int nMaxwell = maxwellKrylovSize_;
-  size_t nodeSize = (size_t)nxn * nyn * nzn;
 
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
   auto reportElectricField = [&](const char* stage, bool includeGhosts) {
@@ -2291,9 +2285,11 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateE(int cycle) {
          includeGhosts ? nzn : nzn - 1},
         {grid.getXN(0), grid.getYN(0), grid.getZN(0)},
         {grid.getDX(), grid.getDY(), grid.getDZ()}};
-    static const char* const names[3] = {"Ex", "Ey", "Ez"};
-    const cudaSolverType* arrays[3] = {d_Ex.devPtr(), d_Ey.devPtr(),
-                                       d_Ez.devPtr()};
+    // E(n+theta) as the mover samples it (smoothed when smoothing is on)
+    static const char* const names[3] = {"ExForPcls", "EyForPcls", "EzForPcls"};
+    const cudaSolverType* arrays[3] = {gpuExForPcls().devPtr(),
+                                       gpuEyForPcls().devPtr(),
+                                       gpuEzForPcls().devPtr()};
     const double scales[3] = {1.0, 1.0, 1.0};
     gpuCycleDiagnostics_.reportArraySet(stage, cycle, -1, names, arrays, scales,
                                         3, region, solverStream_,
@@ -2378,41 +2374,64 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateE(int cycle) {
   }
 #endif
 
-  // E^{n+1} = beta*E + alfa*Eth  where alfa=1/th, beta=-(1-th)/th
-  gpuAddscale2_3(1.0 / th, -(1.0 - th) / th, d_Ex.devPtr(), d_Exth.devPtr(),
-                 d_Ey.devPtr(), d_Eyth.devPtr(), d_Ez.devPtr(), d_Ezth.devPtr(),
-                 nodeSize, solverStream_);
+  // The mover samples E(n+theta), the push the implicit moments assume:
+  // smoothed into ExthSmooth when smoothing is on, Exth itself otherwise.
+  // Faraday's law uses the unsmoothed Exth.  E (d_Ex) stays E^n until
+  // gpuAdvanceE.
+  GPUFieldArray3* const solved[3] = {&d_Exth, &d_Eyth, &d_Ezth};
+  if (smoothingOn()) {
+    GPUFieldArray3* const smoothed[3] = {&d_ExthSmooth, &d_EythSmooth,
+                                         &d_EzthSmooth};
+    gpuSmoothE<M>(solved, smoothed);
 
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
-  reportElectricField("E_after_cycle_solve", false);
+    reportElectricField("Eth_after_smoothing", false);
 #endif
 
-  // Smooth E
-  gpuSmoothE<M>();
+    // Exth and ExthSmooth in one MPI round
+    GPUFieldArray3* const both[6] = {solved[0],   solved[1],   solved[2],
+                                     smoothed[0], smoothed[1], smoothed[2]};
+    const int* const bc[6] = {col->bcEx, col->bcEy, col->bcEz,
+                              col->bcEx, col->bcEy, col->bcEz};
+    gpuCommunicateNodeBC_6mixed(nxn, nyn, nzn, both, bc);
+    gpuOpenBoundaryInflowE(d_Exth.devPtr(), d_Eyth.devPtr(), d_Ezth.devPtr(),
+                           nxn, nyn, nzn);
+    gpuOpenBoundaryInflowE(d_ExthSmooth.devPtr(), d_EythSmooth.devPtr(),
+                           d_EzthSmooth.devPtr(), nxn, nyn, nzn);
+  } else {
+    gpuCommunicateNodeBC_3mixed(nxn, nyn, nzn, d_Exth, col->bcEx, d_Eyth,
+                                col->bcEy, d_Ezth, col->bcEz);
+    gpuOpenBoundaryInflowE(d_Exth.devPtr(), d_Eyth.devPtr(), d_Ezth.devPtr(),
+                           nxn, nyn, nzn);
+  }
 
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
-  reportElectricField("E_after_smoothing", false);
+  reportElectricField("Eth_after_inflow_boundary", true);
 #endif
+}
 
-  // Communicate final E fields (batched: 2 × 3 fields in 1 MPI round each)
-  gpuCommunicateNodeBC_3mixed(nxn, nyn, nzn, d_Exth, col->bcEx, d_Eyth,
-                              col->bcEy, d_Ezth, col->bcEz);
-  gpuCommunicateNodeBC_3mixed(nxn, nyn, nzn, d_Ex, col->bcEx, d_Ey, col->bcEy,
-                              d_Ez, col->bcEz);
+// =========================================================================
+//  gpuAdvanceE: E^n -> E(n+1)
+// =========================================================================
 
-#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
-  reportElectricField("E_after_halo_exchange", true);
-#endif
-
-  // OpenBC Inflow on solved E fields
-  gpuOpenBoundaryInflowE(d_Exth.devPtr(), d_Eyth.devPtr(), d_Ezth.devPtr(), nxn,
-                         nyn, nzn);
-  gpuOpenBoundaryInflowE(d_Ex.devPtr(), d_Ey.devPtr(), d_Ez.devPtr(), nxn, nyn,
-                         nzn);
-
-#if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
-  reportElectricField("E_after_inflow_boundary", true);
-#endif
+void EMfields3D::gpuAdvanceE() {
+  GPUFieldArray3& sx = gpuExForPcls();
+  GPUFieldArray3& sy = gpuEyForPcls();
+  GPUFieldArray3& sz = gpuEzForPcls();
+  if (th == 1.0) {
+    // E(n+1) = S(E(n+theta)): swap the storage; E^n's becomes the work array
+    // the next solve (or smoothing) overwrites before any read
+    d_Ex.swap(sx);
+    d_Ey.swap(sy);
+    d_Ez.swap(sz);
+  } else {
+    // E(n+1) = (S(E(n+theta)) - (1-theta) E^n) / theta on every node: the
+    // source carries its halo and open-boundary values, and the ghost and
+    // layer values of E^n are those of the previous step
+    gpuAddscale2_3(1.0 / th, -(1.0 - th) / th, d_Ex.devPtr(), sx.devPtr(),
+                   d_Ey.devPtr(), sy.devPtr(), d_Ez.devPtr(), sz.devPtr(),
+                   (size_t)nxn * nyn * nzn, solverStream_);
+  }
 }
 
 // =========================================================================
@@ -3050,10 +3069,8 @@ void EMfields3D::gpuOpenBoundaryInflowESource(cudaSolverType* dX,
                                               int ny, int nz) {
   if (!get_col().getApplyInflowBcsEImage())
     return;
-  // injE = -(ue0,ve0,we0) x (B0x,B0y,B0z)
-  const cudaSolverType injE[3] = {-(ve0 * B0z - we0 * B0y),
-                                  -(we0 * B0x - ue0 * B0z),
-                                  -(ue0 * B0y - ve0 * B0x)};
+  double injE[3]; // E0 = -(u0 x B0) / c
+  driftElectricField(injE);
   const int n[3] = {nx, ny, nz};
   for (int f = 0; f < 6; f++)
     if (openInflowFace_[f])
@@ -3087,10 +3104,8 @@ void EMfields3D::gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY,
   const VirtualTopology3D* vct = &get_vct();
   const Collective* col = &get_col();
 
-  double injE[3];
-  injE[0] = -(ve0 * B0z - we0 * B0y);
-  injE[1] = -(we0 * B0x - ue0 * B0z);
-  injE[2] = -(ue0 * B0y - ve0 * B0x);
+  double injE[3]; // E0 = -(u0 x B0) / c
+  driftElectricField(injE);
 
   double invNL = (n_layers_sal > 0) ? 1.0 / (double)n_layers_sal : 1.0;
 

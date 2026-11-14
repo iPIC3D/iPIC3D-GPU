@@ -98,7 +98,8 @@ w0 = 0.0  0.0                           # z drift speeds [required]
 
 TrackParticleID = 1  0  0               # Per-species ID mask [default: all 0]
 
-# Test-particle initial pitch angle and energy, one entry per test species.
+# Test-particle initial pitch angle [rad] and kinetic energy [m c^2], one entry
+# per test species: gamma = 1 + energy, |v| = c sqrt(1 - 1/gamma^2).
 pitch_angle = 0.17453293                # [required if nsTestPart > 0]
 energy      = 0.00020                   # [required if nsTestPart > 0]
 

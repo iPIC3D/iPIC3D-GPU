@@ -147,9 +147,9 @@ void gpuPerfectConductorImage(
 
 /**
  * @brief RHS rows of the Maxwell system on a perfect-conductor face (same
- * plane as gpuPerfectConductorImage): tangential components ebc = -(u0 x B0),
- * normal component (E^n_n - 4 pi theta dt Jhat_n) / chi_nn, with En / Jn the
- * normal components of E^n and Jhat.
+ * plane as gpuPerfectConductorImage): tangential components
+ * ebc = -(u0 x B0) / c, normal component (E^n_n - 4 pi theta dt Jhat_n) /
+ * chi_nn, with En / Jn the normal components of E^n and Jhat.
  */
 void gpuPerfectConductorSource(
     cudaSolverType* vectorX, cudaSolverType* vectorY, cudaSolverType* vectorZ,

@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstring>
 #include <stdexcept>
+#include <utility>
 
 // ---------------------------------------------------------------------------
 //  GPUFieldArray3Impl<T>  –  3-dimensional device array  (S3 × S2 × S1)
@@ -63,6 +64,16 @@ public:
       o.size_ = 0;
     }
     return *this;
+  }
+
+  /** Exchange the storage of two arrays (no device work). */
+  void swap(GPUFieldArray3Impl& o) noexcept {
+    std::swap(d_ptr_, o.d_ptr_);
+    std::swap(S3_, o.S3_);
+    std::swap(S2_, o.S2_);
+    std::swap(S1_, o.S1_);
+    std::swap(size_, o.size_);
+    std::swap(owning_, o.owning_);
   }
 
   /** Create a non-owning view that wraps an existing device pointer.

@@ -21,6 +21,7 @@
 
 #include "Collective.h"
 #include "ConfigFile.h"
+#include "HeatFluxComponents.h"
 #include "MPIdata.h"
 #include "RestartReader.h"
 #include "asserts.h" // for assert_ge
@@ -28,6 +29,7 @@
 #include "input_array.h"
 #include "limits.h" // for INT_MAX
 #include "string.h"
+#include <algorithm>
 #include <cctype>
 #include <math.h>
 #include <mpi.h>
@@ -134,6 +136,13 @@ void Collective::ReadInput(const ConfigFile& config) {
     dt = config.read<double>("dt");
     ncycles = config.read<int>("ncycles");
     th = config.read<double>("th", 1.0);
+    // the theta scheme is unconditionally stable only for th >= 1/2
+    if (!(th >= 0.5)) {
+      if (!MPIdata::get_rank())
+        eprintf("in input file %s th must be at least 0.5, not %g\n",
+                inputfile.c_str(), th);
+      MPIdata::exit(1);
+    }
 
     // Macrocell sizes for (v_par, v_perp) spectra data analysis.
     // Default 0 disables the feature at runtime.
@@ -296,6 +305,14 @@ void Collective::ReadInput(const ConfigFile& config) {
   restart_status = 0;
   last_cycle = -1;
   c = config.read<double>("c", 1.0);
+  // the Gaussian equations divide by c
+  if (!(c > 0.0)) {
+    if (!MPIdata::get_rank())
+      eprintf("in input file %s the speed of light c must be positive, not "
+              "%g\n",
+              inputfile.c_str(), c);
+    MPIdata::exit(1);
+  }
 
 #ifdef BATSRUS
   // set grid size and resolution based on the initial file from fluid code
@@ -1183,26 +1200,53 @@ void Collective::Print() {
 
   // Interior cell counts (no ghost layers) — used for particle estimates
   const int nxc_r = nxc_loc - 2, nyc_r = nyc_loc - 2, nzc_r = nzc_loc - 2;
+  const double intC = (double)nxc_r * nyc_r * nzc_r;
+
+  // Particle SoA arrays (host and device): x, y, z, u, v, w, q, and the ID of
+  // the species with TrackParticleID, 8 bytes each
+  auto soaArrays = [&](int species) {
+    return 7.0 + (getTrackParticleID(species) ? 1.0 : 0.0);
+  };
+
+  // Heat flux is computed only when field output writes it (as in
+  // c_Solver::initCUDA)
+  const bool heatFlux =
+      !field_output_is_off() && outputConfig_.needsAnyHeatFlux();
 
   // --- HOST ---
-  // EMfields3D: 19 node-3D + 4 cell-3D + 20*ns node-4D (10 moments + 10
-  // heat-flux components) + ns cell-4D
+  // EMfields3D (its constructor): 19 node arrays (E, B, rhon, J, the 3
+  // initialization temporaries, B_ext, B_tot) and 4 cell arrays (PHI, Bc);
+  // per species the 10 node moments and the cell density rhocs.
   double hostEMf =
-      (19.0 * gridN + 4.0 * gridC + (20.0 * ns) * gridN + ns * gridC) * 8;
+      (19.0 * gridN + 4.0 * gridC + ns * (10.0 * gridN + gridC)) * 8;
+  // The HeatFlux::ComponentCount node heat-flux arrays of each species are
+  // always allocated but touched (resident) only when heat flux is computed
+  const double hostHeatFlux =
+      heatFlux ? ns * HeatFlux::ComponentCount * gridN * 8.0 : 0.0;
+  // Restart cell metadata when checkpoints are written: offsets and counts
+  // (int) of the guarded and of the active cells, per species
+  const double hostRestart =
+      RestartOutputCycle > 0 ? ns * 2.0 * (gridC + intC) * 4 : 0.0;
   double hostPcl = 0, hostComm = 0;
   for (int i = 0; i < ns; i++) {
     long long nop_i = (long long)npcel[i] * nxc_r * nyc_r *
-                      nzc_r;        // interior cells (same as device)
-    hostPcl += nop_i * 8.0 * 8;     // 8 SoA arrays * 8 bytes
-    hostComm += 0.1 * nop_i * 64.0; // MPI comm buffer (AoS)
+                      nzc_r; // interior cells (same as device)
+    hostPcl += nop_i * soaArrays(i) * 8;
+    hostComm += 0.1 * nop_i * 64.0; // MPI exchange buffer (64 B AoS)
   }
-  double hostTotal = (hostEMf + hostPcl + hostComm) / MB;
+  double hostTotal =
+      (hostEMf + hostHeatFlux + hostRestart + hostPcl + hostComm) / MB;
 
   cout << "HOST:   EMfields = " << hostEMf / MB << " MB"
        << ", particles = " << hostPcl / MB << " MB"
-       << ", comm = " << hostComm / MB << " MB" << endl;
+       << ", comm = " << hostComm / MB << " MB";
+  if (hostHeatFlux > 0)
+    cout << ", heat flux = " << hostHeatFlux / MB << " MB";
+  if (hostRestart > 0)
+    cout << ", restart metadata = " << hostRestart / MB << " MB";
+  cout << endl;
   cout << "        TOTAL = " << hostTotal << " MB (" << hostTotal / 1024
-       << " GB)" << endl;
+       << " GB)  (+ ~250 MB runtime and libraries)" << endl;
 
   // --- DEVICE ---
   // GPU allocations use actual NOP from maxwellian (interior cells only, no
@@ -1219,7 +1263,7 @@ void Collective::Print() {
                       nzc_r; // actual NOP (interior cells)
     long long cap_i = (long long)(nop_i * CAP_FACTOR);
 
-    devPcl += cap_i * 8.0 * 8; // SoA arrays
+    devPcl += cap_i * soaArrays(i) * 8;
     devBuf +=
         cap_i * 8.0                               // departure
         + AUX_FRAC * nop_i * (64.0 + 4.0 + 64.0); // exiting + filler + staging
@@ -1231,17 +1275,54 @@ void Collective::Print() {
     if (isDipole)
       devPlanet += PLANET_FRAC * nop_i * 64.0;
   }
-  double devTotal =
-      (devFieldBuf + devMoments + devPcl + devBuf + devSort + devPlanet) / MB;
+  // GPU field solver (EMfields3D::gpuSolverAllocate): 41 node arrays, plus
+  // the smoothed E(n+theta) the mover samples when E is smoothed, the 10 node
+  // moments of each species, 17 cell arrays, the Krylov vectors (Maxwell x
+  // and b, Poisson x and b of the div(E) and div(B) cleaning), the GMRES basis
+  // V (GMRES_M + 1 vectors) and w, the lazily allocated FGMRES basis Z and
+  // Chebyshev / block-Jacobi vectors, and the halo send and receive buffers
+  // (64 fields per direction).
+  constexpr double GMRES_M = 20.0;      // EMfields3D::GMRES_M
+  constexpr double HALO_MAX_BATCH = 64; // EMfields3D::HALO_MAX_BATCH
+  const bool smoothE = Smooth != 1.0 && SmoothNiter > 0; // smoothingOn()
+  const double intN = (double)(nxn_loc - 2) * (nyn_loc - 2) * (nzn_loc - 2);
+  const double nMaxwell = 3.0 * intN;
+  const double nKrylov = std::max(nMaxwell, intC);
+  double devSolver = (41.0 + (smoothE ? 3.0 : 0.0) + 10.0 * ns) * gridN +
+                     17.0 * gridC + 2.0 * nMaxwell + 4.0 * intC +
+                     (GMRES_M + 2.0) * nKrylov;
+  if (PoissonCorrection == "yes" || divBCorrection == "yes" ||
+      SolverType == "FGMRESBlockJacobi")
+    devSolver += GMRES_M * nKrylov;
+  if (SolverType == "Chebyshev")
+    devSolver += 4.0 * nMaxwell;
+  else if (SolverType == "FGMRESBlockJacobi")
+    devSolver += 2.0 * nMaxwell;
+  devSolver += 2.0 * HALO_MAX_BATCH * 2.0 *
+               ((double)nyn_loc * nzn_loc + (double)nxn_loc * nzn_loc +
+                (double)nxn_loc * nyn_loc);
+  devSolver *= 8;
+
+  // Heat flux (c_Solver::initCUDA): the components and the 4 bulk moments of
+  // each species, when computed
+  const double devHeatFlux =
+      heatFlux ? ns * (HeatFlux::ComponentCount + 4.0) * gridN * 8 : 0.0;
+
+  double devTotal = (devFieldBuf + devMoments + devPcl + devBuf + devSort +
+                     devPlanet + devSolver + devHeatFlux) /
+                    MB;
 
   cout << "DEVICE: particles = " << devPcl / MB << " MB"
        << ", buffers = " << devBuf / MB << " MB"
        << ", moments = " << devMoments / MB << " MB"
-       << ", field = " << devFieldBuf / MB << " MB";
+       << ", field = " << devFieldBuf / MB << " MB"
+       << ", field solver = " << devSolver / MB << " MB";
   if (devSort > 0)
     cout << ", sort = " << devSort / MB << " MB";
   if (devPlanet > 0)
     cout << ", planet = " << devPlanet / MB << " MB";
+  if (devHeatFlux > 0)
+    cout << ", heat flux = " << devHeatFlux / MB << " MB";
   cout << endl;
   cout << "        TOTAL = " << devTotal << " MB (" << devTotal / 1024 << " GB)"
        << "  (+ 500 MB CUDA context)" << endl;

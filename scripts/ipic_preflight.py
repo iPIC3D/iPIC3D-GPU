@@ -128,6 +128,29 @@ def bc_p_name(code: int) -> str:
     }.get(code, "unknown")
 
 
+def track_particle_id_mask(cfg: Input, ns: int):
+    """TrackParticleID per species, as Collective::parseTrackParticleIDMask:
+    one value applies to all species; 0/false/f/no/n/none (any case) is off."""
+    values = [tok.lower() not in {"0", "false", "f", "no", "n", "none"}
+              for tok in str(cfg.raw("TrackParticleID", "")).split()]
+    if len(values) == 1:
+        return values * ns
+    return (values + [False] * ns)[:ns]
+
+
+# Heat-flux tokens of MomentsOutputTag (OutputTagConfig.h): Q or a component,
+# for all species, one species (digit suffix) or the sum (_tot)
+HEAT_FLUX_TOKEN = re.compile(
+    r"^Q(xxx|xxy|xxz|xyy|xyz|xzz|yyy|yyz|yzz|zzz)?(\d+|_tot)?$")
+
+
+def heat_flux_requested(cfg: Input) -> bool:
+    """Field output writes heat flux, as in c_Solver::initCUDA."""
+    tokens = [t.strip() for t in str(cfg.raw("MomentsOutputTag", "")).split("+")]
+    return (cfg.integer("FieldOutputCycle", 100) > 0
+            and any(HEAT_FLUX_TOKEN.match(t) for t in tokens if t))
+
+
 def ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
 
@@ -155,6 +178,8 @@ def print_report(cfg: Input) -> None:
     dt = cfg.real("dt")
     ncycles = cfg.integer("ncycles")
     th = cfg.real("th", 1.0)
+    if not th >= 0.5:  # same rejection as Collective::ReadInput
+        raise SystemExit(f"th must be at least 0.5, not {cxx(th)}")
     smooth = cfg.real("Smooth", 1.0)
     smooth_niter = cfg.integer("SmoothNiter", 6)
     halo_overlap = cfg.integer("HaloOverlap", 0) != 0
@@ -172,8 +197,11 @@ def print_report(cfg: Input) -> None:
     poisson_cycle = cfg.integer("PoissonCorrectionCycle", 10)
     divb = cfg.string("divBCorrection", "no")
     divb_cycle = cfg.integer("divBCorrectionCycle", 10)
+    solver_type = cfg.string("SolverType", "GMRES")
 
     c = cfg.real("c", 1.0)
+    if not c > 0.0:
+        raise SystemExit(f"the speed of light c must be positive, not {cxx(c)}")
     lx = cfg.real("Lx", 10.0)
     ly = cfg.real("Ly", 10.0)
     lz = cfg.real("Lz", 10.0)
@@ -204,6 +232,9 @@ def print_report(cfg: Input) -> None:
     npcely = cfg.array_int("npcely", ns)
     npcelz = cfg.array_int("npcelz", ns)
     npcel = [npcelx[i] * npcely[i] * npcelz[i] for i in range(ns)]
+    track_id = track_particle_id_mask(cfg, ns)
+    heat_flux = heat_flux_requested(cfg)
+    restart_output_cycle = cfg.integer("RestartOutputCycle", 5000)
 
     bc_em_xr = cfg.integer("bcEMfaceXright")
     bc_em_xl = cfg.integer("bcEMfaceXleft")
@@ -389,20 +420,36 @@ def print_report(cfg: Input) -> None:
     nyc_r = nyc_loc - 2
     nzc_r = nzc_loc - 2
 
-    host_emf = (50.0 * grid_n + 15.0 * grid_c
-                + (10.0 * ns) * grid_n + ns * grid_c
-                + grid_n * 8.0 + 6.0 * 3.0 * grid_n) * 8.0
-    host_field_buf = field_size * 24.0 * 8.0
+    int_c = float(nxc_r) * nyc_r * nzc_r
+
+    # Particle SoA arrays (host and device): x, y, z, u, v, w, q, and the ID
+    # of the species with TrackParticleID, 8 bytes each
+    soa_arrays = [7.0 + (1.0 if track_id[i] else 0.0) for i in range(ns)]
+
+    # EMfields3D (its constructor), as in Collective::Print: 19 node arrays
+    # and 4 cell arrays; per species the 10 node moments and the cell density.
+    host_emf = (19.0 * grid_n + 4.0 * grid_c + ns * (10.0 * grid_n + grid_c)) * 8.0
+    # The heat-flux arrays are always allocated but resident only when used
+    host_heat_flux = ns * HEAT_FLUX_COMPONENTS * grid_n * 8.0 if heat_flux else 0.0
+    # Restart cell metadata when checkpoints are written: offsets and counts
+    # (int) of the guarded and of the active cells, per species
+    host_restart = ns * 2.0 * (grid_c + int_c) * 4.0 if restart_output_cycle > 0 else 0.0
     host_pcl = 0.0
     host_comm = 0.0
     for i in range(ns):
         nop_i = npcel[i] * nxc_r * nyc_r * nzc_r
-        host_pcl += nop_i * 8.0 * 8.0
+        host_pcl += nop_i * soa_arrays[i] * 8.0
         host_comm += 0.1 * nop_i * 64.0
-    host_total = (host_emf + host_field_buf + host_pcl + host_comm) / mb
+    host_total = (host_emf + host_heat_flux + host_restart + host_pcl + host_comm) / mb
 
-    print(f"HOST:   EMfields = {cxx(host_emf / mb)} MB, particles = {cxx(host_pcl / mb)} MB, comm = {cxx(host_comm / mb)} MB, field buf = {cxx(host_field_buf / mb)} MB")
-    print(f"        TOTAL = {cxx(host_total)} MB ({cxx(host_total / 1024.0)} GB)")
+    line = (f"HOST:   EMfields = {cxx(host_emf / mb)} MB, particles = {cxx(host_pcl / mb)} MB, "
+            f"comm = {cxx(host_comm / mb)} MB")
+    if host_heat_flux > 0:
+        line += f", heat flux = {cxx(host_heat_flux / mb)} MB"
+    if host_restart > 0:
+        line += f", restart metadata = {cxx(host_restart / mb)} MB"
+    print(line)
+    print(f"        TOTAL = {cxx(host_total)} MB ({cxx(host_total / 1024.0)} GB)  (+ ~250 MB runtime and libraries)")
 
     cap_factor = 1.4
     aux_frac = 0.1
@@ -417,26 +464,55 @@ def print_report(cfg: Input) -> None:
     for i in range(ns):
         nop_i = npcel[i] * nxc_r * nyc_r * nzc_r
         cap_i = int(nop_i * cap_factor)
-        dev_pcl += cap_i * 8.0 * 8.0
+        dev_pcl += cap_i * soa_arrays[i] * 8.0
         dev_buf += cap_i * 8.0 + aux_frac * nop_i * (64.0 + 4.0 + 64.0)
         if sorting_cycle > 0:
             dev_sort += 3.0 * grid_c * 4.0 + cap_i * (4.0 + 8.0)
         if is_dipole:
             dev_planet += planet_frac * nop_i * 64.0
-    dev_total = (dev_field_buf + dev_moments + dev_pcl + dev_buf + dev_sort + dev_planet) / mb
+    # GPU field solver (EMfields3D::gpuSolverAllocate), as in Collective::Print:
+    # 41 node arrays (+3 for the smoothed E(n+theta) when E is smoothed), the
+    # 10 node moments of each species, 17 cell arrays, the Krylov vectors, the
+    # GMRES basis (GMRES_M + 1) and w, the lazy FGMRES basis Z and Chebyshev /
+    # block-Jacobi vectors, and the halo buffers (64 fields per direction).
+    gmres_m = 20.0
+    halo_max_batch = 64.0
+    smooth_e = smooth != 1.0 and smooth_niter > 0  # EMfields3D::smoothingOn()
+    int_n = float(nxn_loc - 2) * (nyn_loc - 2) * (nzn_loc - 2)
+    n_maxwell = 3.0 * int_n
+    n_krylov = max(n_maxwell, int_c)
+    dev_solver = ((41.0 + (3.0 if smooth_e else 0.0) + 10.0 * ns) * grid_n
+                  + 17.0 * grid_c + 2.0 * n_maxwell + 4.0 * int_c
+                  + (gmres_m + 2.0) * n_krylov)
+    if poisson == "yes" or divb == "yes" or solver_type == "FGMRESBlockJacobi":
+        dev_solver += gmres_m * n_krylov
+    if solver_type == "Chebyshev":
+        dev_solver += 4.0 * n_maxwell
+    elif solver_type == "FGMRESBlockJacobi":
+        dev_solver += 2.0 * n_maxwell
+    dev_solver += 2.0 * halo_max_batch * 2.0 * (
+        float(nyn_loc) * nzn_loc + float(nxn_loc) * nzn_loc + float(nxn_loc) * nyn_loc)
+    dev_solver *= 8.0
+    # Heat flux (c_Solver::initCUDA): components and 4 bulk moments per species
+    dev_heat_flux = ns * (HEAT_FLUX_COMPONENTS + 4.0) * grid_n * 8.0 if heat_flux else 0.0
+    dev_total = (dev_field_buf + dev_moments + dev_pcl + dev_buf + dev_sort + dev_planet
+                 + dev_solver + dev_heat_flux) / mb
     line = (f"DEVICE: particles = {cxx(dev_pcl / mb)} MB, buffers = {cxx(dev_buf / mb)} MB, "
-            f"moments = {cxx(dev_moments / mb)} MB, field = {cxx(dev_field_buf / mb)} MB")
+            f"moments = {cxx(dev_moments / mb)} MB, field = {cxx(dev_field_buf / mb)} MB, "
+            f"field solver = {cxx(dev_solver / mb)} MB")
     if dev_sort > 0:
         line += f", sort = {cxx(dev_sort / mb)} MB"
     if dev_planet > 0:
         line += f", planet = {cxx(dev_planet / mb)} MB"
+    if dev_heat_flux > 0:
+        line += f", heat flux = {cxx(dev_heat_flux / mb)} MB"
     print(line)
     print(f"        TOTAL = {cxx(dev_total)} MB ({cxx(dev_total / 1024.0)} GB)  (+ 500 MB CUDA context)")
     combined = host_total + dev_total
     print(f"COMBINED = {cxx(combined)} MB ({cxx(combined / 1024.0)} GB)")
     print("---------------------")
 
-    _ = th, delta, rho_inject, HEAT_FLUX_COMPONENTS
+    _ = th, delta, rho_inject
 
 
 def usage() -> None:

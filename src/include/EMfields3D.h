@@ -54,7 +54,8 @@
  * The solver uses this class to initialize case-dependent fields, advance the
  * implicit Maxwell system, reduce the particle moments deposited by the moment
  * kernels (ghost exchange, species sums, hat functions), and hold the device
- * field arrays that the particle mover's field packing reads (gpuEx(), ...).
+ * field arrays that the particle mover's field packing reads (gpuExForPcls(),
+ * gpuBxn(), ...).
  */
 class EMfields3D // :public Field
 {
@@ -523,6 +524,11 @@ public:
                                    const int* bc1, GPUFieldArray3& a2,
                                    const int* bc2, GPUFieldArray3& a3,
                                    const int* bc3);
+  /** Batched 6-field node-based halo exchange (one MPI round) with per-field
+   * BCs (bc[f] is int[6]). */
+  void gpuCommunicateNodeBC_6mixed(int nx, int ny, int nz,
+                                   GPUFieldArray3* const a[6],
+                                   const int* const bc[6]);
   /** Batched 3-field node box-stencil halo exchange with per-field BCs. */
   void gpuCommunicateNodeBoxStencilBC_3mixed(int nx, int ny, int nz,
                                              GPUFieldArray3& a1, const int* bc1,
@@ -568,12 +574,21 @@ public:
   // ---- GPU Solver: field-solver methods ----
   // gpuCalculateE, gpuCalculateB and gpuCalculateHatFunctions run the
   // instantiation of the run's HaloMode (input HaloOverlap).
-  /** Advance E: div(E) correction (PoissonCorrection), implicit Maxwell
-   * solve, smoothing, halo exchange and the post-solve open-boundary update
-   * (gpuOpenBoundaryInflowE). */
+  /** Solve for E(n+theta): div(E) correction of E^n (PoissonCorrection),
+   * implicit Maxwell solve into Exth, and, when E is smoothed, the smoothed
+   * E(n+theta) in ExthSmooth; halo exchange and post-solve open-boundary
+   * update (gpuOpenBoundaryInflowE) of both.  The mover samples
+   * gpuExForPcls().  E (d_Ex) still holds E^n afterwards: gpuCalculateB
+   * advances it. */
   void gpuCalculateE(int cycle);
-  /** Advance B by Faraday's law from Eth, apply its boundary conditions and
-   * case fixes, interpolate to the nodes and clean div(B) (divBCorrection). */
+  /** E^n -> E(n+1) = (S(E(n+theta)) - (1-theta) E^n) / theta, S the smoothing
+   * (identity when off).  theta = 1: E(n+1) = S(E(n+theta)), a buffer swap
+   * that leaves E^n's storage as the next solve's work array.  Called at the
+   * end of gpuCalculateB, after Faraday's law has used Exth. */
+  void gpuAdvanceE();
+  /** Complete the step: B by Faraday's law from the unsmoothed Exth, its
+   * boundary conditions and case fixes, interpolation to the nodes and div(B)
+   * cleaning (divBCorrection), then E to n+1 (gpuAdvanceE). */
   void gpuCalculateB(int cycle);
   /** Build the hat quantities (rhohat, Jhat) of the implicit field solve;
    * cycle=-1 denotes initialization. */
@@ -683,7 +698,7 @@ public:
   void gpuPerfectConductorImages(cudaSolverType* d_im, GPUFieldArray3& vX,
                                  GPUFieldArray3& vY, GPUFieldArray3& vZ);
   /** GPU perfect conductor BC, RHS rows on every conductor face of this rank
-   *  (bcEMface = 0): tangential -(u0 x B0), normal the constant part of the
+   *  (bcEMface = 0): tangential -(u0 x B0) / c, normal the constant part of the
    *  normal row (gpuPerfectConductorSource). */
   void gpuPerfectConductorSources(cudaSolverType* dX, cudaSolverType* dY,
                                   cudaSolverType* dZ);
@@ -798,7 +813,7 @@ public:
   void gpuInterpDensitiesN2C();
 
   // ---- GPU Solver: open boundary conditions ----
-  /** GPU open BC: RHS rows (E0 = -u0 x B0) of the open inflow faces (only
+  /** GPU open BC: RHS rows (E0 = -(u0 x B0) / c) of the open inflow faces (only
    *  with ApplyInflowBcsEImage). */
   void gpuOpenBoundaryInflowESource(cudaSolverType* dX, cudaSolverType* dY,
                                     cudaSolverType* dZ, int nx, int ny, int nz);
@@ -905,6 +920,20 @@ public:
   GPUFieldArray3& gpuEx() { return d_Ex; }
   GPUFieldArray3& gpuEy() { return d_Ey; }
   GPUFieldArray3& gpuEz() { return d_Ez; }
+  /** The E the mover samples: E(n+theta), smoothed when smoothing is on. */
+  GPUFieldArray3& gpuExForPcls() {
+    return smoothingOn() ? d_ExthSmooth : d_Exth;
+  }
+  GPUFieldArray3& gpuEyForPcls() {
+    return smoothingOn() ? d_EythSmooth : d_Eyth;
+  }
+  GPUFieldArray3& gpuEzForPcls() {
+    return smoothingOn() ? d_EzthSmooth : d_Ezth;
+  }
+  /** True when the smoothing of E, rhoc and Jhat changes the fields
+   *  (Smooth != 1 and SmoothNiter > 0); otherwise ExthSmooth is neither
+   *  allocated nor used. */
+  bool smoothingOn() const { return Smooth != 1.0 && SmoothNiter > 0; }
   GPUFieldArray3& gpuBxn() { return d_Bxn; }
   GPUFieldArray3& gpuByn() { return d_Byn; }
   GPUFieldArray3& gpuBzn() { return d_Bzn; }
@@ -932,6 +961,13 @@ private: // initialization helpers
    *  diagonal pressures p_s,xx = J_s,x^2 / rho_s + uth_s^2 rho_s (yy, zz
    *  alike), read by maxwellianFromSpeciesCurrents for the thermal speed. */
   void initSpeciesCurrents(bool fromAmpere, bool varyingThermal);
+
+private: // ideal drift field
+  /** E0 = -(u0 x B0) / c: the ideal electric field of the plasma drifting at
+   *  u0 = (ue0, ve0, we0) (species 0) in B0 = (B0x, B0y, B0z), Gaussian units.
+   *  The inflow faces, the conductor walls and the Dipole initial state use
+   *  it. */
+  void driftElectricField(double E0[3]) const;
 
 private: // X-right open boundary layer
   /** True on ranks owning an X-right open outflow face (bcEMfaceXright = 2,
@@ -970,11 +1006,28 @@ private: // solver steps in halo mode M (see HaloMode)
   template <HaloMode M> void gpuCalculateE(int cycle);
   template <HaloMode M> void gpuCalculateB(int cycle);
   template <HaloMode M> void gpuCalculateHatFunctions(int cycle);
-  /** SmoothNiter iterations of box smoothing of arr (type 0: cells). */
+  /** SmoothNiter smoothing passes of the N fields src into dst (dst == src:
+   *  in place).  The outputs alternate between dst and scratch so that the
+   *  last pass writes dst, with no copies (in place with an odd SmoothNiter:
+   *  one copy at the end).  Each pass refreshes the ghosts of its input:
+   *  begin(in) starts the halo exchange (HaloMode::Overlap only, the
+   *  interior is smoothed meanwhile), end(in) completes it and applies the
+   *  boundary rules (HaloMode::Blocking: the whole refresh). */
+  template <HaloMode M, int N, typename Begin, typename End>
+  void gpuSmoothPasses(GPUFieldArray3* const src[N],
+                       GPUFieldArray3* const dst[N],
+                       GPUFieldArray3* const scratch[N], int nx, int ny, int nz,
+                       Begin&& begin, End&& end);
+  /** Smoothing of arr in place (type 0: cells; rhoc), gpuSmoothPasses with
+   *  the scratch d_smoothTemp. */
   template <HaloMode M> void gpuSmooth(GPUFieldArray3& arr, int type);
-  /** Smoothing of E, the 3 components together. */
-  template <HaloMode M> void gpuSmoothE();
-  /** Smoothing of 3 arrays together (type 0: cells; Jhat). */
+  /** Smoothing of the electric field src (3 components) into dst with the E
+   *  ghost rules, gpuSmoothPasses with the scratch d_tempX/Y/Z.  Needs
+   *  smoothingOn(); src keeps its interior, its ghosts are overwritten. */
+  template <HaloMode M>
+  void gpuSmoothE(GPUFieldArray3* const src[3], GPUFieldArray3* const dst[3]);
+  /** Smoothing of 3 arrays in place (type 0: cells; Jhat), gpuSmoothPasses
+   *  with the scratch d_temp2X/Y/Z. */
   template <HaloMode M>
   void gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
                   int type);
@@ -1013,7 +1066,7 @@ private:
   double B1x, B1y, B1z;
   /*! charge to mass ratio array for different species */
   double* qom;
-  /*! u0, v0, w0 of species 0 (E0 = -u0 x B0, TaylorGreen flow) */
+  /*! u0, v0, w0 of species 0 (E0 = -(u0 x B0) / c, TaylorGreen flow) */
   double ue0, ve0, we0;
 
   // KEEP IN MEMORY GUARD CELLS ARE INCLUDED
@@ -1140,7 +1193,7 @@ private:
   // the topology and boundary codes:
   // - openInflowFace_: bcEMface = 2 with bcPface = 2, never X-right (an open
   //   X-right face keeps its operator rows).  With ApplyInflowBcsEImage its
-  //   Maxwell rows are the identity (image) and E0 = -u0 x B0 (RHS);
+  //   Maxwell rows are the identity (image) and E0 = -(u0 x B0) / c (RHS);
   // - conductorFace_: perfect conductor, bcEMface = 0.
   bool openInflowFace_[6];
   bool conductorFace_[6];
@@ -1212,9 +1265,13 @@ private:
   //  whole.
   // =========================================================================
 
-  // Electric field (node-based)
+  // Electric field (node-based): E^n, advanced to E(n+1) by gpuAdvanceE
   GPUFieldArray3 d_Ex, d_Ey, d_Ez;
+  // E(n+theta) from the solve, unsmoothed (Faraday's law)
   GPUFieldArray3 d_Exth, d_Eyth, d_Ezth;
+  // E(n+theta) smoothed: the field the mover samples, and the one E(n+1) is
+  // built from; allocated only when smoothingOn()
+  GPUFieldArray3 d_ExthSmooth, d_EythSmooth, d_EzthSmooth;
 
   // Magnetic field (center-based)
   GPUFieldArray3 d_Bxc, d_Byc, d_Bzc;

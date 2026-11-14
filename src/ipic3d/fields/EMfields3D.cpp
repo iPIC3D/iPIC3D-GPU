@@ -622,6 +622,12 @@ void EMfields3D::setZeroDensities() {
   setZeroPrimaryMoments();
 }
 
+void EMfields3D::driftElectricField(double E0[3]) const {
+  E0[0] = -(ve0 * B0z - we0 * B0y) / c;
+  E0[1] = -(we0 * B0x - ue0 * B0z) / c;
+  E0[2] = -(ue0 * B0y - ve0 * B0x) / c;
+}
+
 bool EMfields3D::ownsOutflowFaceXright() const {
   return get_vct().getXright_neighbor() == MPI_PROC_NULL &&
          bcEMfaceXright == 2 && get_col().getBcPfaceXright() == 3;
@@ -2374,8 +2380,7 @@ void EMfields3D::initDipole() {
   }
 
   double ebc[3];
-  cross_product(ue0, ve0, we0, B0x, B0y, B0z, ebc);
-  scale(ebc, -1.0, 3);
+  driftElectricField(ebc); // E0 = -(u0 x B0) / c
 
 #pragma omp parallel for collapse(3)
   for (int i = 0; i < nxn; i++) {
@@ -2486,8 +2491,7 @@ void EMfields3D::initDipole2D() {
   }
 
   double ebc[3];
-  cross_product(ue0, ve0, we0, B0x, B0y, B0z, ebc);
-  scale(ebc, -1.0, 3);
+  driftElectricField(ebc); // E0 = -(u0 x B0) / c
 
 #pragma omp parallel for collapse(3)
   for (int i = 0; i < nxn; i++) {

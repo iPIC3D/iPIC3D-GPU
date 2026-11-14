@@ -4,7 +4,7 @@
  *
  * Node and cell stencils: gradC2N, gradN2C, divN2C, divC2N, curlC2N,
  *   curlN2C, interpC2N, interpN2C, divSymmTensorN2C, and the 7-point
- *   smoothing step.
+ *   smoothing pass of 1 or 3 fields (gpuSmoothFields).
  *
  * All kernels operate on flat device pointers (row-major [nx][ny][nz]).
  * Grid dimensions include ghost cells.
@@ -143,22 +143,6 @@ void gpuDivSymmTensorN2C(cudaSolverType* divCX, cudaSolverType* divCY,
                          cudaSolverType invdz, cudaStream_t stream = 0);
 
 // =========================================================================
-//  Smoothing (7-point stencil)
-// =========================================================================
-
-/**
- * Single iteration of the 7-point smooth:
- *   out[i][j][k] = alpha * in[i][j][k] + beta3D * (6 neighbours)
- *
- * Both 'in' and 'out' must be on the same grid (node- or center-based).
- * Interior: i=1..nx-2, j=1..ny-2, k=1..nz-2.
- * Ghost cells must be valid (from prior halo exchange).
- */
-void gpuSmoothStep(cudaSolverType* out, const cudaSolverType* in, int nx,
-                   int ny, int nz, cudaSolverType alpha, cudaSolverType beta3D,
-                   cudaStream_t stream = 0);
-
-// =========================================================================
 //  Interior / boundary stencil variants of the overlapped halo exchanges
 //  (HaloMode::Overlap).
 //  Interior covers [2..n-3] (no ghost dependency).
@@ -210,11 +194,29 @@ void gpuInterpC2N_complement(cudaSolverType* fieldN,
                              int safeJHi, int safeKLo, int safeKHi,
                              cudaStream_t stream = 0);
 
-void gpuSmoothStep_interior(cudaSolverType* out, const cudaSolverType* in,
-                            int nx, int ny, int nz, cudaSolverType alpha,
-                            cudaSolverType beta3D, cudaStream_t stream = 0);
-void gpuSmoothStep_boundary(cudaSolverType* out, const cudaSolverType* in,
-                            int nx, int ny, int nz, cudaSolverType alpha,
-                            cudaSolverType beta3D, cudaStream_t stream = 0);
+// =========================================================================
+//  Smoothing pass of N fields in one launch (EMfields3D::gpuSmoothPasses)
+// =========================================================================
+
+/** The points of a smoothing pass: All = [1..n-2]^3 (blocking halo
+ *  exchange); Interior = [2..n-3]^3, which reads no ghost (while the exchange
+ *  is in flight); Shell = All minus Interior (after it), launched as its
+ *  three slabs, or as All when Interior is empty (a flat or thin axis). */
+enum class SmoothRegion { All, Interior, Shell };
+
+/** The output and input fields of one smoothing pass (N = 1 or 3). */
+template <int N> struct SmoothFields {
+  cudaSolverType* out[N];
+  const cudaSolverType* in[N];
+};
+
+/** One 7-point smoothing pass of the N fields over region, in one launch:
+ *    out = alpha * in + beta3D * (6 neighbours of in).
+ *  The ghosts of in must be valid for the points that read them; out and in
+ *  must not alias. */
+template <int N>
+void gpuSmoothFields(const SmoothFields<N>& fields, int nx, int ny, int nz,
+                     cudaSolverType alpha, cudaSolverType beta3D,
+                     SmoothRegion region, cudaStream_t stream = 0);
 
 #endif // GPU_STENCILS_CUH

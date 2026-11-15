@@ -19,9 +19,14 @@ __device__ __forceinline__ void depositParticleMomentsToNodes(
   const commonType ui = pclsArray->getU()[pidx];
   const commonType vi = pclsArray->getV()[pidx];
   const commonType wi = pclsArray->getW()[pidx];
-  const commonType xpcl = pclsArray->getX()[pidx];
-  const commonType ypcl = pclsArray->getY()[pidx];
-  const commonType zpcl = pclsArray->getZ()[pidx];
+  commonType xpcl = pclsArray->getX()[pidx];
+  commonType ypcl = pclsArray->getY()[pidx];
+  commonType zpcl = pclsArray->getZ()[pidx];
+  // A position outside the guarded subdomain, or NaN, is moved to its edge,
+  // as the mover and the cell sorter do: the cell below then contains the
+  // position, the weights stay in [0, 1] and the float-to-int conversion
+  // never sees a NaN.  A position inside is unchanged.
+  grid->make_position_safe(xpcl, ypcl, zpcl);
   const commonType qi = pclsArray->getQ()[pidx];
   const commonType velmoments[10] = {1.0, // charge density
                                      ui,  // momentum density
@@ -36,9 +41,9 @@ __device__ __forceinline__ void depositParticleMomentsToNodes(
   int ix = 2 + int(floor((xpcl - xstart) * inv_dx));
   int iy = 2 + int(floor((ypcl - ystart) * inv_dy));
   int iz = 2 + int(floor((zpcl - zstart) * inv_dz));
-  // Safety clamp: prevent negative indices (would wrap to huge uint32_t in
-  // toOneDimIndex) and cap at nxn-1/nyn-1/nzn-1 to avoid OOB on the moments
-  // array.
+  // The clamped position gives 1 <= ix <= nxn-1 (and so on); the clamp
+  // below only guards against round-off at the edges of that range, which
+  // would index outside the moments array.
   if (ix < 1)
     ix = 1;
   if (ix > nxn - 1)
@@ -175,9 +180,14 @@ heatFluxKernelUnsorted(momentParameter* momentParam, grid3DCUDA* grid,
   const commonType ui = pclsArray->getU()[pidx];
   const commonType vi = pclsArray->getV()[pidx];
   const commonType wi = pclsArray->getW()[pidx];
-  const commonType xpcl = pclsArray->getX()[pidx];
-  const commonType ypcl = pclsArray->getY()[pidx];
-  const commonType zpcl = pclsArray->getZ()[pidx];
+  commonType xpcl = pclsArray->getX()[pidx];
+  commonType ypcl = pclsArray->getY()[pidx];
+  commonType zpcl = pclsArray->getZ()[pidx];
+  // A position outside the guarded subdomain, or NaN, is moved to its edge,
+  // as the mover and the cell sorter do: the cell below then contains the
+  // position, the weights stay in [0, 1] and the float-to-int conversion
+  // never sees a NaN.  A position inside is unchanged.
+  grid->make_position_safe(xpcl, ypcl, zpcl);
   const commonType qi = pclsArray->getQ()[pidx];
 
   int ix = 2 + int(floor((xpcl - xstart) * inv_dx));
@@ -365,6 +375,12 @@ cellAwareMomentKernel(const int* __restrict__ cell_start_offsets, int num_cells,
       xpcl = px[pidx];
       ypcl = py[pidx];
       zpcl = pz[pidx];
+      // A particle outside this cell (the sorter puts one outside the
+      // subdomain, or NaN, into an edge cell) is moved onto it, so that its
+      // weights stay in [0, 1].  A particle inside is unchanged.
+      xpcl = fmin(fmax(xpcl, xn_lo), xn_hi);
+      ypcl = fmin(fmax(ypcl, yn_lo), yn_hi);
+      zpcl = fmin(fmax(zpcl, zn_lo), zn_hi);
     }
 
     // Trilinear weights using the same arithmetic as momentKernelStayed.

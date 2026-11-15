@@ -30,17 +30,19 @@ __global__ void exitingKernel(particleArrayCUDA* pclsArray,
                               exitingArray* exitingArray,
                               hashedSum* hashedSumArray) {
 
-  uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (pidx >= pclsArray->getNOP())
-    return;
-
-  __shared__ int x; // y, the number of holes (eixitng + deleted + planet)
+  // x, the number of holes (exiting + deleted + planet).  Every thread of the
+  // block reaches the barrier: the bound check comes after it.
+  __shared__ int x;
   if (threadIdx.x == 0) {
     x = 0;
     for (int i = 0; i <= departureArrayElementType::PLANET_HASHEDSUM_INDEX; i++)
       x += hashedSumArray[i].getSum();
   }
   __syncthreads();
+
+  const uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (pidx >= pclsArray->getNOP())
+    return;
 
   auto departureElement = departureArray->getArray() + pidx;
   // return the stayed particles in the front part

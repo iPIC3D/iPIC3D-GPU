@@ -18,6 +18,12 @@ __device__ constexpr bool cap_velocity() { return false; }
 /** Safety cap of the particle speed, |v| < kVelocityCapOverC c. */
 constexpr commonType kVelocityCapOverC = 0.9999;
 
+/** Most subcycles of one relativistic push.  The implicit rotation is stable
+ *  at any angle; the subcycles keep it accurate (at most pi/4 of gyration
+ *  each), and the shipped dipole decks need about 50 at the planet surface.
+ *  The cap bounds the cost of a corrupted, huge or infinite, |B|. */
+constexpr int kMaxSubcycles = 1024;
+
 // ======= Inline mover helpers =======
 
 /**
@@ -342,9 +348,15 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
                                 sampled_field[1] * sampled_field[1] +
                                 sampled_field[2] * sampled_field[2]);
 
-  // evaluate dt_substep and number of sub cycles
+  // evaluate dt_substep and number of sub cycles: at most pi/4 of gyration
+  // per subcycle.  int() of a NaN or of a value past INT_MAX is undefined:
+  // a NaN |B| takes one subcycle (its NaN result deletes the particle after
+  // the push), a huge one kMaxSubcycles.
   commonType dt_sub = M_PI * c / (4 * fabs(moverParam->qom) * B_mag);
-  const int sub_cycles = (int)(moverParam->dt / dt_sub) + 1;
+  const commonType nsub = moverParam->dt / dt_sub;
+  const int sub_cycles = !(nsub >= 0)               ? 1
+                         : nsub < kMaxSubcycles - 1 ? (int)nsub + 1
+                                                    : kMaxSubcycles;
   dt_sub = moverParam->dt / (commonType)(sub_cycles);
 
   const commonType dto2_sub = .5 * dt_sub;

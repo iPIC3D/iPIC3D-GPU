@@ -235,9 +235,26 @@ public:
     get_weights(weights, w0x, w0y, w0z, w1x, w1y, w1z);
   }
 
-  __device__ double getXN(uint32_t index) { return xStart + (index - 1) * dx; }
-  __device__ double getYN(uint32_t index) { return yStart + (index - 1) * dy; }
-  __device__ double getZN(uint32_t index) { return zStart + (index - 1) * dz; }
+  /** The position of node index (node 1 is at xStart, node 0 the ghost
+   *  node); signed, so that index 0 does not wrap. */
+  __device__ double getXN(int index) { return xStart + (index - 1) * dx; }
+  __device__ double getYN(int index) { return yStart + (index - 1) * dy; }
+  __device__ double getZN(int index) { return zStart + (index - 1) * dz; }
+
+  /** Move a position into the guarded subdomain, the range that
+   *  make_grid_position_safe allows: a position outside it, or NaN, goes to
+   *  its edge (NaN to the lower one).  A position inside is unchanged.
+   *  fmin/fmax, no branch. */
+  __host__ __device__ void make_position_safe(cudaParticleType& xpos,
+                                              cudaParticleType& ypos,
+                                              cudaParticleType& zpos) const {
+    xpos = fmin(fmax(xpos, xStart_g + epsilon * dx),
+                xStart_g + nxc_minus_epsilon * dx);
+    ypos = fmin(fmax(ypos, yStart_g + epsilon * dy),
+                yStart_g + nyc_minus_epsilon * dy);
+    zpos = fmin(fmax(zpos, zStart_g + epsilon * dz),
+                zStart_g + nzc_minus_epsilon * dz);
+  }
 };
 
 #endif // GRID_CUDA_CUH

@@ -1713,7 +1713,9 @@ void EMfields3D::stopForSolverFailure(const std::string& reason) const {
 }
 
 // Returns ||b|| and whether the true residual fell below tol * ||r0|| within
-// max_iter restarts (or r0 = 0).
+// max_iter restarts.  A warm start with ||r0|| <= tol ||b|| is kept without
+// iterating, as in the CPU GMRES; without this exit an exact warm start (r0
+// at round-off) could never reach tol ||r0||.
 static EMfields3D::KrylovSolveStatus
 gpuGMRES_impl(EMfields3D* field,
               void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*),
@@ -1770,6 +1772,13 @@ gpuGMRES_impl(EMfields3D* field,
   if (gmresRank == 0)
     printf("Initial residual: %g norm b vector (source) = %g\n", initial_error,
            status.normB);
+  if (initial_error <= tol * status.normB) {
+    if (gmresRank == 0)
+      printf("GMRES converged without iterations: initial residual / norm b "
+             "= %g\n",
+             initial_error / status.normB);
+    return status;
+  }
 
   gpuScale(d_gmresV, 1.0 / initial_error, n, stream);
   double error = initial_error;
@@ -1951,8 +1960,8 @@ void EMfields3D::gpuEnsureFGMRESWorkspace(int m, int n) {
 // =========================================================================
 
 // Returns ||b|| and whether the true residual fell below tol * ||r0|| within
-// max_iter restarts (or r0 = 0).  zeroGuess: start from x = 0, without the
-// image of x.
+// max_iter restarts; a warm start with ||r0|| <= tol ||b|| is kept, as in
+// gpuGMRES_impl.  zeroGuess: start from x = 0, without the image of x.
 static EMfields3D::KrylovSolveStatus
 gpuFGMRES_impl(EMfields3D* field,
                void (EMfields3D::*GpuImage)(cudaSolverType*, cudaSolverType*),
@@ -2024,6 +2033,13 @@ gpuFGMRES_impl(EMfields3D* field,
   if (rank == 0)
     printf("  [%s] Initial residual: %g  norm(b) = %g\n", label, initial_error,
            status.normB);
+  if (initial_error <= tol * status.normB) { // never with zeroGuess (r0 = b)
+    if (rank == 0)
+      printf("  [%s] Converged without iterations: initial residual / "
+             "norm(b) = %g\n",
+             label, initial_error / status.normB);
+    return status;
+  }
 
   double rho_tol = initial_error * tol;
   gpuScale(d_gmresV, 1.0 / initial_error, n, stream);

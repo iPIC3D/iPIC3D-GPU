@@ -487,13 +487,15 @@ __device__ inline cudaCommonType planetRngUniform(uint32_t& state) {
 
 /**
  * @brief Same structure as planetReflectCompactKernel, but instead of
- *        specular (mirror) reflection, the velocity is randomised to a
- *        uniform direction on the OUTWARD hemisphere while preserving
- *        the original speed |v|.
+ *        specular (mirror) reflection, the velocity gets a random direction
+ *        on the OUTWARD hemisphere by the Lambert cosine law, keeping the
+ *        speed |v|.
  *
- *        The kernel samples cos(theta) uniformly in (0, 1) in the LOCAL
- *        frame (z_local = outward normal), giving a uniform distribution on
- *        the outward hemisphere.
+ *        In the LOCAL frame (z_local = outward normal) the kernel samples
+ *        cos(theta) = sqrt(U) and a uniform azimuth: the emitted flux per
+ *        solid angle is proportional to cos(theta), so <cos(theta)> = 2/3.
+ *        The 2D circle (x-z plane) is a cylinder along y: the same law about
+ *        its in-plane normal.
  *
  *        The hemisphere sampling is done without a rejection loop:
  *        a random direction is generated in a local frame whose z-axis
@@ -579,24 +581,29 @@ __global__ void planetDiffuseCompactKernel(
 
   const cudaCommonType eps = sphereRadius * (cudaCommonType)5e-2;
 
-  if (doSphere == 1) { // 3D sphere
+  if (doSphere == 1 || doSphere == 2) {
+    // Outward unit normal n; the 2D circle lies in the x-z plane (a cylinder
+    // along y), so its normal has no y component.
     const cudaCommonType dx = pcl.get_x() - originX;
-    const cudaCommonType dy = pcl.get_y() - originY;
+    const cudaCommonType dy =
+        doSphere == 1 ? pcl.get_y() - originY : (cudaCommonType)0.0;
     const cudaCommonType dz = pcl.get_z() - originZ;
     cudaCommonType r = sqrt(dx * dx + dy * dy + dz * dz);
     if (r < (cudaCommonType)1e-30)
       r = (cudaCommonType)1e-30;
     const cudaCommonType invr = (cudaCommonType)1.0 / r;
-
-    // Outward unit normal n = (nx, ny, nz).
     const cudaCommonType nx = dx * invr;
     const cudaCommonType ny = dy * invr;
     const cudaCommonType nz = dz * invr;
 
-    // Random direction on the outward hemisphere without rejection.
-    const cudaCommonType cosTheta = planetRngUniform(rngState);
-    const cudaCommonType sinTheta =
-        sqrt((cudaCommonType)1.0 - cosTheta * cosTheta);
+    // Lambert (cosine-law) emission into the outward hemisphere, without
+    // rejection: the flux per solid angle is proportional to cos(theta), so
+    // cos^2(theta) is uniform, and the azimuth phi is uniform.  The same law
+    // holds for the 2D cylinder, since the particles have three velocity
+    // components.
+    const cudaCommonType u1 = planetRngUniform(rngState); // in (0, 1)
+    const cudaCommonType cosTheta = sqrt(u1);
+    const cudaCommonType sinTheta = sqrt((cudaCommonType)1.0 - u1);
     const cudaCommonType phi = TWO_PI * planetRngUniform(rngState);
     const cudaCommonType cphi = cos(phi);
     const cudaCommonType sphi = sin(phi);
@@ -631,30 +638,10 @@ __global__ void planetDiffuseCompactKernel(
     pcl.set_u(1, vl_x * t1y + vl_y * t2y + vl_z * ny);
     pcl.set_u(2, vl_x * t1z + vl_y * t2z + vl_z * nz);
 
+    // On the surface (the 2D circle keeps y).
     pcl.set_x(0, originX + (sphereRadius + eps) * nx);
-    pcl.set_x(1, originY + (sphereRadius + eps) * ny);
-    pcl.set_x(2, originZ + (sphereRadius + eps) * nz);
-
-  } else if (doSphere == 2) { // 2D XZ-plane circle
-    const cudaCommonType dx = pcl.get_x() - originX;
-    const cudaCommonType dz = pcl.get_z() - originZ;
-    cudaCommonType r = sqrt(dx * dx + dz * dz);
-    if (r < (cudaCommonType)1e-30)
-      r = (cudaCommonType)1e-30;
-    const cudaCommonType invr = (cudaCommonType)1.0 / r;
-
-    const cudaCommonType nx = dx * invr;
-    const cudaCommonType nz = dz * invr;
-
-    const cudaCommonType alpha =
-        ((cudaCommonType)3.14159265358979323846) *
-        (planetRngUniform(rngState) - (cudaCommonType)0.5);
-    const cudaCommonType ca = cos(alpha);
-    const cudaCommonType sa = sin(alpha);
-    pcl.set_u(0, Vmod * (ca * nx - sa * nz));
-    pcl.set_u(2, Vmod * (ca * nz + sa * nx));
-
-    pcl.set_x(0, originX + (sphereRadius + eps) * nx);
+    if (doSphere == 1)
+      pcl.set_x(1, originY + (sphereRadius + eps) * ny);
     pcl.set_x(2, originZ + (sphereRadius + eps) * nz);
   }
 

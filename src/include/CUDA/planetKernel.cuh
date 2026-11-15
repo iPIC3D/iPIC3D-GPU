@@ -181,8 +181,8 @@ __global__ void planetReflectCompactKernel(
     cudaCommonType sphereRadius, int doSphere);
 
 /**
- * @brief Fused kernel: DIFFUSELY scatter surviving electrons (isotropic
- *        velocity on outward hemisphere, preserving speed) and compact
+ * @brief Fused kernel: DIFFUSELY scatter surviving electrons (Lambert
+ *        cosine law on the outward hemisphere, preserving speed) and compact
  *        into a contiguous output buffer.  Structure identical to
  *        planetReflectCompactKernel; only the velocity update differs.
  *

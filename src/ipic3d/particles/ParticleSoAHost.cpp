@@ -126,6 +126,24 @@ ParticleSoAHost::~ParticleSoAHost() {
 
 // ======= Particle generation =======
 
+uint64_t ParticleSoAHost::loadingSeed(int i, int j, int k) const {
+  // the key: the global cell, with the species above all cells
+  const uint64_t gi = grid_->getCellOffsetX() + i - 1,
+                 gj = grid_->getCellOffsetY() + j - 1,
+                 gk = grid_->getCellOffsetZ() + k - 1;
+  uint64_t z = (((uint64_t)speciesNumber_ * col_->getNxc() + gi) *
+                    col_->getNyc() +
+                gj) *
+                   col_->getNzc() +
+               gk;
+  // SplitMix64 (Steele, Lea & Flood 2014): a bijection that spreads
+  // neighbouring keys over all 64 bits
+  z += 0x9e3779b97f4a7c15ULL;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+  return z ^ (z >> 31);
+}
+
 /**
  * @brief Populate the species with the default Maxwellian initialization.
  *
@@ -148,14 +166,13 @@ void ParticleSoAHost::maxwellian(Field* EMf) {
 
 #pragma omp parallel
   {
-    const int tid = omp_get_thread_num();
-    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 +
-                        tid * 1049);
+    std::mt19937_64 rng; // seeded per cell (loadingSeed)
 
 #pragma omp for collapse(3) schedule(static)
     for (int i = 1; i < numCellsX_ - 1; ++i)
       for (int j = 1; j < numCellsY_ - 1; ++j)
         for (int k = 1; k < numCellsZ_ - 1; ++k) {
+          rng.seed(loadingSeed(i, j, k));
           const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
           const int idxBase = cellIdx * numParticlesPerCell_;
           const double chargePerParticle =
@@ -259,14 +276,13 @@ void ParticleSoAHost::maxwellianFromSpeciesCurrents(Field* EMf,
 
 #pragma omp parallel
   {
-    const int tid = omp_get_thread_num();
-    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 +
-                        tid * 1049);
+    std::mt19937_64 rng; // seeded per cell (loadingSeed)
 
 #pragma omp for collapse(3) schedule(static)
     for (int i = 1; i < numCellsX_ - 1; i++)
       for (int j = 1; j < numCellsY_ - 1; j++)
         for (int k = 1; k < numCellsZ_ - 1; k++) {
+          rng.seed(loadingSeed(i, j, k));
           const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
           const int idxBase = cellIdx * numParticlesPerCell_;
           const double chargePerParticle =
@@ -363,14 +379,13 @@ void ParticleSoAHost::maxwellianDoubleHarris(Field* EMf) {
 
 #pragma omp parallel
   {
-    const int tid = omp_get_thread_num();
-    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 +
-                        tid * 1049);
+    std::mt19937_64 rng; // seeded per cell (loadingSeed)
 
 #pragma omp for collapse(3) schedule(static)
     for (int i = 1; i < numCellsX_ - 1; i++)
       for (int j = 1; j < numCellsY_ - 1; j++)
         for (int k = 1; k < numCellsZ_ - 1; k++) {
+          rng.seed(loadingSeed(i, j, k));
           const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
           const int idxBase = cellIdx * numParticlesPerCell_;
           const double chargePerParticle =
@@ -442,14 +457,13 @@ void ParticleSoAHost::maxwellianHumpPerturbation(Field* EMf) {
 
 #pragma omp parallel
   {
-    const int tid = omp_get_thread_num();
-    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 +
-                        tid * 1049);
+    std::mt19937_64 rng; // seeded per cell (loadingSeed)
 
 #pragma omp for collapse(3) schedule(static)
     for (int i = 1; i < numCellsX_ - 1; i++)
       for (int j = 1; j < numCellsY_ - 1; j++)
         for (int k = 1; k < numCellsZ_ - 1; k++) {
+          rng.seed(loadingSeed(i, j, k));
           const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
           const int idxBase = cellIdx * numParticlesPerCell_;
           const double chargePerParticle =
@@ -516,14 +530,13 @@ void ParticleSoAHost::pitch_angle_energy(Field* EMf) {
 
 #pragma omp parallel
   {
-    const int tid = omp_get_thread_num();
-    std::mt19937_64 rng(vct_->getCartesian_rank() * 31 + speciesNumber_ * 127 +
-                        tid * 1049);
+    std::mt19937_64 rng; // seeded per cell (loadingSeed)
 
 #pragma omp for collapse(3) schedule(static)
     for (int i = 1; i < numCellsX_ - 1; i++)
       for (int j = 1; j < numCellsY_ - 1; j++)
         for (int k = 1; k < numCellsZ_ - 1; k++) {
+          rng.seed(loadingSeed(i, j, k));
           const int cellIdx = ((i - 1) * nyr + (j - 1)) * nzr + (k - 1);
           const int idxBase = cellIdx * numParticlesPerCell_;
           // charge following electron (species 0)

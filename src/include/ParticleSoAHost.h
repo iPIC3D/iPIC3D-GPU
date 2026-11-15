@@ -24,6 +24,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <mpi.h>
 #include <vector>
@@ -536,6 +537,12 @@ private:
   const VirtualTopology3D* vct_ = nullptr;
   const Grid* grid_ = nullptr;
   MPI_Comm mpiComm_ = MPI_COMM_NULL;
+
+  /** Seed of the initial-loading generator of the local cell (i, j, k), ghosts
+   *  included: distinct for every species and global cell, so the loaded
+   *  particles depend neither on the domain decomposition nor on the number
+   *  of OpenMP threads. */
+  uint64_t loadingSeed(int i, int j, int k) const;
 
   // ===== Species parameters (extracted from Collective in constructor) =====
   int numParticlesPerCell_ = 0;   // npcel

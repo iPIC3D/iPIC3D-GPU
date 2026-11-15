@@ -111,7 +111,7 @@ public:
   double getPlanet_radius() const { return (Planet_radius); }
 
   // ── Planet reflection model ──
-  // 0 = specular (mirror) reflection,  1 = diffuse (isotropic) scattering
+  // 0 = specular (mirror) reflection,  1 = diffuse (Lambert cosine law)
   int getPlanetReflectionType() const { return (planetReflectionType); }
 
   // ── Exosphere / planet species parameters ──
@@ -397,7 +397,7 @@ private:
   /*! planet radius */
   double Planet_radius;
 
-  /*! planet reflection type: 0=specular, 1=diffuse (isotropic) */
+  /*! planet reflection type: 0=specular, 1=diffuse (Lambert cosine law) */
   int planetReflectionType;
 
   // ── Exosphere / planet species parameters ──

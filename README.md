@@ -368,7 +368,7 @@ Some cases apply additional boundary-condition fixes during the time loop:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `SolverType` | `GMRES` | Maxwell solver: `GMRES` (GMRES(20)) or `FGMRESBlockJacobi` (FGMRES(20) with the communication-free point-block Jacobi preconditioner) |
-| `GMREStol` | `1e-3` | Relative residual tolerance of the Maxwell solve |
+| `GMREStol` | `1e-3` | Relative residual tolerance of the Maxwell solve: it stops when ‖r‖ < `GMREStol` ‖r₀‖, r₀ the residual of the warm start (the previous solution); a warm start with ‖r₀‖ ≤ `GMREStol` ‖b‖ is kept without iterating |
 | `DivCleaningTol` | `1e-6` | Relative residual tolerance of the solves of the ∇·E and ∇·B corrections (see [the cleaning solves](#solves-of-the-e-and-b-corrections)). It must lie in (0, 1) when a cleaning is on |
 | `BlockJacobiSweeps`, `BlockJacobiOmega` | `1`, `1.0` | Richardson sweeps and relaxation factor of the block-Jacobi preconditioner (`SolverType = FGMRESBlockJacobi`) |
 | `PoissonCorrection`, `PoissonCorrectionCycle` | `no`, `10` | ∇·E correction (`yes` enables) and its interval in cycles, which must be at least 1 when the correction is on (the run stops at startup otherwise) |
@@ -457,7 +457,7 @@ Particles that enter the planet (`Planet_radius`) are processed on the GPU every
 
 - All ions are absorbed.
 - Electrons of all species are ranked together by the kinetic energy of one physical electron (relativistic, independent of the macroparticle weight) and absorbed from the most energetic down, until the absorbed charge best matches the charge to neutralise: the ions absorbed in this cycle plus the imbalance carried from earlier cycles. What is left, at most half an electron macroparticle unless too few electrons hit, is carried to the next cycle. The carried charge is not written to restart files; a restart starts it from zero.
-- The other electrons are reflected, specularly or diffusely (`planetReflectionType = 0` or `1`), and placed on the surface.
+- The other electrons are reflected, specularly or diffusely (`planetReflectionType = 0` or `1`), and placed on the surface. A diffuse reflection keeps the speed and draws the direction by the Lambert cosine law about the outward normal (in 2D, the in-plane normal of the cylinder).
 
 Every `PlanetDiagnosticsCycle` cycles (default `DiagnosticsOutputCycle`; `<= 0` disables), rank 0 appends the surface balance to `PlanetBC.txt` in `SaveDirName`: per species, the macroparticles and charge that hit the planet and that were absorbed; the carried charge, summed over ranks and its extremes; the mean energy separating absorbed from reflected electrons; and the rank-cycles with hits and with too few electrons to balance the ions. A row labelled N covers the hits since the previous row, up to cycle N-1; a last row at the end of the run, labelled with the resume cycle like the final restart checkpoint, covers the rest.
 

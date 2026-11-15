@@ -396,7 +396,7 @@ void Collective::ReadInput(const ConfigFile& config) {
     }
   }
 
-  // ── Planet reflection model: 0=specular (default), 1=diffuse (isotropic) ──
+  // ── Planet reflection model: 0=specular (default), 1=diffuse (Lambert) ──
   planetReflectionType = config.read<int>("planetReflectionType", 0);
 
   // ── Exosphere / planet species parameters ──
@@ -1088,7 +1088,7 @@ void Collective::Print() {
   cout << "Planet Boundary" << endl;
   cout << "---------------------" << endl;
   cout << "Reflection type            : " << planetReflectionType
-       << (planetReflectionType == 0 ? " (specular)" : " (diffuse/isotropic)")
+       << (planetReflectionType == 0 ? " (specular)" : " (diffuse, Lambert cosine law)")
        << endl;
   cout << "Diagnostics cycle          : " << PlanetDiagnosticsCycle
        << (PlanetDiagnosticsCycle > 0 ? " (PlanetBC.txt)" : " (disabled)")

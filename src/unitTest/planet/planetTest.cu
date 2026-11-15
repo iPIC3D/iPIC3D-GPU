@@ -20,6 +20,10 @@
  *       diagnostics
  *  5. Reflect + compact    (planetReflectCompactKernel)
  *     → surviving particles are outside the planet sphere after reflection
+ *  6. Diffuse reflection   (planetDiffuseCompactKernel), 3D sphere and 2D
+ *     circle → speed (all three components) kept, on the surface, outward,
+ *     Lambert law: <cos θ> = 2/3, cos²θ uniform (Kolmogorov-Smirnov),
+ *     isotropic tangential directions
  *
  * Test data (c = 1)
  * ─────────────────
@@ -58,6 +62,7 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <random>
 #include <vector>
 
 // planetKernel.cuh pulls in cudaTypeDef, particleArrayCUDA, particleExchange,
@@ -134,6 +139,134 @@ static PlanetBCState readState(const PlanetBCState* d_state) {
 static void setIonChargeCycle(PlanetBCState* d_state, cudaParticleType q) {
   cudaErrChk(cudaMemcpy(&d_state->ionChargeCycle, &q, sizeof(cudaParticleType),
                         cudaMemcpyHostToDevice));
+}
+
+/** Diffuse reflection of n electrons placed inside the planet with random
+ *  velocities, all survivors (cutoff 0): the speed and, for the 2D circle in
+ *  the x-z plane, y are kept; the particles sit on the surface (radius
+ *  1.05 R) moving outward; mu = cos θ about the outward normal follows the
+ *  Lambert law, <mu> = 2/3 and mu² uniform; the two tangential direction
+ *  cosines have mean 0 and mean square 1/4.  The bounds are 5 standard
+ *  deviations, and 1.95 / sqrt(n) (0.1 %) for the KS distance. */
+static bool diffuseReflectionCase(int doSphere, cudaCommonType ox,
+                                  cudaCommonType oy, cudaCommonType oz,
+                                  cudaCommonType R) {
+  const int n = 200000;
+  std::mt19937_64 gen(17 + doSphere);
+  std::normal_distribution<double> normal;
+  std::vector<SpeciesParticle> in(n);
+  for (int i = 0; i < n; i++) {
+    double d[3] = {normal(gen), doSphere == 1 ? normal(gen) : 0.0,
+                   normal(gen)};
+    const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const double depth = 0.9 * R * std::uniform_real_distribution<double>()(gen);
+    in[i].set(0.1 * normal(gen), 0.1 * normal(gen), 0.1 * normal(gen), -1.0,
+              ox + depth * d[0] / len,
+              doSphere == 1 ? oy + depth * d[1] / len : oy + 0.3,
+              oz + depth * d[2] / len, (cudaPclType_ID)i);
+  }
+  planetArray pa(in.data(), n);
+  planetArray* d_pa = pa.copyToDevice();
+  planetArray** d_ptrs;
+  cudaErrChk(cudaMalloc(&d_ptrs, sizeof(planetArray*)));
+  cudaErrChk(
+      cudaMemcpy(d_ptrs, &d_pa, sizeof(planetArray*), cudaMemcpyHostToDevice));
+  std::vector<uint32_t> idx(n);
+  std::iota(idx.begin(), idx.end(), 0u);
+  const int zero = 0;
+  int *d_offsets, *d_cutoff, *d_count;
+  uint32_t* d_idx;
+  SpeciesParticle* d_out;
+  cudaErrChk(cudaMalloc(&d_offsets, sizeof(int)));
+  cudaErrChk(cudaMalloc(&d_cutoff, sizeof(int)));
+  cudaErrChk(cudaMalloc(&d_count, sizeof(int)));
+  cudaErrChk(cudaMalloc(&d_idx, n * sizeof(uint32_t)));
+  cudaErrChk(cudaMalloc(&d_out, n * sizeof(SpeciesParticle)));
+  cudaErrChk(cudaMemcpy(d_offsets, &zero, sizeof(int), cudaMemcpyHostToDevice));
+  cudaErrChk(cudaMemcpy(d_cutoff, &zero, sizeof(int), cudaMemcpyHostToDevice));
+  cudaErrChk(cudaMemcpy(d_count, &zero, sizeof(int), cudaMemcpyHostToDevice));
+  cudaErrChk(cudaMemcpy(d_idx, idx.data(), n * sizeof(uint32_t),
+                        cudaMemcpyHostToDevice));
+  planetDiffuseCompactKernel<<<(n + BLOCK - 1) / BLOCK, BLOCK>>>(
+      d_ptrs, 1, d_offsets, d_idx, d_cutoff, n, d_out, d_count, ox, oy, oz, R,
+      doSphere, 12345u);
+  cudaErrChk(cudaDeviceSynchronize());
+  int count = 0;
+  std::vector<SpeciesParticle> out(n);
+  cudaErrChk(cudaMemcpy(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
+  cudaErrChk(cudaMemcpy(out.data(), d_out, n * sizeof(SpeciesParticle),
+                        cudaMemcpyDeviceToHost));
+  cudaFree(d_ptrs);
+  cudaFree(d_offsets);
+  cudaFree(d_cutoff);
+  cudaFree(d_count);
+  cudaFree(d_idx);
+  cudaFree(d_out);
+  cudaFree(d_pa);
+
+  double errSpeed = 0, errRadius = 0, errY = 0, minMu = 1;
+  double sMu = 0, sT1 = 0, sT2 = 0, sT1q = 0, sT2q = 0;
+  std::vector<double> mu2;
+  mu2.reserve(n);
+  for (int i = 0; i < count; i++) {
+    const SpeciesParticle& p = out[i];
+    const SpeciesParticle& q = in[p.get_id()];
+    double d[3] = {p.get_x() - ox, doSphere == 1 ? p.get_y() - oy : 0.0,
+                   p.get_z() - oz};
+    const double r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const double nv[3] = {d[0] / r, d[1] / r, d[2] / r};
+    const double v[3] = {p.get_u(), p.get_v(), p.get_w()};
+    const double s = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    const double s0 = std::sqrt(q.get_u() * q.get_u() +
+                                q.get_v() * q.get_v() + q.get_w() * q.get_w());
+    errSpeed = std::max(errSpeed, std::fabs(s - s0) / s0);
+    errRadius = std::max(errRadius, std::fabs(r - 1.05 * R) / R);
+    if (doSphere == 2)
+      errY = std::max(errY, std::fabs(p.get_y() - q.get_y()));
+    // tangent basis (t1, t2) of the normal
+    double t1[3];
+    if (std::fabs(nv[0]) < 0.9) {
+      const double l = std::sqrt(nv[1] * nv[1] + nv[2] * nv[2]);
+      t1[0] = 0, t1[1] = nv[2] / l, t1[2] = -nv[1] / l;
+    } else {
+      const double l = std::sqrt(nv[0] * nv[0] + nv[2] * nv[2]);
+      t1[0] = -nv[2] / l, t1[1] = 0, t1[2] = nv[0] / l;
+    }
+    const double t2[3] = {nv[1] * t1[2] - nv[2] * t1[1],
+                          nv[2] * t1[0] - nv[0] * t1[2],
+                          nv[0] * t1[1] - nv[1] * t1[0]};
+    const double mu = (v[0] * nv[0] + v[1] * nv[1] + v[2] * nv[2]) / s;
+    const double e1 = (v[0] * t1[0] + v[1] * t1[1] + v[2] * t1[2]) / s;
+    const double e2 = (v[0] * t2[0] + v[1] * t2[1] + v[2] * t2[2]) / s;
+    minMu = std::min(minMu, mu);
+    sMu += mu;
+    sT1 += e1;
+    sT2 += e2;
+    sT1q += e1 * e1;
+    sT2q += e2 * e2;
+    mu2.push_back(mu * mu);
+  }
+  std::sort(mu2.begin(), mu2.end());
+  double ks = 0;
+  for (size_t i = 0; i < mu2.size(); i++)
+    ks = std::max({ks, std::fabs((i + 1.0) / mu2.size() - mu2[i]),
+                   std::fabs((double)i / mu2.size() - mu2[i])});
+  const double N = count, meanMu = sMu / N;
+  const double sigMu = std::sqrt(1.0 / 18.0 / N), sigT = std::sqrt(0.25 / N),
+               sigTq = std::sqrt(1.0 / 16.0 / N);
+  const char* geom = doSphere == 1 ? "3D sphere" : "2D circle";
+  std::cout << "  " << geom << ": <mu> = " << meanMu << " (2/3), KS "
+            << ks << ", tangential means " << sT1 / N << " " << sT2 / N
+            << ", mean squares " << sT1q / N << " " << sT2q / N
+            << " (1/4), speed error " << errSpeed << "\n";
+  bool ok = count == n;
+  ok &= errSpeed < 1e-12 && errRadius < 1e-12 && errY == 0.0 && minMu >= 0.0;
+  ok &= std::fabs(meanMu - 2.0 / 3.0) < 5 * sigMu;
+  ok &= ks < 1.95 / std::sqrt(N);
+  ok &= std::fabs(sT1 / N) < 5 * sigT && std::fabs(sT2 / N) < 5 * sigT;
+  ok &= std::fabs(sT1q / N - 0.25) < 5 * sigTq &&
+        std::fabs(sT2q / N - 0.25) < 5 * sigTq;
+  return ok;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -527,6 +660,17 @@ static int runTest() {
     }
   }
   check(reflectPass, "survivors outside the sphere with u reversed", allPassed);
+
+  // ════════════════════════════════════════════════════════════
+  //  TEST 6: Diffuse reflection (Lambert law), 3D sphere and 2D circle
+  // ════════════════════════════════════════════════════════════
+  printSeparator("TEST 6 — Diffuse reflection");
+  check(diffuseReflectionCase(1, originX, originY, originZ, sphereRadius),
+        "3D sphere: speed kept, on the surface, outward, Lambert law",
+        allPassed);
+  check(diffuseReflectionCase(2, originX, originY, originZ, sphereRadius),
+        "2D circle: speed and y kept, on the surface, outward, Lambert law",
+        allPassed);
 
   // ════════════════════════════════════════════════════════════
   //  Summary

@@ -31,6 +31,7 @@
 #include "string.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdarg>
 #include <math.h>
 #include <mpi.h>
 #include <sstream>
@@ -96,13 +97,7 @@ int Collective::read_enum_parameter(const char* option_name,
     if (!strcmp(enum_name.c_str(), enumNames[i]))
       return i;
   }
-  // could not find enum, so issue error and quit.
-  if (!MPIdata::get_rank()) {
-    eprintf("in input file %s there is an invalid option %s\n",
-            inputfile.c_str(), enum_name.c_str());
-  }
-  MPIdata::exit(1);
-  // this is a better way
+  requireInput(false, "there is an invalid option %s", enum_name.c_str());
   return INVALID_ENUM;
 }
 
@@ -110,6 +105,23 @@ const char* Collective::get_name_of_enum(int in) {
   assert_ge(in, 0);
   assert_lt(in, NUMBER_OF_ENUMS);
   return enumNames[in];
+}
+
+// Every rank reads the same input and stops together (eprintf would abort
+// rank 0 and leave the others in MPI_Finalize).
+void Collective::requireInput(bool ok, const char* fmt, ...) const {
+  if (ok)
+    return;
+  if (!MPIdata::get_rank()) {
+    char msg[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+    printf("ERROR: in input file %s %s\n", inputfile.c_str(), msg);
+    fflush(stdout);
+  }
+  MPIdata::exit(1);
 }
 
 /*! Read the input file; on a restart also select the checkpoint to load (the
@@ -137,12 +149,7 @@ void Collective::ReadInput(const ConfigFile& config) {
     ncycles = config.read<int>("ncycles");
     th = config.read<double>("th", 1.0);
     // the theta scheme is unconditionally stable only for th >= 1/2
-    if (!(th >= 0.5)) {
-      if (!MPIdata::get_rank())
-        eprintf("in input file %s th must be at least 0.5, not %g\n",
-                inputfile.c_str(), th);
-      MPIdata::exit(1);
-    }
+    requireInput(th >= 0.5, "th must be at least 0.5, not %g", th);
 
     // Macrocell sizes for (v_par, v_perp) spectra data analysis.
     // Default 0 disables the feature at runtime.
@@ -230,6 +237,13 @@ void Collective::ReadInput(const ConfigFile& config) {
     PoissonCorrectionCycle = config.read<int>("PoissonCorrectionCycle", 10);
     divBCorrection = config.read<string>("divBCorrection", "no");
     divBCorrectionCycle = config.read<int>("divBCorrectionCycle", 10);
+    // the field solver takes cycle % <name>Cycle
+    requireInput(PoissonCorrection != "yes" || PoissonCorrectionCycle >= 1,
+                 "PoissonCorrectionCycle must be at least 1, not %d",
+                 PoissonCorrectionCycle);
+    requireInput(divBCorrection != "yes" || divBCorrectionCycle >= 1,
+                 "divBCorrectionCycle must be at least 1, not %d",
+                 divBCorrectionCycle);
 
     rhoINIT = std::make_unique<double[]>(ns);
     array_double rhoINIT0 = config.read<array_double>("rhoINIT");
@@ -262,6 +276,10 @@ void Collective::ReadInput(const ConfigFile& config) {
     // solver tolerances (CGtol: host CG, not used currently)
     CGtol = config.read<double>("CGtol", 1e-3);
     GMREStol = config.read<double>("GMREStol", 1e-3);
+    DivCleaningTol = config.read<double>("DivCleaningTol", 1e-6);
+    requireInput((PoissonCorrection != "yes" && divBCorrection != "yes") ||
+                     (DivCleaningTol > 0.0 && DivCleaningTol < 1.0),
+                 "DivCleaningTol must be in (0, 1), not %g", DivCleaningTol);
     NiterMover = config.read<int>("NiterMover", 3);
     // Maxwell solver: "GMRES" (default), "FGMRESBlockJacobi" or "Chebyshev"
     SolverType = config.read<string>("SolverType", "GMRES");
@@ -272,12 +290,12 @@ void Collective::ReadInput(const ConfigFile& config) {
     BlockJacobiSweeps = config.read<int>("BlockJacobiSweeps", 1);
     BlockJacobiOmega = config.read<double>("BlockJacobiOmega", 1.0);
     // Poisson Chebyshev preconditioner parameters (divergence cleaning)
-    PoissonChebMaxIter = config.read<int>("PoissonChebMaxIter", 10);
+    PoissonChebMaxIter = config.read<int>("PoissonChebMaxIter", 20);
     PoissonChebRescaleEigMin =
         config.read<double>("PoissonChebRescaleEigMin", 1.0);
     PoissonChebRescaleEigMax =
         config.read<double>("PoissonChebRescaleEigMax", 1.0);
-    PoissonChebEigRatio = config.read<double>("PoissonChebEigRatio", 1000.0);
+    PoissonChebEigRatio = config.read<double>("PoissonChebEigRatio", 300.0);
     // take the injection of the particless
     Vinj = config.read<double>("Vinj", 0.0);
 
@@ -306,13 +324,7 @@ void Collective::ReadInput(const ConfigFile& config) {
   last_cycle = -1;
   c = config.read<double>("c", 1.0);
   // the Gaussian equations divide by c
-  if (!(c > 0.0)) {
-    if (!MPIdata::get_rank())
-      eprintf("in input file %s the speed of light c must be positive, not "
-              "%g\n",
-              inputfile.c_str(), c);
-    MPIdata::exit(1);
-  }
+  requireInput(c > 0.0, "the speed of light c must be positive, not %g", c);
 
 #ifdef BATSRUS
   // set grid size and resolution based on the initial file from fluid code
@@ -351,14 +363,17 @@ void Collective::ReadInput(const ConfigFile& config) {
     const int d = !(nxc == 1 && PERIODICX) + !(nyc == 1 && PERIODICY) +
                   !(nzc == 1 && PERIODICZ);
     const double smoothMin = d > 1 ? (2.0 * d - 3.0) / (2.0 * d) : 0.0;
-    if (!(Smooth >= smoothMin && Smooth <= 1.0)) {
-      if (!MPIdata::get_rank())
-        eprintf("in input file %s Smooth must be in [%g, 1] for this %dD "
-                "grid, not %g\n",
-                inputfile.c_str(), smoothMin, d, Smooth);
-      MPIdata::exit(1);
-    }
+    requireInput(Smooth >= smoothMin && Smooth <= 1.0,
+                 "Smooth must be in [%g, 1] for this %dD grid, not %g",
+                 smoothMin, d, Smooth);
   }
+  // the div(B) face rules take the next inner node: a non-periodic direction
+  // needs 2 cells
+  requireInput(divBCorrection != "yes" ||
+                   ((nxc > 1 || PERIODICX) && (nyc > 1 || PERIODICY) &&
+                    (nzc > 1 || PERIODICZ)),
+               "divBCorrection needs at least 2 cells along every non-periodic "
+               "direction (a single-cell direction must be periodic)");
 
   x_center_dipole = config.read<double>("x_center_dipole", 5.0);
   y_center_dipole = config.read<double>("y_center_dipole", 5.0);
@@ -740,13 +755,9 @@ void Collective::ReadInput(const ConfigFile& config) {
   // from the reference plane
   const string outflowLayerFields =
       config.read<string>("OutflowLayerFields", "solved");
-  if (outflowLayerFields != "copy" && outflowLayerFields != "solved") {
-    if (!MPIdata::get_rank())
-      eprintf("in input file %s OutflowLayerFields must be copy or solved, "
-              "not %s\n",
-              inputfile.c_str(), outflowLayerFields.c_str());
-    MPIdata::exit(1);
-  }
+  requireInput(outflowLayerFields == "copy" || outflowLayerFields == "solved",
+               "OutflowLayerFields must be copy or solved, not %s",
+               outflowLayerFields.c_str());
   outflowLayerSolved = outflowLayerFields == "solved";
 
   if (RESTART1) { // you are restarting
@@ -931,6 +942,7 @@ void Collective::init_derived_parameters() {
 
 /*! Print Simulation Parameters */
 void Collective::Print() {
+  auto ceilDiv = [](int a, int b) { return (a + b - 1) / b; };
   cout << endl;
   cout << "Simulation Parameters" << endl;
   cout << "---------------------" << endl;
@@ -988,6 +1000,27 @@ void Collective::Print() {
     cout << ", n_layers=" << n_layers_sal
          << (sal_tangential_B ? ", B tangential only" : ", all B components");
   cout << endl;
+  // The open-face B treatment (gpuOpenBoundaryInflowB) runs only on wall
+  // ranks with more than 8 cells along the face normal, a gate meant for the
+  // flat direction of a 2D run: flag a thinner split of any other direction.
+  // Cells per rank as in Grid3DCU: the last rank takes the remainder.
+  auto warnThinOpenFace = [&](const char* face, int bc, bool periodic,
+                              int cells, int len, bool right, char axis) {
+    const int first = ceilDiv(cells, len);
+    const int local = right ? cells - first * (len - 1) : first;
+    if (bc == 2 && !periodic && cells > 1 && local <= 8)
+      cout << "WARNING: open face " << face << " has " << local
+           << " cells per rank along " << axis
+           << ": the open-face B treatment needs at least 9 and is skipped; "
+              "use fewer ranks along "
+           << axis << " (at least 9 cells per wall rank)" << endl;
+  };
+  warnThinOpenFace("Xleft", bcEMfaceXleft, PERIODICX, nxc, XLEN, false, 'x');
+  warnThinOpenFace("Xright", bcEMfaceXright, PERIODICX, nxc, XLEN, true, 'x');
+  warnThinOpenFace("Yleft", bcEMfaceYleft, PERIODICY, nyc, YLEN, false, 'y');
+  warnThinOpenFace("Yright", bcEMfaceYright, PERIODICY, nyc, YLEN, true, 'y');
+  warnThinOpenFace("Zleft", bcEMfaceZleft, PERIODICZ, nzc, ZLEN, false, 'z');
+  warnThinOpenFace("Zright", bcEMfaceZright, PERIODICZ, nzc, ZLEN, true, 'z');
   cout << "---------------------" << endl;
   cout << "Particle Boundary Conditions" << endl;
   cout << "---------------------" << endl;
@@ -1044,6 +1077,12 @@ void Collective::Print() {
     cout << "WARNING: full B SAL with the global div(B) cleaning: the cleaning "
             "carries the SAL's B_n = B0_n at the faces into the whole box; use "
             "sal_tangential_B = 1"
+         << endl;
+  if (divBCorrection == "yes" && !yes_sal && !PERIODICX && bcEMfaceXleft == 2)
+    cout << "WARNING: open Xleft face without SAL and the global div(B) "
+            "cleaning: the face sets the whole B, B_n included, to B0 every "
+            "cycle and the cleaning carries that face flux into the whole box; "
+            "use yes_sal = 1 with sal_tangential_B = 1"
          << endl;
   cout << "---------------------" << endl;
   cout << "Planet Boundary" << endl;
@@ -1200,7 +1239,6 @@ void Collective::Print() {
   cout << "Estimated Memory Per Rank" << endl;
   cout << "---------------------" << endl;
 
-  auto ceilDiv = [](int a, int b) { return (a + b - 1) / b; };
   const int nxc_loc = ceilDiv(nxc, XLEN) + 2; // +2 ghost cells
   const int nyc_loc = ceilDiv(nyc, YLEN) + 2;
   const int nzc_loc = ceilDiv(nzc, ZLEN) + 2;
@@ -1294,28 +1332,38 @@ void Collective::Print() {
     if (isDipole)
       devPlanet += PLANET_FRAC * nop_i * 64.0;
   }
-  // GPU field solver (EMfields3D::gpuSolverAllocate): 41 node arrays, plus
-  // the smoothed E(n+theta) the mover samples when E is smoothed, the 10 node
-  // moments of each species, 17 cell arrays, the Krylov vectors (Maxwell x
-  // and b, Poisson x and b of the div(E) and div(B) cleaning), the GMRES basis
-  // V (GMRES_M + 1 vectors) and w, the lazily allocated FGMRES basis Z and
-  // Chebyshev / block-Jacobi vectors, and the halo send and receive buffers
-  // (64 fields per direction).
+  // GPU field solver (EMfields3D::gpuSolverAllocate): 35 node arrays (and PSI
+  // with the div(B) cleaning), plus the smoothed E(n+theta) the mover samples
+  // when E is smoothed, the 10 node moments of each species, 16 cell arrays,
+  // the Krylov vectors (Maxwell x and b, x and b of each cleaning that is
+  // on), the GMRES basis V (GMRES_M + 1 vectors) and w, the lazily allocated
+  // FGMRES basis Z and Chebyshev-solver / block-Jacobi vectors, the two
+  // Chebyshev iterates of the cleaning preconditioner, and the halo send and
+  // receive buffers (64 fields per direction).
   constexpr double GMRES_M = 20.0;      // EMfields3D::GMRES_M
   constexpr double HALO_MAX_BATCH = 64; // EMfields3D::HALO_MAX_BATCH
   const bool smoothE = Smooth != 1.0 && SmoothNiter > 0; // smoothingOn()
   const double intN = (double)(nxn_loc - 2) * (nyn_loc - 2) * (nzn_loc - 2);
   const double nMaxwell = 3.0 * intN;
-  const double nKrylov = std::max(nMaxwell, intC);
-  double devSolver = (41.0 + (smoothE ? 3.0 : 0.0) + 10.0 * ns) * gridN +
-                     17.0 * gridC + 2.0 * nMaxwell + 4.0 * intC +
-                     (GMRES_M + 2.0) * nKrylov;
-  if (PoissonCorrection == "yes" || divBCorrection == "yes" ||
-      SolverType == "FGMRESBlockJacobi")
+  const double nKrylov = nMaxwell; // the longest Krylov vectors
+  const bool divE = PoissonCorrection == "yes", divB = divBCorrection == "yes";
+  const bool cleaning = divE || divB;
+  // the div(B) rows: the interior nodes, one row plane along a flat axis
+  // (EMfields3D::divBExtent)
+  const double intB = (double)(nxc == 1 && PERIODICX ? nxc_r : nxn_loc - 2) *
+                      (nyc == 1 && PERIODICY ? nyc_r : nyn_loc - 2) *
+                      (nzc == 1 && PERIODICZ ? nzc_r : nzn_loc - 2);
+  double devSolver =
+      (35.0 + (divB ? 1.0 : 0.0) + (smoothE ? 3.0 : 0.0) + 10.0 * ns) * gridN +
+      16.0 * gridC + 2.0 * nMaxwell + (divE ? 2.0 * intC : 0.0) +
+      (divB ? 2.0 * intB : 0.0) + (GMRES_M + 2.0) * nKrylov;
+  if (cleaning || SolverType == "FGMRESBlockJacobi")
     devSolver += GMRES_M * nKrylov;
   if (SolverType == "Chebyshev")
     devSolver += 4.0 * nMaxwell;
-  else if (SolverType == "FGMRESBlockJacobi")
+  if (cleaning)
+    devSolver += 2.0 * std::max(divE ? intC : 0.0, divB ? intB : 0.0);
+  if (SolverType == "FGMRESBlockJacobi")
     devSolver += 2.0 * nMaxwell;
   devSolver += 2.0 * HALO_MAX_BATCH * 2.0 *
                ((double)nyn_loc * nzn_loc + (double)nxn_loc * nzn_loc +
@@ -1390,6 +1438,7 @@ void Collective::save(const std::string& header) {
   my_file << "SolverStopOnNonConvergence = " << solverStopOnNonConvergence
           << endl;
   my_file << "GMRES error tolerance    = " << GMREStol << endl;
+  my_file << "DivCleaningTol           = " << DivCleaningTol << endl;
   my_file << "CG error tolerance       = " << CGtol << endl;
   my_file << "Mover error tolerance    = " << NiterMover << endl;
   my_file << "---------------------------" << endl;

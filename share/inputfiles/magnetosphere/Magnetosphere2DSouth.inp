@@ -165,16 +165,17 @@ planetReflectionType = 1                # 0=specular, 1=diffuse [default: 0]
 # %%%%%%%%%%%%%%%%%%%% NUMERICAL SOLVERS %%%%%%%%%%%%%%%%%%%%
 CGtol      = 1E-3                       # CG tolerance; current call disabled [default: 1e-3]
 GMREStol   = 1E-5                       # Maxwell GMRES/FGMRES tolerance [default: 1e-3]
+DivCleaningTol = 1E-6                   # div(E)/div(B) cleaning tolerance [default: 1e-6]
 NiterMover = 5                          # Predictor-corrector iterations [default: 3]
 
 # GPU Maxwell solver:
 SolverType        = GMRES                # [default: GMRES]
 
-# GPU Chebyshev preconditioner for
-# Poisson problems div(E)/div(B) cleaning.
-PoissonChebMaxIter       = 20             # Preconditioner iterations; raised from 10, which needs many more FGMRES restarts for the 2-D div(B) cleaning [default: 10]
+# Chebyshev preconditioner of the div(E)/div(B) cleaning solves.
+PoissonChebMaxIter       = 20             # Preconditioner iterations [default: 20]
 PoissonChebRescaleEigMin = 1.0            # Lower-bound multiplier [default: 1.0]
 PoissonChebRescaleEigMax = 1.0            # Upper-bound multiplier [default: 1.0]
+PoissonChebEigRatio      = 300            # eigMin floor eigMax/value, 0: exact bounds [default: 300]
 
 # %%%%%%%%%%%%%%%%%%%% OUTPUT AND RESTART %%%%%%%%%%%%%%%%%%%%
 FieldOutputCycle       = 500              # Field/moment interval; <=0 disables [default: 100]

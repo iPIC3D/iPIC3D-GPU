@@ -119,8 +119,10 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
     }
     return static_cast<int>(count);
   };
-  poissonKrylovSize_ = checkedKrylovLength("Poisson", 1, nxc, nyc, nzc);
+  divEKrylovSize_ = checkedKrylovLength("div(E)", 1, nxc, nyc, nzc);
   maxwellKrylovSize_ = checkedKrylovLength("Maxwell", 3, nxn, nyn, nzn);
+  divBKrylovSize_ = checkedKrylovLength("div(B)", 1, divBExtent(0),
+                                        divBExtent(1), divBExtent(2));
 
   // External imposed fields
   //
@@ -145,6 +147,7 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
     divBCorrectionCycle = col->getdivBCorrectionCycle();
   }
   GMREStol = col->getGMREStol();
+  divCleaningTol = col->getDivCleaningTol();
   SolverType = col->getSolverType();
   chebMaxIter = col->getChebyshevMaxIter();
   chebEigMin = col->getChebyshevEigMin();
@@ -622,6 +625,16 @@ void EMfields3D::driftElectricField(double E0[3]) const {
   E0[0] = -(ve0 * B0z - we0 * B0y) / c;
   E0[1] = -(we0 * B0x - ue0 * B0z) / c;
   E0[2] = -(ue0 * B0y - ve0 * B0x) / c;
+}
+
+bool EMfields3D::flatAxis(int a) const {
+  const int n[3] = {nxc, nyc, nzc};
+  const int self = _vct.getCartesian_rank();
+  const int left[3] = {_vct.getXleft_neighbor(), _vct.getYleft_neighbor(),
+                       _vct.getZleft_neighbor()};
+  const int right[3] = {_vct.getXright_neighbor(), _vct.getYright_neighbor(),
+                        _vct.getZright_neighbor()};
+  return n[a] - 2 == 1 && left[a] == self && right[a] == self;
 }
 
 bool EMfields3D::ownsOutflowFaceXright() const {

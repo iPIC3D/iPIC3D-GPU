@@ -889,9 +889,9 @@ void gpuGhostRowsXright(const CellArrayBatch& batch, int nxc, int nyc, int nzc,
 //  Fix B kernels for GEM / ForceFree
 // =========================================================================
 
-/** Fix center-based B for GEM on 3 Y-boundary layers.
- *  side: 0=left (j=0,1,2), 1=right (j=nyc-1, nyc-2, nyc-3). */
-template <typename T>
+/** Fix center-based B for GEM on 3 Y-boundary layers (GHOST_ONLY: the ghost
+ *  layer only).  side: 0=left (j=0,1,2), 1=right (j=nyc-1, nyc-2, nyc-3). */
+template <bool GHOST_ONLY, typename T>
 __global__ void k_fixBcGEM(T* Bxc, T* Byc, T* Bzc, T B0x, T B0y, T B0z,
                            T yStart, T dy, T LyH, T delta, int side, int nxc,
                            int nyc, int nzc) {
@@ -909,10 +909,12 @@ __global__ void k_fixBcGEM(T* Bxc, T* Byc, T* Bzc, T B0x, T B0y, T B0z,
   int idx1 = (i * nyc + j1) * nzc + k;
   int idx2 = (i * nyc + j2) * nzc + k;
   Bxc[idx0] = bx_val;
-  Bxc[idx1] = bx_val;
-  Bxc[idx2] = bx_val;
   Byc[idx0] = B0y;
   Bzc[idx0] = B0z;
+  if constexpr (GHOST_ONLY)
+    return;
+  Bxc[idx1] = bx_val;
+  Bxc[idx2] = bx_val;
   Bzc[idx1] = B0z;
   Bzc[idx2] = B0z;
 }
@@ -922,12 +924,15 @@ void gpuFixBcGEMKernel(cudaSolverType* Bxc, cudaSolverType* Byc,
                        cudaSolverType B0y, cudaSolverType B0z,
                        cudaSolverType yStart, cudaSolverType dy,
                        cudaSolverType LyH, cudaSolverType delta, int side,
-                       int nxc, int nyc, int nzc, cudaStream_t stream) {
+                       int nxc, int nyc, int nzc, bool ghostOnly,
+                       cudaStream_t stream) {
   int total = nxc * nzc;
   if (total <= 0)
     return;
   int blk = 256;
-  k_fixBcGEM<<<(total + blk - 1) / blk, blk, 0, stream>>>(
+  const auto kernel = ghostOnly ? k_fixBcGEM<true, cudaSolverType>
+                                : k_fixBcGEM<false, cudaSolverType>;
+  kernel<<<(total + blk - 1) / blk, blk, 0, stream>>>(
       Bxc, Byc, Bzc, B0x, B0y, B0z, yStart, dy, LyH, delta, side, nxc, nyc,
       nzc);
   cudaErrChk(cudaGetLastError());
@@ -983,9 +988,9 @@ void gpuFixBnGEMKernel(cudaSolverType* Bxn, cudaSolverType* Byn,
 }
 
 /** Fix center-based B for ForceFree on a Y boundary: Bz = B0z/cosh on the
- *  three cell planes next to the wall; Bx = B0x tanh and By = B0y on the
- *  ghost plane. */
-template <typename T>
+ *  three cell planes next to the wall (GHOST_ONLY: the ghost plane only);
+ *  Bx = B0x tanh and By = B0y on the ghost plane. */
+template <bool GHOST_ONLY, typename T>
 __global__ void k_fixBforcefree(T* Bxc, T* Byc, T* Bzc, T B0x, T B0y, T B0z,
                                 T yStart, T dy, T LyH, T delta, int side,
                                 int nxc, int nyc, int nzc) {
@@ -1016,6 +1021,8 @@ __global__ void k_fixBforcefree(T* Bxc, T* Byc, T* Bzc, T B0x, T B0y, T B0z,
   Bxc[idx0] = B0x * tanh(arg0);
   Byc[idx0] = B0y;
   Bzc[idx0] = B0z / cosh(arg0);
+  if constexpr (GHOST_ONLY)
+    return;
   Bzc[idx1] = B0z / cosh(arg1);
   Bzc[idx2] = B0z / cosh(arg2);
 }
@@ -1025,12 +1032,15 @@ void gpuFixBforcefreeKernel(cudaSolverType* Bxc, cudaSolverType* Byc,
                             cudaSolverType B0y, cudaSolverType B0z,
                             cudaSolverType yStart, cudaSolverType dy,
                             cudaSolverType LyH, cudaSolverType delta, int side,
-                            int nxc, int nyc, int nzc, cudaStream_t stream) {
+                            int nxc, int nyc, int nzc, bool ghostOnly,
+                            cudaStream_t stream) {
   int total = nxc * nzc;
   if (total <= 0)
     return;
   int blk = 256;
-  k_fixBforcefree<<<(total + blk - 1) / blk, blk, 0, stream>>>(
+  const auto kernel = ghostOnly ? k_fixBforcefree<true, cudaSolverType>
+                                : k_fixBforcefree<false, cudaSolverType>;
+  kernel<<<(total + blk - 1) / blk, blk, 0, stream>>>(
       Bxc, Byc, Bzc, B0x, B0y, B0z, yStart, dy, LyH, delta, side, nxc, nyc,
       nzc);
   cudaErrChk(cudaGetLastError());
@@ -1113,12 +1123,14 @@ void gpuConstantChargePlanet2DKernel(cudaSolverType* rhons, cudaSolverType val,
 }
 
 // =========================================================================
-//  Center-to-center Laplacian (for Poisson solver)
+//  Center-to-center 7-point Laplacian (not used currently: the cleaning
+//  solves use the 27-point operators of GPUCleaning.cu)
 // =========================================================================
 
 /** 7-point center Laplacian of the interior cells, written packed:
  *  lapK[(i nj + j) nk + k] for the interior cell (i+1, j+1, k+1).  Reads the
- *  face ghosts of fC, never the edge or corner ghosts. */
+ *  face ghosts of fC, never the edge or corner ghosts.  Not used
+ *  (gpuLapC2CToKrylov). */
 template <typename T>
 __global__ void k_lapC2CToKrylov(T* __restrict__ lapK, const T* __restrict__ fC,
                                  int nxc, int nyc, int nzc, T invdx2, T invdy2,
@@ -1149,8 +1161,8 @@ void gpuLapC2CToKrylov(cudaSolverType* lapK, const cudaSolverType* fC, int nxc,
   cudaErrChk(cudaGetLastError());
 }
 
-/** 7-point center Laplacian: lapC = d²f/dx² + d²f/dy² + d²f/dz².  Not used
- *  currently (gpuLapC2CToKrylov). */
+/** 7-point center Laplacian: lapC = d²f/dx² + d²f/dy² + d²f/dz².  Used
+ *  only by the unit tests (not used). */
 template <typename T>
 __global__ void k_lapC2C(T* lapC, const T* fC, int nxc, int nyc, int nzc,
                          T invdx2, T invdy2, T invdz2) {
@@ -1186,7 +1198,7 @@ void gpuLapC2CKernel(cudaSolverType* lapC, const cudaSolverType* fC, int nxc,
 /** 7-point center Laplacian with per-face ghost rules (no ghost reads).
  *  A neighbour outside the interior is replaced by g * f(cell), g in
  *  {0, +1, -1}.  With one interior cell both faces act on the same cell.
- *  Not used currently (gpuChebyshevPoissonStep1/N). */
+ *  Not used currently. */
 template <typename T>
 __global__ void k_lapC2CLocal(T* lapC, const T* fC, int nxc, int nyc, int nzc,
                               T invdx2, T invdy2, T invdz2, T gXl, T gXr, T gYl,

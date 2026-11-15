@@ -147,16 +147,18 @@ ApplyInflowBcsEImage = 1                # Include inflow E terms [default: 1]
 
 # %%%%%%%%%%%%%%%%%%%% NUMERICAL SOLVERS %%%%%%%%%%%%%%%%%%%%
 CGtol      = 1E-3                       # Host CG tolerance (not used) [default: 1e-3]
-GMREStol   = 1E-3                       # Maxwell and Poisson GMRES/FGMRES tolerance [default: 1e-3]
+GMREStol   = 1E-3                       # Maxwell GMRES/FGMRES tolerance [default: 1e-3]
+DivCleaningTol = 1E-6                   # div(E)/div(B) cleaning tolerance [default: 1e-6]
 NiterMover = 3                          # Predictor-corrector iterations [default: 3]
 
 # Maxwell solver: GMRES, FGMRESBlockJacobi or Chebyshev.
 SolverType = GMRES                      # [default: GMRES]
 
-# Chebyshev preconditioner of the div(E)/div(B) Poisson solves.
-PoissonChebMaxIter       = 10           # Polynomial degree = value + 1 [default: 10]
+# Chebyshev preconditioner of the div(E)/div(B) cleaning solves.
+PoissonChebMaxIter       = 20           # Preconditioner iterations [default: 20]
 PoissonChebRescaleEigMin = 1.0          # Lower-bound multiplier [default: 1.0]
 PoissonChebRescaleEigMax = 1.0          # Upper-bound multiplier [default: 1.0]
+PoissonChebEigRatio      = 300          # eigMin floor eigMax/value, 0: exact bounds [default: 300]
 
 # %%%%%%%%%%%%%%%%%%%% OUTPUT AND RESTART %%%%%%%%%%%%%%%%%%%%
 # Tags are joined with +; an empty tag writes nothing.

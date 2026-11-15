@@ -1,10 +1,15 @@
+#ifndef GPU_BLAS_CUH
+#define GPU_BLAS_CUH
+
 /**
  * @file GPUBlas.cuh
  * @brief GPU BLAS-like operations for the iPIC3D GPU field solver.
  *
  * Element-wise vector operations (fill, scale, sum, sub, addscale, add a
- * constant, neg) and reduction operations (dot product, norm, sum) on flat
- * device arrays.
+ * constant, neg), reduction operations (dot product, norm, sum, the batched
+ * dots of an Arnoldi step) and the fused Arnoldi update (gpuSubCombination)
+ * on flat device arrays, and the signed box sums and updates of the
+ * cleaning null spaces.
  * Also provides the Krylov <-> physical packing kernels (gpuPhys2Solver*,
  * gpuSolver2Phys*).
  *
@@ -12,9 +17,6 @@
  * used with GPUFieldArray3::devPtr(), GPUFieldArray4::speciesPtr(), and
  * GPUKrylovVector::devPtr().
  */
-
-#ifndef GPU_BLAS_CUH
-#define GPU_BLAS_CUH
 
 #include "cudaTypeDef.cuh"
 #include <cstddef>
@@ -55,7 +57,17 @@ void gpuAddscale(cudaSolverType alfa, cudaSolverType* dst,
 void gpuAddscale2(cudaSolverType alfa, cudaSolverType beta, cudaSolverType* dst,
                   const cudaSolverType* src, size_t n, cudaStream_t stream = 0);
 
-/** d[i] += c */
+/** Most terms of gpuSubCombination (the coefficients travel by value). */
+constexpr int kMaxCombination = 64;
+
+/** w[i] -= sum_{j < count} coef[j] V[j stride + i], coef a host array of
+ *  count <= kMaxCombination values: the Arnoldi orthogonalisation in one pass
+ *  (each element in the order of count gpuAddscale calls). */
+void gpuSubCombination(cudaSolverType* w, const cudaSolverType* V,
+                       size_t stride, int count, size_t n,
+                       const cudaSolverType* coef, cudaStream_t stream = 0);
+
+/** d[i] += c  (not used) */
 void gpuAddConst(cudaSolverType* d, cudaSolverType c, size_t n,
                  cudaStream_t stream = 0);
 
@@ -150,7 +162,7 @@ cudaSolverType gpuNorm2(const cudaSolverType* a, size_t n,
 /**
  * Local sum: sum_i a[i].
  * d_scratch must point to a device cudaSolverType.
- * Returns the result synchronously.
+ * Returns the result synchronously.  Not used.
  */
 cudaSolverType gpuReduceSum(const cudaSolverType* a, size_t n,
                             cudaSolverType* d_scratch, cudaStream_t stream = 0);
@@ -174,10 +186,47 @@ void gpuDot_async(const cudaSolverType* a, const cudaSolverType* b, size_t n,
  *
  * d_out is a device array of >= (k+2) cudaSolverType elements (zeroed
  * internally). After call, d_out contains the LOCAL partial sums (caller must
- * MPI_Allreduce).  k + 1 <= 32.
+ * MPI_Allreduce).  More than 32 vectors take one pass over w per 32.
  */
 void gpuBatchedDotNorm(const cudaSolverType* w, const cudaSolverType* V_base,
                        size_t stride, int k, size_t n, cudaSolverType* d_out,
+                       cudaStream_t stream = 0);
+
+// =========================================================================
+//  Signed box sums and updates (the null spaces of the cleaning solves)
+// =========================================================================
+
+/** A box [lo, hi) of a packed row-major n[0] x n[1] x n[2] vector, and the
+ *  sign (-1)^(sum over the axes a with sgn[a] of (index_a + par[a])) of its
+ *  points (par: the global offset of the rank's rows). */
+struct SignedBox {
+  int n[3], lo[3], hi[3], sgn[3], par[3];
+};
+
+/**
+ * Signed sums over the box: one per plane normal to axis c, out[l] over
+ * the plane index_c = lo[c] + l (hi[c] - lo[c] planes), or in total (c = -1,
+ * out[0]).  d_out is zeroed here; asynchronous.
+ */
+void gpuSignedBoxSums(const cudaSolverType* v, const SignedBox& box, int c,
+                      cudaSolverType* d_out, cudaStream_t stream = 0);
+
+/** One term of gpuSubSignedTerms: the signs of sgn (with the par of the
+ *  box) times line[index_c - lo[c]] (c >= 0, device array) or value. */
+struct SignedTerm {
+  int c, sgn[3];
+  const cudaSolverType* line;
+  cudaSolverType value;
+};
+
+/** Most terms of gpuSubSignedTerms: a mean, three checkerboard families and
+ *  their shared triple checkerboard. */
+constexpr int kMaxSignedTerms = 5;
+
+/** v -= sum of the nTerms (<= kMaxSignedTerms) terms over the box (its own
+ *  sgn unused). */
+void gpuSubSignedTerms(cudaSolverType* v, const SignedBox& box,
+                       const SignedTerm* terms, int nTerms,
                        cudaStream_t stream = 0);
 
 // =========================================================================
@@ -197,7 +246,8 @@ void gpuPhys2Solver3(cudaSolverType* d_solver, const cudaSolverType* d_physX,
                      cudaStream_t stream = 0);
 
 /**
- * Pack a single scalar field (Poisson).
+ * Pack a single scalar field.  Used only by the unit tests and the 7-point
+ * images (not used).
  * Krylov index: (i-1)*(ny-2)*(nz-2) + (j-1)*(nz-2) + (k-1)
  */
 void gpuPhys2Solver1(cudaSolverType* d_solver, const cudaSolverType* d_phys,
@@ -212,7 +262,8 @@ void gpuSolver2Phys3(cudaSolverType* d_physX, cudaSolverType* d_physY,
                      int nx, int ny, int nz, cudaStream_t stream = 0);
 
 /**
- * Unpack a single scalar field (Poisson).
+ * Unpack a single scalar field.  Used only by the unit tests and the
+ * 7-point images (not used); the cleanings use gpuSolver2PhysLap27.
  */
 void gpuSolver2Phys1(cudaSolverType* d_phys, const cudaSolverType* d_solver,
                      int nx, int ny, int nz, cudaStream_t stream = 0);

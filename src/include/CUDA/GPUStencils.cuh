@@ -1,3 +1,6 @@
+#ifndef GPU_STENCILS_CUH
+#define GPU_STENCILS_CUH
+
 /**
  * @file GPUStencils.cuh
  * @brief GPU stencil kernels for the iPIC3D GPU field solver.
@@ -9,9 +12,6 @@
  * All kernels operate on flat device pointers (row-major [nx][ny][nz]).
  * Grid dimensions include ghost cells.
  */
-
-#ifndef GPU_STENCILS_CUH
-#define GPU_STENCILS_CUH
 
 #include "cudaTypeDef.cuh"
 
@@ -37,7 +37,7 @@ void gpuGradC2N(cudaSolverType* gradXN, cudaSolverType* gradYN,
  * ghost cell plane from the ghost node plane.
  * Input on node grid [nxn][nyn][nzn] (nxn=nxc+1, etc.).
  * Not used currently: the Maxwell images evaluate it inside
- * gpuMaxwellLocalCenterOps (the image-reference test uses it as reference).
+ * gpuMaxwellLocalCenterOps (the unit tests use it as reference).
  */
 void gpuGradN2C(cudaSolverType* gradXC, cudaSolverType* gradYC,
                 cudaSolverType* gradZC, const cudaSolverType* scFieldN, int nxc,
@@ -65,7 +65,7 @@ void gpuDivN2C(cudaSolverType* divC, const cudaSolverType* vecXN,
  * Output on node grid [nxn][nyn][nzn], interior i=1..nxn-2.
  * Input on center grid [nxc][nyc][nzc].
  * Not used currently: the Maxwell images evaluate it inside
- * gpuMaxwellLocalNodeFused (the image-reference test uses it as reference).
+ * gpuMaxwellLocalNodeFused (the unit tests use it as reference).
  */
 void gpuDivC2N(cudaSolverType* divN, const cudaSolverType* vecXC,
                const cudaSolverType* vecYC, const cudaSolverType* vecZC,
@@ -218,5 +218,102 @@ template <int N>
 void gpuSmoothFields(const SmoothFields<N>& fields, int nx, int ny, int nz,
                      cudaSolverType alpha, cudaSolverType beta3D,
                      SmoothRegion region, cudaStream_t stream = 0);
+
+// =========================================================================
+//  Device stencils at one point, shared by the kernels of GPUStencils.cu and
+//  the fused kernels of the divergence cleaning (GPUCleaning.cu).  Each
+//  difference along an axis is averaged over the 4 pairs of the other two.
+// =========================================================================
+
+/** The factors q = 0.25 / h of the three axes, computed once on the host
+ *  (0.25 * invd is exact): an averaged difference is q * (sum of the 4). */
+template <typename T> struct DiffScale {
+  T x, y, z;
+};
+template <typename T> inline DiffScale<T> diffScale(T invdx, T invdy, T invdz) {
+  return {0.25 * invdx, 0.25 * invdy, 0.25 * invdz};
+}
+
+#if defined(__CUDACC__) || defined(__HIPCC__)
+/** Row-major [i][j][k] index of an array with extents (., ny, nz). */
+__host__ __device__ __forceinline__ int stencilIdx(int i, int j, int k, int ny,
+                                                   int nz) {
+  return (i * ny + j) * nz + k;
+}
+
+/** gradC2N at node (i, j, k): the centres (i-1..i, j-1..j, k-1..k). */
+template <typename T>
+__device__ __forceinline__ void
+gradC2NAt(const T* __restrict__ C, int i, int j, int k, int nyc, int nzc,
+          const DiffScale<T>& q, T& gx, T& gy, T& gz) {
+  const auto c = [&](int ii, int jj, int kk) {
+    return C[stencilIdx(ii, jj, kk, nyc, nzc)];
+  };
+  const T c000 = c(i - 1, j - 1, k - 1), c001 = c(i - 1, j - 1, k);
+  const T c010 = c(i - 1, j, k - 1), c011 = c(i - 1, j, k);
+  const T c100 = c(i, j - 1, k - 1), c101 = c(i, j - 1, k);
+  const T c110 = c(i, j, k - 1), c111 = c(i, j, k);
+  gx = q.x * ((c111 - c011) + (c110 - c010) + (c101 - c001) + (c100 - c000));
+  gy = q.y * ((c111 - c101) + (c110 - c100) + (c011 - c001) + (c010 - c000));
+  gz = q.z * ((c111 - c110) + (c101 - c100) + (c011 - c010) + (c001 - c000));
+}
+
+/** gradN2C at centre (i, j, k): the nodes (i..i+1, j..j+1, k..k+1). */
+template <typename T>
+__device__ __forceinline__ void
+gradN2CAt(const T* __restrict__ N, int i, int j, int k, int nyn, int nzn,
+          const DiffScale<T>& q, T& gx, T& gy, T& gz) {
+  const auto n = [&](int ii, int jj, int kk) {
+    return N[stencilIdx(ii, jj, kk, nyn, nzn)];
+  };
+  const T n000 = n(i, j, k), n001 = n(i, j, k + 1);
+  const T n010 = n(i, j + 1, k), n011 = n(i, j + 1, k + 1);
+  const T n100 = n(i + 1, j, k), n101 = n(i + 1, j, k + 1);
+  const T n110 = n(i + 1, j + 1, k), n111 = n(i + 1, j + 1, k + 1);
+  gx = q.x * ((n100 - n000) + (n101 - n001) + (n110 - n010) + (n111 - n011));
+  gy = q.y * ((n010 - n000) + (n011 - n001) + (n110 - n100) + (n111 - n101));
+  gz = q.z * ((n001 - n000) + (n101 - n100) + (n011 - n010) + (n111 - n110));
+}
+
+/** divN2C at centre (i, j, k): the nodes (i..i+1, j..j+1, k..k+1). */
+template <typename T>
+__device__ __forceinline__ T divN2CAt(const T* __restrict__ X,
+                                      const T* __restrict__ Y,
+                                      const T* __restrict__ Z, int i, int j,
+                                      int k, int nyn, int nzn,
+                                      const DiffScale<T>& q) {
+  T cx, cy, cz, unused0, unused1;
+  gradN2CAt(X, i, j, k, nyn, nzn, q, cx, unused0, unused1);
+  gradN2CAt(Y, i, j, k, nyn, nzn, q, unused0, cy, unused1);
+  gradN2CAt(Z, i, j, k, nyn, nzn, q, unused0, unused1, cz);
+  return cx + cy + cz;
+}
+
+/** divC2N at node (i, j, k): the centres (i-1..i, j-1..j, k-1..k).  Not
+ *  built on gradC2NAt: its z sum is in another order. */
+template <typename T>
+__device__ __forceinline__ T divC2NAt(const T* __restrict__ X,
+                                      const T* __restrict__ Y,
+                                      const T* __restrict__ Z, int i, int j,
+                                      int k, int nyc, int nzc,
+                                      const DiffScale<T>& q) {
+  const auto c = [&](const T* a, int ii, int jj, int kk) {
+    return a[stencilIdx(ii, jj, kk, nyc, nzc)];
+  };
+  const T cx = q.x * ((c(X, i, j, k) - c(X, i - 1, j, k)) +
+                      (c(X, i, j, k - 1) - c(X, i - 1, j, k - 1)) +
+                      (c(X, i, j - 1, k) - c(X, i - 1, j - 1, k)) +
+                      (c(X, i, j - 1, k - 1) - c(X, i - 1, j - 1, k - 1)));
+  const T cy = q.y * ((c(Y, i, j, k) - c(Y, i, j - 1, k)) +
+                      (c(Y, i, j, k - 1) - c(Y, i, j - 1, k - 1)) +
+                      (c(Y, i - 1, j, k) - c(Y, i - 1, j - 1, k)) +
+                      (c(Y, i - 1, j, k - 1) - c(Y, i - 1, j - 1, k - 1)));
+  const T cz = q.z * ((c(Z, i, j, k) - c(Z, i, j, k - 1)) +
+                      (c(Z, i - 1, j, k) - c(Z, i - 1, j, k - 1)) +
+                      (c(Z, i, j - 1, k) - c(Z, i, j - 1, k - 1)) +
+                      (c(Z, i - 1, j - 1, k) - c(Z, i - 1, j - 1, k - 1)));
+  return cx + cy + cz;
+}
+#endif
 
 #endif // GPU_STENCILS_CUH

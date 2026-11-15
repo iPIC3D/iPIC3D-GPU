@@ -1,3 +1,6 @@
+#ifndef GPU_PHYSICS_KERNELS_CUH
+#define GPU_PHYSICS_KERNELS_CUH
+
 /**
  * @file GPUPhysicsKernels.cuh
  * @brief GPU kernel declarations for iPIC3D physics operations:
@@ -8,9 +11,6 @@
  * All host wrapper functions are callable from .cpp translation units
  * (they do not use <<<>>> syntax directly).
  */
-
-#ifndef GPU_PHYSICS_KERNELS_CUH
-#define GPU_PHYSICS_KERNELS_CUH
 
 #include "GPUPointLaunch.cuh"
 #include "OutflowBoundary.h"
@@ -265,13 +265,15 @@ void gpuGhostRowsXright(const CellArrayBatch& batch, int nxc, int nyc, int nzc,
 //  Fix B kernels for GEM / ForceFree
 // =========================================================================
 
-/** Fix center B for GEM (tanh profile on Y-boundary layers). */
+/** Fix center B for GEM (tanh profile on the ghost and 2 interior
+ *  Y-boundary layers, or the ghost layer only). */
 void gpuFixBcGEMKernel(cudaSolverType* Bxc, cudaSolverType* Byc,
                        cudaSolverType* Bzc, cudaSolverType B0x,
                        cudaSolverType B0y, cudaSolverType B0z,
                        cudaSolverType yStart, cudaSolverType dy,
                        cudaSolverType LyH, cudaSolverType delta, int side,
-                       int nxc, int nyc, int nzc, cudaStream_t stream = 0);
+                       int nxc, int nyc, int nzc, bool ghostOnly,
+                       cudaStream_t stream = 0);
 
 /** Fix node B for GEM (tanh profile using center Y coordinates). */
 void gpuFixBnGEMKernel(cudaSolverType* Bxn, cudaSolverType* Byn,
@@ -282,13 +284,15 @@ void gpuFixBnGEMKernel(cudaSolverType* Bxn, cudaSolverType* Byn,
                        int nxn, int nyn, int nzn, int nyc,
                        cudaStream_t stream = 0);
 
-/** Fix center B for ForceFree (tanh Bx, 1/cosh Bz on Y boundaries). */
+/** Fix center B for ForceFree (tanh Bx, 1/cosh Bz on Y boundaries; or the
+ *  ghost layer only). */
 void gpuFixBforcefreeKernel(cudaSolverType* Bxc, cudaSolverType* Byc,
                             cudaSolverType* Bzc, cudaSolverType B0x,
                             cudaSolverType B0y, cudaSolverType B0z,
                             cudaSolverType yStart, cudaSolverType dy,
                             cudaSolverType LyH, cudaSolverType delta, int side,
-                            int nxc, int nyc, int nzc, cudaStream_t stream = 0);
+                            int nxc, int nyc, int nzc, bool ghostOnly,
+                            cudaStream_t stream = 0);
 
 // =========================================================================
 //  ConstantChargePlanet kernels
@@ -313,19 +317,21 @@ void gpuConstantChargePlanet2DKernel(cudaSolverType* rhons, cudaSolverType val,
                                      int nzn, cudaStream_t stream = 0);
 
 // =========================================================================
-//  Center-to-center Laplacian (Poisson solver)
+//  Center-to-center 7-point Laplacian (not used currently: the cleaning
+//  solves use the 27-point operators of GPUCleaning.cuh)
 // =========================================================================
 
 /** 7-point center Laplacian of the interior cells of fC (face ghosts set by
  *  the caller), written packed into the Krylov vector lapK, p = (i nj + j) nk
- *  + k over the interior cells (layout of gpuPhys2Solver1). */
+ *  + k over the interior cells (layout of gpuPhys2Solver1).  Used only by
+ *  the unit tests and gpuPoissonImage (not used). */
 void gpuLapC2CToKrylov(cudaSolverType* lapK, const cudaSolverType* fC, int nxc,
                        int nyc, int nzc, cudaSolverType invdx2,
                        cudaSolverType invdy2, cudaSolverType invdz2,
                        cudaStream_t stream = 0);
 
-/** 7-point center Laplacian on the cell array.  Not used currently: the
- *  Poisson image writes the Krylov vector directly (gpuLapC2CToKrylov). */
+/** 7-point center Laplacian on the cell array.  Used only by the unit tests
+ *  (not used). */
 void gpuLapC2CKernel(cudaSolverType* lapC, const cudaSolverType* fC, int nxc,
                      int nyc, int nzc, cudaSolverType invdx2,
                      cudaSolverType invdy2, cudaSolverType invdz2,
@@ -334,9 +340,8 @@ void gpuLapC2CKernel(cudaSolverType* lapC, const cudaSolverType* fC, int nxc,
 /** 7-point center Laplacian that never reads the ghost layer.  The value
  *  beyond each face is ghostFactor[f] * (adjacent interior cell), with
  *  f = Xleft, Xright, Yleft, Yright, Zleft, Zright and factor 0 (zero
- *  ghost), +1 (copy) or -1 (antisymmetric).  Not used currently: the Poisson
- *  preconditioner applies this operator inside its Chebyshev step kernels
- *  (gpuChebyshevPoissonStep1/N). */
+ *  ghost), +1 (copy) or -1 (antisymmetric).  Used only by the unit tests
+ *  and gpuPoissonImageLocal (not used). */
 void gpuLapC2CLocalKernel(cudaSolverType* lapC, const cudaSolverType* fC,
                           int nxc, int nyc, int nzc, cudaSolverType invdx2,
                           cudaSolverType invdy2, cudaSolverType invdz2,

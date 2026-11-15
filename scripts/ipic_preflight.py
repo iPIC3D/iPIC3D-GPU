@@ -197,6 +197,14 @@ def print_report(cfg: Input) -> None:
     poisson_cycle = cfg.integer("PoissonCorrectionCycle", 10)
     divb = cfg.string("divBCorrection", "no")
     divb_cycle = cfg.integer("divBCorrectionCycle", 10)
+    # same rejections as Collective::ReadInput
+    for name, on, every in (("PoissonCorrectionCycle", poisson == "yes", poisson_cycle),
+                            ("divBCorrectionCycle", divb == "yes", divb_cycle)):
+        if on and every < 1:
+            raise SystemExit(f"{name} must be at least 1, not {every}")
+    div_cleaning_tol = cfg.real("DivCleaningTol", 1e-6)
+    if (poisson == "yes" or divb == "yes") and not 0.0 < div_cleaning_tol < 1.0:
+        raise SystemExit(f"DivCleaningTol must be in (0, 1), not {cxx(div_cleaning_tol)}")
     solver_type = cfg.string("SolverType", "GMRES")
 
     c = cfg.real("c", 1.0)
@@ -223,6 +231,15 @@ def print_report(cfg: Input) -> None:
     if not smooth_min <= smooth <= 1.0:
         raise SystemExit(f"Smooth must be in [{cxx(smooth_min)}, 1] for this "
                          f"{dims}D grid, not {cxx(smooth)}")
+    # same rejection as Collective::ReadInput: the div(B) face rules take the
+    # next inner node
+    if divb == "yes" and any(n < 2 and not p for n, p in
+                             ((nxc, periodic_x), (nyc, periodic_y), (nzc, periodic_z))):
+        raise SystemExit("divBCorrection needs at least 2 cells along every non-periodic "
+                         "direction (a single-cell direction must be periodic)")
+    outflow_layer_fields = cfg.string("OutflowLayerFields", "solved")
+    if outflow_layer_fields not in ("copy", "solved"):  # as Collective::ReadInput
+        raise SystemExit(f"OutflowLayerFields must be copy or solved, not {outflow_layer_fields}")
 
     planet_reflection = cfg.integer("planetReflectionType", 0)
     ns_solar = cfg.integer("ns_solar_wind", ns)
@@ -252,6 +269,7 @@ def print_report(cfg: Input) -> None:
     bc_em_zr = cfg.integer("bcEMfaceZright")
     bc_em_zl = cfg.integer("bcEMfaceZleft")
     yes_sal = cfg.integer("yes_sal", 0)
+    sal_tangential_b = cfg.integer("sal_tangential_B", 1)
     n_layers_sal = cfg.integer("n_layers_sal", 3)
 
     bc_p_xr = cfg.integer("bcPfaceXright", 1)
@@ -299,6 +317,22 @@ def print_report(cfg: Input) -> None:
     print(f"Zright : {bc_em_zr} ({bc_em_name(bc_em_zr)})")
     sal = "yes" if yes_sal else "no"
     print(f"SAL (absorbing layer): {sal}" + (f", n_layers={n_layers_sal}" if yes_sal else ""))
+    # same warning as Collective::Print: the open-face B treatment skips wall
+    # ranks with at most 8 cells along the face normal (meant for flat 2D
+    # directions); the last rank along an axis takes the remainder
+    for face, bc, periodic, cells, nlen, right, axis in (
+            ("Xleft", bc_em_xl, periodic_x, nxc, xlen, False, "x"),
+            ("Xright", bc_em_xr, periodic_x, nxc, xlen, True, "x"),
+            ("Yleft", bc_em_yl, periodic_y, nyc, ylen, False, "y"),
+            ("Yright", bc_em_yr, periodic_y, nyc, ylen, True, "y"),
+            ("Zleft", bc_em_zl, periodic_z, nzc, zlen, False, "z"),
+            ("Zright", bc_em_zr, periodic_z, nzc, zlen, True, "z")):
+        first = ceil_div(cells, nlen)
+        local = cells - first * (nlen - 1) if right else first
+        if bc == 2 and not periodic and cells > 1 and local <= 8:
+            print(f"WARNING: open face {face} has {local} cells per rank along "
+                  f"{axis}: the open-face B treatment needs at least 9 and is "
+                  f"skipped; use fewer ranks along {axis} (at least 9 cells per wall rank)")
     print("---------------------")
     print("Particle Boundary Conditions")
     print("---------------------")
@@ -320,6 +354,15 @@ def print_report(cfg: Input) -> None:
     if divb == "yes":
         line += f", every {divb_cycle} cycles (in gpuCalculateB)"
     print(line)
+    if divb == "yes" and yes_sal and not sal_tangential_b:
+        print("WARNING: full B SAL with the global div(B) cleaning: the cleaning "
+              "carries the SAL's B_n = B0_n at the faces into the whole box; use "
+              "sal_tangential_B = 1")
+    if divb == "yes" and not yes_sal and not periodic_x and bc_em_xl == 2:
+        print("WARNING: open Xleft face without SAL and the global div(B) "
+              "cleaning: the face sets the whole B, B_n included, to B0 every "
+              "cycle and the cleaning carries that face flux into the whole box; "
+              "use yes_sal = 1 with sal_tangential_B = 1")
     print("---------------------")
     print("Planet Boundary")
     print("---------------------")
@@ -480,24 +523,36 @@ def print_report(cfg: Input) -> None:
         if is_dipole:
             dev_planet += planet_frac * nop_i * 64.0
     # GPU field solver (EMfields3D::gpuSolverAllocate), as in Collective::Print:
-    # 41 node arrays (+3 for the smoothed E(n+theta) when E is smoothed), the
-    # 10 node moments of each species, 17 cell arrays, the Krylov vectors, the
-    # GMRES basis (GMRES_M + 1) and w, the lazy FGMRES basis Z and Chebyshev /
-    # block-Jacobi vectors, and the halo buffers (64 fields per direction).
+    # 35 node arrays (+1 PSI with the div(B) cleaning, +3 for the smoothed
+    # E(n+theta) when E is smoothed), the 10 node moments of each species, 16
+    # cell arrays, the Krylov vectors, the GMRES basis (GMRES_M + 1) and w, the
+    # lazy FGMRES basis Z and Chebyshev-solver / block-Jacobi vectors, the two
+    # Chebyshev iterates of the cleaning preconditioner, and the halo buffers
+    # (64 fields per direction).
     gmres_m = 20.0
     halo_max_batch = 64.0
     smooth_e = smooth != 1.0 and smooth_niter > 0  # EMfields3D::smoothingOn()
     int_n = float(nxn_loc - 2) * (nyn_loc - 2) * (nzn_loc - 2)
     n_maxwell = 3.0 * int_n
-    n_krylov = max(n_maxwell, int_c)
-    dev_solver = ((41.0 + (3.0 if smooth_e else 0.0) + 10.0 * ns) * grid_n
-                  + 17.0 * grid_c + 2.0 * n_maxwell + 4.0 * int_c
+    n_krylov = n_maxwell  # the longest Krylov vectors
+    div_e, div_b = poisson == "yes", divb == "yes"
+    cleaning = div_e or div_b
+    # the div(B) rows: the interior nodes, one row plane along a flat axis
+    int_b = (float(nxc_r if nxc == 1 and periodic_x else nxn_loc - 2)
+             * (nyc_r if nyc == 1 and periodic_y else nyn_loc - 2)
+             * (nzc_r if nzc == 1 and periodic_z else nzn_loc - 2))
+    dev_solver = ((35.0 + (1.0 if div_b else 0.0) + (3.0 if smooth_e else 0.0)
+                   + 10.0 * ns) * grid_n
+                  + 16.0 * grid_c + 2.0 * n_maxwell
+                  + (2.0 * int_c if div_e else 0.0) + (2.0 * int_b if div_b else 0.0)
                   + (gmres_m + 2.0) * n_krylov)
-    if poisson == "yes" or divb == "yes" or solver_type == "FGMRESBlockJacobi":
+    if cleaning or solver_type == "FGMRESBlockJacobi":
         dev_solver += gmres_m * n_krylov
     if solver_type == "Chebyshev":
         dev_solver += 4.0 * n_maxwell
-    elif solver_type == "FGMRESBlockJacobi":
+    if cleaning:  # the two Chebyshev iterates of the cleaning preconditioner
+        dev_solver += 2.0 * max(int_c if div_e else 0.0, int_b if div_b else 0.0)
+    if solver_type == "FGMRESBlockJacobi":
         dev_solver += 2.0 * n_maxwell
     dev_solver += 2.0 * halo_max_batch * 2.0 * (
         float(nyn_loc) * nzn_loc + float(nxn_loc) * nzn_loc + float(nxn_loc) * nyn_loc)

@@ -1,3 +1,6 @@
+#ifndef EM_FIELDS_3D_H
+#define EM_FIELDS_3D_H
+
 /* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
  * Publications that use results from iPIC3D need to properly cite
@@ -25,9 +28,6 @@
  * domain.
  */
 
-#ifndef EM_FIELDS_3D_H
-#define EM_FIELDS_3D_H
-
 #include "Alloc.h"
 #include "Basic.h"
 #include "asserts.h"
@@ -41,6 +41,7 @@
 #include "OutflowBoundary.h"
 #include "cudaTypeDef.cuh"
 
+#include "GPUCleaning.cuh"
 #include "GPUFieldArray.cuh"
 #include "GPUHaloComm.cuh"
 #include "GPUMaxwellLocal.cuh"
@@ -67,8 +68,10 @@ public:
    *  HatFunctions, the smoothing routines and gpuMaxwellImage are compiled
    *  for both modes (template parameter): the public gpuCalculate* run the
    *  mode of the run, the public gpuMaxwellImage the one of
-   *  gpuMaxwellImageFn().  The other exchanges (Maxwell source, Poisson
-   *  solves) are blocking. */
+   *  gpuMaxwellImageFn(), the cleaning images (gpuCleaningImage) Overlap
+   *  where their rows split (Lap27Rows::split).
+   *  The other exchanges (Maxwell source, the rest of the cleanings) are
+   *  blocking, and a div(B) cleaning cycle runs the B update blocking. */
   enum class HaloMode { Blocking, Overlap };
 
   /** Outcome of a Krylov solve, read by the field-solver guard after the
@@ -585,7 +588,8 @@ public:
 
   // ---- GPU Solver: field-solver methods ----
   // gpuCalculateE, gpuCalculateB and gpuCalculateHatFunctions run the
-  // instantiation of the run's HaloMode (input HaloOverlap).
+  // instantiation of the run's HaloMode (input HaloOverlap), except
+  // gpuCalculateB on a div(B) cleaning cycle, which runs Blocking.
   /** Solve for E(n+theta): div(E) correction of E^n (PoissonCorrection),
    * implicit Maxwell solve into Exth, and, when E is smoothed, the smoothed
    * E(n+theta) in ExthSmooth; halo exchange and post-solve open-boundary
@@ -599,8 +603,9 @@ public:
    * end of gpuCalculateB, after Faraday's law has used Exth. */
   void gpuAdvanceE();
   /** Complete the step: B by Faraday's law from the unsmoothed Exth, its
-   * boundary conditions and case fixes, interpolation to the nodes and div(B)
-   * cleaning (divBCorrection), then E to n+1 (gpuAdvanceE). */
+   * boundary conditions and case fixes, div(B) cleaning of the cell B
+   * (divBCorrection), interpolation to the nodes, then E to n+1
+   * (gpuAdvanceE). */
   void gpuCalculateB(int cycle);
   /** Build the hat quantities (rhohat, Jhat) of the implicit field solve;
    * cycle=-1 denotes initialization. */
@@ -847,7 +852,8 @@ public:
    * fieldCopyLayersXright() cell planes.  Applied once per cycle, after
    * Faraday's law (gpuCalculateB): the blend is not idempotent.  ghostOnly
    * treats only the ghost layer, whose value the full call sets independently
-   * of the layers: gpuMaxwellSource restores it after its ghost exchange. */
+   * of the layers: gpuMaxwellSource restores it after its ghost exchange,
+   * gpuApplyDivBCleaning after its correction. */
   void gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
                               cudaSolverType* dZ, int nx, int ny, int nz,
                               bool ghostOnly = false);
@@ -868,12 +874,12 @@ public:
                        cudaSolverType* dZ);
 
   // ---- GPU Solver: case-specific B fixes ----
-  /** GPU fix center B for GEM case. */
-  void gpuFixBcGEM();
+  /** GPU fix center B for GEM case (ghostOnly: the ghost layer only). */
+  void gpuFixBcGEM(bool ghostOnly = false);
   /** GPU fix node B for GEM case. */
   void gpuFixBnGEM();
-  /** GPU fix center B for ForceFree case. */
-  void gpuFixBforcefree();
+  /** GPU fix center B for ForceFree case (ghostOnly: the ghost layer only). */
+  void gpuFixBforcefree(bool ghostOnly = false);
 
   // ---- GPU Solver: ConstantChargePlanet ----
   /** GPU ConstantChargePlanet: set rhons inside sphere. */
@@ -883,38 +889,98 @@ public:
   void gpuConstantChargePlanet2DPlaneXZ(double R, double x_center,
                                         double z_center);
 
-  // ---- GPU Solver: Poisson/divB correction ----
-  /** GPU Poisson image operator (laplacian on centers, with communication). */
+  // ---- GPU Solver: div(E) and div(B) cleaning (GPUCleaning.cuh) ----
+  /** 7-point Laplacian image on the centres (with communication).  Not used
+   *  currently: the div(E) solve uses gpuCleaningImage. */
   void gpuPoissonImage(cudaSolverType* d_im, cudaSolverType* d_vec);
-  /** GPU Poisson image operator, communication-free (computes -∇², positive
-   * eigenvalues).  Physical faces use the ghost rule of gpuPoissonImage, a
-   * periodic direction with one cell is flat, rank interfaces are cut with
-   * zero ghosts (block Jacobi).  Not used currently: the Chebyshev
-   * preconditioner applies the same operator inside its step kernels. */
+  /** Communication-free 7-point -∇² (positive eigenvalues): physical faces
+   *  use the ghost rule of gpuPoissonImage, a periodic direction with one
+   *  cell is flat, rank interfaces are cut with zero ghosts.  Not used
+   *  currently. */
   void gpuPoissonImageLocal(cudaSolverType* d_im, cudaSolverType* d_vec);
-  /** Analytic eigenvalue bounds of the local -∇², eigMin floored at
-   * eigMax / PoissonChebEigRatio and both rescaled (once per simulation). */
-  void computePoissonChebyshevEigenvalues();
-  /** Chebyshev preconditioner for Poisson (communication-free, analytic
-   * eigenvalues). */
-  void gpuChebyshevPrecondPoisson(cudaSolverType* d_x, cudaSolverType* d_b);
-  /** GPU FGMRES(m) with Chebyshev preconditioner for Poisson (divergence
-   * cleaning). */
-  KrylovSolveStatus gpuFGMRES_PoissonChebyshev(cudaSolverType* d_x, int n,
-                                               cudaSolverType* d_b, int m,
-                                               int max_iter, cudaSolverType tol,
-                                               MPI_Comm fieldcomm);
-  /** With every direction periodic, subtract from the packed right-hand side
-   * d_b of a Poisson solve its global mean, the component outside the range
-   * of the operator. */
-  void gpuRemovePoissonMean(cudaSolverType* d_b);
-  /** GPU Poisson correction for div(E) cleaning. */
-  void gpuPoissonCorrection(int cycle);
-  /** Divergence cleaning of B: solve lap(PSI) = div(B) with PSI = 0 beyond
-   * the physical faces and subtract grad(PSI) from the node B on every
-   * node, as the div(E) correction does. */
-  void gpuApplyDivBCleaning(int cycle);
 
+private:
+  /** div(E) cleaning (PoissonCorrection, on its cycles; gpuCalculateE):
+   *  solve divN2C(gradC2N phi) = divN2C(E) - 4 pi rho, then E -= gradC2N phi
+   *  on the nodes. */
+  void gpuPoissonCorrection(int cycle);
+  /** div(B) cleaning (gpuCalculateB on a cleaning cycle, divBCorrection on):
+   *  solve divC2N(gradN2C psi) = divC2N(Bc) on the nodes (zero normal
+   *  gradient of psi on perfect conductors, psi = 0 on the other physical
+   *  faces), then Bc -= gradN2C psi on the cells; restores the ghost cells of
+   *  Bc. */
+  void gpuApplyDivBCleaning(int cycle);
+  /** Chebyshev interval of a local cleaning operator (gpuSolverAllocate). */
+  struct ChebBounds {
+    double min = 0.0, max = 0.0;
+  };
+  /** A cleaning solve, set up by gpuSolverAllocate when that cleaning is on;
+   *  buf is the array its image unpacks into (d_PHI, cells; d_PSI, nodes). */
+  struct CleaningSolve {
+    Lap27Op op{};
+    Lap27Rows rows{};
+    ChebBounds cheb;
+    CleaningNullSpace null{};
+    GPUFieldArray3* buf = nullptr;
+    bool cells = false;
+    const char* name = "";  // "div(E)", "div(B)"
+    const char* label = ""; // of the FGMRES output
+    GPUKrylovVector x, b;
+  };
+  bool isDivBCleaningCycle(int cycle) const {
+    return divBCorrection && cycle % divBCorrectionCycle == 0;
+  }
+  /** A flat axis: one periodic cell on one rank (the flat direction of a 2D
+   *  run). */
+  bool flatAxis(int a) const;
+  /** Extent with ghosts of the div(B) rows along axis a: the nodes, or the
+   *  cells on a flat axis, whose two interior node planes are one periodic
+   *  node (Lap27Op::twin). */
+  int divBExtent(int a) const {
+    const int cells[3] = {nxc, nyc, nzc}, nodes[3] = {nxn, nyn, nzn};
+    return flatAxis(a) ? cells[a] : nodes[a];
+  }
+  /** Slots of d_cleanLines_ for the null-space sums, then as many for the
+   *  line coefficients (cleaningNullSpace). */
+  int cleanLinesSlots() const { return 1 + nxn + nyn + nzn; }
+  /** The Chebyshev interval of a local cleaning operator (printed). */
+  ChebBounds cleaningChebBounds(const Lap27Op& op, const char* label);
+  /** A field the right-hand side of a cleaning was computed from, weight
+   *  times its squared norm adding to the round-off scale. */
+  struct RoundOffTerm {
+    const cudaSolverType* data;
+    size_t n;
+    double weight;
+  };
+  /** Image of the solve cleaning_ points to, in halo mode M: unpack into its
+   *  buf (face rules), exchange the halo, 27-point image; the cell ghosts of
+   *  the physical faces must be 0 (gpuPoissonCorrection sets them once per
+   *  solve). */
+  template <HaloMode M>
+  void gpuCleaningImage(cudaSolverType* d_im, cudaSolverType* d_vec);
+  /** Its preconditioner: x ≈ L^-1 b (gpuChebyshevCleaning). */
+  void gpuCleaningPrecond(cudaSolverType* d_x, cudaSolverType* d_b);
+  /** FGMRES(CLEANING_M) of s from x = 0 to divCleaningTol, after removing
+   *  the null space from s.b; false (nothing solved) when s.b is at the
+   *  round-off of the fields in scale. */
+  bool gpuCleaningSolve(CleaningSolve& s,
+                        const std::vector<RoundOffTerm>& scale, int cycle);
+  /** Subtract from the right-hand side of a cleaning solve its components on
+   *  the null space of the operator (ns, CleaningNullSpace). */
+  void gpuRemoveCleaningNullSpace(cudaSolverType* d_b,
+                                  const CleaningNullSpace& ns);
+  /** Whether the right-hand side b is at the round-off of the fields it was
+   *  computed from, ||b||² <= (1e3 eps)² sum weight ||field||² over the
+   *  ranks: then there is nothing to clean. */
+  bool cleaningAtRoundOff(const cudaSolverType* d_b, int n,
+                          const std::vector<RoundOffTerm>& fields);
+  /** The case-specific fixes of the cell B (GEM, ForceFree walls; ghostOnly:
+   *  their ghost layers only). */
+  void gpuFixBcCase(bool ghostOnly = false);
+  bool isGemCase() const; // GEM, GEMnoPert, GEMDoubleHarris
+  bool isForceFreeCase() const;
+
+public:
   // ---- Field-solver guard (SolverSourceGrowthLimit,
   //      SolverStopOnNonConvergence) ----
   /** Stop the run if the Maxwell right-hand side norm is not finite or grew
@@ -929,7 +995,8 @@ public:
   [[noreturn]] void stopForSolverFailure(const std::string& reason) const;
 
   // ---- GPU Solver: additional halo exchange ----
-  /** Center box-stencil halo exchange using field communicator. */
+  /** Center box-stencil halo exchange using field communicator.  Not used
+   *  currently (only gpuPoissonImage calls it). */
   void gpuCommunicateCenterBoxStencilBC(int nx, int ny, int nz,
                                         GPUFieldArray3& gpuArr,
                                         int bcFaceXright, int bcFaceXleft,
@@ -1246,15 +1313,19 @@ private:
   int divBCorrectionCycle;
 
   // Krylov vector lengths: 3 x interior nodes (Maxwell), interior cells
-  // (Poisson)
+  // (div(E) cleaning), interior nodes with one row plane along a flat axis
+  // (div(B) cleaning)
   int maxwellKrylovSize_ = 0;
-  int poissonKrylovSize_ = 0;
+  int divEKrylovSize_ = 0;
+  int divBKrylovSize_ = 0;
 
   /*! RESTART BOOLEAN */
   int restart1;
 
-  /*! tolerance of the Maxwell (GMRES, FGMRES) and Poisson solves */
+  /*! tolerance of the Maxwell solve (GMRES, FGMRES) */
   double GMREStol;
+  /*! tolerance of the div(E) and div(B) cleaning solves (FGMRES) */
+  double divCleaningTol;
   /*! Maxwell solver: "GMRES" (default, also any unknown value),
    * "FGMRESBlockJacobi" or "Chebyshev" */
   std::string SolverType;
@@ -1322,7 +1393,8 @@ private:
   GPUFieldArray4 d_pXXsn, d_pXYsn, d_pXZsn;
   GPUFieldArray4 d_pYYsn, d_pYZsn, d_pZZsn;
 
-  // Potentials (center-based)
+  // Potentials of the cleanings: PHI of div(E) on the centres, PSI of div(B)
+  // on the nodes; both also unpack the Krylov vectors of their image
   GPUFieldArray3 d_PHI, d_PSI;
 
   // External B (node-based)
@@ -1338,22 +1410,12 @@ private:
   GPUFieldArray3 d_Dx, d_Dy, d_Dz;
   GPUFieldArray3 d_vectX, d_vectY, d_vectZ;
   GPUFieldArray3 d_divC;
+  // cell scratch of the Maxwell images (poissonTemp/Im also of the 7-point
+  // images, not used currently)
+  GPUFieldArray3 d_divBwork, d_divE_work, d_poissonTemp, d_poissonIm;
 
-  // divB cleaning work arrays
-  GPUFieldArray3 d_divBwork;
-  GPUFieldArray3 d_gradPSIX, d_gradPSIY, d_gradPSIZ;
-
-  // Poisson / Maxwell Krylov vectors
+  // Krylov vectors of the Maxwell solve (the cleanings: CleaningSolve)
   GPUKrylovVector d_xkrylovMaxwell, d_bkrylovMaxwell;
-  GPUKrylovVector d_xkrylovPoisson_B, d_bkrylovPoisson_B;
-  GPUKrylovVector d_xkrylovPoisson_E, d_bkrylovPoisson_E;
-
-  // div(E) correction work arrays
-  GPUFieldArray3 d_divE_work;
-  GPUFieldArray3 d_gradPHIX_work, d_gradPHIY_work, d_gradPHIZ_work;
-
-  // Poisson image work arrays
-  GPUFieldArray3 d_poissonTemp, d_poissonIm;
 
   // Smooth temp buffer
   GPUFieldArray3 d_smoothTemp;
@@ -1364,7 +1426,8 @@ private:
   // Reduction scratch buffer for GPU BLAS dot/norm operations
   cudaSolverType* d_blasScratch = nullptr;
 
-  // GPU GMRES workspace, persistently allocated for max(Maxwell, Poisson).
+  // GPU GMRES workspace, persistently allocated for the Maxwell length (the
+  // longest Krylov vectors).
   cudaSolverType* d_gmresV = nullptr; // [GMRES_MP1][max krylov length]
   cudaSolverType* d_gmresW = nullptr; // [max krylov length]
   std::size_t gmresVAlloc = 0;        // allocated d_gmresV element count
@@ -1374,7 +1437,7 @@ private:
   cudaSolverType* d_fgmresZ = nullptr; // [GMRES_M][max krylov length]
   std::size_t fgmresZAlloc = 0;        // allocated d_fgmresZ element count
 
-  // ---- GPU Chebyshev workspace (4 Krylov-sized vectors) ----
+  // ---- Chebyshev solver workspace (4 Maxwell vectors, lazy) ----
   cudaSolverType* d_chebY = nullptr;   // current iterate
   cudaSolverType* d_chebW = nullptr;   // new iterate
   cudaSolverType* d_chebZ = nullptr;   // previous iterate
@@ -1385,15 +1448,21 @@ private:
   double chebEigMin = 0.0; // 0 → will be set to 1.0
   double chebEigMax = 0.0; // 0 → estimated via power iteration
 
-  // Poisson Chebyshev preconditioner (analytic eigenvalues of local -∇²)
-  double poissonChebEigMin = 0.0;
-  double poissonChebEigMax = 0.0;
-  bool poissonChebComputed = false;
+  // The div(E) (cells) and div(B) (nodes) cleaning solves, and the one
+  // FGMRES runs (its image and preconditioner read it)
+  CleaningSolve divE_, divB_;
+  const CleaningSolve* cleaning_ = nullptr;
+  // the null-space sums, then the line coefficients (cleanLinesSlots() each)
+  cudaSolverType* d_cleanLines_ = nullptr;
+  // the two Chebyshev iterates of the cleaning preconditioner, of
+  // cleanChebLength_ each
+  cudaSolverType* d_cleanCheb_ = nullptr;
+  int cleanChebLength_ = 0;
   int poissonChebMaxIter =
-      10; // Chebyshev polynomial degree for Poisson preconditioner
+      20; // Chebyshev steps of the cleaning preconditioners
   double poissonChebRescaleEigMin = 1.0; // rescale factor for min eigenvalue
   double poissonChebRescaleEigMax = 1.0; // rescale factor for max eigenvalue
-  double poissonChebEigRatio = 1000.0;   // eigMin >= eigMax / this (<= 0: off)
+  double poissonChebEigRatio = 300.0;    // eigMin >= eigMax / this (<= 0: off)
 
   // Block-Jacobi preconditioner parameters
   int blockJacobiSweeps =
@@ -1415,15 +1484,25 @@ private:
   // Avoids per-call heap allocation and enables true async D→H DMA.
   static constexpr int GMRES_M = 20;
   static constexpr int GMRES_MP1 = GMRES_M + 1;
-  double* h_gmresReduceLocal =
-      nullptr; // pinned, [GMRES_MP1] for Arnoldi reductions
-  double* h_gmresReduceGlobal =
-      nullptr;                // pinned, [GMRES_MP1] for MPI_Allreduce output
-  double* h_gmresH = nullptr; // pinned, [GMRES_MP1 * GMRES_M] Hessenberg matrix
-  double* h_gmresG = nullptr; // pinned, [GMRES_MP1] residual vector
-  double* h_gmresCS = nullptr; // pinned, [GMRES_M] Givens cosines
-  double* h_gmresSN = nullptr; // pinned, [GMRES_M] Givens sines
-  double* h_gmresY = nullptr;  // pinned, [GMRES_MP1] back-substitution work
+  // Restart length of the cleaning solves.  Their vectors (interior cells or
+  // nodes) are at most a third of the Maxwell ones (3 x interior nodes), so
+  // the device workspace sized for GMRES_M Maxwell vectors holds the longer
+  // basis; the host buffers and the reduction scratch are sized for it.
+  static constexpr int CLEANING_M = 3 * GMRES_M;
+  static constexpr int KRYLOV_M_MAX =
+      CLEANING_M > GMRES_M ? CLEANING_M : GMRES_M;
+  static_assert(KRYLOV_M_MAX <= kMaxCombination,
+                "an Arnoldi step passes up to KRYLOV_M_MAX coefficients");
+  // pinned host buffers of the Arnoldi process, for up to KRYLOV_M_MAX
+  // vectors: reductions (local, global), Hessenberg matrix, residual,
+  // Givens cosines and sines, back substitution
+  double* h_gmresReduceLocal = nullptr;  // [KRYLOV_M_MAX + 1]
+  double* h_gmresReduceGlobal = nullptr; // [KRYLOV_M_MAX + 1]
+  double* h_gmresH = nullptr;            // [(KRYLOV_M_MAX + 1) * KRYLOV_M_MAX]
+  double* h_gmresG = nullptr;            // [KRYLOV_M_MAX + 1]
+  double* h_gmresCS = nullptr;           // [KRYLOV_M_MAX]
+  double* h_gmresSN = nullptr;           // [KRYLOV_M_MAX]
+  double* h_gmresY = nullptr;            // [KRYLOV_M_MAX + 1]
 
   // Dedicated non-blocking CUDA stream for the GPU field solver.
   // Avoids implicit serialisation with particle streams via the legacy default

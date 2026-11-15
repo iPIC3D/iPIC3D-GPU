@@ -62,6 +62,9 @@ private:
   };
   int read_enum_parameter(const char* option_name, const char* default_value,
                           const ConfigFile& config);
+  /** Stops the run on every rank unless ok; rank 0 prints "ERROR: in input
+   *  file <name> <fmt...>". */
+  void requireInput(bool ok, const char* fmt, ...) const;
 
 public:
   static const char* get_name_of_enum(int in);
@@ -282,6 +285,7 @@ public:
   double getVinj() const { return (Vinj); }
   double getCGtol() const { return (CGtol); }
   double getGMREStol() const { return (GMREStol); }
+  double getDivCleaningTol() const { return (DivCleaningTol); }
   int getNiterMover() const { return (NiterMover); }
   string getSolverType() const { return (SolverType); }
   int getChebyshevMaxIter() const { return (ChebyshevMaxIter); }
@@ -611,6 +615,8 @@ private:
   double CGtol;
   /*! GMRES solver stopping criterium tolerance */
   double GMREStol;
+  /*! tolerance of the div(E) and div(B) cleaning solves (FGMRES) */
+  double DivCleaningTol;
   /*! mover predictor correcto iteration */
   int NiterMover;
 

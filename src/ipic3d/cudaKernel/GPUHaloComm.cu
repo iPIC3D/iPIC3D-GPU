@@ -21,147 +21,53 @@ __device__ __forceinline__ int idx3(int i, int j, int k, int ny, int nz) {
 }
 
 // =========================================================================
-//  BC kernels – face boundary condition application
+//  BC kernel – face boundary condition application
 //  bcType  0 = Dirichlet 0 second-order  ghost = -interior
 //          1 = Dirichlet 0 first-order   ghost = 0
 //          2 = Neumann   0 first-order   ghost = interior
-//         -1 = ghost layer left unchanged (BC_FACE_KEEP)
+//          3 = even node mirror          ghost = second interior layer
+//              (BC_FACE_NODE_MIRROR: symmetric about the face node)
+//         -1 = ghost layer left unchanged (BC_FACE_KEEP, not launched)
 // =========================================================================
 
-__global__ void gpuBCfaceXleft(cudaSolverType* __restrict__ arr, int nx, int ny,
-                               int nz, int bcType) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x;
-  int k = blockIdx.y * blockDim.y + threadIdx.y;
-  if (j >= ny || k >= nz)
+/** The rule bcType on the ghost plane of one face, one thread per point
+ *  (1D launch): point t is (slow, fast) = (t / nFast, t % nFast), at index
+ *  base + slow * strideSlow + fast * strideFast, fast being k (j on a z
+ *  face); the first and second interior layers are step and 2 step away
+ *  (step: the index stride toward the interior). */
+__global__ void gpuBCfacePlane(cudaSolverType* __restrict__ arr, int base,
+                               int nFast, int strideSlow, int strideFast,
+                               int points, int step, int bcType) {
+  const int t = blockIdx.x * blockDim.x + threadIdx.x;
+  if (t >= points)
     return;
-  int dst = idx3(0, j, k, ny, nz);
-  int src = idx3(1, j, k, ny, nz);
+  const int slow = t / nFast;
+  const int dst = base + slow * strideSlow + (t - slow * nFast) * strideFast;
   switch (bcType) {
   case 0:
-    arr[dst] = -arr[src];
+    arr[dst] = -arr[dst + step];
     break;
   case 1:
     arr[dst] = 0.0;
     break;
   case 2:
-    arr[dst] = arr[src];
+    arr[dst] = arr[dst + step];
     break;
-  }
-}
-
-__global__ void gpuBCfaceXright(cudaSolverType* __restrict__ arr, int nx,
-                                int ny, int nz, int bcType) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x;
-  int k = blockIdx.y * blockDim.y + threadIdx.y;
-  if (j >= ny || k >= nz)
-    return;
-  int dst = idx3(nx - 1, j, k, ny, nz);
-  int src = idx3(nx - 2, j, k, ny, nz);
-  switch (bcType) {
-  case 0:
-    arr[dst] = -arr[src];
-    break;
-  case 1:
-    arr[dst] = 0.0;
-    break;
-  case 2:
-    arr[dst] = arr[src];
-    break;
-  }
-}
-
-__global__ void gpuBCfaceYleft(cudaSolverType* __restrict__ arr, int nx, int ny,
-                               int nz, int bcType) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  int k = blockIdx.y * blockDim.y + threadIdx.y;
-  if (i >= nx || k >= nz)
-    return;
-  int dst = idx3(i, 0, k, ny, nz);
-  int src = idx3(i, 1, k, ny, nz);
-  switch (bcType) {
-  case 0:
-    arr[dst] = -arr[src];
-    break;
-  case 1:
-    arr[dst] = 0.0;
-    break;
-  case 2:
-    arr[dst] = arr[src];
-    break;
-  }
-}
-
-__global__ void gpuBCfaceYright(cudaSolverType* __restrict__ arr, int nx,
-                                int ny, int nz, int bcType) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  int k = blockIdx.y * blockDim.y + threadIdx.y;
-  if (i >= nx || k >= nz)
-    return;
-  int dst = idx3(i, ny - 1, k, ny, nz);
-  int src = idx3(i, ny - 2, k, ny, nz);
-  switch (bcType) {
-  case 0:
-    arr[dst] = -arr[src];
-    break;
-  case 1:
-    arr[dst] = 0.0;
-    break;
-  case 2:
-    arr[dst] = arr[src];
-    break;
-  }
-}
-
-__global__ void gpuBCfaceZleft(cudaSolverType* __restrict__ arr, int nx, int ny,
-                               int nz, int bcType) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  int j = blockIdx.y * blockDim.y + threadIdx.y;
-  if (i >= nx || j >= ny)
-    return;
-  int dst = idx3(i, j, 0, ny, nz);
-  int src = idx3(i, j, 1, ny, nz);
-  switch (bcType) {
-  case 0:
-    arr[dst] = -arr[src];
-    break;
-  case 1:
-    arr[dst] = 0.0;
-    break;
-  case 2:
-    arr[dst] = arr[src];
-    break;
-  }
-}
-
-__global__ void gpuBCfaceZright(cudaSolverType* __restrict__ arr, int nx,
-                                int ny, int nz, int bcType) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  int j = blockIdx.y * blockDim.y + threadIdx.y;
-  if (i >= nx || j >= ny)
-    return;
-  int dst = idx3(i, j, nz - 1, ny, nz);
-  int src = idx3(i, j, nz - 2, ny, nz);
-  switch (bcType) {
-  case 0:
-    arr[dst] = -arr[src];
-    break;
-  case 1:
-    arr[dst] = 0.0;
-    break;
-  case 2:
-    arr[dst] = arr[src];
+  case BC_FACE_NODE_MIRROR:
+    arr[dst] = arr[dst + 2 * step];
     break;
   }
 }
 
 // =========================================================================
-//  Self-copy kernels – periodic face swap when rank == neighbour
+//  Self-copy kernels – periodic face swap when rank == neighbour (not used,
+//  see the batched kernels); contiguous index of the plane on threadIdx.x
 // =========================================================================
 
 __global__ void gpuSelfCopyFaceX(cudaSolverType* __restrict__ arr, int nx,
                                  int ny, int nz, int offset) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (j >= ny - 1 || k >= nz - 1)
     return;
   const int xLoSrc = 1 + offset;
@@ -173,8 +79,8 @@ __global__ void gpuSelfCopyFaceX(cudaSolverType* __restrict__ arr, int nx,
 
 __global__ void gpuSelfCopyFaceY(cudaSolverType* __restrict__ arr, int nx,
                                  int ny, int nz, int offset) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i >= nx - 1 || k >= nz - 1)
     return;
   const int yLoSrc = 1 + offset;
@@ -185,8 +91,8 @@ __global__ void gpuSelfCopyFaceY(cudaSolverType* __restrict__ arr, int nx,
 
 __global__ void gpuSelfCopyFaceZ(cudaSolverType* __restrict__ arr, int nx,
                                  int ny, int nz, int offset) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i >= nx - 1 || j >= ny - 1)
     return;
   const int zLoSrc = 1 + offset;
@@ -196,7 +102,7 @@ __global__ void gpuSelfCopyFaceZ(cudaSolverType* __restrict__ arr, int nx,
 }
 
 // =========================================================================
-//  Self-copy kernels – periodic edge swap when rank == neighbour
+//  Self-copy kernels – periodic edge swap when rank == neighbour (not used)
 // =========================================================================
 
 __global__ void gpuSelfCopyEdgeX(cudaSolverType* __restrict__ arr, int nx,
@@ -316,7 +222,7 @@ __global__ void gpuSelfCopyEdgeZ(cudaSolverType* __restrict__ arr, int nx,
 }
 
 // =========================================================================
-//  Self-copy kernels – periodic corner swap
+//  Self-copy kernels – periodic corner swap (not used)
 // =========================================================================
 
 __global__ void gpuSelfCopyCornerX(cudaSolverType* __restrict__ arr, int nx,
@@ -405,14 +311,15 @@ __global__ void gpuSelfCopyCornerZ(cudaSolverType* __restrict__ arr, int nx,
 }
 
 // =========================================================================
-//  Batched self-copy kernels – face (uses blockIdx.z for field index)
+//  Batched self-copy kernels – face (uses blockIdx.z for field index; the
+//  contiguous index of the plane on threadIdx.x)
 // =========================================================================
 
 __global__ void
 gpuBatchSelfCopyFaceX(cudaSolverType* const* __restrict__ fields, int nx,
                       int ny, int nz, int offset) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (j >= ny - 1 || k >= nz - 1)
     return;
   cudaSolverType* arr = fields[blockIdx.z];
@@ -425,8 +332,8 @@ gpuBatchSelfCopyFaceX(cudaSolverType* const* __restrict__ fields, int nx,
 __global__ void
 gpuBatchSelfCopyFaceY(cudaSolverType* const* __restrict__ fields, int nx,
                       int ny, int nz, int offset) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i >= nx - 1 || k >= nz - 1)
     return;
   cudaSolverType* arr = fields[blockIdx.z];
@@ -439,8 +346,8 @@ gpuBatchSelfCopyFaceY(cudaSolverType* const* __restrict__ fields, int nx,
 __global__ void
 gpuBatchSelfCopyFaceZ(cudaSolverType* const* __restrict__ fields, int nx,
                       int ny, int nz, int offset) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i >= nx - 1 || j >= ny - 1)
     return;
   cudaSolverType* arr = fields[blockIdx.z];
@@ -666,13 +573,13 @@ gpuBatchSelfCopyCornerZ(cudaSolverType* const* __restrict__ fields, int nx,
 }
 
 // =========================================================================
-//  Additive interpolation kernels (for communicateInterp)
+//  Additive interpolation kernels (for communicateInterp; not used)
 // =========================================================================
 
 __global__ void gpuAddFaceX(cudaSolverType* __restrict__ arr, int nx, int ny,
                             int nz, bool hasXright, bool hasXleft) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (j > ny - 2 || k > nz - 2)
     return;
   if (hasXright)
@@ -683,8 +590,8 @@ __global__ void gpuAddFaceX(cudaSolverType* __restrict__ arr, int nx, int ny,
 
 __global__ void gpuAddFaceY(cudaSolverType* __restrict__ arr, int nx, int ny,
                             int nz, bool hasYright, bool hasYleft) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nx - 2 || k > nz - 2)
     return;
   if (hasYright)
@@ -695,8 +602,8 @@ __global__ void gpuAddFaceY(cudaSolverType* __restrict__ arr, int nx, int ny,
 
 __global__ void gpuAddFaceZ(cudaSolverType* __restrict__ arr, int nx, int ny,
                             int nz, bool hasZright, bool hasZleft) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nx - 2 || j > ny - 2)
     return;
   if (hasZright)
@@ -788,89 +695,62 @@ __global__ void gpuAddCorner(cudaSolverType* __restrict__ arr, int nx, int ny,
 //  gpuBCface – apply face boundary conditions on GPU array
 // =========================================================================
 
-static constexpr int BC_BLOCK = 16;
+/** Threads per block of gpuBCfacePlane.  A face kernel is latency-bound;
+ *  small blocks spread a plane over more SMs.  On 2D and 3D faces this
+ *  measured as fast as 16x16 2D blocks, and faster than 256-thread ones. */
+static constexpr int kBCBlock = 64;
+
+/** The face rules bcType on the faces with physical[f], f = Xleft, Xright,
+ *  Yleft, Yright, Zleft, Zright: the launch order, which decides the edge
+ *  and corner ghosts two faces share. */
+static void launchBCfaces(cudaSolverType* d, int nx, int ny, int nz,
+                          const bool physical[6], const int bcType[6],
+                          cudaStream_t stream) {
+  const int n[3] = {nx, ny, nz};
+  const int stride[3] = {ny * nz, nz, 1};
+  for (int f = 0; f < 6; f++) {
+    if (!physical[f] || bcType[f] == BC_FACE_KEEP)
+      continue;
+    const int dir = f / 2;
+    const bool right = f % 2 == 1;
+    // in-plane axes: the slow one, then the fast one (k, or j on a z face)
+    const int slow = dir == 0 ? 1 : 0, fast = dir == 2 ? 1 : 2;
+    const int points = n[slow] * n[fast];
+    gpuBCfacePlane<<<(points + kBCBlock - 1) / kBCBlock, kBCBlock, 0, stream>>>(
+        d, right ? (n[dir] - 1) * stride[dir] : 0, n[fast], stride[slow],
+        stride[fast], points, right ? -stride[dir] : stride[dir], bcType[f]);
+  }
+}
 
 void gpuBCface(int nx, int ny, int nz, GPUFieldArray3& gpuArr, int bcFaceXright,
                int bcFaceXleft, int bcFaceYright, int bcFaceYleft,
                int bcFaceZright, int bcFaceZleft, const VirtualTopology3D* vct,
                cudaStream_t stream) {
-  cudaSolverType* d = gpuArr.devPtr();
-
-  // X boundaries
-  if (vct->getXleft_neighbor() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((ny + BC_BLOCK - 1) / BC_BLOCK, (nz + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceXleft<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceXleft);
-  }
-  if (vct->getXright_neighbor() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((ny + BC_BLOCK - 1) / BC_BLOCK, (nz + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceXright<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceXright);
-  }
-
-  // Y boundaries
-  if (vct->getYleft_neighbor() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((nx + BC_BLOCK - 1) / BC_BLOCK, (nz + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceYleft<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceYleft);
-  }
-  if (vct->getYright_neighbor() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((nx + BC_BLOCK - 1) / BC_BLOCK, (nz + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceYright<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceYright);
-  }
-
-  // Z boundaries
-  if (vct->getZleft_neighbor() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((nx + BC_BLOCK - 1) / BC_BLOCK, (ny + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceZleft<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceZleft);
-  }
-  if (vct->getZright_neighbor() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((nx + BC_BLOCK - 1) / BC_BLOCK, (ny + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceZright<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceZright);
-  }
+  const bool physical[6] = {vct->getXleft_neighbor() == MPI_PROC_NULL,
+                            vct->getXright_neighbor() == MPI_PROC_NULL,
+                            vct->getYleft_neighbor() == MPI_PROC_NULL,
+                            vct->getYright_neighbor() == MPI_PROC_NULL,
+                            vct->getZleft_neighbor() == MPI_PROC_NULL,
+                            vct->getZright_neighbor() == MPI_PROC_NULL};
+  const int bcType[6] = {bcFaceXleft,  bcFaceXright, bcFaceYleft,
+                         bcFaceYright, bcFaceZleft,  bcFaceZright};
+  launchBCfaces(gpuArr.devPtr(), nx, ny, nz, physical, bcType, stream);
 }
 
 void gpuBCface_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
                  int bcFaceXright, int bcFaceXleft, int bcFaceYright,
                  int bcFaceYleft, int bcFaceZright, int bcFaceZleft,
                  const VirtualTopology3D* vct, cudaStream_t stream) {
-  // Same face kernels as gpuBCface; physical faces are found with the
-  // particle-topology neighbours.
-  cudaSolverType* d = gpuArr.devPtr();
-
-  if (vct->getXleft_neighbor_P() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((ny + BC_BLOCK - 1) / BC_BLOCK, (nz + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceXleft<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceXleft);
-  }
-  if (vct->getXright_neighbor_P() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((ny + BC_BLOCK - 1) / BC_BLOCK, (nz + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceXright<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceXright);
-  }
-  if (vct->getYleft_neighbor_P() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((nx + BC_BLOCK - 1) / BC_BLOCK, (nz + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceYleft<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceYleft);
-  }
-  if (vct->getYright_neighbor_P() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((nx + BC_BLOCK - 1) / BC_BLOCK, (nz + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceYright<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceYright);
-  }
-  if (vct->getZleft_neighbor_P() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((nx + BC_BLOCK - 1) / BC_BLOCK, (ny + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceZleft<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceZleft);
-  }
-  if (vct->getZright_neighbor_P() == MPI_PROC_NULL) {
-    dim3 block(BC_BLOCK, BC_BLOCK);
-    dim3 grid((nx + BC_BLOCK - 1) / BC_BLOCK, (ny + BC_BLOCK - 1) / BC_BLOCK);
-    gpuBCfaceZright<<<grid, block, 0, stream>>>(d, nx, ny, nz, bcFaceZright);
-  }
+  // physical faces from the particle-topology neighbours
+  const bool physical[6] = {vct->getXleft_neighbor_P() == MPI_PROC_NULL,
+                            vct->getXright_neighbor_P() == MPI_PROC_NULL,
+                            vct->getYleft_neighbor_P() == MPI_PROC_NULL,
+                            vct->getYright_neighbor_P() == MPI_PROC_NULL,
+                            vct->getZleft_neighbor_P() == MPI_PROC_NULL,
+                            vct->getZright_neighbor_P() == MPI_PROC_NULL};
+  const int bcType[6] = {bcFaceXleft,  bcFaceXright, bcFaceYleft,
+                         bcFaceYright, bcFaceZleft,  bcFaceZright};
+  launchBCfaces(gpuArr.devPtr(), nx, ny, nz, physical, bcType, stream);
 }
 
 // =========================================================================

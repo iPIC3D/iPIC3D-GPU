@@ -63,6 +63,7 @@ __global__ void k_gradC2N(T* __restrict__ gradXN, T* __restrict__ gradYN,
  * gradN2C: gradient node→center.
  * Output on center grid: i=iLo..iHi (interior 1..nxc-2 by default), j, k
  * interior → reads node[i..i+1].
+ * Not used (gpuGradN2C, a unit-test reference).
  */
 template <typename T>
 __global__ void k_gradN2C(T* __restrict__ gradXC, T* __restrict__ gradYC,
@@ -140,7 +141,8 @@ __global__ void k_divN2C(T* __restrict__ divC, const T* __restrict__ vecXN,
 #undef N_
 }
 
-/** divC2N: divergence center→node.  Reads center[i-1..i] for node output. */
+/** divC2N: divergence center→node.  Reads center[i-1..i] for node output.
+ *  Not used (gpuDivC2N, a unit-test reference). */
 template <typename T>
 __global__ void k_divC2N(T* __restrict__ divN, const T* __restrict__ vecXC,
                          const T* __restrict__ vecYC,
@@ -523,7 +525,7 @@ void gpuDivSymmTensorN2C(cudaSolverType* divCX, cudaSolverType* divCY,
 // =========================================================================
 
 // -----------------------------------------------------------------
-//  divC2N  (centre → node divergence)
+//  divC2N  (centre → node divergence; these variants are not used)
 // -----------------------------------------------------------------
 template <typename T>
 __device__ __forceinline__ void
@@ -614,7 +616,7 @@ void gpuDivC2N_boundary(cudaSolverType* divN, const cudaSolverType* vXC,
 }
 
 // -----------------------------------------------------------------
-//  gradC2N  (centre → node gradient)
+//  gradC2N  (centre → node gradient; these variants are not used)
 // -----------------------------------------------------------------
 template <typename T>
 __device__ __forceinline__ void

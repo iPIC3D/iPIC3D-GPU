@@ -1,16 +1,20 @@
 /**
  * Run with mpirun -n 8 ./gpuMaxwellSolverTest --case all
  * to execute all test cases, or with --case periodic, --case reflective,
- * --case manufactured, --case oblique-wave, --case boundary-rows or
- * --case image-reference to run a single case.
+ * --case manufactured, --case oblique-wave, --case boundary-rows,
+ * --case smoothed-faces or --case image-reference to run a single case.
  *
- * boundary-rows, and image-reference where its layout leaves x non-periodic,
- * use an open inflow face at x-left (bcEMface = bcPface = 2,
+ * boundary-rows, smoothed-faces, and image-reference where its layout leaves
+ * x non-periodic, use an open inflow face at x-left (bcEMface = bcPface = 2,
  * ApplyInflowBcsEImage = 1).
  *   boundary-rows (x-right perfect conductor): gpuMaxwellImage of a random
  *     vector must already hold the face rows, i.e. equal itself after
  *     gpuPerfectConductorImages and gpuOpenBoundaryInflowEImage are applied
  *     to it again.
+ *   smoothed-faces (x-right perfect conductor, Smooth < 1, a drift u0 so that
+ *     E0 = -(u0 x B0) / c is not zero): after gpuCalculateE the smoothed E
+ *     the mover samples must hold the values the face rows impose, E0 on the
+ *     inflow face and the tangential E0 on the conductor face, bitwise.
  *   image-reference (x-right open, which keeps its operator rows, or an
  *     outflow face; conductor walls on the non-periodic y and z faces), on the
  *     layouts of kImageLayouts (3D and 2D, flat and self-periodic axes,
@@ -115,12 +119,14 @@ enum class TestCase {
   Manufactured,
   ObliqueWave,
   BoundaryRows,
+  SmoothedFaces,
   ImageReference
 };
 
-constexpr std::array<TestCase, 6> kAllTestCases = {
-    TestCase::Periodic,    TestCase::Reflective,   TestCase::Manufactured,
-    TestCase::ObliqueWave, TestCase::BoundaryRows, TestCase::ImageReference};
+constexpr std::array<TestCase, 7> kAllTestCases = {
+    TestCase::Periodic,      TestCase::Reflective,   TestCase::Manufactured,
+    TestCase::ObliqueWave,   TestCase::BoundaryRows, TestCase::SmoothedFaces,
+    TestCase::ImageReference};
 
 struct TestSelection {
   bool runAll = true;
@@ -227,6 +233,15 @@ struct TestInput {
   double qom = -1.0;
   double density = 0.35;
   Vec3 backgroundB = {0.31, -0.17, 0.23};
+  // smoothed-faces: drift of species 0 along x, and the smoothing
+  double driftX = 0.1;
+  double smooth = 0.5;
+  int smoothPasses = 3;
+
+  /** E0 = -(u0 x B0) / c with u0 = (driftX, 0, 0) (smoothed-faces). */
+  Vec3 driftElectric() const {
+    return {0.0, driftX * backgroundB[2] / c, -driftX * backgroundB[1] / c};
+  }
 
   int mpiRanks() const { return xlen * ylen * zlen; }
   Vec3 periodicElectric() const { return {exUniform, eyPeriodic, ezPeriodic}; }
@@ -236,6 +251,7 @@ struct TestInput {
 
   ConfigFile config(TestCase testCase) const {
     const bool openInflowXleft = testCase == TestCase::BoundaryRows ||
+                                 testCase == TestCase::SmoothedFaces ||
                                  testCase == TestCase::ImageReference;
     const bool periodicX = testCase != TestCase::Reflective && !openInflowXleft;
 
@@ -297,6 +313,16 @@ struct TestInput {
       cfg.add("bcPfaceXright", 2);
       cfg.add("PERIODICY", 0);
       cfg.add("PERIODICY_P", 0);
+    }
+    if (testCase == TestCase::SmoothedFaces) {
+      cfg.add("Smooth", smooth);
+      cfg.add("SmoothNiter", smoothPasses);
+      cfg.add("B0x", backgroundB[0]);
+      cfg.add("B0y", backgroundB[1]);
+      cfg.add("B0z", backgroundB[2]);
+      std::ostringstream u0Values;
+      u0Values << driftX << " 0 0 0 0 0 0 0 0 0 0 0";
+      cfg.add("u0", u0Values.str());
     }
 
     cfg.add("CGtol", gmresTolerance);
@@ -479,6 +505,8 @@ const char* caseName(TestCase testCase) {
     return "oblique-wave";
   case TestCase::BoundaryRows:
     return "boundary-rows";
+  case TestCase::SmoothedFaces:
+    return "smoothed-faces";
   case TestCase::ImageReference:
     return "image-reference";
   }
@@ -502,7 +530,8 @@ TestSelection parseCase(int argc, char** argv) {
       if (i + 1 >= argc) {
         throw std::runtime_error(
             "missing value for --case; expected all, periodic, reflective, "
-            "manufactured, oblique-wave, boundary-rows or image-reference");
+            "manufactured, oblique-wave, boundary-rows, smoothed-faces or "
+            "image-reference");
       }
       const char* value = argv[i + 1];
       if (std::strcmp(value, "all") == 0)
@@ -522,13 +551,16 @@ TestSelection parseCase(int argc, char** argv) {
       if (std::strcmp(value, "boundary-rows") == 0) {
         return {false, TestCase::BoundaryRows};
       }
+      if (std::strcmp(value, "smoothed-faces") == 0) {
+        return {false, TestCase::SmoothedFaces};
+      }
       if (std::strcmp(value, "image-reference") == 0) {
         return {false, TestCase::ImageReference};
       }
       throw std::runtime_error(std::string("unknown --case '") + value +
                                "'; expected all, periodic, reflective, "
-                               "manufactured, oblique-wave, boundary-rows or "
-                               "image-reference");
+                               "manufactured, oblique-wave, boundary-rows, "
+                               "smoothed-faces or image-reference");
     }
   }
   return {};
@@ -1107,6 +1139,59 @@ void runBoundaryRowsCase(EMfields3D& fields, Grid3DCU& grid,
   }
 }
 
+void runSmoothedFacesCase(EMfields3D& fields, Grid3DCU& grid,
+                          const TestInput& input, int rank, Check& check) {
+  const cudaStream_t stream = fields.gpuSolverStream();
+  initializeManufacturedFields(fields, grid, input);
+  fields.gpuSolverSyncH2D(stream);
+  prepareManufacturedMoments(fields);
+  fields.gpuCalculateE(0);
+
+  const int nxn = grid.getNXN(), nyn = grid.getNYN(), nzn = grid.getNZN();
+  const size_t size = (size_t)nxn * nyn * nzn;
+  std::array<std::vector<cudaSolverType>, 3> e;
+  GPUFieldArray3* const smoothed[3] = {
+      &fields.gpuExForPcls(), &fields.gpuEyForPcls(), &fields.gpuEzForPcls()};
+  cudaErrChk(cudaStreamSynchronize(stream));
+  for (int c = 0; c < 3; c++) {
+    e[c].resize(size);
+    cudaErrChk(cudaMemcpy(e[c].data(), smoothed[c]->devPtr(),
+                          size * sizeof(cudaSolverType),
+                          cudaMemcpyDeviceToHost));
+  }
+
+  // max |E - E0| over the face plane i of the components [c0, 3)
+  const Vec3 e0 = input.driftElectric();
+  auto faceDeviation = [&](int i, int c0) {
+    double dev = 0.0;
+    for (int j = 1; j < nyn - 1; j++)
+      for (int k = 1; k < nzn - 1; k++)
+        for (int c = c0; c < 3; c++)
+          dev = std::max(
+              dev, std::fabs(e[c][((size_t)i * nyn + j) * nzn + k] - e0[c]));
+    return dev;
+  };
+  const VirtualTopology3D& vct = fields.get_vct();
+  double local[2] = {0.0, 0.0}; // inflow face, conductor face (tangential)
+  if (vct.getXleft_neighbor() == MPI_PROC_NULL)
+    local[0] = faceDeviation(1, 0);
+  if (vct.getXright_neighbor() == MPI_PROC_NULL)
+    local[1] = faceDeviation(nxn - 2, 1);
+  double global[2];
+  MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
+  if (rank == 0) {
+    std::cout << "smoothed-faces: max |E - E0| on the inflow face = "
+              << global[0]
+              << ", max |E_t - E0_t| on the conductor face = " << global[1]
+              << "\n";
+    if (!fields.smoothingOn())
+      check.fail("the case runs without smoothing");
+    if (global[0] != 0.0 || global[1] != 0.0)
+      check.fail("the smoothed E does not hold the face values of the rows");
+  }
+}
+
 void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
                            const TestInput& input, const ImageLayout& layout,
                            int rank, Check& check) {
@@ -1532,6 +1617,10 @@ int runOnFields(TestCase testCase, EMfields3D& fields, Grid3DCU& grid,
 
   case TestCase::BoundaryRows:
     runBoundaryRowsCase(fields, grid, input, rank, check);
+    break;
+
+  case TestCase::SmoothedFaces:
+    runSmoothedFacesCase(fields, grid, input, rank, check);
     break;
 
   case TestCase::ObliqueWave:

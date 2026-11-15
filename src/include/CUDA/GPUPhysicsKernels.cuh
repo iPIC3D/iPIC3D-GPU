@@ -197,12 +197,14 @@ void gpuAdjustNonPeriodicDensities(int nptrs, cudaSolverType* const* d_devPtrs,
 //  Open boundary face/layer kernels
 // =========================================================================
 
-/** Set 3 arrays to (cx, cy, cz) on a face plane interior [1..n-2]: the RHS
- *  rows of the open inflow faces. */
+/** Set 3 arrays to (cx, cy, cz) on a face plane interior [1..n-2]; with
+ *  tangentialOnly the component normal to the face (dir) keeps its value.
+ *  The RHS rows of the open inflow faces, and the face values these and the
+ *  conductor tangential rows impose (EMfields3D::gpuImposeFaceE). */
 void gpuOpenBCSetFace3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
                        cudaSolverType cx, cudaSolverType cy, cudaSolverType cz,
                        int dir, int faceIdx, int nx, int ny, int nz,
-                       cudaStream_t stream = 0);
+                       cudaStream_t stream = 0, bool tangentialOnly = false);
 
 /** Identity rows, image = vect, on a face plane interior [1..n-2], written
  *  into the Krylov image (interleaved layout of gpuPhys2Solver3): the image

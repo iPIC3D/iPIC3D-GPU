@@ -8,7 +8,8 @@
  */
 
 #include "EMfields3D.h"
-#include "GPUHaloComm.cuh" // single-array self-copy kernels, BC kernels
+#include "GPUHaloComm.cuh" // batched self-copy kernels
+#include "GPUPointLaunch.cuh"
 #include "GPUSolverMPITypes.h"
 #include "VCtopology3D.h"
 #include <climits>
@@ -488,13 +489,10 @@ void EMfields3D::gpuInitializeHaloPlans() {
       plan.maxBufferElements[direction] = maximum;
     }
 
-    constexpr int faceBlock = 16;
-    plan.selfFaceBlocks[0][0] = (ny - 2 + faceBlock - 1) / faceBlock;
-    plan.selfFaceBlocks[0][1] = (nz - 2 + faceBlock - 1) / faceBlock;
-    plan.selfFaceBlocks[1][0] = (nx - 2 + faceBlock - 1) / faceBlock;
-    plan.selfFaceBlocks[1][1] = (nz - 2 + faceBlock - 1) / faceBlock;
-    plan.selfFaceBlocks[2][0] = (nx - 2 + faceBlock - 1) / faceBlock;
-    plan.selfFaceBlocks[2][1] = (ny - 2 + faceBlock - 1) / faceBlock;
+    // the interior of each face plane, its contiguous index on threadIdx.x
+    plan.selfFaceLaunch[0] = pointLaunch(1, ny - 2, nz - 2);
+    plan.selfFaceLaunch[1] = pointLaunch(1, nx - 2, nz - 2);
+    plan.selfFaceLaunch[2] = pointLaunch(1, nx - 2, ny - 2);
     int maximumExtent = nx > ny ? nx : ny;
     if (nz > maximumExtent)
       maximumExtent = nz;
@@ -601,25 +599,26 @@ void EMfields3D::gpuCompleteHaloPhases(const HaloTopologyPlan& topology,
               HALO_SEND_TAG[direction], comm, &requests[requestCount++]);
   }
 
-  constexpr int faceBlock = 16;
-  const dim3 block(faceBlock, faceBlock);
+  // one launch per face pair, blockIdx.z selects the field
+  auto selfFace = [&](int axis) {
+    PointLaunch L = geometry.selfFaceLaunch[axis];
+    L.grid.z = nFields;
+    return L;
+  };
   if (topology.selfAxis[0]) {
-    const dim3 grid(geometry.selfFaceBlocks[0][0],
-                    geometry.selfFaceBlocks[0][1], nFields);
-    gpuBatchSelfCopyFaceX<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                      offset);
+    const PointLaunch L = selfFace(0);
+    gpuBatchSelfCopyFaceX<<<L.grid, L.block, 0, stream>>>(d_ptrs, nx, ny, nz,
+                                                          offset);
   }
   if (topology.selfAxis[1]) {
-    const dim3 grid(geometry.selfFaceBlocks[1][0],
-                    geometry.selfFaceBlocks[1][1], nFields);
-    gpuBatchSelfCopyFaceY<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                      offset);
+    const PointLaunch L = selfFace(1);
+    gpuBatchSelfCopyFaceY<<<L.grid, L.block, 0, stream>>>(d_ptrs, nx, ny, nz,
+                                                          offset);
   }
   if (topology.selfAxis[2]) {
-    const dim3 grid(geometry.selfFaceBlocks[2][0],
-                    geometry.selfFaceBlocks[2][1], nFields);
-    gpuBatchSelfCopyFaceZ<<<grid, block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                      offset);
+    const PointLaunch L = selfFace(2);
+    gpuBatchSelfCopyFaceZ<<<L.grid, L.block, 0, stream>>>(d_ptrs, nx, ny, nz,
+                                                          offset);
   }
 
   if (requestCount > 0)

@@ -17,10 +17,16 @@
 
 #include "cudaTypeDef.cuh"
 
+/** Threads per block of gpuPackFieldForPclsToCenter (its shared tile holds
+ *  kPackFieldBlock cells). */
+constexpr int kPackFieldBlock = 128;
+
 /**
  * @brief Pack node-based E, B, B_ext into the cell-centered mover buffer.
  *
- * One thread per cell.  Total cells = (nxn-1) * (nyn-1) * nzn.
+ * One thread per cell, kPackFieldBlock threads per block.  Total cells =
+ * (nxn-1) * (nyn-1) * nzn.  A block gathers its cells into shared memory
+ * and writes their contiguous range of out with consecutive threads.
  *
  * @param out        Output packed buffer  [ncells * 24]
  * @param Ex,Ey,Ez   Node-based E fields   [nxn * nyn * nzn]

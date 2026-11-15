@@ -18,6 +18,8 @@
 //  MUdot kernel
 // =========================================================================
 
+/** One species of MUdot.  Not used (gpuMUdotSpecies, a unit-test reference:
+ *  gpuMUdot treats all species in one kernel). */
 template <typename T>
 __global__ void
 k_MUdotSpecies(T* __restrict__ MUdotX, T* __restrict__ MUdotY,
@@ -489,37 +491,39 @@ void gpuPerfectConductorSource(
 #undef IDX3
 
 // =========================================================================
-//  Non-periodic particle faces: double the node moments on the face plane
+//  Non-periodic particle faces: double the node moments on the face plane.
+//  2D launch over the interior of the plane, the contiguous index on x:
+//  (x, y) = (k, j) on an x face, (k, i) on a y face, (j, i) on a z face.
 // =========================================================================
 
-// Kernel: double the values on the X face plane i = fixedI
+// Kernel: double the values on the X face plane i = fixedI (not used)
 template <typename T>
 __global__ void k_doubleFaceX(T* __restrict__ arr, int fixedI, int nyn,
                               int nzn) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (j >= nyn - 1 || k >= nzn - 1)
     return;
   arr[(fixedI * nyn + j) * nzn + k] *= 2.0;
 }
 
-// Kernel: double the values on the Y face plane j = fixedJ
+// Kernel: double the values on the Y face plane j = fixedJ (not used)
 template <typename T>
 __global__ void k_doubleFaceY(T* __restrict__ arr, int fixedJ, int nxn, int nyn,
                               int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i >= nxn - 1 || k >= nzn - 1)
     return;
   arr[(i * nyn + fixedJ) * nzn + k] *= 2.0;
 }
 
-// Kernel: double the values on the Z face plane k = fixedK
+// Kernel: double the values on the Z face plane k = fixedK (not used)
 template <typename T>
 __global__ void k_doubleFaceZ(T* __restrict__ arr, int fixedK, int nxn, int nyn,
                               int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i >= nxn - 1 || j >= nyn - 1)
     return;
   arr[(i * nyn + j) * nzn + fixedK] *= 2.0;
@@ -529,8 +533,8 @@ __global__ void k_doubleFaceZ(T* __restrict__ arr, int fixedK, int nxn, int nyn,
 template <typename T>
 __global__ void k_batchDoubleFaceX(T* const* __restrict__ ptrs, int fixedI,
                                    int nyn, int nzn) {
-  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (j >= nyn - 1 || k >= nzn - 1)
     return;
   ptrs[blockIdx.z][(fixedI * nyn + j) * nzn + k] *= 2.0;
@@ -539,8 +543,8 @@ __global__ void k_batchDoubleFaceX(T* const* __restrict__ ptrs, int fixedI,
 template <typename T>
 __global__ void k_batchDoubleFaceY(T* const* __restrict__ ptrs, int fixedJ,
                                    int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int k = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i >= nxn - 1 || k >= nzn - 1)
     return;
   ptrs[blockIdx.z][(i * nyn + fixedJ) * nzn + k] *= 2.0;
@@ -549,8 +553,8 @@ __global__ void k_batchDoubleFaceY(T* const* __restrict__ ptrs, int fixedJ,
 template <typename T>
 __global__ void k_batchDoubleFaceZ(T* const* __restrict__ ptrs, int fixedK,
                                    int nxn, int nyn, int nzn) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-  int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i >= nxn - 1 || j >= nyn - 1)
     return;
   ptrs[blockIdx.z][(i * nyn + j) * nzn + fixedK] *= 2.0;
@@ -561,47 +565,32 @@ void gpuAdjustNonPeriodicDensities(int nptrs, cudaSolverType* const* d_devPtrs,
                                    bool xRightNull, bool yLeftNull,
                                    bool yRightNull, bool zLeftNull,
                                    bool zRightNull, cudaStream_t stream) {
-  static constexpr int BLK = 16;
-
-  // X faces (fixedI = 1 or nxn-2)
-  if (xLeftNull) {
-    dim3 block(BLK, BLK);
-    dim3 grid(((nyn - 2) + BLK - 1) / BLK, ((nzn - 2) + BLK - 1) / BLK, nptrs);
-    k_batchDoubleFaceX<<<grid, block, 0, stream>>>(d_devPtrs, 1, nyn, nzn);
-  }
-  if (xRightNull) {
-    dim3 block(BLK, BLK);
-    dim3 grid(((nyn - 2) + BLK - 1) / BLK, ((nzn - 2) + BLK - 1) / BLK, nptrs);
-    k_batchDoubleFaceX<<<grid, block, 0, stream>>>(d_devPtrs, nxn - 2, nyn,
-                                                   nzn);
-  }
-
-  // Y faces (fixedJ = 1 or nyn-2)
-  if (yLeftNull) {
-    dim3 block(BLK, BLK);
-    dim3 grid(((nxn - 2) + BLK - 1) / BLK, ((nzn - 2) + BLK - 1) / BLK, nptrs);
-    k_batchDoubleFaceY<<<grid, block, 0, stream>>>(d_devPtrs, 1, nxn, nyn, nzn);
-  }
-  if (yRightNull) {
-    dim3 block(BLK, BLK);
-    dim3 grid(((nxn - 2) + BLK - 1) / BLK, ((nzn - 2) + BLK - 1) / BLK, nptrs);
-    k_batchDoubleFaceY<<<grid, block, 0, stream>>>(d_devPtrs, nyn - 2, nxn, nyn,
-                                                   nzn);
-  }
-
-  // Z faces (fixedK = 1 or nzn-2)
-  if (zLeftNull) {
-    dim3 block(BLK, BLK);
-    dim3 grid(((nxn - 2) + BLK - 1) / BLK, ((nyn - 2) + BLK - 1) / BLK, nptrs);
-    k_batchDoubleFaceZ<<<grid, block, 0, stream>>>(d_devPtrs, 1, nxn, nyn, nzn);
-  }
-  if (zRightNull) {
-    dim3 block(BLK, BLK);
-    dim3 grid(((nxn - 2) + BLK - 1) / BLK, ((nyn - 2) + BLK - 1) / BLK, nptrs);
-    k_batchDoubleFaceZ<<<grid, block, 0, stream>>>(d_devPtrs, nzn - 2, nxn, nyn,
-                                                   nzn);
-  }
-
+  // the interior of each face plane, its contiguous index on threadIdx.x;
+  // blockIdx.z selects the field
+  auto face = [&](int slow, int fast) {
+    PointLaunch L = pointLaunch(1, slow, fast);
+    L.grid.z = nptrs;
+    return L;
+  };
+  const PointLaunch X = face(nyn - 2, nzn - 2), Y = face(nxn - 2, nzn - 2),
+                    Z = face(nxn - 2, nyn - 2);
+  if (xLeftNull)
+    k_batchDoubleFaceX<<<X.grid, X.block, 0, stream>>>(d_devPtrs, 1, nyn, nzn);
+  if (xRightNull)
+    k_batchDoubleFaceX<<<X.grid, X.block, 0, stream>>>(d_devPtrs, nxn - 2, nyn,
+                                                       nzn);
+  if (yLeftNull)
+    k_batchDoubleFaceY<<<Y.grid, Y.block, 0, stream>>>(d_devPtrs, 1, nxn, nyn,
+                                                       nzn);
+  if (yRightNull)
+    k_batchDoubleFaceY<<<Y.grid, Y.block, 0, stream>>>(d_devPtrs, nyn - 2, nxn,
+                                                       nyn, nzn);
+  if (zLeftNull)
+    k_batchDoubleFaceZ<<<Z.grid, Z.block, 0, stream>>>(d_devPtrs, 1, nxn, nyn,
+                                                       nzn);
+  if (zRightNull)
+    k_batchDoubleFaceZ<<<Z.grid, Z.block, 0, stream>>>(d_devPtrs, nzn - 2, nxn,
+                                                       nyn, nzn);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -609,18 +598,23 @@ void gpuAdjustNonPeriodicDensities(int nptrs, cudaSolverType* const* d_devPtrs,
 //  Open Boundary kernels
 // =========================================================================
 
-/** Set 3 arrays to (cx, cy, cz) on a face plane interior [1..n-2]. */
+/** Set 3 arrays to (cx, cy, cz) on a face plane interior [1..n-2]; with
+ *  tangentialOnly the component normal to the face keeps its value. */
 template <typename T, int DIR>
 __global__ void k_setFacePlane3(T* __restrict__ X, T* __restrict__ Y,
                                 T* __restrict__ Z, T cx, T cy, T cz, int face,
-                                int nx, int ny, int nz) {
+                                int nx, int ny, int nz, bool tangentialOnly) {
+  constexpr int A = (DIR + 1) % 3, B = (DIR + 2) % 3;
   int a, b;
   if (!facePoint<DIR>(a, b, nx, ny, nz))
     return;
   const int idx = faceIdx3<DIR>(face, a, b, ny, nz);
-  X[idx] = cx;
-  Y[idx] = cy;
-  Z[idx] = cz;
+  T* const dst[3] = {X, Y, Z};
+  const T value[3] = {cx, cy, cz};
+  if (!tangentialOnly)
+    dst[DIR][idx] = value[DIR];
+  dst[A][idx] = value[A];
+  dst[B][idx] = value[B];
 }
 
 /** Identity rows: image = vect on a face plane interior [1..n-2], written
@@ -643,13 +637,13 @@ __global__ void k_copyFacePlane3(T* __restrict__ im, const T* __restrict__ vX,
 void gpuOpenBCSetFace3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
                        cudaSolverType cx, cudaSolverType cy, cudaSolverType cz,
                        int dir, int faceIdx, int nx, int ny, int nz,
-                       cudaStream_t stream) {
+                       cudaStream_t stream, bool tangentialOnly) {
   const int total = facePoints(dir, nx, ny, nz);
   if (total <= 0)
     return;
   const int grid = (total + kFaceBlock - 1) / kFaceBlock;
   FACE_DIR_DISPATCH(dir, k_setFacePlane3, grid, kFaceBlock, stream, X, Y, Z, cx,
-                    cy, cz, faceIdx, nx, ny, nz)
+                    cy, cz, faceIdx, nx, ny, nz, tangentialOnly)
   cudaErrChk(cudaGetLastError());
 }
 
@@ -668,55 +662,39 @@ void gpuOpenBCCopyFace3(cudaSolverType* image, const cudaSolverType* vX,
 
 #undef FACE_DIR_DISPATCH
 
+/** The layers [layerStart, layerEnd] normal to dir, whole along the other
+ *  axes: a pointLaunch over this box puts its contiguous index (the layer
+ *  itself on z layers) on threadIdx.x. */
+static PointBox layerBox(int dir, int layerStart, int layerEnd, int nx, int ny,
+                         int nz) {
+  PointSpan span[3] = {pointRange(0, nx - 1), pointRange(0, ny - 1),
+                       pointRange(0, nz - 1)};
+  span[dir] = pointRange(layerStart, layerEnd);
+  return {span[0], span[1], span[2]};
+}
+
+/** The layer index along dir of point (i, j, k) (a select, no branch). */
+__device__ __forceinline__ int layerOf(int dir, int i, int j, int k) {
+  return dir == 0 ? i : (dir == 1 ? j : k);
+}
+
 /**
- * SAL blend: v[idx] = v[idx]*sal + target*(1-sal) on boundary layers.
- * dir: 0=X, 1=Y, 2=Z.
+ * SAL blend: v[idx] = v[idx]*sal + target*(1-sal) on the layers of box.
  * ascending: true if sal increases from layerStart to layerEnd.
  * skipComp: component (0=X, 1=Y, 2=Z) left unchanged, or -1 for none.
  */
 template <typename T>
-__global__ void k_salBlend3(T* X, T* Y, T* Z, T tgtX, T tgtY, T tgtZ, int dir,
-                            int layerStart, int layerEnd, T invNLayers,
-                            int ascending, int skipComp, int nx, int ny,
+__global__ void k_salBlend3(T* X, T* Y, T* Z, T tgtX, T tgtY, T tgtZ,
+                            PointBox box, int dir, int layerStart, int layerEnd,
+                            T invNLayers, int ascending, int skipComp, int ny,
                             int nz) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int nLayers = layerEnd - layerStart + 1;
-  int d1, d2;
-  if (dir == 0) {
-    d1 = ny;
-    d2 = nz;
-  } else if (dir == 1) {
-    d1 = nx;
-    d2 = nz;
-  } else {
-    d1 = nx;
-    d2 = ny;
-  }
-  int total = nLayers * d1 * d2;
-  if (tid >= total)
-    return;
-  int layerOff = tid / (d1 * d2);
-  int rem = tid % (d1 * d2);
-  int a = rem / d2;
-  int b = rem % d2;
-  int layer = layerStart + layerOff;
-  T sal = ascending ? (T)(layer - layerStart) * invNLayers
-                    : (T)(layerEnd - layer) * invNLayers;
   int i, j, k;
-  if (dir == 0) {
-    i = layer;
-    j = a;
-    k = b;
-  } else if (dir == 1) {
-    i = a;
-    j = layer;
-    k = b;
-  } else {
-    i = a;
-    j = b;
-    k = layer;
-  }
-  int idx = (i * ny + j) * nz + k;
+  if (!pointOf(box, i, j, k))
+    return;
+  const int layer = layerOf(dir, i, j, k);
+  const T sal = ascending ? (T)(layer - layerStart) * invNLayers
+                          : (T)(layerEnd - layer) * invNLayers;
+  const int idx = (i * ny + j) * nz + k;
   if (skipComp != 0)
     X[idx] = X[idx] * sal + tgtX * (1.0 - sal);
   if (skipComp != 1)
@@ -731,69 +709,24 @@ void gpuSALBlendLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
                         int layerEnd, cudaSolverType invNLayers, int ascending,
                         int nx, int ny, int nz, cudaStream_t stream,
                         int skipComp) {
-  int nLayers = layerEnd - layerStart + 1;
-  int d1, d2;
-  if (dir == 0) {
-    d1 = ny;
-    d2 = nz;
-  } else if (dir == 1) {
-    d1 = nx;
-    d2 = nz;
-  } else {
-    d1 = nx;
-    d2 = ny;
-  }
-  int total = nLayers * d1 * d2;
-  if (total <= 0)
+  const PointBox box = layerBox(dir, layerStart, layerEnd, nx, ny, nz);
+  if (box.empty())
     return;
-  int blk = 256;
-  k_salBlend3<<<(total + blk - 1) / blk, blk, 0, stream>>>(
-      X, Y, Z, tgtX, tgtY, tgtZ, dir, layerStart, layerEnd, invNLayers,
-      ascending, skipComp, nx, ny, nz);
+  const PointLaunch L = pointLaunch(box);
+  k_salBlend3<<<L.grid, L.block, 0, stream>>>(
+      X, Y, Z, tgtX, tgtY, tgtZ, box, dir, layerStart, layerEnd, invNLayers,
+      ascending, skipComp, ny, nz);
   cudaErrChk(cudaGetLastError());
 }
 
-/** Set 3 arrays to constant values on boundary layers. */
+/** Set 3 arrays to constant values on the layers of box. */
 template <typename T>
-__global__ void k_setConstLayers3(T* X, T* Y, T* Z, T cx, T cy, T cz, int dir,
-                                  int layerStart, int layerEnd, int nx, int ny,
-                                  int nz) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int nLayers = layerEnd - layerStart + 1;
-  int d1, d2;
-  if (dir == 0) {
-    d1 = ny;
-    d2 = nz;
-  } else if (dir == 1) {
-    d1 = nx;
-    d2 = nz;
-  } else {
-    d1 = nx;
-    d2 = ny;
-  }
-  int total = nLayers * d1 * d2;
-  if (tid >= total)
-    return;
-  int layerOff = tid / (d1 * d2);
-  int rem = tid % (d1 * d2);
-  int a = rem / d2;
-  int b = rem % d2;
-  int layer = layerStart + layerOff;
+__global__ void k_setConstLayers3(T* X, T* Y, T* Z, T cx, T cy, T cz,
+                                  PointBox box, int ny, int nz) {
   int i, j, k;
-  if (dir == 0) {
-    i = layer;
-    j = a;
-    k = b;
-  } else if (dir == 1) {
-    i = a;
-    j = layer;
-    k = b;
-  } else {
-    i = a;
-    j = b;
-    k = layer;
-  }
-  int idx = (i * ny + j) * nz + k;
+  if (!pointOf(box, i, j, k))
+    return;
+  const int idx = (i * ny + j) * nz + k;
   X[idx] = cx;
   Y[idx] = cy;
   Z[idx] = cz;
@@ -803,78 +736,26 @@ void gpuSetConstLayers3(cudaSolverType* X, cudaSolverType* Y, cudaSolverType* Z,
                         cudaSolverType cx, cudaSolverType cy, cudaSolverType cz,
                         int dir, int layerStart, int layerEnd, int nx, int ny,
                         int nz, cudaStream_t stream) {
-  int nLayers = layerEnd - layerStart + 1;
-  int d1, d2;
-  if (dir == 0) {
-    d1 = ny;
-    d2 = nz;
-  } else if (dir == 1) {
-    d1 = nx;
-    d2 = nz;
-  } else {
-    d1 = nx;
-    d2 = ny;
-  }
-  int total = nLayers * d1 * d2;
-  if (total <= 0)
+  const PointBox box = layerBox(dir, layerStart, layerEnd, nx, ny, nz);
+  if (box.empty())
     return;
-  int blk = 256;
-  k_setConstLayers3<<<(total + blk - 1) / blk, blk, 0, stream>>>(
-      X, Y, Z, cx, cy, cz, dir, layerStart, layerEnd, nx, ny, nz);
+  const PointLaunch L = pointLaunch(box);
+  k_setConstLayers3<<<L.grid, L.block, 0, stream>>>(X, Y, Z, cx, cy, cz, box,
+                                                    ny, nz);
   cudaErrChk(cudaGetLastError());
 }
 
-/** Copy from a constant reference plane to boundary layers. */
+/** Copy the reference layer refLayer to the layers of box (layerStride: the
+ *  index stride along the layer direction). */
 template <typename T>
-__global__ void k_extrapolateLayers3(T* X, T* Y, T* Z, int dir, int layerStart,
-                                     int layerEnd, int refLayer, int nx, int ny,
+__global__ void k_extrapolateLayers3(T* X, T* Y, T* Z, PointBox box, int dir,
+                                     int refLayer, int layerStride, int ny,
                                      int nz) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int nLayers = layerEnd - layerStart + 1;
-  int d1, d2;
-  if (dir == 0) {
-    d1 = ny;
-    d2 = nz;
-  } else if (dir == 1) {
-    d1 = nx;
-    d2 = nz;
-  } else {
-    d1 = nx;
-    d2 = ny;
-  }
-  int total = nLayers * d1 * d2;
-  if (tid >= total)
+  int i, j, k;
+  if (!pointOf(box, i, j, k))
     return;
-  int layerOff = tid / (d1 * d2);
-  int rem = tid % (d1 * d2);
-  int a = rem / d2;
-  int b = rem % d2;
-  int layer = layerStart + layerOff;
-  int i, j, k, ri, rj, rk;
-  if (dir == 0) {
-    i = layer;
-    j = a;
-    k = b;
-    ri = refLayer;
-    rj = a;
-    rk = b;
-  } else if (dir == 1) {
-    i = a;
-    j = layer;
-    k = b;
-    ri = a;
-    rj = refLayer;
-    rk = b;
-  } else {
-    i = a;
-    j = b;
-    k = layer;
-    ri = a;
-    rj = b;
-    rk = refLayer;
-  }
-  int idx = (i * ny + j) * nz + k;
-  int ridx = (ri * ny + rj) * nz + rk;
+  const int idx = (i * ny + j) * nz + k;
+  const int ridx = idx + (refLayer - layerOf(dir, i, j, k)) * layerStride;
   X[idx] = X[ridx];
   Y[idx] = Y[ridx];
   Z[idx] = Z[ridx];
@@ -884,24 +765,13 @@ void gpuExtrapolateLayers3(cudaSolverType* X, cudaSolverType* Y,
                            cudaSolverType* Z, int dir, int layerStart,
                            int layerEnd, int refLayer, int nx, int ny, int nz,
                            cudaStream_t stream) {
-  int nLayers = layerEnd - layerStart + 1;
-  int d1, d2;
-  if (dir == 0) {
-    d1 = ny;
-    d2 = nz;
-  } else if (dir == 1) {
-    d1 = nx;
-    d2 = nz;
-  } else {
-    d1 = nx;
-    d2 = ny;
-  }
-  int total = nLayers * d1 * d2;
-  if (total <= 0)
+  const PointBox box = layerBox(dir, layerStart, layerEnd, nx, ny, nz);
+  if (box.empty())
     return;
-  int blk = 256;
-  k_extrapolateLayers3<<<(total + blk - 1) / blk, blk, 0, stream>>>(
-      X, Y, Z, dir, layerStart, layerEnd, refLayer, nx, ny, nz);
+  const int layerStride[3] = {ny * nz, nz, 1};
+  const PointLaunch L = pointLaunch(box);
+  k_extrapolateLayers3<<<L.grid, L.block, 0, stream>>>(
+      X, Y, Z, box, dir, refLayer, layerStride[dir], ny, nz);
   cudaErrChk(cudaGetLastError());
 }
 

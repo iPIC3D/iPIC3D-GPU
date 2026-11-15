@@ -1616,9 +1616,8 @@ void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronize) {
   {
     const int ncells =
         (grid->getNXN() - 1) * (grid->getNYN() - 1) * grid->getNZN();
-    const int blockSize = 256;
-    const int gridDim = (ncells + blockSize - 1) / blockSize;
-    gpuPackFieldForPclsToCenter<<<gridDim, blockSize, 0, streams[0]>>>(
+    const int gridDim = (ncells + kPackFieldBlock - 1) / kPackFieldBlock;
+    gpuPackFieldForPclsToCenter<<<gridDim, kPackFieldBlock, 0, streams[0]>>>(
         fieldForPclCUDAPtr, EMf->gpuExForPcls().devPtr(),
         EMf->gpuEyForPcls().devPtr(), EMf->gpuEzForPcls().devPtr(),
         EMf->gpuBxn().devPtr(), EMf->gpuByn().devPtr(), EMf->gpuBzn().devPtr(),

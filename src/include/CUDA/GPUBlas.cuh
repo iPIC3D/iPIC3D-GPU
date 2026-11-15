@@ -50,11 +50,11 @@ void gpuSubRes(cudaSolverType* res, const cudaSolverType* a,
 void gpuAddscale(cudaSolverType alfa, cudaSolverType* dst,
                  const cudaSolverType* src, size_t n, cudaStream_t stream = 0);
 
-/** dst[i] = beta*dst[i] + alfa*src[i] */
+/** dst[i] = beta*dst[i] + alfa*src[i]  (not used) */
 void gpuAddscale2(cudaSolverType alfa, cudaSolverType beta, cudaSolverType* dst,
                   const cudaSolverType* src, size_t n, cudaStream_t stream = 0);
 
-/** d[i] = -d[i] */
+/** d[i] = -d[i]  (not used) */
 void gpuNeg(cudaSolverType* d, size_t n, cudaStream_t stream = 0);
 
 /** dst = src  (device-to-device memcpy) */
@@ -127,6 +127,7 @@ void gpuAddscale2_3(cudaSolverType alfa, cudaSolverType beta,
  * Local dot product: sum_i a[i]*b[i].
  * d_scratch must point to a device cudaSolverType.
  * Returns the result synchronously (D2H copy after kernel).
+ * Not used: the solvers use gpuDot_async.
  */
 cudaSolverType gpuDot(const cudaSolverType* a, const cudaSolverType* b,
                       size_t n, cudaSolverType* d_scratch,
@@ -136,6 +137,7 @@ cudaSolverType gpuDot(const cudaSolverType* a, const cudaSolverType* b,
  * Local squared norm: sum_i a[i]*a[i].
  * d_scratch must point to a device cudaSolverType.
  * Returns the result synchronously.
+ * Not used by the solvers (gpuNorm2_async); the Maxwell unit test uses it.
  */
 cudaSolverType gpuNorm2(const cudaSolverType* a, size_t n,
                         cudaSolverType* d_scratch, cudaStream_t stream = 0);
@@ -159,7 +161,7 @@ void gpuDot_async(const cudaSolverType* a, const cudaSolverType* b, size_t n,
  *
  * d_out is a device array of >= (k+2) cudaSolverType elements (zeroed
  * internally). After call, d_out contains the LOCAL partial sums (caller must
- * MPI_Allreduce).
+ * MPI_Allreduce).  k + 1 <= 32.
  */
 void gpuBatchedDotNorm(const cudaSolverType* w, const cudaSolverType* V_base,
                        size_t stride, int k, size_t n, cudaSolverType* d_out,
@@ -206,11 +208,11 @@ void gpuSolver2Phys1(cudaSolverType* d_phys, const cudaSolverType* d_solver,
 //  Scratch buffer helpers
 // =========================================================================
 
-/** Allocate a small device scratch buffer (one cudaSolverType) for reductions.
- */
+/** Allocate a small device scratch buffer (one cudaSolverType) for reductions
+ *  (used by the unit tests only). */
 void gpuBlasAllocScratch(cudaSolverType** d_scratch);
 
-/** Free the scratch buffer. */
+/** Free the scratch buffer (used by the unit tests only). */
 void gpuBlasFreeScratch(cudaSolverType* d_scratch);
 
 #endif // GPU_BLAS_CUH

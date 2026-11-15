@@ -67,6 +67,7 @@ __global__ void k_addscale(T alfa, T* __restrict__ dst,
     dst[i] += alfa * src[i];
 }
 
+/** Not used (gpuAddscale2). */
 template <typename T>
 __global__ void k_addscale2(T alfa, T beta, T* __restrict__ dst,
                             const T* __restrict__ src, size_t n) {
@@ -75,6 +76,7 @@ __global__ void k_addscale2(T alfa, T beta, T* __restrict__ dst,
     dst[i] = beta * dst[i] + alfa * src[i];
 }
 
+/** Not used (gpuNeg). */
 template <typename T> __global__ void k_neg(T* __restrict__ d, size_t n) {
   size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
   if (i < n)
@@ -174,6 +176,7 @@ void gpuEq(cudaSolverType* dst, const cudaSolverType* src, size_t n,
 //  Fused triple kernels – 3 arrays in one launch
 // =========================================================================
 
+/** Not used (gpuNeg3, a unit-test reference). */
 template <typename T>
 __global__ void k_neg3(T* __restrict__ dX, T* __restrict__ dY,
                        T* __restrict__ dZ, size_t n) {
@@ -185,6 +188,7 @@ __global__ void k_neg3(T* __restrict__ dX, T* __restrict__ dY,
   }
 }
 
+/** Not used (gpuSub3, a unit-test reference). */
 template <typename T>
 __global__ void k_sub3(T* __restrict__ dstX, const T* __restrict__ srcX,
                        T* __restrict__ dstY, const T* __restrict__ srcY,
@@ -511,54 +515,49 @@ void gpuDot_async(const cudaSolverType* a, const cudaSolverType* b, size_t n,
 //  Batched dot+norm kernel for GMRES Arnoldi
 // =========================================================================
 
-// k_batchedDotNorm keeps its partial sums in a fixed-size per-thread array:
-// at most this many dot products per call (k + 1, at most the GMRES restart
-// length)
+// Most dot products per call of gpuBatchedDotNorm (k + 1, at most the GMRES
+// restart length): the instantiations of k_batchedDotNorm
 constexpr int kBatchedDotMax = 32;
 
 /**
- * Fused kernel: compute (k+1) dot products dot(w, V[j]) for j=0..k
- * AND norm2(w) simultaneously.  Uses grid-stride loop.
+ * Fused kernel: the KP1 dot products dot(w, V[j]), j < KP1, and norm2(w) in
+ * one grid-stride pass over w.  KP1 is a template parameter so that the
+ * KP1 + 1 per-thread sums stay in registers (indexed with a runtime count
+ * they would live in local memory).
  *
- * d_out must have k+2 doubles, zeroed before launch.
- * V[j] starts at V_base + j*stride.
- *
- * Template-free: runtime loop over j values.  k is small (~20) so the
- * overhead of the inner loop is negligible.
+ * d_out must have KP1 + 1 doubles, zeroed before launch: d_out[j] =
+ * dot(w, V[j]), d_out[KP1] = norm2(w).  V[j] starts at V_base + j*stride.
  */
-template <typename T>
+template <typename T, int KP1>
 __global__ void k_batchedDotNorm(const T* __restrict__ w,
                                  const T* __restrict__ V_base, size_t stride,
-                                 int kp1, size_t n, T* __restrict__ d_out) {
-  // kp1 = k+1 (number of dot products). d_out has kp1+1 entries.
-  // d_out[0..kp1-1] = dot(w, V[j]), d_out[kp1] = norm2(w).
-
-  // Each thread accumulates kp1+1 partial sums.
-  // Use stack-allocated array up to a compile-time max.
-  T sums[kBatchedDotMax + 1]; // +1 for norm2
-  const int total = kp1 + 1;  // kp1 <= kBatchedDotMax: checked on the host
+                                 size_t n, T* __restrict__ d_out) {
+  constexpr int total = KP1 + 1;
+  T sums[total];
+#pragma unroll
   for (int j = 0; j < total; j++)
     sums[j] = 0.0;
 
   for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
        i += (size_t)blockDim.x * gridDim.x) {
-    T wi = w[i];
-    for (int j = 0; j < kp1; j++)
+    const T wi = w[i];
+#pragma unroll
+    for (int j = 0; j < KP1; j++)
       sums[j] += wi * V_base[j * stride + i];
-    sums[kp1] += wi * wi;
+    sums[KP1] += wi * wi;
   }
 
-  // Warp-level reduction for ALL accumulators
-  for (int j = 0; j < total; j++) {
+  // Warp-level reduction for all accumulators
+#pragma unroll
+  for (int j = 0; j < total; j++)
     sums[j] = warp_reduce_sum(sums[j]);
-  }
 
   // Per-warp partial sums to shared memory
-  extern __shared__ T smem[]; // MAX_WARPS * total
-  int lane = threadIdx.x % WARP_SIZE;
-  int warpId = threadIdx.x / WARP_SIZE;
-
+  __shared__ T smem[MAX_WARPS * total];
+  const int lane = threadIdx.x % WARP_SIZE;
+  const int warpId = threadIdx.x / WARP_SIZE;
   if (lane == 0) {
+#pragma unroll
     for (int j = 0; j < total; j++)
       smem[warpId * total + j] = sums[j];
   }
@@ -575,12 +574,27 @@ __global__ void k_batchedDotNorm(const T* __restrict__ w,
   }
 }
 
+/** Launch k_batchedDotNorm<KP1> for the runtime count kp1, KP1 <= kp1 <=
+ *  kBatchedDotMax (host-side dispatch; kp1 = 0 computes norm2(w) only). */
+template <int KP1>
+static void launchBatchedDotNorm(int kp1, int grid, cudaStream_t stream,
+                                 const cudaSolverType* w,
+                                 const cudaSolverType* V_base, size_t stride,
+                                 size_t n, cudaSolverType* d_out) {
+  if constexpr (KP1 < kBatchedDotMax) {
+    if (kp1 > KP1)
+      return launchBatchedDotNorm<KP1 + 1>(kp1, grid, stream, w, V_base, stride,
+                                           n, d_out);
+  }
+  k_batchedDotNorm<cudaSolverType, KP1>
+      <<<grid, BLAS_BLOCK, 0, stream>>>(w, V_base, stride, n, d_out);
+}
+
 void gpuBatchedDotNorm(const cudaSolverType* w, const cudaSolverType* V_base,
                        size_t stride, int k, size_t n, cudaSolverType* d_out,
                        cudaStream_t stream) {
-  int kp1 = k + 1;     // number of dot products
-  int total = kp1 + 1; // +1 for norm2
-  // more vectors would write past the kernel's per-thread sums array
+  const int kp1 = k + 1; // number of dot products
+  // more vectors than the instantiated kernels
   if (kp1 > kBatchedDotMax) {
     fprintf(stderr,
             "gpuBatchedDotNorm: %d vectors exceed the %d the kernel "
@@ -589,18 +603,15 @@ void gpuBatchedDotNorm(const cudaSolverType* w, const cudaSolverType* V_base,
     abort();
   }
 
-  // Zero the output array
-  cudaErrChk(cudaMemsetAsync(d_out, 0, total * sizeof(cudaSolverType), stream));
+  // Zero the output array (kp1 dot products + norm2)
+  cudaErrChk(
+      cudaMemsetAsync(d_out, 0, (kp1 + 1) * sizeof(cudaSolverType), stream));
 
   if (n == 0)
     return;
 
-  int grid = reduceGridSize(n);
-  // Shared memory: MAX_WARPS * total doubles
-  size_t smemBytes = MAX_WARPS * total * sizeof(cudaSolverType);
-
-  k_batchedDotNorm<<<grid, BLAS_BLOCK, smemBytes, stream>>>(w, V_base, stride,
-                                                            kp1, n, d_out);
+  launchBatchedDotNorm<0>(kp1, reduceGridSize(n), stream, w, V_base, stride, n,
+                          d_out);
   cudaErrChk(cudaGetLastError());
 }
 

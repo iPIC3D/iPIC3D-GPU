@@ -264,7 +264,7 @@ void EMfields3D::gpuSolverAllocate() {
 
   // ---- BLAS reduction scratch ----
   // Need (m+2) doubles for gpuBatchedDotNorm in GMRES (m=20 → 22 doubles).
-  // Also used as 1-double scratch for individual gpuDot/gpuNorm2 calls.
+  // Also the 1-double scratch of the gpuDot_async / gpuNorm2_async calls.
   cudaErrChk(
       cudaMalloc(&d_blasScratch, (GMRES_M + 2) * sizeof(cudaSolverType)));
 
@@ -813,11 +813,13 @@ void EMfields3D::gpuPIdot(GPUFieldArray3& PIX, GPUFieldArray3& PIY,
 //  Smoothing passes: rhoc (gpuSmooth), Jhat (gpuSmooth3), E (gpuSmoothE)
 // =========================================================================
 
-template <EMfields3D::HaloMode M, int N, typename Begin, typename End>
+template <EMfields3D::HaloMode M, int N, typename Begin, typename End,
+          typename Fix>
 void EMfields3D::gpuSmoothPasses(GPUFieldArray3* const src[N],
                                  GPUFieldArray3* const dst[N],
                                  GPUFieldArray3* const scratch[N], int nx,
-                                 int ny, int nz, Begin&& begin, End&& end) {
+                                 int ny, int nz, Begin&& begin, End&& end,
+                                 Fix&& fix) {
   const double alpha = Smooth;
   const double beta3D = (1.0 - alpha) / 6.0;
   const int passes = SmoothNiter;
@@ -847,6 +849,7 @@ void EMfields3D::gpuSmoothPasses(GPUFieldArray3* const src[N],
       gpuSmoothFields<N>(f, nx, ny, nz, alpha, beta3D, SmoothRegion::All,
                          solverStream_);
     }
+    fix(out);
     in = out;
   }
   if (in[0] != dst[0])
@@ -884,24 +887,17 @@ void EMfields3D::gpuSmooth(GPUFieldArray3& arr, int type) {
       gpuCommunicateNodeBoxStencilBC_P(nx, ny, nz, *in[0], 2, 2, 2, 2, 2, 2);
     }
   };
-  gpuSmoothPasses<M, 1>(fields, fields, scratch, nx, ny, nz, begin, end);
+  gpuSmoothPasses<M, 1>(fields, fields, scratch, nx, ny, nz, begin, end,
+                        [](GPUFieldArray3* const*) {});
 }
 
 template <EMfields3D::HaloMode M>
 void EMfields3D::gpuSmoothE(GPUFieldArray3* const src[3],
                             GPUFieldArray3* const dst[3]) {
-  const Collective* col = &get_col();
-
-  // X-right outflow face: continue every component past the face with zero
-  // gradient, instead of the open-face ghost E_x = 0
-  int bc[3][6];
-  for (int f = 0; f < 6; f++) {
-    bc[0][f] = col->bcEx[f];
-    bc[1][f] = col->bcEy[f];
-    bc[2][f] = col->bcEz[f];
-  }
-  if (ownsOutflowFaceXright())
-    bc[0][0] = bc[1][0] = bc[2][0] = 2;
+  // Every physical face continues every component evenly about the face node;
+  // the face values the Maxwell rows impose are restored after each pass
+  constexpr int m = BC_FACE_NODE_MIRROR;
+  const int mirror[6] = {m, m, m, m, m, m};
 
   GPUFieldArray3* const scratch[3] = {&d_tempX, &d_tempY, &d_tempZ};
   auto begin = [&](GPUFieldArray3* const* in) {
@@ -914,15 +910,33 @@ void EMfields3D::gpuSmoothE(GPUFieldArray3* const src[3],
     if constexpr (M == HaloMode::Overlap) {
       gpuBatchedHaloEndExchange();
       for (int c = 0; c < 3; c++)
-        gpuBCface(nxn, nyn, nzn, *in[c], bc[c][0], bc[c][1], bc[c][2], bc[c][3],
-                  bc[c][4], bc[c][5], &_vct, solverStream_);
+        gpuBCface(nxn, nyn, nzn, *in[c], m, m, m, m, m, m, &_vct,
+                  solverStream_);
     } else {
       // Batched: 3 fields in 1 MPI round instead of 3 sequential exchanges
-      gpuCommunicateNodeBoxStencilBC_3mixed(nxn, nyn, nzn, *in[0], bc[0],
-                                            *in[1], bc[1], *in[2], bc[2]);
+      gpuCommunicateNodeBoxStencilBC_3mixed(nxn, nyn, nzn, *in[0], mirror,
+                                            *in[1], mirror, *in[2], mirror);
     }
   };
-  gpuSmoothPasses<M, 3>(src, dst, scratch, nxn, nyn, nzn, begin, end);
+  auto fix = [&](GPUFieldArray3* const* out) {
+    gpuImposeFaceE(out[0]->devPtr(), out[1]->devPtr(), out[2]->devPtr());
+  };
+  gpuSmoothPasses<M, 3>(src, dst, scratch, nxn, nyn, nzn, begin, end, fix);
+}
+
+void EMfields3D::gpuImposeFaceE(cudaSolverType* dX, cudaSolverType* dY,
+                                cudaSolverType* dZ) {
+  // the right-hand sides of the identity rows, in the order of the source
+  // (gpuPerfectConductorSources, then gpuOpenBoundaryInflowESource)
+  double ebc[3]; // -(u0 x B0) / c
+  driftElectricField(ebc);
+  const int n[3] = {nxn, nyn, nzn};
+  for (int f = 0; f < 6; f++)
+    if (conductorFace_[f])
+      gpuOpenBCSetFace3(dX, dY, dZ, ebc[0], ebc[1], ebc[2], f / 2,
+                        f % 2 ? n[f / 2] - 2 : 1, nxn, nyn, nzn, solverStream_,
+                        true); // tangential components only
+  gpuOpenBoundaryInflowESource(dX, dY, dZ, nxn, nyn, nzn);
 }
 
 template <EMfields3D::HaloMode M>
@@ -960,7 +974,8 @@ void EMfields3D::gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2,
                                          2, 2, 2, 2, 2);
     }
   };
-  gpuSmoothPasses<M, 3>(fields, fields, scratch, nx, ny, nz, begin, end);
+  gpuSmoothPasses<M, 3>(fields, fields, scratch, nx, ny, nz, begin, end,
+                        [](GPUFieldArray3* const*) {});
 }
 
 void EMfields3D::gpuPerfectConductorImages(cudaSolverType* d_im,
@@ -1462,9 +1477,10 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
   if (col->getCase() == "ForceFree")
     gpuFixBforcefree();
 
-  // OpenBC: apply inflow BCs on center B
+  // Open faces: the exchange above reset their ghost layer, restore it.  The
+  // layers themselves were treated once, after Faraday's law (gpuCalculateB).
   gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
-                         nyc, nzc);
+                         nyc, nzc, true);
 
   // Case-specific center B fix after OpenBC
   {
@@ -3168,68 +3184,75 @@ void EMfields3D::gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY,
 
 void EMfields3D::gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
                                         cudaSolverType* dZ, int nx, int ny,
-                                        int nz) {
+                                        int nz, bool ghostOnly) {
   const VirtualTopology3D* vct = &get_vct();
   double invNL = (n_layers_sal > 0) ? 1.0 / (double)n_layers_sal : 1.0;
   // With sal_tangential_B the SAL leaves B normal to the face alone: blending
   // it towards B0 creates div(B) in the layer (see README)
   auto skip = [&](int dir) { return sal_tangential_B ? dir : -1; };
+  // The treated layers: [0, leftEnd] on a left face, [rightStart(n, L), n - 1]
+  // on a right face, or only the ghost layer.  The SAL weight of the ghost
+  // layer is 0 in both ranges, so the ghost value does not depend on them.
+  const int leftEnd = ghostOnly ? 0 : n_layers_sal;
+  auto rightStart = [&](int n, int L) { return ghostOnly ? n - 1 : n - L - 1; };
 
   // Xleft
   if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 2 &&
       nx > 10) {
     if (yes_sal)
-      gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 0, 0, n_layers_sal, invNL,
-                         1, nx, ny, nz, solverStream_, skip(0));
+      gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 0, 0, leftEnd, invNL, 1, nx,
+                         ny, nz, solverStream_, skip(0));
     else
-      gpuSetConstLayers3(dX, dY, dZ, B0x, B0y, B0z, 0, 0, n_layers_sal, nx, ny,
-                         nz, solverStream_);
+      gpuSetConstLayers3(dX, dY, dZ, B0x, B0y, B0z, 0, 0, leftEnd, nx, ny, nz,
+                         solverStream_);
   }
   // Xright: always extrapolation from interior
   if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
       nx > 10) {
     const int L = fieldCopyLayersXright();
-    gpuExtrapolateLayers3(dX, dY, dZ, 0, nx - L - 1, nx - 1, nx - 2 - L, nx, ny,
-                          nz, solverStream_);
+    gpuExtrapolateLayers3(dX, dY, dZ, 0, rightStart(nx, L), nx - 1, nx - 2 - L,
+                          nx, ny, nz, solverStream_);
   }
   // Yleft
   if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
       ny > 10) {
     if (yes_sal)
-      gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 1, 0, n_layers_sal, invNL,
-                         1, nx, ny, nz, solverStream_, skip(1));
+      gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 1, 0, leftEnd, invNL, 1, nx,
+                         ny, nz, solverStream_, skip(1));
     else
-      gpuExtrapolateLayers3(dX, dY, dZ, 1, 0, n_layers_sal, n_layers_sal + 1,
-                            nx, ny, nz, solverStream_);
+      gpuExtrapolateLayers3(dX, dY, dZ, 1, 0, leftEnd, n_layers_sal + 1, nx, ny,
+                            nz, solverStream_);
   }
   // Yright
   if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 2 &&
       ny > 10) {
     if (yes_sal)
-      gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 1, ny - n_layers_sal - 1,
-                         ny - 1, invNL, 0, nx, ny, nz, solverStream_, skip(1));
+      gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 1,
+                         rightStart(ny, n_layers_sal), ny - 1, invNL, 0, nx, ny,
+                         nz, solverStream_, skip(1));
     else
-      gpuExtrapolateLayers3(dX, dY, dZ, 1, ny - n_layers_sal - 1, ny - 1,
+      gpuExtrapolateLayers3(dX, dY, dZ, 1, rightStart(ny, n_layers_sal), ny - 1,
                             ny - 2 - n_layers_sal, nx, ny, nz, solverStream_);
   }
   // Zleft
   if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 2 &&
       nz > 10) {
     if (yes_sal)
-      gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 2, 0, n_layers_sal, invNL,
-                         1, nx, ny, nz, solverStream_, skip(2));
+      gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 2, 0, leftEnd, invNL, 1, nx,
+                         ny, nz, solverStream_, skip(2));
     else
-      gpuExtrapolateLayers3(dX, dY, dZ, 2, 0, n_layers_sal, n_layers_sal + 1,
-                            nx, ny, nz, solverStream_);
+      gpuExtrapolateLayers3(dX, dY, dZ, 2, 0, leftEnd, n_layers_sal + 1, nx, ny,
+                            nz, solverStream_);
   }
   // Zright
   if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 2 &&
       nz > 10) {
     if (yes_sal)
-      gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 2, nz - n_layers_sal - 1,
-                         nz - 1, invNL, 0, nx, ny, nz, solverStream_, skip(2));
+      gpuSALBlendLayers3(dX, dY, dZ, B0x, B0y, B0z, 2,
+                         rightStart(nz, n_layers_sal), nz - 1, invNL, 0, nx, ny,
+                         nz, solverStream_, skip(2));
     else
-      gpuExtrapolateLayers3(dX, dY, dZ, 2, nz - n_layers_sal - 1, nz - 1,
+      gpuExtrapolateLayers3(dX, dY, dZ, 2, rightStart(nz, n_layers_sal), nz - 1,
                             nz - 2 - n_layers_sal, nx, ny, nz, solverStream_);
   }
 }

@@ -138,6 +138,17 @@ set_tests_properties(
   )
 
 add_test(
+  NAME gpuMaxwellSolverSmoothedFaces
+  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
+          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
+          --case smoothed-faces ${MPIEXEC_POSTFLAGS})
+set_tests_properties(
+  gpuMaxwellSolverSmoothedFaces
+  PROPERTIES
+    TIMEOUT 90
+  )
+
+add_test(
   NAME gpuMaxwellSolverImageReference
   COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
           ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
@@ -162,7 +173,8 @@ set_tests_properties(
   )
 
 # The solver cases with HaloOverlap = 1 (image-reference runs both modes)
-foreach(test_case periodic reflective manufactured boundary-rows oblique-wave)
+foreach(test_case periodic reflective manufactured boundary-rows smoothed-faces
+                  oblique-wave)
   string(REPLACE "-" "_" test_name ${test_case})
   add_test(
     NAME gpuMaxwellSolverOverlap_${test_name}

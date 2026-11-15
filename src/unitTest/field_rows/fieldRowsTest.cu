@@ -10,7 +10,8 @@
  *                          dt J_n) / chi_nn with chi the rows of MUdot (host),
  *                          and the tangential rows are x_t - ebc_t.
  *   --case open-rows       gpuOpenBCSetFace3 / gpuOpenBCCopyFace3 write the
- *                          constants / identity on the face rows only.
+ *                          constants / identity on the face rows only;
+ *                          with tangentialOnly, the tangential constants.
  *   --case mudot           gpuMUdot (all species in one kernel) against a host
  *                          per-species MUdot and the per-species kernel
  *                          gpuMUdotSpecies, for 1..6, 16, 17 and 33 species
@@ -342,6 +343,21 @@ static void testOpenRows() {
       std::snprintf(what, sizeof(what), "%s: elsewhere untouched",
                     faceName(dir, high));
       check(errOut == 0.0, what, errOut);
+
+      Dev tx(d0[0]), ty(d0[1]), tz(d0[2]);
+      gpuOpenBCSetFace3(tx.p, ty.p, tz.p, kEbc[0], kEbc[1], kEbc[2], dir, plane,
+                        NX, NY, NZ, 0, true);
+      const Vec t[3] = {tx.get(), ty.get(), tz.get()};
+      double errTan = 0;
+      for (size_t q = 0; q < N; q++)
+        for (int c = 0; c < 3; c++)
+          errTan = std::max(
+              errTan, (double)std::fabs(
+                          t[c][q] - (row[q] && c != dir ? kEbc[c] : d0[c][q])));
+      std::snprintf(what, sizeof(what),
+                    "%s: tangentialOnly sets E_t on face rows only",
+                    faceName(dir, high));
+      check(errTan == 0.0, what, errTan);
     }
 }
 

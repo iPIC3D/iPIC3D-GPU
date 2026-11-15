@@ -18,7 +18,11 @@
 #include <mpi.h>
 
 // =========================================================================
-//  CUDA kernels for local self-copy (periodic same-rank neighbours)
+//  CUDA kernels for local face self-copy (periodic same-rank neighbours;
+//  not used: the exchanges use the batched kernels below)
+//  The face kernels (self-copy and gpuAddFace*) take a 2D launch over the
+//  interior of the plane, the contiguous index on x: (x, y) = (k, j) on an
+//  x face, (k, i) on a y face, (j, i) on a z face.
 // =========================================================================
 
 /** Copy ghost faces for periodic X self-neighbour.  offset (all self-copy
@@ -36,7 +40,7 @@ __global__ void gpuSelfCopyFaceZ(cudaSolverType* __restrict__ arr, int nx,
                                  int ny, int nz, int offset);
 
 // =========================================================================
-//  CUDA kernels for local edge self-copy (periodic)
+//  CUDA kernels for local edge self-copy (periodic; not used)
 // =========================================================================
 
 /** Copy ghost edges along X when X is periodic self-neighbour (Z and Y exist).
@@ -56,7 +60,7 @@ __global__ void gpuSelfCopyEdgeZ(cudaSolverType* __restrict__ arr, int nx,
                                  bool hasYleft, bool hasXright, bool hasXleft);
 
 // =========================================================================
-//  CUDA kernels for local corner self-copy (periodic)
+//  CUDA kernels for local corner self-copy (periodic; not used)
 // =========================================================================
 
 __global__ void gpuSelfCopyCornerX(cudaSolverType* __restrict__ arr, int nx,
@@ -118,41 +122,7 @@ gpuBatchSelfCopyCornerZ(cudaSolverType* const* __restrict__ fields, int nx,
                         bool hasYright, bool hasXleft, bool hasXright);
 
 // =========================================================================
-//  CUDA kernels for boundary condition application on faces
-// =========================================================================
-
-/** Apply BC on the Xleft face (ghost layer i=0). */
-__global__ void gpuBCfaceXleft(cudaSolverType* __restrict__ arr, int nx, int ny,
-                               int nz, int bcType);
-
-/** Apply BC on the Xright face (ghost layer i=nx-1). */
-__global__ void gpuBCfaceXright(cudaSolverType* __restrict__ arr, int nx,
-                                int ny, int nz, int bcType);
-
-/** Apply BC on the Yleft face (ghost layer j=0). */
-__global__ void gpuBCfaceYleft(cudaSolverType* __restrict__ arr, int nx, int ny,
-                               int nz, int bcType);
-
-/** Apply BC on the Yright face (ghost layer j=ny-1). */
-__global__ void gpuBCfaceYright(cudaSolverType* __restrict__ arr, int nx,
-                                int ny, int nz, int bcType);
-
-/** Apply BC on the Zleft face (ghost layer k=0). */
-__global__ void gpuBCfaceZleft(cudaSolverType* __restrict__ arr, int nx, int ny,
-                               int nz, int bcType);
-
-/** Apply BC on the Zright face (ghost layer k=nz-1). */
-__global__ void gpuBCfaceZright(cudaSolverType* __restrict__ arr, int nx,
-                                int ny, int nz, int bcType);
-
-// =========================================================================
-//  CUDA kernels for particle boundary condition (BCface_P)
-// =========================================================================
-// BCface_P is identical to BCface for field solver purposes.
-// Re-use the same kernels.
-
-// =========================================================================
-//  CUDA kernels for additive interpolation (communicateInterp)
+//  CUDA kernels for additive interpolation (communicateInterp; not used)
 // =========================================================================
 
 __global__ void gpuAddFaceX(cudaSolverType* __restrict__ arr, int nx, int ny,
@@ -184,10 +154,17 @@ __global__ void gpuAddCorner(cudaSolverType* __restrict__ arr, int nx, int ny,
 #include "ipicfwd.h"
 class EMfields3D;
 
+/** Face boundary code of gpuBCface for node arrays: the ghost node is the
+ *  mirror of the second interior node about the face node (ghost = f(2) on a
+ *  left face), an even continuation that keeps a uniform field uniform.
+ *  GPU only: the CPU BCface() has no code 3. */
+constexpr int BC_FACE_NODE_MIRROR = 3;
+
 /**
  * @brief Apply face boundary conditions on GPU array.
  *
- * GPU counterpart of BCface() in BcFields3D.cpp.
+ * GPU counterpart of BCface() in BcFields3D.cpp; the codes are listed at
+ * the face kernel gpuBCfacePlane (GPUHaloComm.cu).
  */
 void gpuBCface(int nx, int ny, int nz, GPUFieldArray3& gpuArr, int bcFaceXright,
                int bcFaceXleft, int bcFaceYright, int bcFaceYleft,
@@ -197,8 +174,8 @@ void gpuBCface(int nx, int ny, int nz, GPUFieldArray3& gpuArr, int bcFaceXright,
 /**
  * @brief Apply face boundary conditions (particle version) on GPU array.
  *
- * GPU counterpart of BCface_P() in BcFields3D.cpp: same face kernels as
- * gpuBCface, with physical faces found from the particle-topology neighbours.
+ * GPU counterpart of BCface_P() in BcFields3D.cpp: gpuBCface with the
+ * physical faces found from the particle-topology neighbours.
  */
 void gpuBCface_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
                  int bcFaceXright, int bcFaceXleft, int bcFaceYright,

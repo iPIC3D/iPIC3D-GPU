@@ -19,65 +19,38 @@ __global__ void gpuPackFieldForPclsToCenter(
     const cudaSolverType* __restrict__ Bx_ext,
     const cudaSolverType* __restrict__ By_ext,
     const cudaSolverType* __restrict__ Bz_ext, int nxn, int nyn, int nzn) {
+  constexpr int W = 24;    // values per cell
+  constexpr int P = W + 1; // padded row: conflict-free shared-memory writes
+  __shared__ cudaFieldType tile[kPackFieldBlock * P];
   const int ncells = (nxn - 1) * (nyn - 1) * nzn;
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= ncells)
-    return;
+  const int first = blockIdx.x * kPackFieldBlock; // first cell of the block
+  const int cell = first + threadIdx.x;           // = cellIndex of the layout
 
-  // Decompose flat index into (i, j, k) cell coordinates
-  const int k = idx % nzn;
-  const int j = (idx / nzn) % (nyn - 1);
-  const int i = idx / (nzn * (nyn - 1));
-
-// Source index helper: row-major [nxn][nyn][nzn]
-#define SRC(ii, jj, kk) ((ii) * nyn * nzn + (jj) * nzn + (kk))
-
-  const int cellIndex = (i * (nyn - 1) + j) * nzn + k;
-  cudaFieldType* dst = out + cellIndex * 24;
-
-  // ---- Grid point 0: (i, j, k) ----
-  {
-    const int s = SRC(i, j, k);
-    dst[0] = (cudaFieldType)(Bxn[s] + Bx_ext[s]);
-    dst[1] = (cudaFieldType)(Byn[s] + By_ext[s]);
-    dst[2] = (cudaFieldType)(Bzn[s] + Bz_ext[s]);
-    dst[3] = (cudaFieldType)Ex[s];
-    dst[4] = (cudaFieldType)Ey[s];
-    dst[5] = (cudaFieldType)Ez[s];
+  if (cell < ncells) {
+    const int k = cell % nzn;
+    const int j = (cell / nzn) % (nyn - 1);
+    const int i = cell / (nzn * (nyn - 1));
+    // grid points (i, j, k), (i+1, j, k), (i+1, j+1, k), (i, j+1, k)
+    const int s0 = (i * nyn + j) * nzn + k;
+    const int s[4] = {s0, s0 + nyn * nzn, s0 + (nyn + 1) * nzn, s0 + nzn};
+    cudaFieldType* const row = tile + threadIdx.x * P;
+#pragma unroll
+    for (int p = 0; p < 4; p++) {
+      row[6 * p + 0] = (cudaFieldType)(Bxn[s[p]] + Bx_ext[s[p]]);
+      row[6 * p + 1] = (cudaFieldType)(Byn[s[p]] + By_ext[s[p]]);
+      row[6 * p + 2] = (cudaFieldType)(Bzn[s[p]] + Bz_ext[s[p]]);
+      row[6 * p + 3] = (cudaFieldType)Ex[s[p]];
+      row[6 * p + 4] = (cudaFieldType)Ey[s[p]];
+      row[6 * p + 5] = (cudaFieldType)Ez[s[p]];
+    }
   }
+  __syncthreads();
 
-  // ---- Grid point 1: (i+1, j, k) ----
-  {
-    const int s = SRC(i + 1, j, k);
-    dst[6] = (cudaFieldType)(Bxn[s] + Bx_ext[s]);
-    dst[7] = (cudaFieldType)(Byn[s] + By_ext[s]);
-    dst[8] = (cudaFieldType)(Bzn[s] + Bz_ext[s]);
-    dst[9] = (cudaFieldType)Ex[s];
-    dst[10] = (cudaFieldType)Ey[s];
-    dst[11] = (cudaFieldType)Ez[s];
-  }
-
-  // ---- Grid point 2: (i+1, j+1, k) ----
-  {
-    const int s = SRC(i + 1, j + 1, k);
-    dst[12] = (cudaFieldType)(Bxn[s] + Bx_ext[s]);
-    dst[13] = (cudaFieldType)(Byn[s] + By_ext[s]);
-    dst[14] = (cudaFieldType)(Bzn[s] + Bz_ext[s]);
-    dst[15] = (cudaFieldType)Ex[s];
-    dst[16] = (cudaFieldType)Ey[s];
-    dst[17] = (cudaFieldType)Ez[s];
-  }
-
-  // ---- Grid point 3: (i, j+1, k) ----
-  {
-    const int s = SRC(i, j + 1, k);
-    dst[18] = (cudaFieldType)(Bxn[s] + Bx_ext[s]);
-    dst[19] = (cudaFieldType)(Byn[s] + By_ext[s]);
-    dst[20] = (cudaFieldType)(Bzn[s] + Bz_ext[s]);
-    dst[21] = (cudaFieldType)Ex[s];
-    dst[22] = (cudaFieldType)Ey[s];
-    dst[23] = (cudaFieldType)Ez[s];
-  }
-
-#undef SRC
+  // The cells of the block are consecutive in out: consecutive threads
+  // write their values, coalesced.
+  const int left = ncells - first;
+  const int cells = left < kPackFieldBlock ? left : kPackFieldBlock;
+  cudaFieldType* const dst = out + (size_t)first * W;
+  for (int e = threadIdx.x; e < cells * W; e += kPackFieldBlock)
+    dst[e] = tile[(e / W) * P + e % W];
 }

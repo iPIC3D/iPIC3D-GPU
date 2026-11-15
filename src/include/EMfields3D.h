@@ -832,9 +832,13 @@ public:
                               cudaSolverType* dZ, int nx, int ny, int nz);
   /** GPU open BC: SAL blend / extrapolation on center B inflow faces; an
    * open X-right face copies the plane before them over
-   * fieldCopyLayersXright() cell planes. */
+   * fieldCopyLayersXright() cell planes.  Applied once per cycle, after
+   * Faraday's law (gpuCalculateB): the blend is not idempotent.  ghostOnly
+   * treats only the ghost layer, whose value the full call sets independently
+   * of the layers: gpuMaxwellSource restores it after its ghost exchange. */
   void gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
-                              cudaSolverType* dZ, int nx, int ny, int nz);
+                              cudaSolverType* dZ, int nx, int ny, int nz,
+                              bool ghostOnly = false);
 
   // ---- GPU Solver: ghost node on the X-right outflow face ----
   // (see the X-right open boundary layer section below)
@@ -1012,20 +1016,30 @@ private: // solver steps in halo mode M (see HaloMode)
    *  one copy at the end).  Each pass refreshes the ghosts of its input:
    *  begin(in) starts the halo exchange (HaloMode::Overlap only, the
    *  interior is smoothed meanwhile), end(in) completes it and applies the
-   *  boundary rules (HaloMode::Blocking: the whole refresh). */
-  template <HaloMode M, int N, typename Begin, typename End>
+   *  boundary rules (HaloMode::Blocking: the whole refresh).  fix(out) then
+   *  corrects the output of the pass before the next pass reads it. */
+  template <HaloMode M, int N, typename Begin, typename End, typename Fix>
   void gpuSmoothPasses(GPUFieldArray3* const src[N],
                        GPUFieldArray3* const dst[N],
                        GPUFieldArray3* const scratch[N], int nx, int ny, int nz,
-                       Begin&& begin, End&& end);
+                       Begin&& begin, End&& end, Fix&& fix);
   /** Smoothing of arr in place (type 0: cells; rhoc), gpuSmoothPasses with
    *  the scratch d_smoothTemp. */
   template <HaloMode M> void gpuSmooth(GPUFieldArray3& arr, int type);
-  /** Smoothing of the electric field src (3 components) into dst with the E
-   *  ghost rules, gpuSmoothPasses with the scratch d_tempX/Y/Z.  Needs
-   *  smoothingOn(); src keeps its interior, its ghosts are overwritten. */
+  /** Smoothing of the electric field src (3 components) into dst,
+   *  gpuSmoothPasses with the scratch d_tempX/Y/Z.  On physical faces the
+   *  ghost nodes mirror the second node (BC_FACE_NODE_MIRROR), and every pass
+   *  restores the face values of gpuImposeFaceE, so those rows keep the
+   *  values the solve imposed.  Needs smoothingOn(); src keeps its interior,
+   *  its ghosts are overwritten. */
   template <HaloMode M>
   void gpuSmoothE(GPUFieldArray3* const src[3], GPUFieldArray3* const dst[3]);
+  /** Set the node E (dX, dY, dZ) to the values the identity rows of the
+   *  Maxwell system impose on this rank's faces: the tangential components
+   *  -(u0 x B0) / c on conductor faces, and E0 on the open inflow faces with
+   *  ApplyInflowBcsEImage. */
+  void gpuImposeFaceE(cudaSolverType* dX, cudaSolverType* dY,
+                      cudaSolverType* dZ);
   /** Smoothing of 3 arrays in place (type 0: cells; Jhat), gpuSmoothPasses
    *  with the scratch d_temp2X/Y/Z. */
   template <HaloMode M>
@@ -1463,7 +1477,7 @@ private:
     HaloFacePlan faces[6] = {};
     HaloEdgePlan edges[6][2] = {};
     int edgeLength[3] = {};
-    int selfFaceBlocks[3][2] = {};
+    PointLaunch selfFaceLaunch[3] = {}; // face self-copy, without grid.z
     int edgeKernelBlocks = 0;
     int cornerSendBase[2] = {};
     int cornerRecvBase[2] = {};

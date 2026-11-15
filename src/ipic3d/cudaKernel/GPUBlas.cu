@@ -76,6 +76,13 @@ __global__ void k_addscale2(T alfa, T beta, T* __restrict__ dst,
     dst[i] = beta * dst[i] + alfa * src[i];
 }
 
+template <typename T>
+__global__ void k_addConst(T* __restrict__ d, T c, size_t n) {
+  size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+  if (i < n)
+    d[i] += c;
+}
+
 /** Not used (gpuNeg). */
 template <typename T> __global__ void k_neg(T* __restrict__ d, size_t n) {
   size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
@@ -154,6 +161,14 @@ void gpuAddscale2(cudaSolverType alfa, cudaSolverType beta, cudaSolverType* dst,
     return;
   k_addscale2<<<divCeil(n, BLAS_BLOCK), BLAS_BLOCK, 0, stream>>>(alfa, beta,
                                                                  dst, src, n);
+  cudaErrChk(cudaGetLastError());
+}
+
+void gpuAddConst(cudaSolverType* d, cudaSolverType c, size_t n,
+                 cudaStream_t stream) {
+  if (n == 0)
+    return;
+  k_addConst<<<divCeil(n, BLAS_BLOCK), BLAS_BLOCK, 0, stream>>>(d, c, n);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -379,6 +394,30 @@ void gpuAddscale2_3(cudaSolverType alfa, cudaSolverType beta,
 // =========================================================================
 
 /**
+ * Adds the sum of the block's per-thread values to *d_result: warp shuffle,
+ * the warp sums through shared memory, then one atomicAdd per block.  Every
+ * thread of the block must call it.
+ */
+template <typename T>
+__device__ __forceinline__ void blockSumAtomicAdd(T sum, T* d_result) {
+  sum = warp_reduce_sum(sum);
+
+  __shared__ T warpSums[MAX_WARPS];
+  const int lane = threadIdx.x % WARP_SIZE;
+  const int warpId = threadIdx.x / WARP_SIZE;
+  if (lane == 0)
+    warpSums[warpId] = sum;
+  __syncthreads();
+
+  if (warpId == 0) {
+    sum = (lane < MAX_WARPS) ? warpSums[lane] : T(0);
+    sum = warp_reduce_sum(sum);
+    if (lane == 0)
+      atomicAdd(d_result, sum);
+  }
+}
+
+/**
  * Generic dot-product reduction kernel.
  * Each block reduces a chunk using grid-stride loop + warp shuffle.
  * The final per-block scalar is atomically added to *d_result.
@@ -392,25 +431,7 @@ __global__ void k_dotReduce(const T* __restrict__ a, const T* __restrict__ b,
        i += (size_t)blockDim.x * gridDim.x) {
     sum += a[i] * b[i];
   }
-
-  // Warp-level reduction
-  sum = warp_reduce_sum(sum);
-
-  // First lane of each warp writes to shared memory
-  __shared__ T warpSums[MAX_WARPS];
-  int lane = threadIdx.x % WARP_SIZE;
-  int warpId = threadIdx.x / WARP_SIZE;
-  if (lane == 0)
-    warpSums[warpId] = sum;
-  __syncthreads();
-
-  // First warp reduces warp sums
-  if (warpId == 0) {
-    sum = (lane < MAX_WARPS) ? warpSums[lane] : 0.0;
-    sum = warp_reduce_sum(sum);
-    if (lane == 0)
-      atomicAdd(d_result, sum);
-  }
+  blockSumAtomicAdd(sum, d_result);
 }
 
 /** Same structure but computes norm2 (a[i]*a[i]). */
@@ -423,22 +444,18 @@ __global__ void k_norm2Reduce(const T* __restrict__ a, size_t n,
     T v = a[i];
     sum += v * v;
   }
+  blockSumAtomicAdd(sum, d_result);
+}
 
-  sum = warp_reduce_sum(sum);
-
-  __shared__ T warpSums[MAX_WARPS];
-  int lane = threadIdx.x % WARP_SIZE;
-  int warpId = threadIdx.x / WARP_SIZE;
-  if (lane == 0)
-    warpSums[warpId] = sum;
-  __syncthreads();
-
-  if (warpId == 0) {
-    sum = (lane < MAX_WARPS) ? warpSums[lane] : 0.0;
-    sum = warp_reduce_sum(sum);
-    if (lane == 0)
-      atomicAdd(d_result, sum);
-  }
+/** Same structure, sum of a[i]. */
+template <typename T>
+__global__ void k_sumReduce(const T* __restrict__ a, size_t n,
+                            T* __restrict__ d_result) {
+  T sum = 0.0;
+  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
+       i += (size_t)blockDim.x * gridDim.x)
+    sum += a[i];
+  blockSumAtomicAdd(sum, d_result);
 }
 
 // ---- grid size limiter for reductions (avoid excessive blocks) ----
@@ -474,6 +491,20 @@ cudaSolverType gpuNorm2(const cudaSolverType* a, size_t n,
   if (n > 0) {
     k_norm2Reduce<<<reduceGridSize(n), BLAS_BLOCK, 0, stream>>>(a, n,
                                                                 d_scratch);
+    cudaErrChk(cudaGetLastError());
+  }
+  cudaSolverType result;
+  cudaErrChk(cudaMemcpyAsync(&result, d_scratch, sizeof(cudaSolverType),
+                             cudaMemcpyDeviceToHost, stream));
+  cudaErrChk(cudaStreamSynchronize(stream));
+  return result;
+}
+
+cudaSolverType gpuReduceSum(const cudaSolverType* a, size_t n,
+                            cudaSolverType* d_scratch, cudaStream_t stream) {
+  cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(cudaSolverType), stream));
+  if (n > 0) {
+    k_sumReduce<<<reduceGridSize(n), BLAS_BLOCK, 0, stream>>>(a, n, d_scratch);
     cudaErrChk(cudaGetLastError());
   }
   cudaSolverType result;

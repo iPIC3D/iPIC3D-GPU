@@ -341,6 +341,25 @@ void Collective::ReadInput(const ConfigFile& config) {
   PERIODICY_P = config.read<bool>("PERIODICY_P", PERIODICY);
   PERIODICZ_P = config.read<bool>("PERIODICZ_P", PERIODICZ);
 
+  // The Smooth filter, a f + (1-a)/6 (sum of the 6 neighbours), has the
+  // response a + (1-a)/3 (cos kx + cos ky + cos kz).  Along a single
+  // periodic cell the cos stays 1, so with d other directions the lowest
+  // response is a - (1-a)(2d-3)/3: negative, flipping modes every pass,
+  // below a = (2d-3)/(2d), i.e. 1/2 in 3D and 1/4 in 2D.  Above a = 1 every
+  // mode but k = 0 grows.
+  {
+    const int d = !(nxc == 1 && PERIODICX) + !(nyc == 1 && PERIODICY) +
+                  !(nzc == 1 && PERIODICZ);
+    const double smoothMin = d > 1 ? (2.0 * d - 3.0) / (2.0 * d) : 0.0;
+    if (!(Smooth >= smoothMin && Smooth <= 1.0)) {
+      if (!MPIdata::get_rank())
+        eprintf("in input file %s Smooth must be in [%g, 1] for this %dD "
+                "grid, not %g\n",
+                inputfile.c_str(), smoothMin, d, Smooth);
+      MPIdata::exit(1);
+    }
+  }
+
   x_center_dipole = config.read<double>("x_center_dipole", 5.0);
   y_center_dipole = config.read<double>("y_center_dipole", 5.0);
   z_center_dipole = config.read<double>("z_center_dipole", 5.0);

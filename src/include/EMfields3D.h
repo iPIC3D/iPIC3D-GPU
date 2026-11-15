@@ -904,6 +904,10 @@ public:
                                                cudaSolverType* d_b, int m,
                                                int max_iter, cudaSolverType tol,
                                                MPI_Comm fieldcomm);
+  /** With every direction periodic, subtract from the packed right-hand side
+   * d_b of a Poisson solve its global mean, the component outside the range
+   * of the operator. */
+  void gpuRemovePoissonMean(cudaSolverType* d_b);
   /** GPU Poisson correction for div(E) cleaning. */
   void gpuPoissonCorrection(int cycle);
   /** Divergence cleaning of B: solve lap(PSI) = div(B) with PSI = 0 beyond

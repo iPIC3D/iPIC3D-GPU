@@ -214,6 +214,15 @@ def print_report(cfg: Input) -> None:
     periodic_x = cfg.boolean("PERIODICX", True)
     periodic_y = cfg.boolean("PERIODICY", True)
     periodic_z = cfg.boolean("PERIODICZ", True)
+    # same rejection as Collective::ReadInput: the Smooth filter's response
+    # is negative below (2d-3)/(2d), d the directions that are not a single
+    # periodic cell, and grows above 1
+    dims = sum(not (n == 1 and p) for n, p in
+               ((nxc, periodic_x), (nyc, periodic_y), (nzc, periodic_z)))
+    smooth_min = (2 * dims - 3) / (2 * dims) if dims > 1 else 0.0
+    if not smooth_min <= smooth <= 1.0:
+        raise SystemExit(f"Smooth must be in [{cxx(smooth_min)}, 1] for this "
+                         f"{dims}D grid, not {cxx(smooth)}")
 
     planet_reflection = cfg.integer("planetReflectionType", 0)
     ns_solar = cfg.integer("ns_solar_wind", ns)

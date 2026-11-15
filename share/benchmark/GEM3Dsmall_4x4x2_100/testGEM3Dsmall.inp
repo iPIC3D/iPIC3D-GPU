@@ -38,7 +38,7 @@ th = 1.0          # th =   decentering parameter
 c = 1.0
 
 #  %%%%%%%%%%%%%%%%%%% SMOOTH %%%%%%%%%%%%%%%%%%
-Smooth = 0.2      # Smoothing value (5-points stencil)
+Smooth = 0.5      # Smoothing value (7-point filter)
 
 Lx = 10   # Lx = simulation box length - x direction    
 Ly = 10   # Ly = simulation box length - y direction   

@@ -2,8 +2,9 @@
  * @file GPUBlas.cuh
  * @brief GPU BLAS-like operations for the iPIC3D GPU field solver.
  *
- * Element-wise vector operations (fill, scale, sum, sub, addscale, neg)
- * and reduction operations (dot product, norm) on flat device arrays.
+ * Element-wise vector operations (fill, scale, sum, sub, addscale, add a
+ * constant, neg) and reduction operations (dot product, norm, sum) on flat
+ * device arrays.
  * Also provides the Krylov <-> physical packing kernels (gpuPhys2Solver*,
  * gpuSolver2Phys*).
  *
@@ -53,6 +54,10 @@ void gpuAddscale(cudaSolverType alfa, cudaSolverType* dst,
 /** dst[i] = beta*dst[i] + alfa*src[i]  (not used) */
 void gpuAddscale2(cudaSolverType alfa, cudaSolverType beta, cudaSolverType* dst,
                   const cudaSolverType* src, size_t n, cudaStream_t stream = 0);
+
+/** d[i] += c */
+void gpuAddConst(cudaSolverType* d, cudaSolverType c, size_t n,
+                 cudaStream_t stream = 0);
 
 /** d[i] = -d[i]  (not used) */
 void gpuNeg(cudaSolverType* d, size_t n, cudaStream_t stream = 0);
@@ -141,6 +146,14 @@ cudaSolverType gpuDot(const cudaSolverType* a, const cudaSolverType* b,
  */
 cudaSolverType gpuNorm2(const cudaSolverType* a, size_t n,
                         cudaSolverType* d_scratch, cudaStream_t stream = 0);
+
+/**
+ * Local sum: sum_i a[i].
+ * d_scratch must point to a device cudaSolverType.
+ * Returns the result synchronously.
+ */
+cudaSolverType gpuReduceSum(const cudaSolverType* a, size_t n,
+                            cudaSolverType* d_scratch, cudaStream_t stream = 0);
 
 /**
  * Async variants: launch reduction kernel + D→H copy into PINNED host

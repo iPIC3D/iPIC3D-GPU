@@ -3718,6 +3718,42 @@ EMfields3D::gpuFGMRES_PoissonChebyshev(cudaSolverType* d_x, int n,
 }
 
 // =========================================================================
+//  gpuRemovePoissonMean
+//
+//  With every direction periodic the Poisson operator maps constants to 0
+//  and, being symmetric, every vector to one of zero sum.  A right-hand side
+//  with a mean has no solution: FGMRES cannot reduce that component of the
+//  residual and stalls.  Subtracting the global mean over the interior cells
+//  makes the system consistent.  For div(E) the mean is -4π times the mean
+//  charge density, so this adds a uniform neutralising background; for
+//  div(B) it is round-off, since the periodic sum of divN2C cancels.  The
+//  solution is then known up to a constant, which the gradient removes
+//  exactly.  With a physical face the operator is not singular (zero ghosts
+//  there) and b is left alone.
+//
+//  The mean is subtracted twice.  The first pass leaves a constant of the
+//  order of the rounding of the mean, eps |mean|; when b is otherwise
+//  almost uniform (a quiet start with a net charge and E = 0) that constant
+//  is most of what remains, and FGMRES stalls on it.  The second pass
+//  leaves eps times the remaining values.
+// =========================================================================
+
+void EMfields3D::gpuRemovePoissonMean(cudaSolverType* d_b) {
+  const VirtualTopology3D& vct = get_vct();
+  if (!(vct.getPERIODICX() && vct.getPERIODICY() && vct.getPERIODICZ()))
+    return;
+  const Collective& col = get_col();
+  const double nCells = (double)col.getNxc() * col.getNyc() * col.getNzc();
+  const int n = poissonKrylovSize_;
+  for (int pass = 0; pass < 2; pass++) {
+    double sum = gpuReduceSum(d_b, n, d_blasScratch, solverStream_);
+    MPI_Allreduce(MPI_IN_PLACE, &sum, 1, MPI_DOUBLE, MPI_SUM,
+                  vct.getFieldComm());
+    gpuAddConst(d_b, (cudaSolverType)(-sum / nCells), n, solverStream_);
+  }
+}
+
+// =========================================================================
 //  gpuPoissonCorrection (div(E) cleaning)
 // =========================================================================
 
@@ -3758,6 +3794,7 @@ void EMfields3D::gpuPoissonCorrection(int cycle) {
   // RHS → Krylov
   gpuPhys2Solver1(d_bkrylovPoisson_E.devPtr(), d_divE_work.devPtr(), nxc, nyc,
                   nzc, solverStream_);
+  gpuRemovePoissonMean(d_bkrylovPoisson_E.devPtr());
 
   if (vct->getCartesian_rank() == 0)
     cout << "*** DIVERGENCE CLEANING div(E) using FGMRES+Chebyshev [GPU] ***"
@@ -3818,6 +3855,7 @@ void EMfields3D::gpuApplyDivBCleaning(int cycle) {
   // RHS → Krylov
   gpuPhys2Solver1(d_bkrylovPoisson_B.devPtr(), d_divBwork.devPtr(), nxc, nyc,
                   nzc, solverStream_);
+  gpuRemovePoissonMean(d_bkrylovPoisson_B.devPtr());
 
   if (vct->getCartesian_rank() == 0)
     cout << "*** DIVERGENCE CLEANING div(B)=0 using FGMRES+Chebyshev [GPU] ***"

@@ -433,12 +433,7 @@ void HDF5OutputAdaptor::write(const std::string& tag, const Dimens dimens,
 void HDF5OutputAdaptor::write(const std::string& tag, const Dimens dimens,
                               const std::vector<int>& i_array) {
   // try {
-  int n = dimens.nels();
-  int* i_array_p = new int[n];
-  for (int i = 0; i < n; ++i)
-    i_array_p[i] = i_array[i];
-  write(tag, dimens, i_array_p);
-  delete[] i_array_p;
+  write(tag, dimens, i_array.data());
   //} catch(PSK::Exception & e) {
   //  e.push("In HDF5OutputAdaptor::write(vector<int> array)");
   //  throw e;
@@ -460,6 +455,7 @@ void HDF5OutputAdaptor::write(const std::string& objname, const Dimens dimens,
   const int dj = dimens[1];
   const int dk = dimens[2];
   const int djk = dk * dj;
+#pragma omp parallel for collapse(2) schedule(static)
   for (int i = 0; i < di; ++i)
     for (int j = 0; j < dj; ++j)
       for (int k = 0; k < dk; ++k)
@@ -557,12 +553,7 @@ void HDF5OutputAdaptor::write(const std::string& tag, const Dimens dimens,
 void HDF5OutputAdaptor::write(const std::string& tag, const Dimens dimens,
                               const std::vector<float>& f_array) {
   // try {
-  int n = dimens.nels();
-  float* f_array_p = new float[n];
-  for (int i = 0; i < n; ++i)
-    f_array_p[i] = f_array[i];
-  write(tag, dimens, f_array_p);
-  delete[] f_array_p;
+  write(tag, dimens, f_array.data());
   //} catch(PSK::Exception & e) {
   //  e.push("In HDF5OutputAdaptor::write(vector<float> array)");
   //  throw e;
@@ -584,6 +575,7 @@ void HDF5OutputAdaptor::write(const std::string& objname, const Dimens dimens,
   const int dj = dimens[1];
   const int dk = dimens[2];
   const int djk = dk * dj;
+#pragma omp parallel for collapse(2) schedule(static)
   for (int i = 0; i < di; ++i)
     for (int j = 0; j < dj; ++j)
       for (int k = 0; k < dk; ++k)
@@ -703,12 +695,7 @@ void HDF5OutputAdaptor::write(const std::string& tag, const Dimens dimens,
 void HDF5OutputAdaptor::write(const std::string& tag, const Dimens dimens,
                               const std::vector<double>& d_array) {
   // try {
-  int n = dimens.nels();
-  double* d_array_p = new double[n];
-  for (int i = 0; i < n; ++i)
-    d_array_p[i] = d_array[i];
-  write(tag, dimens, d_array_p);
-  delete[] d_array_p;
+  write(tag, dimens, d_array.data());
   //} catch(PSK::Exception & e) {
   //  e.push("In HDF5OutputAdaptor::write(vector<double> array)");
   //  throw e;
@@ -730,19 +717,15 @@ void HDF5OutputAdaptor::write(const std::string& objname, const Dimens dimens,
   const int dj = dimens[1];
   const int dk = dimens[2];
   const int djk = dk * dj;
+  // a flat (single-point) axis is read at index 0 (with dk = 1 also j = 0
+  // when dj = 1), the others from the first interior node on
+  const int jOff = (dk != 1 || dj != 1) ? 1 : 0, kOff = dk != 1 ? 1 : 0;
+#pragma omp parallel for collapse(2) schedule(static)
   for (int i = 0; i < di; ++i)
     for (int j = 0; j < dj; ++j)
-      for (int k = 0; k < dk; ++k) {
-
-        if (dk != 1)
-          d_array_p[i * djk + j * dk + k] =
-              d_array[i + 1][j + 1][k + 1] * scale;
-        else if (dj != 1)
-          d_array_p[i * djk + j * dk] = d_array[i + 1][j + 1][0] * scale;
-        else {
-          d_array_p[i * djk + j * dk] = d_array[i + 1][0][0] * scale;
-        }
-      }
+      for (int k = 0; k < dk; ++k)
+        d_array_p[i * djk + j * dk + k] =
+            d_array[i + 1][j + jOff][k + kOff] * scale;
   write(objname, dimens, d_array_p);
   delete[] d_array_p;
   //}
@@ -769,17 +752,14 @@ void HDF5OutputAdaptor::write(const std::string& objname, const Dimens dimens,
 
   const int dk = dimens[2];
   const int djk = dk * dj;
+  // a flat (single-point) axis is read at index 0, as in the 3D write above
+  const int jOff = (dk != 1 || dj != 1) ? 1 : 0, kOff = dk != 1 ? 1 : 0;
+#pragma omp parallel for collapse(2) schedule(static)
   for (int i = 0; i < di; ++i)
     for (int j = 0; j < dj; ++j)
-      for (int k = 0; k < dk; ++k) {
-        if (dk != 1)
-          d_array_p[i * djk + j * dk + k] =
-              d_array[ns][i + 1][j + 1][k + 1] * scale;
-        else if (dj != 1)
-          d_array_p[i * djk + j * dk] = d_array[ns][i + 1][j + 1][0] * scale;
-        else
-          d_array_p[i * djk + j * dk] = d_array[ns][i + 1][0][0] * scale;
-      }
+      for (int k = 0; k < dk; ++k)
+        d_array_p[i * djk + j * dk + k] =
+            d_array[ns][i + 1][j + jOff][k + kOff] * scale;
   write(objname, dimens, d_array_p);
   delete[] d_array_p;
   //}

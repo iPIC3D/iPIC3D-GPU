@@ -35,6 +35,7 @@
 #include "mpi.h"
 
 #include <cstddef>
+#include <vector>
 
 #include "HeatFluxComponents.h"
 #include "OutflowBoundary.h"
@@ -97,7 +98,8 @@ public:
   /** @brief Initialize the default field state or restart-provided state. */
   void init();
   /**
-   * @brief Initialize the beam test configuration.
+   * @brief Initialize the beam test configuration (not used: no Case selects
+   * it).
    *
    * @param x_center Beam-center x coordinate.
    * @param y_center Beam-center y coordinate.
@@ -111,13 +113,16 @@ public:
   /** @brief Single Harris sheet with optional GEM/hump perturbations and
    * optional Ampère current. */
   void initGEMHarris();
+  /** Not used: no Case selects it. */
   void initOriginalGEM();
   /** @brief Initialize the double-Harris-sheet GEM configuration. */
   void initGEMDoubleHarris();
+  /** Not used: no Case selects it. */
   void initDoublePeriodicHarrisWithGaussianHumpPerturbation();
   /** @brief Initialize the hump-perturbation configuration. */
   void initHumpPerturbation();
-  /** @brief Initialize GEM with a dipole-like tail and no perturbation. */
+  /** @brief Initialize GEM with a dipole-like tail and no perturbation (not
+   * used: no Case selects it). */
   void initGEMDipoleLikeTailNoPert();
   /** @brief Initialize GEM without the perturbation term. */
   void initGEMnoPert();
@@ -130,7 +135,7 @@ public:
   /** @brief Initialize the force-free equilibrium case. */
   void initForceFree();
   /**
-   * @brief Initialize a uniform rotated magnetic field.
+   * @brief Initialize a uniform rotated magnetic field (not used).
    *
    * @param B Magnetic-field magnitude.
    * @param theta Rotation angle.
@@ -138,7 +143,7 @@ public:
   void initEM_rotate(double B, double theta);
   /**
    * @brief Add a perturbation cos(kx x + ky y + phase) to the densities of
-   * species 0 and 1.
+   * species 0 and 1 (not used).
    *
    * @param deltaBoB Magnetic perturbation amplitude normalized by the
    * background field.
@@ -157,7 +162,7 @@ public:
                           double ne_phase, double ni_mod, double ni_phase,
                           double B0, Grid* grid);
   /**
-   * @brief Add a perturbation to the electromagnetic field.
+   * @brief Add a perturbation to the electromagnetic field (not used).
    *
    * @param deltaBoB Magnetic perturbation amplitude normalized by the
    * background field.
@@ -215,7 +220,7 @@ public:
                                      double z_center);
   /** @brief Impose a constant charge in the open-boundary layers. */
   void ConstantChargeOpenBC();
-  /** @brief Zero all density-related fields. */
+  /** @brief Zero all density-related fields (used by the unit tests only). */
   void setZeroDensities();
   /** @brief Zero the per-species primary moments. */
   void setZeroPrimaryMoments();
@@ -258,7 +263,7 @@ public:
   arr3_double getBy() { return Byn; }
   arr3_double getBz() { return Bzn; }
 
-  // cell-centred B
+  // cell-centred B (used by the unit tests only)
   arr3_double getBxc() { return Bxc; };
   arr3_double getByc() { return Byc; };
   arr3_double getBzc() { return Bzc; };
@@ -284,6 +289,7 @@ public:
     return arr3_double(rhons.fetch_arr4()[is], nxn, nyn, nzn);
   }
 
+  // B_ext accessors (used by the unit tests only)
   double getBx_ext(int X, int Y, int Z) const { return Bx_ext.get(X, Y, Z); }
   double getBy_ext(int X, int Y, int Z) const { return By_ext.get(X, Y, Z); }
   double getBz_ext(int X, int Y, int Z) const { return Bz_ext.get(X, Y, Z); }
@@ -411,26 +417,32 @@ public:
     return Jzs.get(is, X, Y, Z);
   }
 
-  /*! electric field energy of this rank: sum over its owned nodes
-   *  (ownedNodeEnds) of dV |E|^2 / (8 pi) */
+  /*! electric field energy of this rank: sum over its owned nodes of
+   *  w dV |E|^2 / (8 pi), w the trapezoidal weight (ownedNodeWeights) */
   double getLocalEenergy();
-  /*! magnetic field energy of this rank, with B_ext (owned nodes, as
-   *  getLocalEenergy) */
+  /*! magnetic field energy of this rank: sum over its cells of
+   *  dV |B_c + B_ext|^2 / (8 pi), with the cell-centred B that Faraday's law
+   *  advances (the node B is its interpolation, which filters the
+   *  grid-scale part) and B_ext averaged from the 8 corner nodes */
   double getLocalBenergy();
   /*! electric field energy, summed over the ranks */
   double getEenergy();
   /*! magnetic field energy, summed over the ranks */
   double getBenergy();
-  /*! bulk kinetic energy of species is, summed over the ranks (owned nodes,
-   *  as getLocalEenergy) */
+  /*! bulk kinetic energy of species is, summed over the ranks (owned nodes
+   *  with the weights of getLocalEenergy) */
   double getBulkEnergy(int is);
   /*! Last node this rank owns along x, y, z; the owned nodes are [1, end].
    *  end = n-3 where the next rank or the periodic image holds node n-2,
    *  end = n-2 on a non-periodic last rank (node n-2 is the boundary node),
    *  so that every global node is counted once. */
   void ownedNodeEnds(int& iEnd, int& jEnd, int& kEnd) const;
+  /*! Volume weights of the owned nodes along x, y, z (w[d][1..end]): 1, or
+   *  1/2 on a node of a non-periodic domain face, which holds half a cell
+   *  of the domain (trapezoidal rule). */
+  void ownedNodeWeights(std::vector<double> w[3]) const;
 
-  /*! print electromagnetic fields info */
+  /*! print electromagnetic fields info (not used; empty) */
   void print(void) const;
 
   // get MPI Derived Datatype
@@ -468,7 +480,7 @@ public:
   MPI_Datatype getProcview() { return procview; }
   MPI_Datatype getXYZeType() { return xyzcomp; }
   MPI_Datatype getProcviewXYZ() { return procviewXYZ; }
-  MPI_Datatype getGhostType() { return ghosttype; }
+  MPI_Datatype getGhostType() { return ghosttype; } // not used
 
   void freeDataType();
   bool isLittleEndian() { return lEndFlag; };
@@ -614,7 +626,7 @@ public:
    *  the blocking one. */
   GpuImageFn gpuMaxwellImageFn() const;
   /** Launch sets of the Maxwell images and gpuMUdot (set by
-   *  gpuSolverAllocate). */
+   *  gpuSolverAllocate); this accessor is used by the unit tests only. */
   const MaxwellImageBoxes& gpuMaxwellImageBoxes() const { return imageBoxes_; }
   /** Maxwell operator, communication-free: A*x for use as
    * preconditioner (the Richardson sweeps of gpuBlockJacobiPrecond, run when
@@ -921,9 +933,9 @@ public:
                                         int bcFaceZright, int bcFaceZleft);
 
   // ---- GPU Solver: accessor helpers ----
-  GPUFieldArray3& gpuEx() { return d_Ex; }
-  GPUFieldArray3& gpuEy() { return d_Ey; }
-  GPUFieldArray3& gpuEz() { return d_Ez; }
+  GPUFieldArray3& gpuEx() { return d_Ex; } // unit tests only
+  GPUFieldArray3& gpuEy() { return d_Ey; } // unit tests only
+  GPUFieldArray3& gpuEz() { return d_Ez; } // unit tests only
   /** The E the mover samples: E(n+theta), smoothed when smoothing is on. */
   GPUFieldArray3& gpuExForPcls() {
     return smoothingOn() ? d_ExthSmooth : d_Exth;

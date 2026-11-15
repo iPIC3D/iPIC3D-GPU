@@ -26,6 +26,7 @@
 #include "Collective.h"
 #include "EMfields3D.h"
 #include "Grid3DCU.h"
+#include "HostFieldLoops.h"
 #include "MPIdata.h"
 #include "OutputTagConfig.h"
 #include "ParallelIO.h"
@@ -35,6 +36,7 @@
 #include "debug.h"
 #include "math.h"
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -199,6 +201,7 @@ void WriteOutputParallel(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
                          double (EMfields3D::*g4)(int, int, int, int) const) {
       if (!doWrite)
         return;
+#pragma omp parallel for collapse(2) schedule(static)
       for (int i = 0; i < (int)ldim[0]; i++)
         for (int j = 0; j < (int)ldim[1]; j++)
           for (int k = 0; k < (int)ldim[2]; k++) {
@@ -239,6 +242,7 @@ void WriteOutputParallel(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
     for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
       if (!cfg.writeHeatFluxTot[c])
         continue;
+#pragma omp parallel for collapse(2) schedule(static)
       for (int i = 0; i < (int)ldim[0]; i++)
         for (int j = 0; j < (int)ldim[1]; j++)
           for (int k = 0; k < (int)ldim[2]; k++) {
@@ -339,28 +343,36 @@ static void openNewVTK(MPI_Comm comm, const std::string& path, MPI_File* fh) {
                 MPI_INFO_NULL, fh);
 }
 
-/**
- * @brief Write a 3-component vector VTK file via MPI-IO.
- */
-static void
-writeVectorVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
-               VCtopology3D* vct, const std::string& filepath,
-               const std::string& vectorName, const std::string& description,
-               float**** buf, const VTKGridInfo& g,
-               std::function<void(float****, int, int, int)> fillFn) {
-  const int lx = g.nxn - 3, ly = g.nyn - 3, lz = g.nzn - 3;
-
-  fillFn(buf, lx, ly, lz);
-
-  if (EMf->isLittleEndian()) {
-    for (int iz = 0; iz < lz; iz++)
-      for (int iy = 0; iy < ly; iy++)
-        for (int ix = 0; ix < lx; ix++) {
-          ByteSwap((unsigned char*)&buf[iz][iy][ix][0], 4);
-          ByteSwap((unsigned char*)&buf[iz][iy][ix][1], 4);
-          ByteSwap((unsigned char*)&buf[iz][iy][ix][2], 4);
-        }
+/** Store of fillNodesXFastest for the VTK files: float32, big-endian (the
+ *  legacy VTK binary order) on a little-endian machine. */
+struct vtkFloat {
+  bool swap;
+  explicit vtkFloat(bool littleEndian) : swap(littleEndian) {}
+  float operator()(double x) const {
+    float f = (float)x;
+    if (swap) {
+      uint32_t u;
+      std::memcpy(&u, &f, sizeof u);
+      u = __builtin_bswap32(u);
+      std::memcpy(&f, &u, sizeof f);
+    }
+    return f;
   }
+};
+
+/**
+ * @brief Write a 3-component vector VTK file via MPI-IO.  sample(i, j, k, v)
+ *        gives the 3 components at local node (i, j, k).
+ */
+template <typename Sample>
+static void writeVectorVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
+                           VCtopology3D* vct, const std::string& filepath,
+                           const std::string& vectorName,
+                           const std::string& description, float**** buf,
+                           const VTKGridInfo& g, Sample&& sample) {
+  const int lx = g.nxn - 3, ly = g.nyn - 3, lz = g.nzn - 3;
+  fillNodesXFastest<3>(buf[0][0][0], lx, ly, lz, sample,
+                       vtkFloat(EMf->isLittleEndian()));
 
   const std::string header =
       vtkHeader(description, g, "VECTORS " + vectorName + " float\n");
@@ -396,24 +408,18 @@ writeVectorVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
 }
 
 /**
- * @brief Write a scalar VTK file via MPI-IO.
+ * @brief Write a scalar VTK file via MPI-IO.  sample(i, j, k, v) gives the
+ *        value v[0] at local node (i, j, k).
  */
-static void
-writeScalarVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
-               VCtopology3D* vct, const std::string& filepath,
-               const std::string& scalarName, const std::string& description,
-               float*** buf, const VTKGridInfo& g,
-               std::function<void(float***, int, int, int)> fillFn) {
+template <typename Sample>
+static void writeScalarVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
+                           VCtopology3D* vct, const std::string& filepath,
+                           const std::string& scalarName,
+                           const std::string& description, float*** buf,
+                           const VTKGridInfo& g, Sample&& sample) {
   const int lx = g.nxn - 3, ly = g.nyn - 3, lz = g.nzn - 3;
-
-  fillFn(buf, lx, ly, lz);
-
-  if (EMf->isLittleEndian()) {
-    for (int iz = 0; iz < lz; iz++)
-      for (int iy = 0; iy < ly; iy++)
-        for (int ix = 0; ix < lx; ix++)
-          ByteSwap((unsigned char*)&buf[iz][iy][ix], 4);
-  }
+  fillNodesXFastest<1>(buf[0][0], lx, ly, lz, sample,
+                       vtkFloat(EMf->isLittleEndian()));
 
   const std::string header =
       vtkHeader(description, g,
@@ -469,32 +475,21 @@ void WriteFieldsVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
   if (cfg.writeB) {
     writeVectorVTK(grid, EMf, col, vct, vtkPath(col, "B", cycle), "B",
                    "Magnetic Field", fieldwritebuffer, g,
-                   [&](float**** buf, int lx, int ly, int lz) {
-                     for (int iz = 0; iz < lz; iz++)
-                       for (int iy = 0; iy < ly; iy++)
-                         for (int ix = 0; ix < lx; ix++) {
-                           buf[iz][iy][ix][0] =
-                               (float)EMf->getBxTot(ix + 1, iy + 1, iz + 1);
-                           buf[iz][iy][ix][1] =
-                               (float)EMf->getByTot(ix + 1, iy + 1, iz + 1);
-                           buf[iz][iy][ix][2] =
-                               (float)EMf->getBzTot(ix + 1, iy + 1, iz + 1);
-                         }
+                   [&](int i, int j, int k, double* v) {
+                     v[0] = EMf->getBxTot(i, j, k);
+                     v[1] = EMf->getByTot(i, j, k);
+                     v[2] = EMf->getBzTot(i, j, k);
                    });
   }
 
   if (cfg.writeE) {
-    writeVectorVTK(
-        grid, EMf, col, vct, vtkPath(col, "E", cycle), "E", "Electric Field",
-        fieldwritebuffer, g, [&](float**** buf, int lx, int ly, int lz) {
-          for (int iz = 0; iz < lz; iz++)
-            for (int iy = 0; iy < ly; iy++)
-              for (int ix = 0; ix < lx; ix++) {
-                buf[iz][iy][ix][0] = (float)EMf->getEx(ix + 1, iy + 1, iz + 1);
-                buf[iz][iy][ix][1] = (float)EMf->getEy(ix + 1, iy + 1, iz + 1);
-                buf[iz][iy][ix][2] = (float)EMf->getEz(ix + 1, iy + 1, iz + 1);
-              }
-        });
+    writeVectorVTK(grid, EMf, col, vct, vtkPath(col, "E", cycle), "E",
+                   "Electric Field", fieldwritebuffer, g,
+                   [&](int i, int j, int k, double* v) {
+                     v[0] = EMf->getEx(i, j, k);
+                     v[1] = EMf->getEy(i, j, k);
+                     v[2] = EMf->getEz(i, j, k);
+                   });
   }
 }
 
@@ -514,13 +509,8 @@ void WriteMomentsVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
         grid, EMf, col, vct, vtkPath(col, "rho" + std::to_string(si), cycle),
         "rho" + std::to_string(si),
         "Species " + std::to_string(si) + " density", momentswritebuffer, g,
-        [&](float*** buf, int lx, int ly, int lz) {
-          for (int iz = 0; iz < lz; iz++)
-            for (int iy = 0; iy < ly; iy++)
-              for (int ix = 0; ix < lx; ix++)
-                buf[iz][iy][ix] =
-                    (float)(EMf->getRHOns(ix + 1, iy + 1, iz + 1, si) * 4.0 *
-                            3.1415926535897);
+        [&](int i, int j, int k, double* v) {
+          v[0] = (EMf->getRHOns(i, j, k, si) * 4.0 * 3.1415926535897);
         });
   }
 
@@ -528,13 +518,8 @@ void WriteMomentsVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
   if (cfg.writeRhoTot) {
     writeScalarVTK(grid, EMf, col, vct, vtkPath(col, "rho_tot", cycle),
                    "rho_tot", "Total charge density", momentswritebuffer, g,
-                   [&](float*** buf, int lx, int ly, int lz) {
-                     for (int iz = 0; iz < lz; iz++)
-                       for (int iy = 0; iy < ly; iy++)
-                         for (int ix = 0; ix < lx; ix++)
-                           buf[iz][iy][ix] =
-                               (float)(EMf->getRHOn(ix + 1, iy + 1, iz + 1) *
-                                       4.0 * 3.1415926535897);
+                   [&](int i, int j, int k, double* v) {
+                     v[0] = (EMf->getRHOn(i, j, k) * 4.0 * 3.1415926535897);
                    });
   }
 
@@ -571,12 +556,8 @@ void WriteMomentsVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
       writeScalarVTK(grid, EMf, col, vct, vtkPath(col, tag, cycle), tag,
                      "Species " + std::to_string(si) + " pressure " + pd.name,
                      momentswritebuffer, g,
-                     [&](float*** buf, int lx, int ly, int lz) {
-                       for (int iz = 0; iz < lz; iz++)
-                         for (int iy = 0; iy < ly; iy++)
-                           for (int ix = 0; ix < lx; ix++)
-                             buf[iz][iy][ix] =
-                                 (float)pd.getter(ix + 1, iy + 1, iz + 1, si);
+                     [&](int i, int j, int k, double* v) {
+                       v[0] = pd.getter(i, j, k, si);
                      });
     }
     // Total (sum over all species on-the-fly)
@@ -585,15 +566,11 @@ void WriteMomentsVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
       writeScalarVTK(grid, EMf, col, vct, vtkPath(col, tag, cycle), tag,
                      "Total pressure " + std::string(pd.name),
                      momentswritebuffer, g,
-                     [&](float*** buf, int lx, int ly, int lz) {
-                       for (int iz = 0; iz < lz; iz++)
-                         for (int iy = 0; iy < ly; iy++)
-                           for (int ix = 0; ix < lx; ix++) {
-                             double sum = 0.0;
-                             for (int s = 0; s < ns; s++)
-                               sum += pd.getter(ix + 1, iy + 1, iz + 1, s);
-                             buf[iz][iy][ix] = (float)sum;
-                           }
+                     [&](int i, int j, int k, double* v) {
+                       double sum = 0.0;
+                       for (int s = 0; s < ns; s++)
+                         sum += pd.getter(i, j, k, s);
+                       v[0] = sum;
                      });
     }
   }
@@ -603,31 +580,22 @@ void WriteMomentsVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
     const std::string name = HeatFlux::ComponentNames[c];
     for (int si : cfg.heatFluxSpecies[c]) {
       std::string tag = name + std::to_string(si);
-      writeScalarVTK(
-          grid, EMf, col, vct, vtkPath(col, tag, cycle), tag,
-          "Species " + std::to_string(si) + " heat flux " + name,
-          momentswritebuffer, g, [&](float*** buf, int lx, int ly, int lz) {
-            for (int iz = 0; iz < lz; iz++)
-              for (int iy = 0; iy < ly; iy++)
-                for (int ix = 0; ix < lx; ix++)
-                  buf[iz][iy][ix] =
-                      (float)EMf->getHeatFlux(ix + 1, iy + 1, iz + 1, si, c);
-          });
+      writeScalarVTK(grid, EMf, col, vct, vtkPath(col, tag, cycle), tag,
+                     "Species " + std::to_string(si) + " heat flux " + name,
+                     momentswritebuffer, g,
+                     [&](int i, int j, int k, double* v) {
+                       v[0] = EMf->getHeatFlux(i, j, k, si, c);
+                     });
     }
     if (cfg.writeHeatFluxTot[c]) {
       std::string tag = name + "_tot";
       writeScalarVTK(grid, EMf, col, vct, vtkPath(col, tag, cycle), tag,
                      "Total heat flux " + name, momentswritebuffer, g,
-                     [&](float*** buf, int lx, int ly, int lz) {
-                       for (int iz = 0; iz < lz; iz++)
-                         for (int iy = 0; iy < ly; iy++)
-                           for (int ix = 0; ix < lx; ix++) {
-                             double sum = 0.0;
-                             for (int s = 0; s < ns; s++)
-                               sum += EMf->getHeatFlux(ix + 1, iy + 1, iz + 1,
-                                                       s, c);
-                             buf[iz][iy][ix] = (float)sum;
-                           }
+                     [&](int i, int j, int k, double* v) {
+                       double sum = 0.0;
+                       for (int s = 0; s < ns; s++)
+                         sum += EMf->getHeatFlux(i, j, k, s, c);
+                       v[0] = sum;
                      });
     }
   }
@@ -650,57 +618,36 @@ void WriteMomentsJVTK(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
     writeVectorVTK(
         grid, EMf, col, vct, vtkPath(col, "J" + std::to_string(si), cycle),
         "J" + std::to_string(si), "Species " + std::to_string(si) + " current",
-        fieldwritebuffer, g, [&](float**** buf, int lx, int ly, int lz) {
-          for (int iz = 0; iz < lz; iz++)
-            for (int iy = 0; iy < ly; iy++)
-              for (int ix = 0; ix < lx; ix++) {
-                buf[iz][iy][ix][0] =
-                    (float)EMf->getJxs(ix + 1, iy + 1, iz + 1, si);
-                buf[iz][iy][ix][1] =
-                    (float)EMf->getJys(ix + 1, iy + 1, iz + 1, si);
-                buf[iz][iy][ix][2] =
-                    (float)EMf->getJzs(ix + 1, iy + 1, iz + 1, si);
-              }
+        fieldwritebuffer, g, [&](int i, int j, int k, double* v) {
+          v[0] = EMf->getJxs(i, j, k, si);
+          v[1] = EMf->getJys(i, j, k, si);
+          v[2] = EMf->getJzs(i, j, k, si);
         });
   }
 
   // Total J
   if (cfg.writeJTot) {
-    writeVectorVTK(
-        grid, EMf, col, vct, vtkPath(col, "J_tot", cycle), "J_tot",
-        "Total current", fieldwritebuffer, g,
-        [&](float**** buf, int lx, int ly, int lz) {
-          for (int iz = 0; iz < lz; iz++)
-            for (int iy = 0; iy < ly; iy++)
-              for (int ix = 0; ix < lx; ix++) {
-                buf[iz][iy][ix][0] = (float)EMf->getJx(ix + 1, iy + 1, iz + 1);
-                buf[iz][iy][ix][1] = (float)EMf->getJy(ix + 1, iy + 1, iz + 1);
-                buf[iz][iy][ix][2] = (float)EMf->getJz(ix + 1, iy + 1, iz + 1);
-              }
-        });
+    writeVectorVTK(grid, EMf, col, vct, vtkPath(col, "J_tot", cycle), "J_tot",
+                   "Total current", fieldwritebuffer, g,
+                   [&](int i, int j, int k, double* v) {
+                     v[0] = EMf->getJx(i, j, k);
+                     v[1] = EMf->getJy(i, j, k);
+                     v[2] = EMf->getJz(i, j, k);
+                   });
   }
 }
 
 // ─── Non-blocking VTK helpers (shared grid setup) ────────────────────────────
 
+template <typename Sample>
 static void nbcVectorWrite(EMfields3D* EMf, CollectiveIO* col,
                            VCtopology3D* vct, float**** fieldwritebuffer,
                            int counter, const VTKGridInfo& g,
                            const std::string& tag, const std::string& desc,
-                           std::function<void(float****, int, int, int)> fill,
-                           MPI_File* fhArr) {
+                           Sample&& sample, MPI_File* fhArr) {
   float**** buf = &fieldwritebuffer[counter * g.lz];
-  fill(buf, g.lx, g.ly, g.lz);
-
-  if (EMf->isLittleEndian()) {
-    for (int iz = 0; iz < g.lz; iz++)
-      for (int iy = 0; iy < g.ly; iy++)
-        for (int ix = 0; ix < g.lx; ix++) {
-          ByteSwap((unsigned char*)&buf[iz][iy][ix][0], 4);
-          ByteSwap((unsigned char*)&buf[iz][iy][ix][1], 4);
-          ByteSwap((unsigned char*)&buf[iz][iy][ix][2], 4);
-        }
-  }
+  fillNodesXFastest<3>(buf[0][0][0], g.lx, g.ly, g.lz, sample,
+                       vtkFloat(EMf->isLittleEndian()));
 
   const std::string header = vtkHeader(desc, g, "VECTORS " + tag + " float\n");
   const int nelem = static_cast<int>(header.size());
@@ -743,21 +690,15 @@ static void nbcVectorWrite(EMfields3D* EMf, CollectiveIO* col,
   }
 }
 
+template <typename Sample>
 static void nbcScalarWrite(EMfields3D* EMf, CollectiveIO* col,
                            VCtopology3D* vct, float*** momentswritebuffer,
                            int counter, const VTKGridInfo& g,
                            const std::string& tag, const std::string& desc,
-                           std::function<void(float***, int, int, int)> fill,
-                           MPI_File* fhArr) {
+                           Sample&& sample, MPI_File* fhArr) {
   float*** buf = &momentswritebuffer[counter * g.lz];
-  fill(buf, g.lx, g.ly, g.lz);
-
-  if (EMf->isLittleEndian()) {
-    for (int iz = 0; iz < g.lz; iz++)
-      for (int iy = 0; iy < g.ly; iy++)
-        for (int ix = 0; ix < g.lx; ix++)
-          ByteSwap((unsigned char*)&buf[iz][iy][ix], 4);
-  }
+  fillNodesXFastest<1>(buf[0][0], g.lx, g.ly, g.lz, sample,
+                       vtkFloat(EMf->isLittleEndian()));
 
   const std::string header =
       vtkHeader(desc, g, "SCALARS " + tag + " float\nLOOKUP_TABLE default\n");
@@ -811,17 +752,10 @@ int WriteFieldsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
   if (cfg.writeB) {
     nbcVectorWrite(
         EMf, col, vct, fieldwritebuffer, counter, g, "B", "Magnetic Field",
-        [&](float**** buf, int lx, int ly, int lz) {
-          for (int iz = 0; iz < lz; iz++)
-            for (int iy = 0; iy < ly; iy++)
-              for (int ix = 0; ix < lx; ix++) {
-                buf[iz][iy][ix][0] =
-                    (float)EMf->getBxTot(ix + 1, iy + 1, iz + 1);
-                buf[iz][iy][ix][1] =
-                    (float)EMf->getByTot(ix + 1, iy + 1, iz + 1);
-                buf[iz][iy][ix][2] =
-                    (float)EMf->getBzTot(ix + 1, iy + 1, iz + 1);
-              }
+        [&](int i, int j, int k, double* v) {
+          v[0] = EMf->getBxTot(i, j, k);
+          v[1] = EMf->getByTot(i, j, k);
+          v[2] = EMf->getBzTot(i, j, k);
         },
         fhArr);
     counter++;
@@ -830,14 +764,10 @@ int WriteFieldsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
   if (cfg.writeE) {
     nbcVectorWrite(
         EMf, col, vct, fieldwritebuffer, counter, g, "E", "Electric Field",
-        [&](float**** buf, int lx, int ly, int lz) {
-          for (int iz = 0; iz < lz; iz++)
-            for (int iy = 0; iy < ly; iy++)
-              for (int ix = 0; ix < lx; ix++) {
-                buf[iz][iy][ix][0] = (float)EMf->getEx(ix + 1, iy + 1, iz + 1);
-                buf[iz][iy][ix][1] = (float)EMf->getEy(ix + 1, iy + 1, iz + 1);
-                buf[iz][iy][ix][2] = (float)EMf->getEz(ix + 1, iy + 1, iz + 1);
-              }
+        [&](int i, int j, int k, double* v) {
+          v[0] = EMf->getEx(i, j, k);
+          v[1] = EMf->getEy(i, j, k);
+          v[2] = EMf->getEz(i, j, k);
         },
         fhArr);
     counter++;
@@ -847,17 +777,10 @@ int WriteFieldsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
     nbcVectorWrite(
         EMf, col, vct, fieldwritebuffer, counter, g, "J" + std::to_string(si),
         "Species " + std::to_string(si) + " current",
-        [&](float**** buf, int lx, int ly, int lz) {
-          for (int iz = 0; iz < lz; iz++)
-            for (int iy = 0; iy < ly; iy++)
-              for (int ix = 0; ix < lx; ix++) {
-                buf[iz][iy][ix][0] =
-                    (float)EMf->getJxs(ix + 1, iy + 1, iz + 1, si);
-                buf[iz][iy][ix][1] =
-                    (float)EMf->getJys(ix + 1, iy + 1, iz + 1, si);
-                buf[iz][iy][ix][2] =
-                    (float)EMf->getJzs(ix + 1, iy + 1, iz + 1, si);
-              }
+        [&](int i, int j, int k, double* v) {
+          v[0] = EMf->getJxs(i, j, k, si);
+          v[1] = EMf->getJys(i, j, k, si);
+          v[2] = EMf->getJzs(i, j, k, si);
         },
         fhArr);
     counter++;
@@ -866,14 +789,10 @@ int WriteFieldsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
   if (cfg.writeJTot) {
     nbcVectorWrite(
         EMf, col, vct, fieldwritebuffer, counter, g, "J_tot", "Total current",
-        [&](float**** buf, int lx, int ly, int lz) {
-          for (int iz = 0; iz < lz; iz++)
-            for (int iy = 0; iy < ly; iy++)
-              for (int ix = 0; ix < lx; ix++) {
-                buf[iz][iy][ix][0] = (float)EMf->getJx(ix + 1, iy + 1, iz + 1);
-                buf[iz][iy][ix][1] = (float)EMf->getJy(ix + 1, iy + 1, iz + 1);
-                buf[iz][iy][ix][2] = (float)EMf->getJz(ix + 1, iy + 1, iz + 1);
-              }
+        [&](int i, int j, int k, double* v) {
+          v[0] = EMf->getJx(i, j, k);
+          v[1] = EMf->getJy(i, j, k);
+          v[2] = EMf->getJz(i, j, k);
         },
         fhArr);
     counter++;
@@ -900,13 +819,8 @@ int WriteMomentsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
         EMf, col, vct, momentswritebuffer, counter, g,
         "rho" + std::to_string(si),
         "Species " + std::to_string(si) + " density",
-        [&](float*** buf, int lx, int ly, int lz) {
-          for (int iz = 0; iz < lz; iz++)
-            for (int iy = 0; iy < ly; iy++)
-              for (int ix = 0; ix < lx; ix++)
-                buf[iz][iy][ix] =
-                    (float)(EMf->getRHOns(ix + 1, iy + 1, iz + 1, si) * 4.0 *
-                            3.1415926535897);
+        [&](int i, int j, int k, double* v) {
+          v[0] = (EMf->getRHOns(i, j, k, si) * 4.0 * 3.1415926535897);
         },
         fhArr);
     counter++;
@@ -917,12 +831,8 @@ int WriteMomentsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
     nbcScalarWrite(
         EMf, col, vct, momentswritebuffer, counter, g, "rho_tot",
         "Total charge density",
-        [&](float*** buf, int lx, int ly, int lz) {
-          for (int iz = 0; iz < lz; iz++)
-            for (int iy = 0; iy < ly; iy++)
-              for (int ix = 0; ix < lx; ix++)
-                buf[iz][iy][ix] = (float)(EMf->getRHOn(ix + 1, iy + 1, iz + 1) *
-                                          4.0 * 3.1415926535897);
+        [&](int i, int j, int k, double* v) {
+          v[0] = (EMf->getRHOn(i, j, k) * 4.0 * 3.1415926535897);
         },
         fhArr);
     counter++;
@@ -956,12 +866,8 @@ int WriteMomentsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
       nbcScalarWrite(
           EMf, col, vct, momentswritebuffer, counter, g, tag,
           "Species " + std::to_string(si) + " pressure " + pd.name,
-          [&](float*** buf, int lx, int ly, int lz) {
-            for (int iz = 0; iz < lz; iz++)
-              for (int iy = 0; iy < ly; iy++)
-                for (int ix = 0; ix < lx; ix++)
-                  buf[iz][iy][ix] =
-                      (float)pd.getter(ix + 1, iy + 1, iz + 1, si);
+          [&](int i, int j, int k, double* v) {
+            v[0] = pd.getter(i, j, k, si);
           },
           fhArr);
       counter++;
@@ -971,15 +877,11 @@ int WriteMomentsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
       nbcScalarWrite(
           EMf, col, vct, momentswritebuffer, counter, g, tag,
           "Total pressure " + std::string(pd.name),
-          [&](float*** buf, int lx, int ly, int lz) {
-            for (int iz = 0; iz < lz; iz++)
-              for (int iy = 0; iy < ly; iy++)
-                for (int ix = 0; ix < lx; ix++) {
-                  double sum = 0.0;
-                  for (int s = 0; s < ns; s++)
-                    sum += pd.getter(ix + 1, iy + 1, iz + 1, s);
-                  buf[iz][iy][ix] = (float)sum;
-                }
+          [&](int i, int j, int k, double* v) {
+            double sum = 0.0;
+            for (int s = 0; s < ns; s++)
+              sum += pd.getter(i, j, k, s);
+            v[0] = sum;
           },
           fhArr);
       counter++;
@@ -994,12 +896,8 @@ int WriteMomentsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
       nbcScalarWrite(
           EMf, col, vct, momentswritebuffer, counter, g, tag,
           "Species " + std::to_string(si) + " heat flux " + name,
-          [&](float*** buf, int lx, int ly, int lz) {
-            for (int iz = 0; iz < lz; iz++)
-              for (int iy = 0; iy < ly; iy++)
-                for (int ix = 0; ix < lx; ix++)
-                  buf[iz][iy][ix] =
-                      (float)EMf->getHeatFlux(ix + 1, iy + 1, iz + 1, si, c);
+          [&](int i, int j, int k, double* v) {
+            v[0] = EMf->getHeatFlux(i, j, k, si, c);
           },
           fhArr);
       counter++;
@@ -1009,15 +907,11 @@ int WriteMomentsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
       nbcScalarWrite(
           EMf, col, vct, momentswritebuffer, counter, g, tag,
           "Total heat flux " + name,
-          [&](float*** buf, int lx, int ly, int lz) {
-            for (int iz = 0; iz < lz; iz++)
-              for (int iy = 0; iy < ly; iy++)
-                for (int ix = 0; ix < lx; ix++) {
-                  double sum = 0.0;
-                  for (int s = 0; s < ns; s++)
-                    sum += EMf->getHeatFlux(ix + 1, iy + 1, iz + 1, s, c);
-                  buf[iz][iy][ix] = (float)sum;
-                }
+          [&](int i, int j, int k, double* v) {
+            double sum = 0.0;
+            for (int s = 0; s < ns; s++)
+              sum += EMf->getHeatFlux(i, j, k, s, c);
+            v[0] = sum;
           },
           fhArr);
       counter++;
@@ -1027,6 +921,7 @@ int WriteMomentsVTKNonblk(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
   return counter;
 }
 
+// Not used: the VTK writers swap in fillNodesXFastest (vtkFloat)
 void ByteSwap(unsigned char* b, int n) {
   int i = 0;
   int j = n - 1;

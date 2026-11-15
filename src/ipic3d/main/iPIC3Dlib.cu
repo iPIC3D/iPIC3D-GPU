@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -463,6 +464,7 @@ int c_Solver::Init(int argc, char** argv) {
   particlesHost = new ParticleSoAHost*[ns];
   for (int i = 0; i < ns; i++) {
     particlesHost[i] = new ParticleSoAHost(i, col, vct, grid);
+    particlesHost[i]->setRelativistic(doPlanet_); // moverSubcyclesKernel
 
     if (col->getRestart_status() != 0) { // restart
       particlesHost[i]->restartLoad();
@@ -3160,7 +3162,7 @@ void c_Solver::WriteConserved(int cycle) {
 #if IPIC3D_COMPILE_DISK_OUTPUT
   if (col->getDiagnosticsOutputCycle() > 0 &&
       cycle % col->getDiagnosticsOutputCycle() == 0) {
-    // particlesHost[*]->getKe/getP/getTotalQ() iterate over the host SoA
+    // particlesHost[*]->getKinetic/getTotalQ() iterate over the host SoA
     // u/v/w/q arrays, which are populated only by the async D->H copies in
     // outputCopyAsync() on outputStream and signalled by eventOutputCopy.
     // The mover launched just before WriteOutput() only inserts a stream-side
@@ -3174,42 +3176,60 @@ void c_Solver::WriteConserved(int cycle) {
     Eenergy = EMf->getEenergy();
     Benergy = EMf->getBenergy();
     TOTenergy = 0.0;
-    TOTmomentum = 0.0;
     double TOTcharge = 0.0;
+    double P[3] = {0.0, 0.0, 0.0}; // total momentum vector
+    auto norm = [](const double a[3]) {
+      return std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+    };
     for (int is = 0; is < ns; is++) {
-      Ke[is] = particlesHost[is]->getKe();
+      const ParticleSoAHost::KineticSums k = particlesHost[is]->getKinetic();
+      Ke[is] = k.energy;
       BulkEnergy[is] = EMf->getBulkEnergy(is);
       TOTenergy += Ke[is];
-      momentum[is] = particlesHost[is]->getP();
-      TOTmomentum += momentum[is];
+      momentum[is] = norm(k.momentum);
+      for (int c = 0; c < 3; c++)
+        P[c] += k.momentum[c];
       Qtot[is] = particlesHost[is]->getTotalQ();
       TOTcharge += Qtot[is];
     }
+    TOTmomentum = norm(P);
     if (myrank == (nprocs - 1)) {
       const int cw = 16; // column width
-      // Header in a new file: a fresh run, or a restart without the file.
-      std::ifstream existing(cq);
-      const bool writeHeader =
-          existing.peek() == std::ifstream::traits_type::eof();
-      existing.close();
+      std::ostringstream h;
+      h << std::left << std::setw(8) << "Cycle" << std::setw(cw)
+        << "Total_Energy" << std::setw(cw) << "Momentum" << std::setw(cw)
+        << "Eenergy" << std::setw(cw) << "Benergy" << std::setw(cw) << "Kenergy"
+        << std::setw(cw) << "Total_Charge";
+      for (int is = 0; is < ns; is++)
+        h << std::setw(cw) << ("Ke[" + std::to_string(is) + "]");
+      for (int is = 0; is < ns; is++)
+        h << std::setw(cw) << ("BulkE[" + std::to_string(is) + "]");
+      for (int is = 0; is < ns; is++)
+        h << std::setw(cw) << ("Mom[" + std::to_string(is) + "]");
+      for (int is = 0; is < ns; is++)
+        h << std::setw(cw) << ("Q[" + std::to_string(is) + "]");
+      h << std::setw(cw) << "Px" << std::setw(cw) << "Py" << std::setw(cw)
+        << "Pz";
+      const std::string header = h.str();
+      // The header starts a new file: a fresh run, or a restart without the
+      // file.  A file with other columns (a restart of a run written by
+      // another version) is kept under another name, not appended to.
+      std::string existingHeader;
+      {
+        std::ifstream existing(cq);
+        std::getline(existing, existingHeader);
+      }
+      if (!existingHeader.empty() && existingHeader != header) {
+        const std::string kept = cq + ".before_cycle_" + std::to_string(cycle);
+        std::rename(cq.c_str(), kept.c_str());
+        std::cout << "ConservedQuantities.txt had other columns; kept as "
+                  << kept << std::endl;
+        existingHeader.clear();
+      }
       ofstream my_file(cq.c_str(), fstream::app);
       my_file << std::scientific << std::setprecision(6);
-      if (writeHeader) {
-        my_file << std::left << std::setw(8) << "Cycle" << std::setw(cw)
-                << "Total_Energy" << std::setw(cw) << "Momentum"
-                << std::setw(cw) << "Eenergy" << std::setw(cw) << "Benergy"
-                << std::setw(cw) << "Kenergy" << std::setw(cw)
-                << "Total_Charge";
-        for (int is = 0; is < ns; is++)
-          my_file << std::setw(cw) << ("Ke[" + std::to_string(is) + "]");
-        for (int is = 0; is < ns; is++)
-          my_file << std::setw(cw) << ("BulkE[" + std::to_string(is) + "]");
-        for (int is = 0; is < ns; is++)
-          my_file << std::setw(cw) << ("Mom[" + std::to_string(is) + "]");
-        for (int is = 0; is < ns; is++)
-          my_file << std::setw(cw) << ("Q[" + std::to_string(is) + "]");
-        my_file << endl;
-      }
+      if (existingHeader.empty())
+        my_file << header << endl;
       my_file << std::left << std::setw(8) << cycle << std::setw(cw)
               << (Eenergy + Benergy + TOTenergy) << std::setw(cw) << TOTmomentum
               << std::setw(cw) << Eenergy << std::setw(cw) << Benergy
@@ -3222,6 +3242,8 @@ void c_Solver::WriteConserved(int cycle) {
         my_file << std::setw(cw) << momentum[is];
       for (int is = 0; is < ns; is++)
         my_file << std::setw(cw) << Qtot[is];
+      for (int c = 0; c < 3; c++)
+        my_file << std::setw(cw) << P[c];
       my_file << endl;
       my_file.close();
     }
@@ -3496,7 +3518,8 @@ void c_Solver::Finalize() {
  * counting sort).
  *
  * This path is separate from the GPU cell sorter and only touches the host
- * ParticleSoAHost containers.
+ * ParticleSoAHost containers.  Not used: the GPU cell sort orders the
+ * particles.
  */
 void c_Solver::sortParticles() {
 

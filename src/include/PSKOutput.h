@@ -810,29 +810,20 @@ public:
       }
     }
 
-    // kinetic energy for species s (normalized on q)
+    // kinetic energy of species i on this rank (the ranks sum to its Ke[i]
+    // of ConservedQuantities.txt)
     if (tag.find("k_energy", 0) != string::npos) {
-      double K_en;
       for (int i = 0; i < ns; ++i) {
-        K_en = 0;
         stringstream ii;
         ii << i;
-        double qom = fabs(_col->getQOM(i));
-        for (int n = 0; n < _part[i]->getNOP(); n++) {
-          K_en +=
-              fabs(_part[i]->getQ(n)) * _part[i]->getU(n) * _part[i]->getU(n);
-          K_en +=
-              fabs(_part[i]->getQ(n)) * _part[i]->getV(n) * _part[i]->getV(n);
-          K_en +=
-              fabs(_part[i]->getQ(n)) * _part[i]->getW(n) * _part[i]->getW(n);
-        }
-        K_en *= 0.5 / qom;
-        this->output_adaptor.write(
-            "/energy/kinetic/species_" + ii.str() + "/cycle_" + cc.str(), K_en);
+        this->output_adaptor.write("/energy/kinetic/species_" + ii.str() +
+                                       "/cycle_" + cc.str(),
+                                   _part[i]->getLocalKinetic().energy);
       }
     }
 
-    // magnetic and electric energy of this rank (owned nodes); the sums over
+    // magnetic and electric energy of this rank (getLocalBenergy: its cells,
+    // getLocalEenergy: its owned nodes, trapezoidal weights); the sums over
     // the ranks are Benergy / Eenergy of ConservedQuantities.txt
     if (tag.find("B_energy", 0) != string::npos)
       this->output_adaptor.write("/energy/magnetic/cycle_" + cc.str(),
@@ -939,14 +930,16 @@ public:
     auto writePressureTot = [&](const char* name, bool doWrite, auto getter4) {
       if (!doWrite)
         return;
-      std::vector<double> tmp(nx * ny * nz);
-      for (int iz = 0; iz < nz; iz++)
-        for (int iy = 0; iy < ny; iy++)
-          for (int ix = 0; ix < nx; ix++) {
+      std::vector<double> tmp((size_t)nx * ny * nz);
+      // k fastest, the order of the per-species datasets
+#pragma omp parallel for collapse(2) schedule(static)
+      for (int i = 0; i < (int)nx; i++)
+        for (int j = 0; j < (int)ny; j++)
+          for (int k = 0; k < (int)nz; k++) {
             double sum = 0.0;
             for (int s = 0; s < ns; s++)
-              sum += getter4(ix + 1, iy + 1, iz + 1, s);
-            tmp[(size_t)iz * ny * nx + (size_t)iy * nx + ix] = sum;
+              sum += getter4(i + 1, j + 1, k + 1, s);
+            tmp[((size_t)i * ny + j) * nz + k] = sum;
           }
       this->output_adaptor.write("/moments/" + std::string(name) +
                                      "_tot/cycle_" + cc.str(),
@@ -986,14 +979,16 @@ public:
     auto writeHeatFluxTot = [&](int component) {
       if (!cfg.writeHeatFluxTot[component])
         return;
-      std::vector<double> tmp(nx * ny * nz);
-      for (int iz = 0; iz < nz; iz++)
-        for (int iy = 0; iy < ny; iy++)
-          for (int ix = 0; ix < nx; ix++) {
+      std::vector<double> tmp((size_t)nx * ny * nz);
+      // k fastest, the order of the per-species datasets
+#pragma omp parallel for collapse(2) schedule(static)
+      for (int i = 0; i < (int)nx; i++)
+        for (int j = 0; j < (int)ny; j++)
+          for (int k = 0; k < (int)nz; k++) {
             double sum = 0.0;
             for (int s = 0; s < ns; s++)
-              sum += _field->getHeatFlux(ix + 1, iy + 1, iz + 1, s, component);
-            tmp[(size_t)iz * ny * nx + (size_t)iy * nx + ix] = sum;
+              sum += _field->getHeatFlux(i + 1, j + 1, k + 1, s, component);
+            tmp[((size_t)i * ny + j) * nz + k] = sum;
           }
       this->output_adaptor.write(
           "/moments/" + std::string(HeatFlux::ComponentNames[component]) +
@@ -1002,6 +997,18 @@ public:
     };
     for (int c = 0; c < HeatFlux::ComponentCount; ++c)
       writeHeatFluxTot(c);
+  }
+
+  /** Every sample-th of the n values of src (n / sample rounded up),
+   *  gathered in parallel, for the sampled particle outputs.  These are not
+   *  used: the callers pass sample = 0 (IOManager, OutputWrapperFPP). */
+  template <typename T>
+  static std::vector<T> everyNth(const T* src, int n, int sample) {
+    std::vector<T> out(n > 0 ? (n + sample - 1) / sample : 0);
+#pragma omp parallel for schedule(static)
+    for (int m = 0; m < (int)out.size(); m++)
+      out[m] = src[(size_t)m * sample];
+    return out;
   }
 
   void output(const string& tag, int cycle, int sample) {
@@ -1050,33 +1057,26 @@ public:
             PSK::Dimens(_part[i]->getNOP()), _part[i]->getXall());
       }
     } else if (tag.find("x", 0) != string::npos & sample != 0) {
-      std::vector<double> X;
       for (int i = 0; i < ns; ++i) {
         stringstream ii;
         ii << i;
-        const int num_samples = _part[i]->getNOP() / sample;
-        X.reserve(num_samples);
-        for (int n = 0; n < _part[i]->getNOP(); n += sample) {
-          X.push_back(_part[i]->getX(n));
-        }
+        const std::vector<double> X =
+            everyNth(_part[i]->getXall(), _part[i]->getNOP(), sample);
         this->output_adaptor.write("/particles/species_" + ii.str() +
                                        "/x/cycle_" + cc.str(),
                                    PSK::Dimens(X.size()), X);
       }
     } else if (tag.find("position", 0) != string::npos & sample != 0) {
-      std::vector<double> X, Y, Z;
       for (int i = 0; i < ns; ++i) {
         stringstream ii;
         ii << i;
-        const int num_samples = _part[i]->getNOP() / sample;
-        X.reserve(num_samples);
-        Y.reserve(num_samples);
-        Z.reserve(num_samples);
-        for (int n = 0; n < _part[i]->getNOP(); n += sample) {
-          X.push_back(_part[i]->getX(n));
-          Y.push_back(_part[i]->getY(n));
-          Z.push_back(_part[i]->getZ(n));
-        }
+        const int nop = _part[i]->getNOP();
+        const std::vector<double> X =
+            everyNth(_part[i]->getXall(), nop, sample);
+        const std::vector<double> Y =
+            everyNth(_part[i]->getYall(), nop, sample);
+        const std::vector<double> Z =
+            everyNth(_part[i]->getZall(), nop, sample);
         this->output_adaptor.write("/particles/species_" + ii.str() +
                                        "/x/cycle_" + cc.str(),
                                    PSK::Dimens(X.size()), X);
@@ -1127,33 +1127,26 @@ public:
             PSK::Dimens(_part[i]->getNOP()), _part[i]->getUall());
       }
     } else if (tag.find("u", 0) != string::npos & sample != 0) {
-      std::vector<double> U;
       for (int i = 0; i < ns; ++i) {
         stringstream ii;
         ii << i;
-        const int num_samples = _part[i]->getNOP() / sample;
-        U.reserve(num_samples);
-        for (int n = 0; n < _part[i]->getNOP(); n += sample) {
-          U.push_back(_part[i]->getU(n));
-        }
+        const std::vector<double> U =
+            everyNth(_part[i]->getUall(), _part[i]->getNOP(), sample);
         this->output_adaptor.write("/particles/species_" + ii.str() +
                                        "/u/cycle_" + cc.str(),
                                    PSK::Dimens(U.size()), U);
       }
     } else if (tag.find("velocity", 0) != string::npos & sample != 0) {
-      std::vector<double> U, V, W;
       for (int i = 0; i < ns; ++i) {
         stringstream ii;
         ii << i;
-        const int num_samples = _part[i]->getNOP() / sample;
-        U.reserve(num_samples);
-        V.reserve(num_samples);
-        W.reserve(num_samples);
-        for (int n = 0; n < _part[i]->getNOP(); n += sample) {
-          U.push_back(_part[i]->getU(n));
-          V.push_back(_part[i]->getV(n));
-          W.push_back(_part[i]->getW(n));
-        }
+        const int nop = _part[i]->getNOP();
+        const std::vector<double> U =
+            everyNth(_part[i]->getUall(), nop, sample);
+        const std::vector<double> V =
+            everyNth(_part[i]->getVall(), nop, sample);
+        const std::vector<double> W =
+            everyNth(_part[i]->getWall(), nop, sample);
         this->output_adaptor.write("/particles/species_" + ii.str() +
                                        "/u/cycle_" + cc.str(),
                                    PSK::Dimens(U.size()), U);
@@ -1186,15 +1179,11 @@ public:
             PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getQall());
       }
     } else if (tag.find("q", 0) != string::npos & sample != 0) {
-      std::vector<double> Q;
       for (int i = 0; i < ns; ++i) {
         stringstream ii;
         ii << i;
-        const int num_samples = _part[i]->getNOP() / sample;
-        Q.reserve(num_samples);
-        for (int n = 0; n < _part[i]->getNOP(); n += sample) {
-          Q.push_back(_part[i]->getQ(n));
-        }
+        const std::vector<double> Q =
+            everyNth(_part[i]->getQall(), _part[i]->getNOP(), sample);
         this->output_adaptor.write("/particles/species_" + ii.str() +
                                        "/q/cycle_" + cc.str(),
                                    PSK::Dimens(Q.size()), Q);
@@ -1226,19 +1215,13 @@ public:
                                    _part[i + ns]->getParticleIDall());
       }
     } else if (tag.find("ID", 0) != string::npos & sample != 0) {
-      std::vector<cudaPclType_ID> ID;
       for (int i = 0; i < ns; ++i) {
         if (!_part[i]->tracksParticleID())
           continue;
         stringstream ii;
         ii << i;
-        const cudaPclType_ID* pclID = _part[i]->getParticleIDall();
-        const int num_samples = _part[i]->getNOP() / sample;
-        ID.clear();
-        ID.reserve(num_samples);
-
-        for (int n = 0; n < _part[i]->getNOP(); n += sample)
-          ID.push_back(pclID[n]);
+        const std::vector<cudaPclType_ID> ID =
+            everyNth(_part[i]->getParticleIDall(), _part[i]->getNOP(), sample);
         this->output_adaptor.write(
             "/particles/species_" + ii.str() + "/ID/cycle_" + cc.str(),
             PSK::Dimens(ID.size()), ID.empty() ? nullptr : ID.data());

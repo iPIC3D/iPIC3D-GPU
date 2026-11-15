@@ -246,7 +246,7 @@ public:
 
 private:
   void pad_particle_capacities();
-  void sortParticles();
+  void sortParticles(); // host cell sort (not used)
   /**
    * @brief Pack the current fields into the mover's device buffer.
    *
@@ -309,14 +309,14 @@ private:
   std::vector<std::future<void>>
       exosphereTaskFutures; // persistent future buffer (avoids
                             // per-call allocation)
-  double* Ke; // kinetic energy of each species, the normal one, added up
+  double* Ke; // kinetic energy of each species (relativistic in the Dipole
+              // cases, ParticleSoAHost::getKinetic)
   double* BulkEnergy; // bulk kinetic energy of each species, consider the bulk
                       // motion
-  double*
-      momentum; // an array of doubles, total momentum of all particle species
-  double* Qtot; // total charge per species (sum of particle weights)
-  double* Qremoved; // array of double, with species length, removed charges
-                    // from the depopulation area
+  double* momentum;   // |momentum vector| of each species
+  double* Qtot;       // total charge per species (sum of particle weights)
+  double* Qremoved;   // array of double, with species length, removed charges
+                      // from the depopulation area
   Timing* my_clock;
   std::ofstream pclNumCSV;
 
@@ -448,7 +448,7 @@ private:
   double Eenergy;
   double Benergy;
   double TOTenergy;
-  double TOTmomentum;
+  double TOTmomentum; // |total momentum vector|
   int mergeIdx = -1;
   int* toBeMerged;
 

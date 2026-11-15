@@ -354,14 +354,20 @@ not empty) writes:
 Every `DiagnosticsOutputCycle` cycles, the last MPI rank (nprocs − 1) appends a
 row to `SaveDirName/ConservedQuantities.txt` with the columns `Cycle`,
 `Total_Energy`, `Momentum`, `Eenergy`, `Benergy`, `Kenergy`, `Total_Charge`,
-then `Ke[0…ns−1]`, `BulkE[0…ns−1]`, `Mom[0…ns−1]` and `Q[0…ns−1]`.
+then `Ke[0…ns−1]`, `BulkE[0…ns−1]`, `Mom[0…ns−1]`, `Q[0…ns−1]`, and `Px`, `Py`,
+`Pz`. A restart appends to the file. If the file has other columns (it was
+written by another version), it is renamed to
+`ConservedQuantities.txt.before_cycle_<cycle>` and a new file is started.
 
-`Eenergy`, `Benergy` (with the external field) and `BulkE` are node sums
-$\sum \tfrac12 \Delta V\,|\mathbf{E}|^2/4\pi$, $\sum \tfrac12 \Delta V\,|\mathbf{B}|^2/4\pi$ and
-$\sum \tfrac12 \Delta V\,|\mathbf{J}_s|^2/(\rho_s\,q_s/m_s)$. Each rank sums the nodes it
-owns (`EMfields3D::ownedNodeEnds`): the node shared with the next rank, or with
-the periodic image, belongs to that neighbour, and on a non-periodic direction
-the last rank also counts its boundary node, so every node is counted once.
+- **Field energies:**
+  - `Eenergy` is the node sum $\sum w\,\tfrac12 \Delta V\,|\mathbf{E}|^2/4\pi$.
+  - `Benergy` is the cell sum $\sum \tfrac12 \Delta V\,|\mathbf{B}_c + \mathbf{B}_{\text{ext}}|^2/4\pi$. It uses the cell-centred B that Faraday's law advances, with the node $\mathbf{B}_{\text{ext}}$ averaged over the 8 corners of the cell. E on the nodes and B on the cells are the pair the discrete field-energy balance holds for. The node B is an interpolation that filters out the grid-scale part.
+  - At a restart `Benergy` drops: the checkpoint holds the node B only, and the restart rebuilds the cell B by interpolating it, which removes the grid-scale part (`NUMERICS_BUGS.md` #7).
+- **Node sums:** each rank sums the nodes it owns (`EMfields3D::ownedNodeEnds`). The node shared with the next rank, or with the periodic image, belongs to that neighbour. On a non-periodic direction the last rank also counts its boundary node, so every node is counted once. The weight w is the trapezoidal one (`ownedNodeWeights`): ½ per non-periodic domain face the node lies on, since such a node holds half a cell of the domain.
+- **Particle sums** (`ParticleSoAHost::getKinetic`), with m = q/(q/m) the particle mass:
+  - `Ke[s]` is the kinetic energy of species s: $\sum (\gamma-1)mc^2$ with $\gamma = 1/\sqrt{1-v^2/c^2}$ in the `Dipole` and `Dipole2D` cases, whose mover is relativistic, and $\sum \tfrac12 m v^2$ otherwise. `Kenergy` is their sum. In the relativistic cases a particle with $|v| \ge c$, which only loaded data can hold and the mover deletes, is left out of `Ke[s]` and `Mom[s]`.
+  - `Mom[s]` is the magnitude of the momentum vector $\sum \gamma m\mathbf{v}$ of species s ($\gamma = 1$ in the non-relativistic cases). `Momentum` is the magnitude of the total, whose components are `Px`, `Py`, `Pz`.
+- **`BulkE[s]`** is the node sum $\sum w\,\tfrac12 \Delta V\,|\mathbf{J}_s|^2/(\rho_s\,q_s/m_s)$.
 
 ---
 

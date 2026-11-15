@@ -51,12 +51,14 @@ void communicateNodeBC(int nx, int ny, int nz, arr3_double vector,
 void communicateNode_P(int nx, int ny, int nz, double*** vector,
                        const VirtualTopology3D* vct, EMfields3D* EMf);
 
+// Not used.
 void communicateNodeBoxStencilBC(int nx, int ny, int nz, arr3_double vector,
                                  int bcFaceXright, int bcFaceXleft,
                                  int bcFaceYright, int bcFaceYleft,
                                  int bcFaceZright, int bcFaceZleft,
                                  const VirtualTopology3D* vct, EMfields3D* EMf);
 
+// Not used.
 void communicateNodeBoxStencilBC_P(int nx, int ny, int nz, arr3_double vector,
                                    int bcFaceXright, int bcFaceXleft,
                                    int bcFaceYright, int bcFaceYleft,
@@ -64,6 +66,7 @@ void communicateNodeBoxStencilBC_P(int nx, int ny, int nz, arr3_double vector,
                                    const VirtualTopology3D* vct,
                                    EMfields3D* EMf);
 
+// Not used.
 void communicateNodeBC_P(int nx, int ny, int nz, arr3_double vector,
                          int bcFaceXright, int bcFaceXleft, int bcFaceYright,
                          int bcFaceYleft, int bcFaceZright, int bcFaceZleft,
@@ -90,6 +93,7 @@ void communicateCenterBoxStencilBC(int nx, int ny, int nz, arr3_double vector,
                                    EMfields3D* EMf);
 
 // particles communicate ghost cells (FOR CENTERS) with BOX stencil*/
+// Not used.
 void communicateCenterBoxStencilBC_P(int nx, int ny, int nz, arr3_double vector,
                                      int bcFaceXright, int bcFaceXleft,
                                      int bcFaceYright, int bcFaceYleft,

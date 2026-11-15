@@ -8,7 +8,7 @@
  *
  * Provides:
  *  - Particle generation (maxwellian, restart, pitch_angle_energy, etc.)
- *  - Diagnostics (getKe, getP, getTotalQ, getMaxVelocity,
+ *  - Diagnostics (getKinetic, getTotalQ, getMaxVelocity,
  * getVelocityDistribution)
  *  - Cell-sorted reorder (serial + parallel)
  *  - BC configuration queries (for GPU kernel setup)
@@ -355,37 +355,67 @@ public:
 
   // ===== Diagnostics (MPI reductions via borrowed communicator) =====
 
-  /** Total kinetic energy (MPI-reduced across all ranks). */
-  double getKe() const {
-    double localKe = 0.0;
+  /** Kinetic energy and momentum vector of a set of particles. */
+  struct KineticSums {
+    double energy = 0.0;
+    double momentum[3] = {0.0, 0.0, 0.0};
+  };
+
+  /** Kinetic energy and momentum of this species on this rank.  With the
+   *  relativistic push (setRelativistic) they are (gamma - 1) m c^2 and
+   *  gamma m v, gamma = 1 / sqrt(1 - v^2 / c^2); otherwise 1/2 m v^2 and
+   *  m v.  m = q / (q/m) is the particle mass.  In the relativistic case a
+   *  particle with |v| >= c (possible only in loaded data) is left out: the
+   *  mover deletes it before the push. */
+  KineticSums getLocalKinetic() const {
+    double ke = 0.0, px = 0.0, py = 0.0, pz = 0.0;
     const int numParticles = getNOP();
-#pragma omp parallel for reduction(+ : localKe)
+    const double invC2 = 1.0 / (speedOfLight_ * speedOfLight_);
+    const bool rel = relativistic_;
+#pragma omp parallel for reduction(+ : ke, px, py, pz)
     for (int idx = 0; idx < numParticles; idx++) {
       const double velX = u[idx], velY = v[idx], velZ = w[idx];
-      const double charge = q[idx];
-      localKe += 0.5 * (charge / chargeOverMass_) *
-                 (velX * velX + velY * velY + velZ * velZ);
+      const double mass = q[idx] / chargeOverMass_;
+      const double v2 = velX * velX + velY * velY + velZ * velZ;
+      // (gamma - 1) m c^2 = gamma^2 / (gamma + 1) m v^2, free of the
+      // cancellation of gamma - 1 at small v
+      double gamma = 1.0, keFactor = 0.5;
+      if (rel) {
+        if (!(v2 * invC2 < 1.0))
+          continue;
+        gamma = 1.0 / std::sqrt(1.0 - v2 * invC2);
+        keFactor = gamma * gamma / (gamma + 1.0);
+      }
+      ke += keFactor * mass * v2;
+      px += gamma * mass * velX;
+      py += gamma * mass * velY;
+      pz += gamma * mass * velZ;
     }
-    double totalKe = 0.0;
-    MPI_Allreduce(&localKe, &totalKe, 1, MPI_DOUBLE, MPI_SUM, mpiComm_);
-    return totalKe;
+    KineticSums local;
+    local.energy = ke;
+    local.momentum[0] = px;
+    local.momentum[1] = py;
+    local.momentum[2] = pz;
+    return local;
   }
 
-  /** Total momentum magnitude (MPI-reduced across all ranks). */
-  double getP() const {
-    double localP = 0.0;
-    const int numParticles = getNOP();
-#pragma omp parallel for reduction(+ : localP)
-    for (int idx = 0; idx < numParticles; idx++) {
-      const double velX = u[idx], velY = v[idx], velZ = w[idx];
-      const double charge = q[idx];
-      localP += (charge / chargeOverMass_) *
-                std::sqrt(velX * velX + velY * velY + velZ * velZ);
-    }
-    double totalP = 0.0;
-    MPI_Allreduce(&localP, &totalP, 1, MPI_DOUBLE, MPI_SUM, mpiComm_);
-    return totalP;
+  /** getLocalKinetic summed over all ranks. */
+  KineticSums getKinetic() const {
+    const KineticSums local = getLocalKinetic();
+    const double in[4] = {local.energy, local.momentum[0], local.momentum[1],
+                          local.momentum[2]};
+    double out[4];
+    MPI_Allreduce(in, out, 4, MPI_DOUBLE, MPI_SUM, mpiComm_);
+    KineticSums total;
+    total.energy = out[0];
+    for (int c = 0; c < 3; c++)
+      total.momentum[c] = out[c + 1];
+    return total;
   }
+
+  /** Whether the mover pushes this species relativistically
+   *  (moverSubcyclesKernel): the energy and momentum of getKinetic. */
+  void setRelativistic(bool relativistic) { relativistic_ = relativistic; }
 
   /** Total charge (MPI-reduced across all ranks). */
   double getTotalQ() const {
@@ -414,8 +444,10 @@ public:
   // ===== Cell-sorted reorder (implemented in ParticleSoAHost.cpp) =====
 
   /** @brief Reorder particles by cell index on the host using a serial counting
-   * sort. */
+   * sort (not used: the GPU cell sort orders the particles). */
   void sort_particles_serial();
+  /** @brief Host cell sort with given per-cell counts and offsets (not used).
+   */
   void sort_particles_parallel(int* cellCount, int* cellOffset);
 
   // ===== BC configuration queries (for GPU kernel setup) =====
@@ -497,6 +529,7 @@ private:
   double chargeOverMass_ = 0.0; // qom
   bool isTestParticle_ = false;
   bool trackParticleID_ = false;
+  bool relativistic_ = false; // pushed by the relativistic mover
 
   // ===== Borrowed references (NOT owned, NOT freed) =====
   const CollectiveIO* col_ = nullptr;

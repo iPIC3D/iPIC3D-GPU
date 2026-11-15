@@ -60,6 +60,7 @@ void WriteTestPclsVTK(int nspec, Grid3DCU* grid, ParticleSoAHost** part,
                       EMfields3D* EMf, CollectiveIO* col, VCtopology3D* vct,
                       const string& tag, int cycle, MPI_Request* testpartMPIReq,
                       MPI_File* fh);
+/** Reverse the n bytes at b (not used). */
 void ByteSwap(unsigned char* b, int n);
 
 #endif // PARALLEL_IO_H

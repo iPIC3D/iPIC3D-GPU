@@ -218,11 +218,11 @@ int PHDF5fileClass::WritePHDF5dataset(string grpname, string datasetname,
   }
 
   buffer = new double[nx * ny * nz];
-  int l = 0;
+#pragma omp parallel for collapse(2) schedule(static)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
-        buffer[l++] = data[i][j][k] * scale;
+        buffer[((size_t)i * ny + j) * nz + k] = data[i][j][k] * scale;
 
   /* -------------------------------------------------------- */
   /* 5- Set the stride, count and block values for each chunk */
@@ -349,11 +349,12 @@ int PHDF5fileClass::WritePHDF5dataset(string grpname, string datasetname,
   /* Copy data to buffer, starting from (i0, j0, k0) */
 
   double* buffer = new double[nx * ny * nz];
-  int l = 0;
+#pragma omp parallel for collapse(2) schedule(static)
   for (int i = 0; i < nx; i++)
     for (int j = 0; j < ny; j++)
       for (int k = 0; k < nz; k++)
-        buffer[l++] = data[i + i0][j + j0][k + k0] * scale;
+        buffer[((size_t)i * ny + j) * nz + k] =
+            data[i + i0][j + j0][k + k0] * scale;
 
   /* Set up hyperslab selection */
 

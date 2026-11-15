@@ -383,41 +383,37 @@ void EMfields3D::freeDataType() {
 
 void EMfields3D::adjustNonPeriodicHeatFlux(int is) {
   const VirtualTopology3D* vct = &get_vct();
+  const size_t nodes = (size_t)nxn * nyn * nzn;
 
-  auto scaleNode = [&](int i, int j, int k) {
-    for (int c = 0; c < HeatFlux::ComponentCount; ++c)
-      heatFlux[HeatFlux::componentIndex(is, c)][i][j][k] *= 2;
+  // Double every component on the node plane `face` normal to dir, interior
+  // [1, n-2] along the other two axes; k innermost (contiguous except on a z
+  // face).  An edge node lies on two planes and is doubled twice.
+  auto doublePlane = [&](int dir, int face) {
+    int lo[3] = {1, 1, 1}, hi[3] = {nxn - 2, nyn - 2, nzn - 2};
+    lo[dir] = hi[dir] = face;
+    for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
+      double* a =
+          heatFlux.fetch_arr() + HeatFlux::componentIndex(is, c) * nodes;
+#pragma omp parallel for collapse(2) schedule(static)
+      for (int i = lo[0]; i <= hi[0]; i++)
+        for (int j = lo[1]; j <= hi[1]; j++)
+          for (int k = lo[2]; k <= hi[2]; k++)
+            a[((size_t)i * nyn + j) * nzn + k] *= 2;
+    }
   };
 
   if (vct->getXleft_neighbor_P() == MPI_PROC_NULL)
-    for (int j = 1; j < nyn - 1; j++)
-      for (int k = 1; k < nzn - 1; k++)
-        scaleNode(1, j, k);
-
+    doublePlane(0, 1);
   if (vct->getYleft_neighbor_P() == MPI_PROC_NULL)
-    for (int i = 1; i < nxn - 1; i++)
-      for (int k = 1; k < nzn - 1; k++)
-        scaleNode(i, 1, k);
-
+    doublePlane(1, 1);
   if (vct->getZleft_neighbor_P() == MPI_PROC_NULL)
-    for (int i = 1; i < nxn - 1; i++)
-      for (int j = 1; j < nyn - 1; j++)
-        scaleNode(i, j, 1);
-
+    doublePlane(2, 1);
   if (vct->getXright_neighbor_P() == MPI_PROC_NULL)
-    for (int j = 1; j < nyn - 1; j++)
-      for (int k = 1; k < nzn - 1; k++)
-        scaleNode(nxn - 2, j, k);
-
+    doublePlane(0, nxn - 2);
   if (vct->getYright_neighbor_P() == MPI_PROC_NULL)
-    for (int i = 1; i < nxn - 1; i++)
-      for (int k = 1; k < nzn - 1; k++)
-        scaleNode(i, nyn - 2, k);
-
+    doublePlane(1, nyn - 2);
   if (vct->getZright_neighbor_P() == MPI_PROC_NULL)
-    for (int i = 1; i < nxn - 1; i++)
-      for (int j = 1; j < nyn - 1; j++)
-        scaleNode(i, j, nzn - 2);
+    doublePlane(2, nzn - 2);
 }
 
 void EMfields3D::ConstantChargeOpenBC() {
@@ -702,34 +698,73 @@ void EMfields3D::ownedNodeEnds(int& iEnd, int& jEnd, int& kEnd) const {
   kEnd = vct.getZright_neighbor() == MPI_PROC_NULL ? nzn - 2 : nzn - 3;
 }
 
+void EMfields3D::ownedNodeWeights(std::vector<double> w[3]) const {
+  const VirtualTopology3D& vct = get_vct();
+  int end[3];
+  ownedNodeEnds(end[0], end[1], end[2]);
+  const bool lowFace[3] = {vct.getXleft_neighbor() == MPI_PROC_NULL,
+                           vct.getYleft_neighbor() == MPI_PROC_NULL,
+                           vct.getZleft_neighbor() == MPI_PROC_NULL};
+  const bool highFace[3] = {vct.getXright_neighbor() == MPI_PROC_NULL,
+                            vct.getYright_neighbor() == MPI_PROC_NULL,
+                            vct.getZright_neighbor() == MPI_PROC_NULL};
+  for (int d = 0; d < 3; d++) {
+    w[d].assign(end[d] + 1, 1.0); // w[d][0] unused: the owned nodes are 1..end
+    if (lowFace[d])
+      w[d][1] *= 0.5;
+    if (highFace[d])
+      w[d][end[d]] *= 0.5;
+  }
+}
+
 double EMfields3D::getLocalEenergy() {
-  int iEnd, jEnd, kEnd;
-  ownedNodeEnds(iEnd, jEnd, kEnd);
-  double localEenergy = 0.0;
-  for (int i = 1; i <= iEnd; i++)
-    for (int j = 1; j <= jEnd; j++)
-      for (int k = 1; k <= kEnd; k++)
-        localEenergy += .5 * dx * dy * dz *
-                        (Ex[i][j][k] * Ex[i][j][k] + Ey[i][j][k] * Ey[i][j][k] +
-                         Ez[i][j][k] * Ez[i][j][k]) /
-                        (FourPI);
-  return localEenergy;
+  std::vector<double> w[3];
+  ownedNodeWeights(w);
+  const int ni = (int)w[0].size(), nj = (int)w[1].size(), nk = (int)w[2].size();
+  const double *wx = w[0].data(), *wy = w[1].data(), *wz = w[2].data();
+  const double *ex = Ex.get_arr(), *ey = Ey.get_arr(), *ez = Ez.get_arr();
+  double sum = 0.0; // sum of w |E|^2; k innermost, contiguous
+#pragma omp parallel for collapse(2) reduction(+ : sum) schedule(static)
+  for (int i = 1; i < ni; i++)
+    for (int j = 1; j < nj; j++) {
+      const size_t row = ((size_t)i * nyn + j) * nzn;
+      double s = 0.0;
+      for (int k = 1; k < nk; k++) {
+        const size_t n = row + k;
+        s += wz[k] * (ex[n] * ex[n] + ey[n] * ey[n] + ez[n] * ez[n]);
+      }
+      sum += wx[i] * wy[j] * s;
+    }
+  return .5 * dx * dy * dz * sum / FourPI;
 }
 
 double EMfields3D::getLocalBenergy() {
-  int iEnd, jEnd, kEnd;
-  ownedNodeEnds(iEnd, jEnd, kEnd);
-  double localBenergy = 0.0;
-  for (int i = 1; i <= iEnd; i++)
-    for (int j = 1; j <= jEnd; j++)
-      for (int k = 1; k <= kEnd; k++) {
-        const double Bxt = Bxn[i][j][k] + Bx_ext[i][j][k];
-        const double Byt = Byn[i][j][k] + By_ext[i][j][k];
-        const double Bzt = Bzn[i][j][k] + Bz_ext[i][j][k];
-        localBenergy +=
-            .5 * dx * dy * dz * (Bxt * Bxt + Byt * Byt + Bzt * Bzt) / (FourPI);
+  const double *bx = Bxc.get_arr(), *by = Byc.get_arr(), *bz = Bzc.get_arr();
+  const double *ex = Bx_ext.get_arr(), *ey = By_ext.get_arr(),
+               *ez = Bz_ext.get_arr();
+  // B_ext lives on the nodes: its value at the cell centre is the average of
+  // the 8 corners, as interpN2C; n is the corner (i, j, k) of cell (i, j, k)
+  const size_t sj = nzn, si = (size_t)nyn * nzn;
+  auto atCentre = [si, sj](const double* f, size_t n) {
+    return 0.125 * (f[n] + f[n + si] + f[n + sj] + f[n + 1] + f[n + si + sj] +
+                    f[n + si + 1] + f[n + sj + 1] + f[n + si + sj + 1]);
+  };
+  double sum = 0.0; // sum of |B_c + B_ext|^2; k innermost, contiguous
+#pragma omp parallel for collapse(2) reduction(+ : sum) schedule(static)
+  for (int i = 1; i < nxc - 1; i++)
+    for (int j = 1; j < nyc - 1; j++) {
+      const size_t cell = ((size_t)i * nyc + j) * nzc;
+      const size_t node = ((size_t)i * nyn + j) * nzn;
+      double s = 0.0;
+      for (int k = 1; k < nzc - 1; k++) {
+        const double Bxt = bx[cell + k] + atCentre(ex, node + k);
+        const double Byt = by[cell + k] + atCentre(ey, node + k);
+        const double Bzt = bz[cell + k] + atCentre(ez, node + k);
+        s += Bxt * Bxt + Byt * Byt + Bzt * Bzt;
       }
-  return localBenergy;
+      sum += s;
+    }
+  return .5 * dx * dy * dz * sum / FourPI;
 }
 
 double EMfields3D::getEenergy() {
@@ -750,22 +785,32 @@ double EMfields3D::getBenergy() {
 
 /*! get bulk kinetic energy*/
 double EMfields3D::getBulkEnergy(int is) {
-  int iEnd, jEnd, kEnd;
-  ownedNodeEnds(iEnd, jEnd, kEnd);
-  double localBenergy = 0.0;
+  std::vector<double> w[3];
+  ownedNodeWeights(w);
+  const int ni = (int)w[0].size(), nj = (int)w[1].size(), nk = (int)w[2].size();
+  const double *wx = w[0].data(), *wy = w[1].data(), *wz = w[2].data();
+  const size_t species = (size_t)is * nxn * nyn * nzn;
+  const double* rho = rhons.get_arr() + species;
+  const double *jx = Jxs.get_arr() + species, *jy = Jys.get_arr() + species,
+               *jz = Jzs.get_arr() + species;
+  double sum = 0.0; // sum of w |J|^2 / rho; k innermost, contiguous
+#pragma omp parallel for collapse(2) reduction(+ : sum) schedule(static)
+  for (int i = 1; i < ni; i++)
+    for (int j = 1; j < nj; j++) {
+      const size_t row = ((size_t)i * nyn + j) * nzn;
+      double s = 0.0;
+      for (int k = 1; k < nk; k++) {
+        const size_t n = row + k;
+        // where rho is 0 the current is 0 too
+        s += fabs(rho[n]) > 1.e-20
+                 ? wz[k] * (jx[n] * jx[n] + jy[n] * jy[n] + jz[n] * jz[n]) /
+                       rho[n]
+                 : 0.0;
+      }
+      sum += wx[i] * wy[j] * s;
+    }
+  const double localBenergy = 0.5 * dx * dy * dz * sum;
   double totalBenergy = 0.0;
-  for (int i = 1; i <= iEnd; i++)
-    for (int j = 1; j <= jEnd; j++)
-      for (int k = 1; k <= kEnd; k++)
-        // Trying to avoid division by zero. Where rho iz 0, current must be 0.
-        localBenergy += (fabs(rhons[is][i][j][k]) > 1.e-20)
-                            ? (0.5 * dx * dy * dz *
-                               (Jxs[is][i][j][k] * Jxs[is][i][j][k] +
-                                Jys[is][i][j][k] * Jys[is][i][j][k] +
-                                Jzs[is][i][j][k] * Jzs[is][i][j][k]) /
-                               rhons[is][i][j][k])
-                            : 0.0;
-
   MPI_Allreduce(&localBenergy, &totalBenergy, 1, MPI_DOUBLE, MPI_SUM,
                 (&get_vct())->getFieldComm());
   return (totalBenergy / qom[is]);

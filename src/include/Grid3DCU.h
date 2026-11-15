@@ -56,7 +56,7 @@ public:
   // void allocate(CollectiveIO * ptC, VirtualTopology3D * ptVCT);
   /** deallocate grid arrays for this domain */
   // void deallocate();
-  /** print grid info */
+  /** print grid info (not used) */
   void print() const;
   /** calculate a derivative along a direction on nodes */
   // void derivN(arr3_double derN,
@@ -67,7 +67,7 @@ public:
                const_arr3_double scFieldC) const;
   /** calculate gradient on central points, given a scalar field defined on
    * nodes: cells i = 1..iHi (iHi < 0: nxc-2, the interior), j and k interior;
-   * iHi = nxc-1 also evaluates the X-right ghost cell plane */
+   * iHi = nxc-1 also evaluates the X-right ghost cell plane.  Not used. */
   void gradN2C(arr3_double gradXC, arr3_double gradYC, arr3_double gradZC,
                const_arr3_double scFieldN, int iHi = -1) const;
   /** calculate divergence on central points, given a vector field defined on
@@ -76,20 +76,21 @@ public:
               const_arr3_double vecFieldYN, const_arr3_double vecFieldZN,
               int iHi = -1) const;
   /** calculate divergence on nodes, given a vector field defined on central
-   * points  */
+   * points (not used) */
   void divC2N(arr3_double divN, const_arr3_double vecFieldXC,
               const_arr3_double vecFieldYC, const_arr3_double vecFieldZC) const;
   /** calculate curl on nodes, given a vector field defined on central points */
   void curlC2N(arr3_double curlXN, arr3_double curlYN, arr3_double curlZN,
                const_arr3_double vecFieldXC, const_arr3_double vecFieldYC,
                const_arr3_double vecFieldZC) const;
-  /** calculate curl on central points, given a vector field defined on nodes */
+  /** calculate curl on central points, given a vector field defined on nodes
+   * (not used) */
   void curlN2C(arr3_double curlXC, arr3_double curlYC, arr3_double curlZC,
                const_arr3_double vecFieldXN, const_arr3_double vecFieldYN,
                const_arr3_double vecFieldZN) const;
 
   /** calculate divergence on central points, given a Tensor field defined on
-   * nodes  */
+   * nodes (not used) */
   void divSymmTensorN2C(arr3_double divCX, arr3_double divCY, arr3_double divCZ,
                         const_arr4_double pXX, const_arr4_double pXY,
                         const_arr4_double pXZ, const_arr4_double pYY,
@@ -97,19 +98,19 @@ public:
                         int ns) const;
 
   /** calculate laplacian on central points, given a scalar field defined on
-   * central points for Poisson */
+   * central points for Poisson (not used) */
   // void lapC2Cpoisson(arr3_double lapC, arr3_double scFieldC)const;
   void lapC2Cpoisson(arr3_double lapC, arr3_double scFieldC,
                      EMfields3D* EMf) const;
   /** calculate laplacian on central points, given a scalar field defined on
-   * central points */
+   * central points (not used) */
   void lapC2C(arr3_double lapC, const_arr3_double scFieldC) const;
 
-  /** calculate divergence on boundaries */
+  /** calculate divergence on boundaries (not used) */
   void divBCleft(arr3_double divBC, const_arr3_double vectorX,
                  const_arr3_double vectorY, const_arr3_double vectorZ,
                  int leftActiveNode, int dirDER) const;
-  /** calculate divergence on boundaries */
+  /** calculate divergence on boundaries (not used) */
   void divBCright(arr3_double divBC, const_arr3_double vectorX,
                   const_arr3_double vectorY, const_arr3_double vectorZ,
                   int rightActiveNode, int dirDER) const;
@@ -284,7 +285,7 @@ public: // accessors (inline)
   int get_nxc_r() const { return nxc_r; }
   int get_nyc_r() const { return nyc_r; }
   int get_nzc_r() const { return nzc_r; }
-  int get_num_cells_rr() const { return num_cells_rr; }
+  int get_num_cells_rr() const { return num_cells_rr; } // not used
   double getDX() const { return (dx); }
   double getDY() const { return (dy); }
   double getDZ() const { return (dz); }
@@ -294,7 +295,7 @@ public: // accessors (inline)
   //
   // coordinate accessors
   //
-  // calculated equivalents (preferred for accelerator?):
+  // calculated equivalents (not used)
   double calcXN(int X) const { return xStart + (X - 1) * dx; }
   double calcYN(int Y) const { return yStart + (Y - 1) * dy; }
   double calcZN(int Z) const { return zStart + (Z - 1) * dz; }

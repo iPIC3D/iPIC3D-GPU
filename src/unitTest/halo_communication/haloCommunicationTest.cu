@@ -3,16 +3,25 @@
  *
  * Examples:
  *   mpirun -n 8 ./haloCommunicationTest --case all --suite distributed
+ *   mpirun -n 27 ./haloCommunicationTest --case all --suite distributed27
  *   mpirun -n 1 ./haloCommunicationTest --case all --suite self
  *
  * The conventional test checks every semantically defined array entry,
- * including faces, edges, corners, and MPI_PROC_NULL face/edge ghosts.  The
- * eight corners outside a nonperiodic global domain are intentionally ignored:
+ * including faces, edges, corners, and MPI_PROC_NULL face/edge ghosts.  On
+ * the CPU the eight corners outside a nonperiodic global domain are ignored:
  * NBDerivedHaloComm does not define them; they are left to the boundary
- * conditions applied afterwards.  The additive test builds an independent
- * global-node sum with MPI_Allreduce and checks every physical node.
- * Integer-valued inputs keep all expected sums exactly representable in double
- * precision.
+ * conditions applied afterwards.  The GPU exchange sends every ghost box
+ * straight from the neighbour across it, so there every entry is checked:
+ * a ghost with no neighbour across it (or an edge or corner of a face-only
+ * exchange) must keep its value.  The GPU runs every plan (centres, nodes
+ * with send offset 1 and 0; field and particle communicator; all boxes and
+ * faces only; blocking and split), and a pipeline of different exchanges
+ * without host synchronization between them, with HaloOverlap 1 and 0 (no
+ * split resources, blocking only).  The uneven scenarios give the upper
+ * ranks fewer cells, as Grid3DCU does when the cells do not divide evenly
+ * among the processes.  The additive test builds an independent global-node
+ * sum with MPI_Allreduce and checks every physical node.  Integer-valued
+ * inputs keep all expected sums exactly representable in double precision.
  */
 
 #include <mpi.h>
@@ -34,6 +43,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -63,7 +73,7 @@ constexpr std::array<const char*, 4> kDisabledOutputCycleKeys = {
     "DiagnosticsOutputCycle"};
 
 enum class ExchangeCase { Conventional, Additive, All };
-enum class Suite { Distributed, Self };
+enum class Suite { Distributed, Distributed27, Self };
 enum class Backend { Cpu, Gpu, Both };
 
 struct Options {
@@ -76,19 +86,59 @@ struct Options {
 struct Scenario {
   const char* name;
   std::array<int, 3> dims;
-  std::array<int, 3> periodic;
-  std::array<int, 3> localCells;
+  std::array<int, 3> periodic;         // field communicator
+  std::array<int, 3> localCells;       // of every rank but the upper one
+  std::array<int, 3> particlePeriodic; // particle communicator
+  // Cells the upper rank lacks along each axis, below dims so that Grid3DCU
+  // still gives the other ranks localCells: uneven local sizes
+  std::array<int, 3> trim{};
 };
 
-constexpr std::array<Scenario, 3> kDistributedScenarios = {{
-    {"remote-periodic-2x2x2", {2, 2, 2}, {1, 1, 1}, {4, 5, 6}},
-    {"remote-nonperiodic-2x2x2", {2, 2, 2}, {0, 0, 0}, {4, 5, 6}},
-    {"mixed-remote-null-self-4x2x1", {4, 2, 1}, {1, 0, 1}, {4, 5, 6}},
+constexpr std::array<Scenario, 7> kDistributedScenarios = {{
+    {"remote-periodic-2x2x2", {2, 2, 2}, {1, 1, 1}, {4, 5, 6}, {1, 1, 1}},
+    {"remote-nonperiodic-2x2x2", {2, 2, 2}, {0, 0, 0}, {4, 5, 6}, {0, 0, 0}},
+    {"mixed-remote-null-self-4x2x1",
+     {4, 2, 1},
+     {1, 0, 1},
+     {4, 5, 6},
+     {1, 0, 1}},
+    {"field-particle-periodicity-2x2x2",
+     {2, 2, 2},
+     {1, 0, 1},
+     {4, 5, 6},
+     {0, 1, 1}},
+    // two axes periodic on one process
+    {"remote-x-self-yz-8x1x1", {8, 1, 1}, {1, 1, 1}, {3, 5, 6}, {1, 1, 1}},
+    // a 2D run: one cell along z
+    {"2d-one-cell-z-4x2x1", {4, 2, 1}, {1, 0, 1}, {4, 5, 1}, {1, 0, 1}},
+    // the upper ranks have 3, 4 and 5 cells
+    {"uneven-2x2x2", {2, 2, 2}, {1, 0, 1}, {4, 5, 6}, {0, 1, 1}, {1, 1, 1}},
+}};
+
+// 26 distinct neighbours on the centre rank
+constexpr std::array<Scenario, 4> kDistributed27Scenarios = {{
+    {"remote-periodic-3x3x3", {3, 3, 3}, {1, 1, 1}, {4, 5, 6}, {1, 1, 1}},
+    {"remote-nonperiodic-3x3x3", {3, 3, 3}, {0, 0, 0}, {4, 5, 6}, {0, 0, 0}},
+    {"mixed-3x3x3", {3, 3, 3}, {1, 0, 1}, {4, 5, 6}, {0, 1, 1}},
+    // the upper ranks have 2, 4 and 4 cells
+    {"uneven-3x3x3", {3, 3, 3}, {1, 1, 1}, {4, 5, 6}, {1, 0, 1}, {2, 1, 2}},
 }};
 
 constexpr std::array<Scenario, 1> kSelfScenarios = {{
-    {"self-periodic-1x1x1", {1, 1, 1}, {1, 1, 1}, {4, 5, 6}},
+    {"self-periodic-1x1x1", {1, 1, 1}, {1, 1, 1}, {4, 5, 6}, {1, 1, 1}},
 }};
+
+/** Cells of the domain along axis. */
+int domainCells(const Scenario& scenario, int axis) {
+  return scenario.localCells[axis] * scenario.dims[axis] - scenario.trim[axis];
+}
+
+/** Cells along axis of the rank at process coordinate c; every rank starts
+ *  at c localCells. */
+int localCellsAt(const Scenario& scenario, int axis, int c) {
+  return scenario.localCells[axis] -
+         (c + 1 == scenario.dims[axis] ? scenario.trim[axis] : 0);
+}
 
 template <size_t N, typename Value>
 void addConfigValues(ConfigFile& cfg, const std::array<const char*, N>& keys,
@@ -97,10 +147,10 @@ void addConfigValues(ConfigFile& cfg, const std::array<const char*, N>& keys,
     cfg.add(key, value);
 }
 
-ConfigFile makeConfig(const Scenario& scenario) {
-  const int nxc = scenario.localCells[0] * scenario.dims[0];
-  const int nyc = scenario.localCells[1] * scenario.dims[1];
-  const int nzc = scenario.localCells[2] * scenario.dims[2];
+ConfigFile makeConfig(const Scenario& scenario, bool haloOverlap) {
+  const int nxc = domainCells(scenario, 0);
+  const int nyc = domainCells(scenario, 1);
+  const int nzc = domainCells(scenario, 2);
 
   ConfigFile cfg;
   cfg.add("SaveDirName", ".");
@@ -134,9 +184,9 @@ ConfigFile makeConfig(const Scenario& scenario) {
   cfg.add("PERIODICX", scenario.periodic[0]);
   cfg.add("PERIODICY", scenario.periodic[1]);
   cfg.add("PERIODICZ", scenario.periodic[2]);
-  cfg.add("PERIODICX_P", scenario.periodic[0]);
-  cfg.add("PERIODICY_P", scenario.periodic[1]);
-  cfg.add("PERIODICZ_P", scenario.periodic[2]);
+  cfg.add("PERIODICX_P", scenario.particlePeriodic[0]);
+  cfg.add("PERIODICY_P", scenario.particlePeriodic[1]);
+  cfg.add("PERIODICZ_P", scenario.particlePeriodic[2]);
 
   cfg.add("NiterMover", 1);
   cfg.add("ns", 1);
@@ -153,8 +203,8 @@ ConfigFile makeConfig(const Scenario& scenario) {
   cfg.add("SolverType", "GMRES");
   addConfigValues(cfg, kDisabledOutputCycleKeys, 0);
   cfg.add("CallFinalize", 0);
-  // creates the split exchange resources, so runGpu can test both exchanges
-  cfg.add("HaloOverlap", 1);
+  // 1 creates the split exchange resources: runGpu tests both exchanges
+  cfg.add("HaloOverlap", haloOverlap ? 1 : 0);
   return cfg;
 }
 
@@ -185,7 +235,7 @@ const char* backendName(Backend backend) {
 void printUsage() {
   std::cout
       << "Usage: haloCommunicationTest [--case conventional|additive|all] "
-         "[--suite distributed|self] [--backend cpu|gpu|both]\n";
+         "[--suite distributed|distributed27|self] [--backend cpu|gpu|both]\n";
 }
 
 Options parseOptions(int argc, char** argv) {
@@ -214,6 +264,8 @@ Options parseOptions(int argc, char** argv) {
     } else if (arg == "--suite") {
       if (value == "distributed")
         options.suite = Suite::Distributed;
+      else if (value == "distributed27")
+        options.suite = Suite::Distributed27;
       else if (value == "self")
         options.suite = Suite::Self;
       else
@@ -395,10 +447,9 @@ void initializeConventional(HostFields& fields, const Scenario& scenario,
             const int raw =
                 rawGlobalCoordinate(vct.getCoordinates(axis),
                                     scenario.localCells[axis], index[axis]);
-            const int globalCells =
-                scenario.localCells[axis] * scenario.dims[axis];
-            global[axis] = canonicalCoordinate(raw, globalCells,
-                                               scenario.periodic[axis] != 0);
+            global[axis] =
+                canonicalCoordinate(raw, domainCells(scenario, axis),
+                                    scenario.particlePeriodic[axis] != 0);
           }
           fields[field].fetch(i, j, k) =
               conventionalValue(field, global[0], global[1], global[2]);
@@ -422,7 +473,8 @@ bool conventionalOutputIsDefined(const Scenario& scenario,
     hasMissingNeighbor =
         hasMissingNeighbor ||
         !ghostHasNeighbor(index[axis], extent[axis], vct.getCoordinates(axis),
-                          scenario.dims[axis], scenario.periodic[axis] != 0);
+                          scenario.dims[axis],
+                          scenario.particlePeriodic[axis] != 0);
   }
   return ghostAxes != 3 || !hasMissingNeighbor;
 }
@@ -435,7 +487,8 @@ double expectedConventional(const Scenario& scenario, const VCtopology3D& vct,
 
   for (int axis = 0; axis < 3; ++axis) {
     if (!ghostHasNeighbor(index[axis], extent[axis], vct.getCoordinates(axis),
-                          scenario.dims[axis], scenario.periodic[axis] != 0)) {
+                          scenario.dims[axis],
+                          scenario.particlePeriodic[axis] != 0)) {
       return ghostSentinel(field, i, j, k);
     }
   }
@@ -444,9 +497,8 @@ double expectedConventional(const Scenario& scenario, const VCtopology3D& vct,
   for (int axis = 0; axis < 3; ++axis) {
     const int raw = rawGlobalCoordinate(vct.getCoordinates(axis),
                                         scenario.localCells[axis], index[axis]);
-    const int globalCells = scenario.localCells[axis] * scenario.dims[axis];
-    global[axis] =
-        canonicalCoordinate(raw, globalCells, scenario.periodic[axis] != 0);
+    global[axis] = canonicalCoordinate(raw, domainCells(scenario, axis),
+                                       scenario.particlePeriodic[axis] != 0);
   }
   return conventionalValue(field, global[0], global[1], global[2]);
 }
@@ -479,8 +531,9 @@ buildAdditiveOracle(const Scenario& scenario, const VCtopology3D& vct, int rank,
   std::array<int, 3> globalCells{};
   std::array<int, 3> nodeCounts{};
   for (int axis = 0; axis < 3; ++axis) {
-    globalCells[axis] = scenario.localCells[axis] * scenario.dims[axis];
-    nodeCounts[axis] = globalCells[axis] + (scenario.periodic[axis] ? 0 : 1);
+    globalCells[axis] = domainCells(scenario, axis);
+    nodeCounts[axis] =
+        globalCells[axis] + (scenario.particlePeriodic[axis] ? 0 : 1);
   }
   const size_t totalNodes =
       static_cast<size_t>(nodeCounts[0]) * nodeCounts[1] * nodeCounts[2];
@@ -496,8 +549,8 @@ buildAdditiveOracle(const Scenario& scenario, const VCtopology3D& vct, int rank,
         for (int axis = 0; axis < 3; ++axis) {
           const int raw = rawGlobalCoordinate(
               vct.getCoordinates(axis), scenario.localCells[axis], index[axis]);
-          node[axis] = canonicalCoordinate(raw, globalCells[axis],
-                                           scenario.periodic[axis] != 0);
+          node[axis] = canonicalCoordinate(
+              raw, globalCells[axis], scenario.particlePeriodic[axis] != 0);
         }
         const size_t flat = globalNodeIndex(node, nodeCounts);
         for (int field = 0; field < kFieldCount; ++field) {
@@ -546,8 +599,9 @@ int checkAdditive(HostFields& fields, const Scenario& scenario,
   std::array<int, 3> globalCells{};
   std::array<int, 3> nodeCounts{};
   for (int axis = 0; axis < 3; ++axis) {
-    globalCells[axis] = scenario.localCells[axis] * scenario.dims[axis];
-    nodeCounts[axis] = globalCells[axis] + (scenario.periodic[axis] ? 0 : 1);
+    globalCells[axis] = domainCells(scenario, axis);
+    nodeCounts[axis] =
+        globalCells[axis] + (scenario.particlePeriodic[axis] ? 0 : 1);
   }
 
   for (int i = 1; i <= nx - 2; ++i) {
@@ -558,8 +612,8 @@ int checkAdditive(HostFields& fields, const Scenario& scenario,
         for (int axis = 0; axis < 3; ++axis) {
           const int raw = rawGlobalCoordinate(
               vct.getCoordinates(axis), scenario.localCells[axis], index[axis]);
-          node[axis] = canonicalCoordinate(raw, globalCells[axis],
-                                           scenario.periodic[axis] != 0);
+          node[axis] = canonicalCoordinate(
+              raw, globalCells[axis], scenario.particlePeriodic[axis] != 0);
         }
         const size_t flat = globalNodeIndex(node, nodeCounts);
         for (int field = 0; field < kFieldCount; ++field) {
@@ -592,65 +646,253 @@ int runCpu(ExchangeCase exchangeCase, const Scenario& scenario,
   return checkAdditive(fields, scenario, vct, rank, "cpu", nx, ny, nz);
 }
 
-int runGpu(ExchangeCase exchangeCase, const Scenario& scenario,
-           const VCtopology3D& vct, EMfields3D& emFields, int rank, int nx,
-           int ny, int nz) {
-  // The conventional exchange runs blocking and split (makeConfig sets
-  // HaloOverlap, which creates the split resources).  The additive exchange
-  // updates active nodes and has no split contract: blocking only.
-  const bool conventional = exchangeCase == ExchangeCase::Conventional;
-  int failures = 0;
-  for (int split = 0; split < (conventional ? 2 : 1); ++split) {
-    HostFields host(nx, ny, nz);
-    if (conventional) {
-      initializeConventional(host, scenario, vct, nx, ny, nz);
-    } else {
-      initializeAdditive(host, rank, nx, ny, nz);
-    }
+// ---- GPU: every exchange plan, checked on every entry ----
 
-    StreamGuard stream;
-    const cudaStream_t testStream = stream.get();
-    DeviceFields device(nx, ny, nz);
+struct PlanVariant {
+  const char* name;
+  int geometry; // 0 centres, 1 nodes with send offset 1, 2 nodes with offset 0
+  bool particle;
+  bool faceOnly;
+};
+
+struct ArrayShape {
+  std::array<int, 3> n; // with ghosts
+  int offset;           // send offset
+};
+
+constexpr int kGhosts[3] = {2, 3, 3}; // centres, nodes, nodes
+
+ArrayShape shapeOf(const Scenario& scenario, const VCtopology3D& vct,
+                   int geometry) {
+  ArrayShape shape{};
+  for (int axis = 0; axis < 3; ++axis)
+    shape.n[axis] = localCellsAt(scenario, axis, vct.getCoordinates(axis)) +
+                    kGhosts[geometry];
+  shape.offset = geometry == 1 ? 1 : 0;
+  return shape;
+}
+
+/** The global point whose value index i along axis holds after a copy
+ *  exchange of geometry: the point itself, or, in a ghost, the point the
+ *  neighbour across sends, by its own extent (exists: there is one). */
+int copySource(const Scenario& scenario, const VCtopology3D& vct, int axis,
+               bool periodic, int geometry, const ArrayShape& shape, int i,
+               bool& exists) {
+  const int processes = scenario.dims[axis];
+  const int coordinate = vct.getCoordinates(axis);
+  int source = coordinate, index = i;
+  exists = true;
+  if (i == 0) {
+    exists = periodic || coordinate > 0;
+    source = positiveModulo(coordinate - 1, processes);
+    index = localCellsAt(scenario, axis, source) + kGhosts[geometry] - 2 -
+            shape.offset;
+  } else if (i == shape.n[axis] - 1) {
+    exists = periodic || coordinate + 1 < processes;
+    source = positiveModulo(coordinate + 1, processes);
+    index = 1 + shape.offset;
+  }
+  const int global = source * scenario.localCells[axis] + index - 1;
+  return periodic ? positiveModulo(global, domainCells(scenario, axis))
+                  : global;
+}
+
+double taggedValue(int field, const std::array<int, 3>& g, int tag) {
+  return conventionalValue(field, g[0], g[1], g[2]) + tag * 100000000000.0;
+}
+
+double taggedSentinel(int field, int i, int j, int k, int tag) {
+  return ghostSentinel(field, i, j, k) - tag * 100000000000.0;
+}
+
+/** Visit every entry: (field, index, expected value after the exchange of
+ *  variant, value before it). */
+template <typename Visit>
+void forEachEntry(const Scenario& scenario, const VCtopology3D& vct,
+                  const PlanVariant& variant, const ArrayShape& shape, int tag,
+                  Visit visit) {
+  const auto& periodic =
+      variant.particle ? scenario.particlePeriodic : scenario.periodic;
+  for (int field = 0; field < kFieldCount; ++field)
+    for (int i = 0; i < shape.n[0]; ++i)
+      for (int j = 0; j < shape.n[1]; ++j)
+        for (int k = 0; k < shape.n[2]; ++k) {
+          const std::array<int, 3> index = {i, j, k};
+          std::array<int, 3> global{};
+          bool exists = true;
+          int ghostAxes = 0;
+          for (int axis = 0; axis < 3; ++axis) {
+            bool axisExists = true;
+            global[axis] =
+                copySource(scenario, vct, axis, periodic[axis] != 0,
+                           variant.geometry, shape, index[axis], axisExists);
+            exists = exists && axisExists;
+            ghostAxes += !isPhysical(index[axis], shape.n[axis]);
+          }
+          const double before = ghostAxes == 0
+                                    ? taggedValue(field, global, tag)
+                                    : taggedSentinel(field, i, j, k, tag);
+          const bool copied = exists && (ghostAxes == 1 ||
+                                         (ghostAxes > 1 && !variant.faceOnly));
+          visit(field, i, j, k,
+                copied ? taggedValue(field, global, tag) : before, before);
+        }
+}
+
+/** Device arrays of one exchange, initialized for variant. */
+struct PlanCase {
+  const PlanVariant& variant;
+  ArrayShape shape;
+  int tag;
+  HostFields host;
+  DeviceFields device;
+
+  PlanCase(const Scenario& scenario, const VCtopology3D& vct,
+           const PlanVariant& v, int t)
+      : variant(v), shape(shapeOf(scenario, vct, v.geometry)), tag(t),
+        host(shape.n[0], shape.n[1], shape.n[2]),
+        device(shape.n[0], shape.n[1], shape.n[2]) {
+    forEachEntry(scenario, vct, variant, shape, tag,
+                 [&](int field, int i, int j, int k, double, double before) {
+                   host[field].fetch(i, j, k) = before;
+                 });
     // GPUFieldArray3 initializes with cudaMemset on the legacy default
-    // stream.  A cudaStreamNonBlocking stream has no implicit ordering with
-    // that stream, so finish constructor initialization before starting the
-    // test H2D copies.
+    // stream, which a cudaStreamNonBlocking stream does not wait for
     cudaErrChk(cudaDeviceSynchronize());
-    HaloBufferGuard haloBuffers(emFields);
-    for (int field = 0; field < kFieldCount; ++field) {
-      device[field].copyFromHostAsync(host[field].fetch_arr(), testStream);
-    }
+  }
+
+  void upload(cudaStream_t stream) {
+    for (int field = 0; field < kFieldCount; ++field)
+      device[field].copyFromHostAsync(host[field].fetch_arr(), stream);
+  }
+
+  void exchange(EMfields3D& emFields, bool split, cudaStream_t stream) {
     auto pointers = device.pointers();
+    const bool offsetZero = shape.offset == 0;
     if (split) {
-      emFields.gpuBatchedHaloBeginExchange(pointers.data(), kFieldCount, nx, ny,
-                                           nz, false, false, true, testStream);
+      emFields.gpuBatchedHaloBeginExchange(
+          pointers.data(), kFieldCount, shape.n[0], shape.n[1], shape.n[2],
+          offsetZero, variant.faceOnly, variant.particle, stream);
       emFields.gpuBatchedHaloEndExchange();
     } else {
-      emFields.gpuBatchedHaloExchange(pointers.data(), kFieldCount, nx, ny, nz,
-                                      !conventional, false, !conventional, true,
-                                      testStream);
+      emFields.gpuBatchedHaloExchange(
+          pointers.data(), kFieldCount, shape.n[0], shape.n[1], shape.n[2],
+          offsetZero, variant.faceOnly, false, variant.particle, stream);
     }
-    cudaErrChk(cudaGetLastError());
-    cudaErrChk(cudaStreamSynchronize(testStream));
-
-    for (int field = 0; field < kFieldCount; ++field) {
-      device[field].copyToHost(host[field].fetch_arr());
-    }
-    const char* label = split ? "gpu split" : "gpu";
-    failures +=
-        conventional
-            ? checkConventional(host, scenario, vct, rank, label, nx, ny, nz)
-            : checkAdditive(host, scenario, vct, rank, label, nx, ny, nz);
   }
+
+  int check(const Scenario& scenario, const VCtopology3D& vct, int rank,
+            const char* label) {
+    for (int field = 0; field < kFieldCount; ++field)
+      device[field].copyToHost(host[field].fetch_arr());
+    Checker checker{rank, scenario.name, variant.name, label};
+    forEachEntry(scenario, vct, variant, shape, tag,
+                 [&](int field, int i, int j, int k, double expected, double) {
+                   checker.exact(host[field].get(i, j, k), expected, field, i,
+                                 j, k);
+                 });
+    return checker.failures;
+  }
+};
+
+constexpr std::array<PlanVariant, 12> kPlanVariants = {{
+    {"centre field", 0, false, false},
+    {"centre field faces", 0, false, true},
+    {"centre particle", 0, true, false},
+    {"centre particle faces", 0, true, true},
+    {"node1 field", 1, false, false},
+    {"node1 field faces", 1, false, true},
+    {"node1 particle", 1, true, false},
+    {"node1 particle faces", 1, true, true},
+    {"node0 field", 2, false, false},
+    {"node0 field faces", 2, false, true},
+    {"node0 particle", 2, true, false},
+    {"node0 particle faces", 2, true, true},
+}};
+
+/** Every plan, blocking and, with the split exchange resources (overlap),
+ *  split; then a pipeline of exchanges. */
+int runGpuPlans(const Scenario& scenario, const VCtopology3D& vct,
+                EMfields3D& emFields, int rank, bool overlap) {
+  int failures = 0;
+  StreamGuard stream;
+  HaloBufferGuard haloBuffers(emFields);
+  for (const PlanVariant& variant : kPlanVariants) {
+    for (int split = 0; split < (overlap ? 2 : 1); ++split) {
+      PlanCase one(scenario, vct, variant, 0);
+      one.upload(stream.get());
+      one.exchange(emFields, split == 1, stream.get());
+      cudaErrChk(cudaGetLastError());
+      cudaErrChk(cudaStreamSynchronize(stream.get()));
+      failures += one.check(scenario, vct, rank,
+                            split     ? "gpu split"
+                            : overlap ? "gpu"
+                                      : "gpu, HaloOverlap 0");
+    }
+  }
+
+  // Exchanges with different plans back to back, split and blocking (only
+  // blocking without the split resources), with no host synchronization
+  // between them: each posts its receives while the unpack of the previous
+  // one may still be queued
+  constexpr int stages = 6;
+  std::vector<std::unique_ptr<PlanCase>> pipeline;
+  for (int stage = 0; stage < stages; ++stage)
+    pipeline.push_back(std::make_unique<PlanCase>(
+        scenario, vct, kPlanVariants[(5 * stage + 2) % kPlanVariants.size()],
+        stage + 1));
+  for (auto& one : pipeline)
+    one->upload(stream.get());
+  for (int stage = 0; stage < stages; ++stage)
+    pipeline[stage]->exchange(emFields, overlap && stage % 2 == 0,
+                              stream.get());
+  cudaErrChk(cudaGetLastError());
+  cudaErrChk(cudaStreamSynchronize(stream.get()));
+  for (auto& one : pipeline)
+    failures +=
+        one->check(scenario, vct, rank,
+                   overlap ? "gpu pipeline" : "gpu pipeline, HaloOverlap 0");
   return failures;
+}
+
+int runGpu(ExchangeCase exchangeCase, const Scenario& scenario,
+           const VCtopology3D& vct, EMfields3D& emFields, int rank, int nx,
+           int ny, int nz, bool overlap) {
+  if (exchangeCase == ExchangeCase::Conventional)
+    return runGpuPlans(scenario, vct, emFields, rank, overlap);
+
+  // The additive exchange updates active nodes and has no split contract:
+  // blocking only.
+  HostFields host(nx, ny, nz);
+  initializeAdditive(host, rank, nx, ny, nz);
+  StreamGuard stream;
+  const cudaStream_t testStream = stream.get();
+  DeviceFields device(nx, ny, nz);
+  cudaErrChk(cudaDeviceSynchronize());
+  HaloBufferGuard haloBuffers(emFields);
+  for (int field = 0; field < kFieldCount; ++field)
+    device[field].copyFromHostAsync(host[field].fetch_arr(), testStream);
+  auto pointers = device.pointers();
+  emFields.gpuBatchedHaloExchange(pointers.data(), kFieldCount, nx, ny, nz,
+                                  true, false, true, true, testStream);
+  cudaErrChk(cudaGetLastError());
+  cudaErrChk(cudaStreamSynchronize(testStream));
+  for (int field = 0; field < kFieldCount; ++field)
+    device[field].copyToHost(host[field].fetch_arr());
+  return checkAdditive(host, scenario, vct, rank,
+                       overlap ? "gpu" : "gpu, HaloOverlap 0", nx, ny, nz);
 }
 
 int runScenario(ExchangeCase exchangeCase, Backend backend,
                 const Scenario& scenario, int rank) {
   int globalFailures = 0;
 
-  {
-    ConfigFile config = makeConfig(scenario);
+  // HaloOverlap 1 creates the split exchange resources; without them (0, the
+  // default) the GPU runs the blocking exchange only
+  for (const bool overlap : {true, false}) {
+    if (!overlap && !runsGpu(backend))
+      break;
+    ConfigFile config = makeConfig(scenario, overlap);
     Collective collective(config, "haloCommunicationTest");
     VCtopology3D vct(collective);
     vct.setup_vctopology(MPIdata::get_PicGlobalComm());
@@ -662,25 +904,28 @@ int runScenario(ExchangeCase exchangeCase, Backend backend,
     const int nz = grid.getNZN();
 
     int localFailures = 0;
-    if (nx != scenario.localCells[0] + 3 || ny != scenario.localCells[1] + 3 ||
-        nz != scenario.localCells[2] + 3) {
+    if (nx != localCellsAt(scenario, 0, vct.getCoordinates(0)) + 3 ||
+        ny != localCellsAt(scenario, 1, vct.getCoordinates(1)) + 3 ||
+        nz != localCellsAt(scenario, 2, vct.getCoordinates(2)) + 3) {
       Checker check{rank, scenario.name, caseName(exchangeCase),
                     backendName(backend)};
       check.fail("unexpected local node-grid dimensions");
       localFailures += check.failures;
     } else {
-      if (runsCpu(backend)) {
+      if (runsCpu(backend) && overlap) {
         localFailures +=
             runCpu(exchangeCase, scenario, vct, emFields, rank, nx, ny, nz);
       }
       if (runsGpu(backend)) {
-        localFailures +=
-            runGpu(exchangeCase, scenario, vct, emFields, rank, nx, ny, nz);
+        localFailures += runGpu(exchangeCase, scenario, vct, emFields, rank, nx,
+                                ny, nz, overlap);
       }
     }
 
-    MPI_Allreduce(&localFailures, &globalFailures, 1, MPI_INT, MPI_SUM,
+    int failures = 0;
+    MPI_Allreduce(&localFailures, &failures, 1, MPI_INT, MPI_SUM,
                   MPIdata::get_PicGlobalComm());
+    globalFailures += failures;
   }
 
   if (rank == 0) {
@@ -747,12 +992,15 @@ int main(int argc, char** argv) {
       return EXIT_SUCCESS;
     }
 
-    const int requiredRanks = options.suite == Suite::Distributed ? 8 : 1;
+    const int requiredRanks = options.suite == Suite::Distributed     ? 8
+                              : options.suite == Suite::Distributed27 ? 27
+                                                                      : 1;
     if (nprocs != requiredRanks) {
       if (rank == 0) {
         std::cerr << "haloCommunicationTest "
-                  << (options.suite == Suite::Distributed ? "distributed"
-                                                          : "self")
+                  << (options.suite == Suite::Distributed     ? "distributed"
+                      : options.suite == Suite::Distributed27 ? "distributed27"
+                                                              : "self")
                   << " suite requires " << requiredRanks
                   << " MPI rank(s), but received " << nprocs << ".\n";
       }
@@ -780,6 +1028,8 @@ int main(int argc, char** argv) {
     int failures = 0;
     if (options.suite == Suite::Distributed) {
       failures = runScenarios(kDistributedScenarios, options, rank);
+    } else if (options.suite == Suite::Distributed27) {
+      failures = runScenarios(kDistributed27Scenarios, options, rank);
     } else {
       failures = runScenarios(kSelfScenarios, options, rank);
     }

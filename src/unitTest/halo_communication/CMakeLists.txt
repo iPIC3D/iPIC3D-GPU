@@ -129,3 +129,17 @@ add_halo_communication_test(
   haloCommunicationAdditiveSelfCPU 1 additive self cpu)
 add_halo_communication_test(
   haloCommunicationAdditiveSelfGPU 1 additive self gpu)
+
+# 3x3x3 ranks: 26 distinct neighbours on the centre rank.  Registered only
+# where MPI has 27 slots; elsewhere run by hand, e.g. with Open MPI
+#   mpirun -np 27 --oversubscribe haloCommunicationTest --suite distributed27
+if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL 27)
+  add_halo_communication_test(haloCommunicationConventionalDistributed27CPU 27
+                               conventional distributed27 cpu)
+  add_halo_communication_test(haloCommunicationConventionalDistributed27GPU 27
+                               conventional distributed27 gpu)
+  add_halo_communication_test(
+    haloCommunicationAdditiveDistributed27CPU 27 additive distributed27 cpu)
+  add_halo_communication_test(
+    haloCommunicationAdditiveDistributed27GPU 27 additive distributed27 gpu)
+endif()

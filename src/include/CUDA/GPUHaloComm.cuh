@@ -1,25 +1,76 @@
+#ifndef GPU_HALO_COMM_CUH
+#define GPU_HALO_COMM_CUH
+
 /**
  * @file GPUHaloComm.cuh
  * @brief GPU-aware MPI halo communication for iPIC3D GPU field solver.
  *
  * Mirrors the functionality of Com3DNonblk.cpp / BcFields3D.cpp but operates
- * directly on device-resident GPUFieldArray3 buffers.  Exchanges pack faces,
- * edges and corners into contiguous device buffers (GPUBatchedHaloComm.cu)
- * and pass them to CUDA-aware MPI.
+ * directly on device-resident GPUFieldArray3 buffers.  An exchange sends
+ * every ghost box (6 faces, 12 edges, 8 corners) straight to the neighbour
+ * across it, through contiguous device buffers and CUDA-aware MPI
+ * (GPUBatchedHaloComm.cu).
  *
- * Local self-copies (periodic, same-rank neighbours) and boundary-condition
- * application (BCface) are implemented as CUDA kernels.
+ * Boundary-condition application (BCface) is implemented as CUDA kernels.
  */
-
-#ifndef GPU_HALO_COMM_CUH
-#define GPU_HALO_COMM_CUH
 
 #include "GPUFieldArray.cuh"
 #include <mpi.h>
 
 // =========================================================================
+//  Halo exchange plan (GPUBatchedHaloComm.cu)
+// =========================================================================
+
+/** One box of a halo exchange in an (nx, ny, nz) array: li x lj x lk points
+ *  from the linear index field, k fastest.  Pack copies the send box of a
+ *  remote neighbour into the neighbour's message, unpack the message into
+ *  the ghost box at field; point e of field f is element
+ *  message * nFields + f * length + offset + e of the buffer.  A self copy
+ *  (self >= 0, a ghost box along an axis periodic on one process) copies the
+ *  box at field into the ghost box at self. */
+struct HaloBox {
+  int block;   // first block of the box in the launch
+  int points;  // li * lj * lk
+  int lj, lk;  // extents along j and k
+  int field;   // origin: send box (pack), ghost box (unpack), source (self)
+  int self;    // ghost box origin of a self copy, -1 for the buffer
+  int message; // per-field offset of the neighbour's message in the buffer
+  int length;  // per-field length of that message
+  int offset;  // per-field offset of the box in that message
+};
+
+/** The boxes of one copy launch, passed by value: blockIdx.x walks the
+ *  boxes, blockIdx.y the fields. */
+struct HaloCopyTable {
+  int boxes = 0;
+  int blocks = 0;
+  int ny = 0, nz = 0;
+  HaloBox box[26] = {};
+};
+
+/** A remote neighbour of an exchange: one message for all its boxes. */
+struct HaloPeer {
+  int rank = MPI_PROC_NULL;
+  int offset = 0; // per-field offset of the message in the buffers
+  int length = 0; // per-field length of the message
+};
+
+/** The exchange of one communicator, array geometry and extent, built once
+ *  when the halo buffers are allocated. */
+struct HaloPlan {
+  MPI_Comm comm = MPI_COMM_NULL;
+  bool present[6] = {}; // face neighbours XL XR YL YR ZL ZR exist
+  int peers = 0;        // distinct remote neighbours
+  HaloPeer peer[26] = {};
+  int bufferPoints = 0; // per field: the length of all messages
+  HaloCopyTable pack;   // remote send boxes, self copies of interior boxes
+  HaloCopyTable unpack; // remote ghost boxes
+  HaloCopyTable fill;   // self copies reading ghost boxes the unpack writes
+};
+
+// =========================================================================
 //  CUDA kernels for local face self-copy (periodic same-rank neighbours;
-//  not used: the exchanges use the batched kernels below)
+//  not used: the exchange plan copies them, see HaloBox)
 //  The face kernels (self-copy and gpuAddFace*) take a 2D launch over the
 //  interior of the plane, the contiguous index on x: (x, y) = (k, j) on an
 //  x face, (k, i) on a y face, (j, i) on a z face.
@@ -79,7 +130,7 @@ __global__ void gpuSelfCopyCornerZ(cudaSolverType* __restrict__ arr, int nx,
                                    bool hasXright);
 
 // =========================================================================
-//  Batched self-copy kernels (multiple fields in one launch)
+//  Batched self-copy kernels (multiple fields in one launch; not used)
 // =========================================================================
 
 /** Batched face self-copy: blockIdx.z selects the field. */

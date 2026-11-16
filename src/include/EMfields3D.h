@@ -500,7 +500,8 @@ public:
 
   // ---- GPU Solver: host ↔ device synchronisation ----
   /** Copy all primary field arrays from host to device (for initialisation /
-   * restart). */
+   * restart), then exchange the ghost cells of the cell B (gpuMaxwellSource
+   * reads them without an exchange of its own). */
   void gpuSolverSyncH2D(cudaStream_t stream = 0);
   /** Copy the fields and moments to the host (output, diagnostics, restart,
    * Catalyst). */
@@ -738,9 +739,10 @@ public:
    *  species per pass. */
   void gpuCommunicateGhostP2G_AllSpecies(int cycle = -1);
 
-  /** Batched GPU halo exchange: exchanges nFields 3D arrays in a single set
-   *  of MPI messages per direction, using explicit CUDA pack/unpack into
-   *  persistent contiguous GPU buffers.
+  /** Batched GPU halo exchange of nFields 3D arrays: every ghost box comes
+   *  from the neighbour across it (faces, edges, corners), one message per
+   *  distinct neighbour rank for all fields, all in flight at once; a ghost
+   *  box with no neighbour (MPI_PROC_NULL) is left unchanged.
    *  @param h_fieldPtrs  Host array of nFields device pointers.
    *  @param nFields      Number of field arrays to batch.
    *  @param nx,ny,nz     Canonical local dimensions including ghosts: center
@@ -749,8 +751,12 @@ public:
    *  @param offsetZero   true = send offset 0, false = send offset 1.  P2G
    *                      accumulation intentionally uses node dimensions with
    *                      offset 0.
-   *  @param isFaceOnlyFlag true = skip edges/corners.
-   *  @param needInterp   true = additive accumulation after exchange.
+   *  @param isFaceOnlyFlag true = the 6 face boxes only, edges and corners
+   *                      unchanged.
+   *  @param needInterp   true = additive accumulation after exchange: the
+   *                      ghosts, which hold the neighbours' values of the
+   *                      shared nodes, are added into those nodes.  Needs
+   *                      offsetZero and all boxes (not isFaceOnlyFlag).
    *  @param isParticle   true = use particle communicator.
    *  @param stream       CUDA stream for kernels.  With HaloOverlap off,
    *                      successive calls sharing the persistent buffers must
@@ -760,15 +766,16 @@ public:
                               bool isFaceOnlyFlag, bool needInterp,
                               bool isParticle, cudaStream_t stream);
 
-  /** Queue pointer upload and face packing on the halo stream.  The caller
-   *  then queues dependency-free work on @p computeStream.  Needs the split
-   *  exchange resources (HaloOverlap on). */
+  /** Post the receives, then queue pointer upload and packing on the halo
+   *  stream.  The caller then queues dependency-free work on
+   *  @p computeStream.  Needs the split exchange resources (HaloOverlap on).
+   */
   void gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs, int nFields,
                                    int nx, int ny, int nz, bool offsetZero,
                                    bool isFaceOnlyFlag, bool isParticle,
                                    cudaStream_t computeStream);
-  /** Post face MPI as soon as packing completes, progress faces, edges and
-   *  corners, then make the caller-provided compute stream wait for
+  /** Post the sends as soon as packing completes, wait for all messages,
+   *  queue the unpack, then make the caller-provided compute stream wait for
    *  completion. */
   void gpuBatchedHaloEndExchange();
 
@@ -852,8 +859,9 @@ public:
    * fieldCopyLayersXright() cell planes.  Applied once per cycle, after
    * Faraday's law (gpuCalculateB): the blend is not idempotent.  ghostOnly
    * treats only the ghost layer, whose value the full call sets independently
-   * of the layers: gpuMaxwellSource restores it after its ghost exchange,
-   * gpuApplyDivBCleaning after its correction. */
+   * of the layers: gpuCalculateB restores it after its exchange,
+   * gpuMaxwellSource after the ForceFree layers, gpuApplyDivBCleaning after
+   * its correction. */
   void gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
                               cudaSolverType* dZ, int nx, int ny, int nz,
                               bool ghostOnly = false);
@@ -1511,109 +1519,79 @@ private:
   // operator), built once by gpuSolverAllocate
   MaxwellImageBoxes imageBoxes_{};
 
-  // ---- Persistent batched halo-exchange buffers ----
-  // 6 directions: 0=XL 1=XR 2=YL 3=YR 4=ZL 5=ZR
+  // ---- Halo exchange (GPUBatchedHaloComm.cu) ----
+  // An exchange fills every ghost box from the neighbour across it, the 26
+  // directions (6 faces, 12 edges, 8 corners), with one message per
+  // distinct neighbour rank: the receives are posted first, then all sends,
+  // and one MPI_Waitall completes them.  Along a self axis (periodic on one
+  // process) the ghost boxes are copies within the array, so only the boxes
+  // with no step along a self axis travel: in 2D (one cell along z) the
+  // z-ghosts of the received boxes are copied after the unpack, not sent.
   // HALO_MAX_BATCH is the max number of fields per single batched exchange.
   // Callers with more fields split them themselves (e.g.
   // gpuCommunicateGhostP2G_AllSpecies, HALO_MAX_BATCH/10 species per pass).
   static constexpr int HALO_MAX_BATCH = 64;
-  double* d_haloBuf_send_[6] = {}; // contiguous GPU send buffers
-  double* d_haloBuf_recv_[6] = {}; // contiguous GPU recv buffers
-  double** d_ptrArray_ = nullptr;  // device array of field pointers for kernels
-  double** h_ptrArray_ =
-      nullptr; // pinned host staging for d_ptrArray_ H→D copies
+  cudaSolverType* d_haloSend_ = nullptr; // the messages one after another
+  // Receive buffers, used by alternate exchanges with a remote neighbour: an
+  // exchange posts its receives before packing, into the buffer of the
+  // last-but-one such exchange.  Its unpack has completed: the host waited
+  // for the pack of the last such exchange, which the GPU queues after it
+  // (haloBuffersReady_, or the one stream of the blocking exchanges).
+  cudaSolverType* d_haloRecv_[2] = {};
+  int haloRecvSlot_ = 0;
+  cudaSolverType** d_ptrArray_ = nullptr; // device table of the field pointers
   bool haloBufsAllocated_ = false;
 
-  // ---- Immutable halo topology and geometry plans ----
   // Topology and local mesh dimensions do not change while an EMfields3D
-  // instance is alive.  Resolve them once when halo storage is initialized;
-  // exchanges only select one of these fixed plans.
-  struct HaloTopologyPlan {
-    MPI_Comm comm = MPI_COMM_NULL;
-    int neighbors[6] = {};
-    int present[6] = {};
-    int selfAxis[3] = {};
-    int remoteDirections[6] = {};
-    int remoteDirectionCount = 0;
-    int edgeDirections[6] = {};
-    int edgeDirectionCount = 0;
-    int edgeSegments[6][2] = {};
-    int edgeMultiplicity[6] = {};
-    int cornerDirections[2] = {};
-    int cornerDirectionCount = 0;
-    bool hasRemoteYZ = false;
-  };
-
-  struct HaloFacePlan {
-    int sendBase = 0;
-    int recvBase = 0;
-    int outerStride = 0;
-    int innerStride = 0;
-    int outerCount = 0;
-    int innerCount = 0;
-    int elements = 0;
-  };
-
-  struct HaloEdgePlan {
-    int sendBase = 0;
-    int recvBase = 0;
-    int stride = 0;
-    int elements = 0;
-  };
-
-  struct HaloGeometryPlan {
-    int nx = 0;
-    int ny = 0;
-    int nz = 0;
-    int offset = 0;
-    int active[3] = {};
-    HaloFacePlan faces[6] = {};
-    HaloEdgePlan edges[6][2] = {};
-    int edgeLength[3] = {};
-    PointLaunch selfFaceLaunch[3] = {}; // face self-copy, without grid.z
-    int edgeKernelBlocks = 0;
-    int cornerSendBase[2] = {};
-    int cornerRecvBase[2] = {};
-    int maxBufferElements[6] = {};
-  };
-
+  // instance is alive: gpuAllocateHaloBuffers builds the plans once, for
+  // each topology (field, particle communicator), geometry (centres, nodes
+  // with send offset 1 or 0) and extent (all boxes, faces only); an
+  // exchange selects one.
   enum HaloTopologyKind { HALO_FIELD = 0, HALO_PARTICLE = 1 };
   enum HaloGeometryKind {
     HALO_CENTER_OFFSET0 = 0,
     HALO_NODE_OFFSET1 = 1,
     HALO_NODE_OFFSET0 = 2
   };
-  HaloTopologyPlan haloTopologyPlans_[2] = {};
-  HaloGeometryPlan haloGeometryPlans_[3] = {};
-  bool haloPlansInitialized_ = false;
+  HaloPlan haloPlans_[2][3][2] = {}; // [topology][geometry][faces only]
 
   void gpuInitializeHaloPlans();
-  const HaloGeometryPlan& gpuSelectHaloGeometry(int nx, int ny, int nz,
-                                                bool offsetZero) const;
-  void gpuQueueHaloFacePack(cudaSolverType** h_fieldPtrs, int nFields,
-                            const HaloTopologyPlan& topology,
-                            const HaloGeometryPlan& geometry,
-                            cudaStream_t stream);
-  void gpuCompleteHaloPhases(const HaloTopologyPlan& topology,
-                             const HaloGeometryPlan& geometry, int nFields,
-                             bool faceOnly, cudaStream_t stream);
+  /** The plan of an exchange of nFields arrays of (nx, ny, nz); aborts on
+   *  arguments outside the contract of the exchanges. */
+  const HaloPlan& gpuSelectHaloPlan(cudaSolverType** h_fieldPtrs, int nFields,
+                                    int nx, int ny, int nz, bool offsetZero,
+                                    bool faceOnly, bool isParticle) const;
+  /** Post the receives of plan into the next receive buffer; returns it and
+   *  sets requests[0, plan.peers). */
+  cudaSolverType* gpuHaloPostReceives(const HaloPlan& plan, int nFields,
+                                      MPI_Request* requests);
+  /** Upload the field pointers and queue the pack launch on stream. */
+  void gpuHaloPack(const HaloPlan& plan, cudaSolverType** h_fieldPtrs,
+                   int nFields, cudaStream_t stream);
+  /** Post the sends of plan (the send buffer is packed) into
+   *  requests[plan.peers, 2 plan.peers) and complete all of them. */
+  void gpuHaloSendAndWait(const HaloPlan& plan, int nFields,
+                          MPI_Request* requests);
+  /** Queue the unpack of recv and the self copies after it on stream. */
+  void gpuHaloUnpack(const HaloPlan& plan, cudaSolverType* recv, int nFields,
+                     cudaStream_t stream);
 
   // ---- Split halo exchange state ----
-  // Communication kernels use a separate stream so face, edge and corner
-  // progress can overlap the dependency-free stencil core on solverStream_.
+  // Communication kernels use a separate stream so packing, MPI and
+  // unpacking can overlap the dependency-free stencil core on solverStream_.
   // Created only with HaloOverlap on (gpuAllocateHaloBuffers).
   cudaStream_t haloStream_ = 0;
   cudaEvent_t haloInputReady_ = nullptr;
-  cudaEvent_t haloPhaseReady_ = nullptr;
+  cudaEvent_t haloPacked_ = nullptr;
   cudaEvent_t haloBuffersReady_ = nullptr;
 
   struct HaloExchangeState {
     bool active = false;
-    const HaloTopologyPlan* topology = nullptr;
-    const HaloGeometryPlan* geometry = nullptr;
+    const HaloPlan* plan = nullptr;
     int nFields = 0;
-    bool faceOnly = false;
     cudaStream_t computeStream = 0;
+    cudaSolverType* recv = nullptr;    // receive buffer of this exchange
+    MPI_Request requests[2 * 26] = {}; // receives, then sends
   } haloExchange_;
 
   // Flag tracking whether GPU solver arrays have been allocated

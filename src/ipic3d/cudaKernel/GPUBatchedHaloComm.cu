@@ -1,15 +1,19 @@
 /**
  * @file GPUBatchedHaloComm.cu
- * @brief Batched GPU halo exchange with explicit pack/unpack.
+ * @brief Batched GPU halo exchange: the 26 neighbour directions in one round.
  *
- * Explicit CUDA pack/unpack kernels and contiguous MPI transfers.  Multiple
- * field arrays are batched into single MPI messages to minimise the
- * number of MPI calls per exchange.
+ * Every ghost box (6 faces, 12 edges, 8 corners) comes straight from the
+ * neighbour across it.  The boxes for one neighbour rank travel as one
+ * contiguous message for all batched fields; the receives are posted before
+ * packing, then all sends, and one MPI_Waitall completes the exchange.
+ * Along an axis that is periodic on one process the ghost boxes are copies
+ * within the array.  The plans (HaloPlan) are built once, when the halo
+ * buffers are allocated; an exchange selects one, and one pack, one unpack
+ * and one self-copy launch move the boxes of all its fields.
  */
 
 #include "EMfields3D.h"
-#include "GPUHaloComm.cuh" // batched self-copy kernels
-#include "GPUPointLaunch.cuh"
+#include "GPUHaloComm.cuh" // HaloPlan
 #include "GPUSolverMPITypes.h"
 #include "VCtopology3D.h"
 #include <climits>
@@ -24,8 +28,76 @@ __device__ __forceinline__ int bidx3(int i, int j, int k, int ny, int nz) {
   return (i * ny + j) * nz + k;
 }
 
+static constexpr int HALO_BLOCK = 256; // threads per block of every launch
+
+static inline int haloBlocks(int threads) {
+  return 1 + (threads - 1) / HALO_BLOCK;
+}
+
 // =========================================================================
-//  BATCHED PACK / UNPACK KERNELS
+//  HALO BOX COPY: one launch packs (or unpacks) every box of every field
+// =========================================================================
+
+/** PACK: the send boxes into the send buffer, and the self copies; otherwise
+ *  the receive buffer into the ghost boxes.  A block reads one box, the last
+ *  one starting at or before blockIdx.x; blockIdx.y selects the field. */
+template <bool PACK>
+__global__ void
+k_haloCopy(const HaloCopyTable t, cudaSolverType* __restrict__ buf,
+           cudaSolverType* const* __restrict__ fields, int nFields) {
+  int lo = 0, hi = t.boxes - 1;
+  while (lo < hi) {
+    const int mid = (lo + hi + 1) >> 1;
+    if (t.box[mid].block <= (int)blockIdx.x)
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  const HaloBox& b = t.box[lo];
+  const int e = ((int)blockIdx.x - b.block) * HALO_BLOCK + (int)threadIdx.x;
+  if (e >= b.points)
+    return;
+  const int line = e / b.lk; // (i, j) line of the box, k = e - line lk
+  const int i = line / b.lj;
+  const int at = (i * t.ny + line - i * b.lj) * t.nz + e - line * b.lk;
+  cudaSolverType* const f = fields[blockIdx.y];
+  if constexpr (PACK) {
+    if (b.self >= 0) {
+      f[b.self + at] = f[b.field + at];
+      return;
+    }
+  }
+  const int m = b.message * nFields + (int)blockIdx.y * b.length + b.offset + e;
+  if constexpr (PACK)
+    buf[m] = f[b.field + at];
+  else
+    f[b.field + at] = buf[m];
+}
+
+template <bool PACK>
+static void launchHaloCopy(const HaloCopyTable& t, cudaSolverType* buf,
+                           cudaSolverType* const* fields, int nFields,
+                           cudaStream_t stream) {
+  if (t.boxes == 0)
+    return;
+  k_haloCopy<PACK><<<dim3(t.blocks, nFields), HALO_BLOCK, 0, stream>>>(
+      t, buf, fields, nFields);
+}
+
+/** The device pointers of the batched fields, passed by value: the launch
+ *  copies them, so the host table is free at once. */
+struct HaloFieldPointers {
+  cudaSolverType* p[64];
+};
+
+/** One thread per field. */
+__global__ void k_haloSetPointers(const HaloFieldPointers h,
+                                  cudaSolverType** __restrict__ table) {
+  table[threadIdx.x] = h.p[threadIdx.x];
+}
+
+// =========================================================================
+//  BATCHED PACK / UNPACK KERNELS (not used: k_haloCopy moves all boxes)
 //
 //  k_batchPack2D / k_batchUnpack2D handle any rectangular 2D region
 //  described by (base, outerStride, innerStride, outerCount, innerCount).
@@ -70,7 +142,8 @@ __global__ void k_batchUnpack2D(const cudaSolverType* __restrict__ buf,
 }
 
 // =========================================================================
-//  CORNER PACK / UNPACK  (4 scattered elements per field per direction)
+//  CORNER PACK / UNPACK  (4 scattered elements per field per direction; not
+//  used)
 // =========================================================================
 
 __global__ void k_batchPackCorners4(cudaSolverType* __restrict__ buf,
@@ -283,20 +356,65 @@ __global__ void k_batchAddCorner(cudaSolverType* const* __restrict__ fields,
     fields[f][bidx3(1, 1, 1, ny, nz)] += fields[f][bidx3(0, 0, 0, ny, nz)];
 }
 
+/** Add the ghosts of the faces, edges and corners with a neighbour (present:
+ *  XL XR YL YR ZL ZR) into the nodes they share with it. */
+static void launchHaloAdd(const bool present[6], cudaSolverType* const* fields,
+                          int nFields, int nx, int ny, int nz,
+                          cudaStream_t stream) {
+  const bool xl = present[0], xr = present[1], yl = present[2], yr = present[3],
+             zl = present[4], zr = present[5];
+  const int nxr = nx - 2, nyr = ny - 2, nzr = nz - 2;
+  k_batchAddFaceX<<<haloBlocks(nyr * nzr * nFields), HALO_BLOCK, 0, stream>>>(
+      fields, nFields, nx, ny, nz, xr, xl);
+  k_batchAddFaceY<<<haloBlocks(nxr * nzr * nFields), HALO_BLOCK, 0, stream>>>(
+      fields, nFields, nx, ny, nz, yr, yl);
+  k_batchAddFaceZ<<<haloBlocks(nxr * nyr * nFields), HALO_BLOCK, 0, stream>>>(
+      fields, nFields, nx, ny, nz, zr, zl);
+  k_batchAddEdgeZ<<<haloBlocks(nzr * nFields), HALO_BLOCK, 0, stream>>>(
+      fields, nFields, nx, ny, nz, xr, xl, yr, yl);
+  k_batchAddEdgeY<<<haloBlocks(nyr * nFields), HALO_BLOCK, 0, stream>>>(
+      fields, nFields, nx, ny, nz, xr, xl, zr, zl);
+  k_batchAddEdgeX<<<haloBlocks(nxr * nFields), HALO_BLOCK, 0, stream>>>(
+      fields, nFields, nx, ny, nz, yr, yl, zr, zl);
+  k_batchAddCorner<<<haloBlocks(nFields), HALO_BLOCK, 0, stream>>>(
+      fields, nFields, nx, ny, nz, xr, xl, yr, yl, zr, zl);
+  cudaErrChk(cudaGetLastError());
+}
+
 // =========================================================================
-//  BATCHED HALO EXCHANGE
+//  EXCHANGE PLANS
 //
-//  The halo exchange of NBDerivedHaloComm, for several arrays at once.
-//  Uses explicit CUDA pack/unpack into persistent contiguous GPU buffers
-//  followed by MPI_Isend/Irecv of contiguous data.
+//  Direction d = 9 (dx + 1) + 3 (dy + 1) + (dz + 1) holds the neighbour at
+//  offset (dx, dy, dz) in the process grid, 13 = HALO_SELF this rank, and
+//  26 - d is the opposite direction.  Along an axis with step s, the send box
+//  of d is the point 1 + offset (s = -1), the points 1..n-2 (s = 0) or the
+//  point n-2-offset (s = +1), and its ghost box the point 0, the points
+//  1..n-2 or the point n-1.  The ghost boxes tile the ghost shell, and every
+//  send box lies in the points 1..n-2, so the sends read no ghost and all
+//  boxes travel in one round.  Along an axis with s = 0 the two ranks share
+//  the coordinate, hence the extent n-2, also when the cells do not divide
+//  evenly among the processes.
 // =========================================================================
 
-static constexpr int BATCH_BLK = 256;
-static constexpr int HALO_SEND_TAG[6] = {1, 4, 2, 5, 3, 6};
-static constexpr int HALO_RECV_TAG[6] = {4, 1, 5, 2, 6, 3};
+static constexpr int HALO_SELF = 13;
+static constexpr int HALO_STRIDE[3] = {9, 3, 1}; // of a step along x, y, z
+// XL XR YL YR ZL ZR, the order of HaloPlan::present
+static constexpr int HALO_FACE_DIRECTION[6] = {4, 22, 10, 16, 12, 14};
+// One tag: an exchange sends one message per neighbour pair and completes
+// before the next one starts, and MPI keeps the order of the messages
+// between two ranks
+static constexpr int HALO_TAG = 2626;
+static constexpr bool HALO_SEND[3] = {true, true, true};
+static constexpr bool HALO_GHOST[3] = {false, false, false};
 
-static inline int haloBatchBlocks(int total) {
-  return 1 + (total - 1) / BATCH_BLK;
+static inline int haloStep(int d, int axis) {
+  return d / HALO_STRIDE[axis] % 3 - 1;
+}
+
+static inline bool haloFaceDirection(int d) {
+  return std::abs(haloStep(d, 0)) + std::abs(haloStep(d, 1)) +
+             std::abs(haloStep(d, 2)) ==
+         1;
 }
 
 [[noreturn]] static void batchedHaloContractFailure(const char* reason) {
@@ -316,444 +434,313 @@ static inline int haloBatchBlocks(int total) {
   std::abort();
 }
 
-static void haloIrecv(void* buffer, int count, MPI_Datatype datatype,
-                      int source, int tag, MPI_Comm comm,
-                      MPI_Request* request) {
-  const int error =
-      MPI_Irecv(buffer, count, datatype, source, tag, comm, request);
+/** The neighbour rank of every direction on a Cartesian communicator:
+ *  periodic axes wrap, a step beyond a non-periodic edge is MPI_PROC_NULL. */
+static void haloNeighbors(MPI_Comm comm, int neighbor[27]) {
+  int dims[3], periods[3], coords[3];
+  int error = MPI_Cart_get(comm, 3, dims, periods, coords);
   if (error != MPI_SUCCESS)
-    batchedHaloMpiFailure(error, comm, "MPI_Irecv");
+    batchedHaloMpiFailure(error, comm, "MPI_Cart_get");
+  for (int d = 0; d < 27; ++d) {
+    int c[3];
+    bool outside = false;
+    for (int a = 0; a < 3; ++a) {
+      c[a] = coords[a] + haloStep(d, a);
+      if (c[a] < 0 || c[a] >= dims[a]) {
+        if (periods[a])
+          c[a] = (c[a] + dims[a]) % dims[a];
+        else
+          outside = true;
+      }
+    }
+    neighbor[d] = MPI_PROC_NULL;
+    if (!outside) {
+      error = MPI_Cart_rank(comm, c, &neighbor[d]);
+      if (error != MPI_SUCCESS)
+        batchedHaloMpiFailure(error, comm, "MPI_Cart_rank");
+    }
+  }
 }
 
-static void haloIsend(const void* buffer, int count, MPI_Datatype datatype,
-                      int destination, int tag, MPI_Comm comm,
-                      MPI_Request* request) {
-  const int error =
-      MPI_Isend(buffer, count, datatype, destination, tag, comm, request);
-  if (error != MPI_SUCCESS)
-    batchedHaloMpiFailure(error, comm, "MPI_Isend");
+/** Append a box of extents ext from the array index origin to t. */
+static HaloBox& haloAddBox(HaloCopyTable& t, const int ext[3], int origin) {
+  if (t.boxes == 26)
+    batchedHaloContractFailure("more than 26 halo boxes");
+  HaloBox& b = t.box[t.boxes++];
+  b = HaloBox{};
+  b.block = t.blocks;
+  b.points = ext[0] * ext[1] * ext[2];
+  b.lj = ext[1];
+  b.lk = ext[2];
+  b.field = origin;
+  b.self = -1;
+  t.blocks += haloBlocks(b.points);
+  return b;
 }
 
-static void haloWaitall(int count, MPI_Request* requests, MPI_Status* statuses,
-                        MPI_Comm comm) {
-  const int error = MPI_Waitall(count, requests, statuses);
-  if (error != MPI_SUCCESS)
-    batchedHaloMpiFailure(error, comm, "MPI_Waitall");
-}
+/** Builds the plan of one communicator, array geometry and extent. */
+class HaloPlanBuilder {
+public:
+  HaloPlanBuilder(const int neighbor[27], int rank, const int n[3], int offset,
+                  bool faceOnly)
+      : neighbor_(neighbor), offset_(offset), faceOnly_(faceOnly) {
+    const int minExtent = offset == 0 ? 3 : 4;
+    for (int a = 0; a < 3; ++a) {
+      if (n[a] < minExtent)
+        batchedHaloContractFailure("invalid canonical halo geometry");
+      n_[a] = n[a];
+      // periodic on one process: this rank on both sides
+      selfAxis_[a] = neighbor[HALO_SELF - HALO_STRIDE[a]] == rank &&
+                     neighbor[HALO_SELF + HALO_STRIDE[a]] == rank;
+    }
+    if ((size_t)n[0] * n[1] * n[2] > INT_MAX)
+      batchedHaloContractFailure("halo array exceeds INT_MAX points");
+  }
+
+  HaloPlan build(MPI_Comm comm) const {
+    HaloPlan plan;
+    plan.comm = comm;
+    for (int f = 0; f < 6; ++f)
+      plan.present[f] = neighbor_[HALO_FACE_DIRECTION[f]] != MPI_PROC_NULL;
+    for (HaloCopyTable* t : {&plan.pack, &plan.unpack, &plan.fill}) {
+      t->ny = n_[1];
+      t->nz = n_[2];
+    }
+    // one message per distinct remote neighbour, in the order of its first
+    // direction
+    for (int d = 0; d < 27; ++d) {
+      if (!sent(d) || hasPeer(plan, neighbor_[d]))
+        continue;
+      HaloPeer& peer = plan.peer[plan.peers++];
+      peer.rank = neighbor_[d];
+      peer.offset = plan.bufferPoints;
+      peer.length = addMessage(plan.pack, peer, true);
+      addMessage(plan.unpack, peer, false); // the same boxes and length
+      if ((size_t)plan.bufferPoints + peer.length > INT_MAX)
+        batchedHaloContractFailure("halo buffer exceeds INT_MAX");
+      plan.bufferPoints += peer.length;
+    }
+    // A box with a step along a self axis is a copy within the array: along
+    // the self axes from the send point of the opposite step, along the
+    // other axes from the same ghost box.  With steps along self axes only
+    // it reads interior points (pack launch); otherwise it reads the ghost
+    // box of the direction without the self steps, which the unpack writes
+    // (fill launch, after it).  No copy reads a ghost box that another copy
+    // of its launch writes.
+    for (int d = 0; d < 27; ++d) {
+      if (!exchanged(d) || !stepsAlong(d, true))
+        continue;
+      int ext[3];
+      const int ghost = boxOrigin(d, HALO_GHOST, ext);
+      const int source = boxOrigin(selfMirror(d), selfAxis_, ext);
+      haloAddBox(stepsAlong(d, false) ? plan.fill : plan.pack, ext, source)
+          .self = ghost;
+    }
+    return plan;
+  }
+
+private:
+  const int* neighbor_; // [27], by direction
+  int n_[3];
+  int offset_;
+  bool faceOnly_;
+  bool selfAxis_[3];
+
+  /** d steps along a self axis (self) or along another axis (!self). */
+  bool stepsAlong(int d, bool self) const {
+    for (int a = 0; a < 3; ++a)
+      if (selfAxis_[a] == self && haloStep(d, a) != 0)
+        return true;
+    return false;
+  }
+  /** The ghost box of d has a neighbour and belongs to the exchange. */
+  bool exchanged(int d) const {
+    return d != HALO_SELF && neighbor_[d] != MPI_PROC_NULL &&
+           (!faceOnly_ || haloFaceDirection(d));
+  }
+  /** It travels over MPI: with no step along a self axis the neighbour is
+   *  remote. */
+  bool sent(int d) const { return exchanged(d) && !stepsAlong(d, true); }
+
+  /** d with its steps along the self axes reversed. */
+  int selfMirror(int d) const {
+    for (int a = 0; a < 3; ++a)
+      if (selfAxis_[a])
+        d -= 2 * haloStep(d, a) * HALO_STRIDE[a];
+    return d;
+  }
+
+  /** The box of d: along an axis with step -1 (+1) the send point 1 + offset
+   *  (n-2-offset) where send[a], else the ghost point 0 (n-1); with step 0
+   *  the points 1..n-2.  Sets its extents and returns its origin. */
+  int boxOrigin(int d, const bool send[3], int ext[3]) const {
+    int o[3];
+    for (int a = 0; a < 3; ++a) {
+      const int s = haloStep(d, a);
+      ext[a] = s == 0 ? n_[a] - 2 : 1;
+      o[a] = s == 0  ? 1
+             : s < 0 ? (send[a] ? 1 + offset_ : 0)
+                     : (send[a] ? n_[a] - 2 - offset_ : n_[a] - 1);
+    }
+    return (o[0] * n_[1] + o[1]) * n_[2] + o[2];
+  }
+
+  static bool hasPeer(const HaloPlan& plan, int rank) {
+    for (int p = 0; p < plan.peers; ++p)
+      if (plan.peer[p].rank == rank)
+        return true;
+    return false;
+  }
+
+  /** Append the boxes of the message of peer to t, the send boxes (send) or
+   *  the ghost boxes, at consecutive offsets; returns its length.  Both
+   *  sides list the boxes in ascending direction of the sender: d on the
+   *  send side, 26 - d on the receive side. */
+  int addMessage(HaloCopyTable& t, const HaloPeer& peer, bool send) const {
+    const int first = t.boxes;
+    int length = 0;
+    for (int i = 0; i < 27; ++i) {
+      const int d = send ? i : 26 - i;
+      if (!sent(d) || neighbor_[d] != peer.rank)
+        continue;
+      int ext[3];
+      const int origin = boxOrigin(d, send ? HALO_SEND : HALO_GHOST, ext);
+      HaloBox& b = haloAddBox(t, ext, origin);
+      b.message = peer.offset;
+      b.offset = length;
+      length += b.points;
+    }
+    for (int b = first; b < t.boxes; ++b)
+      t.box[b].length = length;
+    return length;
+  }
+};
 
 void EMfields3D::gpuInitializeHaloPlans() {
-  if (haloPlansInitialized_)
-    return;
-
   const VirtualTopology3D& vct = get_vct();
+  // extents and send offsets of HALO_CENTER_OFFSET0, _NODE_OFFSET1, _OFFSET0
+  const int extents[3][3] = {{nxc, nyc, nzc}, {nxn, nyn, nzn}, {nxn, nyn, nzn}};
+  const int offsets[3] = {0, 1, 0};
   for (int kind = HALO_FIELD; kind <= HALO_PARTICLE; ++kind) {
     const bool particle = kind == HALO_PARTICLE;
-    HaloTopologyPlan& plan = haloTopologyPlans_[kind];
-    plan.comm = particle ? vct.getParticleComm() : vct.getFieldComm();
-    const int rank =
-        particle ? vct.getParticleCartesian_rank() : vct.getCartesian_rank();
-    plan.neighbors[0] =
-        particle ? vct.getXleft_neighbor_P() : vct.getXleft_neighbor();
-    plan.neighbors[1] =
-        particle ? vct.getXright_neighbor_P() : vct.getXright_neighbor();
-    plan.neighbors[2] =
-        particle ? vct.getYleft_neighbor_P() : vct.getYleft_neighbor();
-    plan.neighbors[3] =
-        particle ? vct.getYright_neighbor_P() : vct.getYright_neighbor();
-    plan.neighbors[4] =
-        particle ? vct.getZleft_neighbor_P() : vct.getZleft_neighbor();
-    plan.neighbors[5] =
-        particle ? vct.getZright_neighbor_P() : vct.getZright_neighbor();
-    if (plan.comm == MPI_COMM_NULL || rank == MPI_PROC_NULL)
+    const MPI_Comm comm = particle ? vct.getParticleComm() : vct.getFieldComm();
+    if (comm == MPI_COMM_NULL)
       batchedHaloContractFailure("halo topology is not initialized");
-
-    bool remote[6] = {};
-    for (int direction = 0; direction < 6; ++direction) {
-      plan.present[direction] = plan.neighbors[direction] != MPI_PROC_NULL;
-      remote[direction] =
-          plan.present[direction] && plan.neighbors[direction] != rank;
-      if (remote[direction])
-        plan.remoteDirections[plan.remoteDirectionCount++] = direction;
-    }
-    for (int axis = 0; axis < 3; ++axis)
-      plan.selfAxis[axis] = plan.neighbors[2 * axis] == rank &&
-                            plan.neighbors[2 * axis + 1] == rank;
-
-    static constexpr int edgeDependencies[3][2] = {{4, 5}, {0, 1}, {2, 3}};
-    for (int direction = 0; direction < 6; ++direction) {
-      const int edgeAxis = direction / 2;
-      for (int segment = 0; segment < 2; ++segment) {
-        const int dependency = edgeDependencies[edgeAxis][segment];
-        if (remote[dependency])
-          plan.edgeSegments[direction][plan.edgeMultiplicity[direction]++] =
-              segment;
-      }
-      if (remote[direction] && plan.edgeMultiplicity[direction] > 0)
-        plan.edgeDirections[plan.edgeDirectionCount++] = direction;
-    }
-    for (int direction = 0; direction < 2; ++direction) {
-      if (remote[direction])
-        plan.cornerDirections[plan.cornerDirectionCount++] = direction;
-    }
-    const bool remoteY = remote[2] || remote[3];
-    const bool remoteZ = remote[4] || remote[5];
-    plan.hasRemoteYZ = remoteY && remoteZ;
+    int rank = MPI_PROC_NULL;
+    const int error = MPI_Comm_rank(comm, &rank);
+    if (error != MPI_SUCCESS)
+      batchedHaloMpiFailure(error, comm, "MPI_Comm_rank");
+    int neighbor[27];
+    haloNeighbors(comm, neighbor);
+    const int faceNeighbor[6] = {
+        particle ? vct.getXleft_neighbor_P() : vct.getXleft_neighbor(),
+        particle ? vct.getXright_neighbor_P() : vct.getXright_neighbor(),
+        particle ? vct.getYleft_neighbor_P() : vct.getYleft_neighbor(),
+        particle ? vct.getYright_neighbor_P() : vct.getYright_neighbor(),
+        particle ? vct.getZleft_neighbor_P() : vct.getZleft_neighbor(),
+        particle ? vct.getZright_neighbor_P() : vct.getZright_neighbor()};
+    for (int f = 0; f < 6; ++f)
+      if (neighbor[HALO_FACE_DIRECTION[f]] != faceNeighbor[f])
+        batchedHaloContractFailure("halo neighbours disagree with topology");
+    for (int g = 0; g < 3; ++g)
+      for (int faceOnly = 0; faceOnly < 2; ++faceOnly)
+        haloPlans_[kind][g][faceOnly] =
+            HaloPlanBuilder(neighbor, rank, extents[g], offsets[g],
+                            faceOnly == 1)
+                .build(comm);
   }
-
-  auto buildGeometry = [&](HaloGeometryPlan& plan, int nx, int ny, int nz,
-                           int offset) {
-    const int minExtent = offset == 0 ? 3 : 4;
-    if (nx < minExtent || ny < minExtent || nz < minExtent)
-      batchedHaloContractFailure("invalid canonical halo geometry");
-    const size_t volume = (size_t)nx * ny * nz;
-    if (volume > INT_MAX)
-      batchedHaloContractFailure("invalid canonical halo geometry");
-
-    plan.nx = nx;
-    plan.ny = ny;
-    plan.nz = nz;
-    plan.offset = offset;
-    plan.active[0] = nx - 2;
-    plan.active[1] = ny - 2;
-    plan.active[2] = nz - 2;
-
-    auto setFace = [&](int direction, int sendBase, int recvBase,
-                       int outerStride, int innerStride, int outerCount,
-                       int innerCount) {
-      const size_t elements = (size_t)outerCount * innerCount;
-      if (elements > (size_t)INT_MAX / HALO_MAX_BATCH)
-        batchedHaloContractFailure("halo face MPI count exceeds INT_MAX");
-      HaloFacePlan& face = plan.faces[direction];
-      face.sendBase = sendBase;
-      face.recvBase = recvBase;
-      face.outerStride = outerStride;
-      face.innerStride = innerStride;
-      face.outerCount = outerCount;
-      face.innerCount = innerCount;
-      face.elements = static_cast<int>(elements);
-    };
-
-    const int yz = ny * nz;
-    setFace(0, (1 + offset) * yz + nz + 1, nz + 1, nz, 1, ny - 2, nz - 2);
-    setFace(1, (nx - 2 - offset) * yz + nz + 1, (nx - 1) * yz + nz + 1, nz, 1,
-            ny - 2, nz - 2);
-    setFace(2, yz + (1 + offset) * nz + 1, yz + 1, yz, 1, nx - 2, nz - 2);
-    setFace(3, yz + (ny - 2 - offset) * nz + 1, yz + (ny - 1) * nz + 1, yz, 1,
-            nx - 2, nz - 2);
-    setFace(4, yz + nz + 1 + offset, yz + nz, yz, nz, nx - 2, ny - 2);
-    setFace(5, yz + nz + nz - 2 - offset, yz + nz + nz - 1, yz, nz, nx - 2,
-            ny - 2);
-
-    auto setEdge = [&](int direction, int segment, int sendBase, int recvBase,
-                       int stride, int elements) {
-      HaloEdgePlan& edge = plan.edges[direction][segment];
-      edge.sendBase = sendBase;
-      edge.recvBase = recvBase;
-      edge.stride = stride;
-      edge.elements = elements;
-    };
-    for (int direction = 0; direction < 2; ++direction) {
-      const int sendX = direction == 0 ? 1 + offset : nx - 2 - offset;
-      const int recvX = direction == 0 ? 0 : nx - 1;
-      setEdge(direction, 0, sendX * yz + nz, recvX * yz + nz, nz, ny - 2);
-      setEdge(direction, 1, sendX * yz + nz + nz - 1, recvX * yz + nz + nz - 1,
-              nz, ny - 2);
-    }
-    for (int direction = 2; direction < 4; ++direction) {
-      const int sendY = direction == 2 ? 1 + offset : ny - 2 - offset;
-      const int recvY = direction == 2 ? 0 : ny - 1;
-      setEdge(direction, 0, sendY * nz + 1, recvY * nz + 1, 1, nz - 2);
-      setEdge(direction, 1, (nx - 1) * yz + sendY * nz + 1,
-              (nx - 1) * yz + recvY * nz + 1, 1, nz - 2);
-    }
-    for (int direction = 4; direction < 6; ++direction) {
-      const int sendZ = direction == 4 ? 1 + offset : nz - 2 - offset;
-      const int recvZ = direction == 4 ? 0 : nz - 1;
-      setEdge(direction, 0, yz + sendZ, yz + recvZ, yz, nx - 2);
-      setEdge(direction, 1, yz + (ny - 1) * nz + sendZ,
-              yz + (ny - 1) * nz + recvZ, yz, nx - 2);
-    }
-
-    plan.edgeLength[0] = ny - 2;
-    plan.edgeLength[1] = nz - 2;
-    plan.edgeLength[2] = nx - 2;
-    for (int direction = 0; direction < 6; ++direction) {
-      const int worstEdgeElements = 2 * plan.edgeLength[direction / 2];
-      int maximum = plan.faces[direction].elements;
-      if (worstEdgeElements > maximum)
-        maximum = worstEdgeElements;
-      if (maximum < 4)
-        maximum = 4;
-      if (maximum > INT_MAX / HALO_MAX_BATCH)
-        batchedHaloContractFailure("halo buffer or MPI count exceeds INT_MAX");
-      plan.maxBufferElements[direction] = maximum;
-    }
-
-    // the interior of each face plane, its contiguous index on threadIdx.x
-    plan.selfFaceLaunch[0] = pointLaunch(1, ny - 2, nz - 2);
-    plan.selfFaceLaunch[1] = pointLaunch(1, nx - 2, nz - 2);
-    plan.selfFaceLaunch[2] = pointLaunch(1, nx - 2, ny - 2);
-    int maximumExtent = nx > ny ? nx : ny;
-    if (nz > maximumExtent)
-      maximumExtent = nz;
-    plan.edgeKernelBlocks = (maximumExtent + 255) / 256;
-    plan.cornerSendBase[0] = (1 + offset) * yz;
-    plan.cornerSendBase[1] = (nx - 2 - offset) * yz;
-    plan.cornerRecvBase[0] = 0;
-    plan.cornerRecvBase[1] = (nx - 1) * yz;
-  };
-
-  buildGeometry(haloGeometryPlans_[HALO_CENTER_OFFSET0], nxc, nyc, nzc, 0);
-  buildGeometry(haloGeometryPlans_[HALO_NODE_OFFSET1], nxn, nyn, nzn, 1);
-  buildGeometry(haloGeometryPlans_[HALO_NODE_OFFSET0], nxn, nyn, nzn, 0);
-  haloPlansInitialized_ = true;
 }
 
-const EMfields3D::HaloGeometryPlan&
-EMfields3D::gpuSelectHaloGeometry(int nx, int ny, int nz,
-                                  bool offsetZero) const {
-  if (!haloPlansInitialized_)
-    batchedHaloContractFailure("halo plans are not initialized");
+const HaloPlan& EMfields3D::gpuSelectHaloPlan(cudaSolverType** h_fieldPtrs,
+                                              int nFields, int nx, int ny,
+                                              int nz, bool offsetZero,
+                                              bool faceOnly,
+                                              bool isParticle) const {
+  if (!haloBufsAllocated_)
+    batchedHaloContractFailure("halo buffers and plans are not initialized");
+  if (haloExchange_.active)
+    batchedHaloContractFailure("overlapping use of shared GPU halo buffers");
+  if (!h_fieldPtrs)
+    batchedHaloContractFailure("null halo field table");
+  if (nFields <= 0 || nFields > HALO_MAX_BATCH)
+    batchedHaloContractFailure("invalid halo field count");
+  int geometry;
   if (nx == nxc && ny == nyc && nz == nzc && offsetZero)
-    return haloGeometryPlans_[HALO_CENTER_OFFSET0];
-  if (nx == nxn && ny == nyn && nz == nzn)
-    return haloGeometryPlans_[offsetZero ? HALO_NODE_OFFSET0
-                                         : HALO_NODE_OFFSET1];
-  batchedHaloContractFailure("exchange does not match a cached halo geometry");
+    geometry = HALO_CENTER_OFFSET0;
+  else if (nx == nxn && ny == nyn && nz == nzn)
+    geometry = offsetZero ? HALO_NODE_OFFSET0 : HALO_NODE_OFFSET1;
+  else
+    batchedHaloContractFailure(
+        "exchange does not match a cached halo geometry");
+  return haloPlans_[isParticle ? HALO_PARTICLE : HALO_FIELD][geometry]
+                   [faceOnly ? 1 : 0];
 }
 
-// Helper: launch k_batchPack2D with auto grid sizing
-static inline void launchPack2D(cudaSolverType* buf,
-                                cudaSolverType* const* fields, int nFields,
-                                int base, int outerStride, int innerStride,
-                                int outerCount, int innerCount,
-                                cudaStream_t s) {
-  int total = outerCount * innerCount * nFields;
-  if (total <= 0)
-    return;
-  k_batchPack2D<<<haloBatchBlocks(total), BATCH_BLK, 0, s>>>(
-      buf, fields, nFields, base, outerStride, innerStride, outerCount,
-      innerCount);
-}
+// =========================================================================
+//  ONE EXCHANGE ROUND: receives, pack, sends, one MPI_Waitall, unpack
+// =========================================================================
 
-static inline void launchUnpack2D(const cudaSolverType* buf,
-                                  cudaSolverType* const* fields, int nFields,
-                                  int base, int outerStride, int innerStride,
-                                  int outerCount, int innerCount,
-                                  cudaStream_t s) {
-  int total = outerCount * innerCount * nFields;
-  if (total <= 0)
-    return;
-  k_batchUnpack2D<<<haloBatchBlocks(total), BATCH_BLK, 0, s>>>(
-      buf, fields, nFields, base, outerStride, innerStride, outerCount,
-      innerCount);
-}
-
-void EMfields3D::gpuQueueHaloFacePack(cudaSolverType** h_fieldPtrs, int nFields,
-                                      const HaloTopologyPlan& topology,
-                                      const HaloGeometryPlan& geometry,
-                                      cudaStream_t stream) {
-  memcpy(h_ptrArray_, h_fieldPtrs, nFields * sizeof(cudaSolverType*));
-  cudaErrChk(cudaMemcpyAsync(d_ptrArray_, h_ptrArray_,
-                             nFields * sizeof(cudaSolverType*),
-                             cudaMemcpyHostToDevice, stream));
-
-  auto* const* d_ptrs = reinterpret_cast<cudaSolverType* const*>(d_ptrArray_);
-  for (int item = 0; item < topology.remoteDirectionCount; ++item) {
-    const int direction = topology.remoteDirections[item];
-    const HaloFacePlan& face = geometry.faces[direction];
-    launchPack2D(d_haloBuf_send_[direction], d_ptrs, nFields, face.sendBase,
-                 face.outerStride, face.innerStride, face.outerCount,
-                 face.innerCount, stream);
+cudaSolverType* EMfields3D::gpuHaloPostReceives(const HaloPlan& plan,
+                                                int nFields,
+                                                MPI_Request* requests) {
+  if (plan.peers == 0)
+    return nullptr;
+  cudaSolverType* const recv = d_haloRecv_[haloRecvSlot_];
+  haloRecvSlot_ ^= 1;
+  for (int p = 0; p < plan.peers; ++p) {
+    const HaloPeer& peer = plan.peer[p];
+    const int error =
+        MPI_Irecv(recv + (size_t)peer.offset * nFields, peer.length * nFields,
+                  mpiTypeOf<cudaSolverType>(), peer.rank, HALO_TAG, plan.comm,
+                  &requests[p]);
+    if (error != MPI_SUCCESS)
+      batchedHaloMpiFailure(error, plan.comm, "MPI_Irecv");
   }
+  return recv;
+}
+
+void EMfields3D::gpuHaloPack(const HaloPlan& plan, cudaSolverType** h_fieldPtrs,
+                             int nFields, cudaStream_t stream) {
+  static_assert(HALO_MAX_BATCH <= 64, "HaloFieldPointers holds 64 pointers");
+  HaloFieldPointers h;
+  std::memcpy(h.p, h_fieldPtrs, nFields * sizeof(cudaSolverType*));
+  k_haloSetPointers<<<1, nFields, 0, stream>>>(h, d_ptrArray_);
+  launchHaloCopy<true>(plan.pack, d_haloSend_, d_ptrArray_, nFields, stream);
   cudaErrChk(cudaGetLastError());
 }
 
-void EMfields3D::gpuCompleteHaloPhases(const HaloTopologyPlan& topology,
-                                       const HaloGeometryPlan& geometry,
-                                       int nFields, bool faceOnly,
-                                       cudaStream_t stream) {
-  const int* neighbors = topology.neighbors;
-  const MPI_Comm comm = topology.comm;
-  const int nx = geometry.nx;
-  const int ny = geometry.ny;
-  const int nz = geometry.nz;
-  const int offset = geometry.offset;
-  auto* const* d_ptrs = reinterpret_cast<cudaSolverType* const*>(d_ptrArray_);
-  MPI_Status statuses[12];
-  MPI_Request requests[12];
-
-  int requestCount = 0;
-  for (int item = 0; item < topology.remoteDirectionCount; ++item) {
-    const int direction = topology.remoteDirections[item];
-    haloIrecv(d_haloBuf_recv_[direction],
-              geometry.faces[direction].elements * nFields,
-              mpiTypeOf<cudaSolverType>(), neighbors[direction],
-              HALO_RECV_TAG[direction], comm, &requests[requestCount++]);
-  }
-  for (int item = 0; item < topology.remoteDirectionCount; ++item) {
-    const int direction = topology.remoteDirections[item];
-    haloIsend(d_haloBuf_send_[direction],
-              geometry.faces[direction].elements * nFields,
-              mpiTypeOf<cudaSolverType>(), neighbors[direction],
-              HALO_SEND_TAG[direction], comm, &requests[requestCount++]);
-  }
-
-  // one launch per face pair, blockIdx.z selects the field
-  auto selfFace = [&](int axis) {
-    PointLaunch L = geometry.selfFaceLaunch[axis];
-    L.grid.z = nFields;
-    return L;
-  };
-  if (topology.selfAxis[0]) {
-    const PointLaunch L = selfFace(0);
-    gpuBatchSelfCopyFaceX<<<L.grid, L.block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                          offset);
-  }
-  if (topology.selfAxis[1]) {
-    const PointLaunch L = selfFace(1);
-    gpuBatchSelfCopyFaceY<<<L.grid, L.block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                          offset);
-  }
-  if (topology.selfAxis[2]) {
-    const PointLaunch L = selfFace(2);
-    gpuBatchSelfCopyFaceZ<<<L.grid, L.block, 0, stream>>>(d_ptrs, nx, ny, nz,
-                                                          offset);
-  }
-
-  if (requestCount > 0)
-    haloWaitall(requestCount, requests, statuses, comm);
-  for (int item = 0; item < topology.remoteDirectionCount; ++item) {
-    const int direction = topology.remoteDirections[item];
-    const HaloFacePlan& face = geometry.faces[direction];
-    launchUnpack2D(d_haloBuf_recv_[direction], d_ptrs, nFields, face.recvBase,
-                   face.outerStride, face.innerStride, face.outerCount,
-                   face.innerCount, stream);
-  }
-
-  if (faceOnly)
+void EMfields3D::gpuHaloSendAndWait(const HaloPlan& plan, int nFields,
+                                    MPI_Request* requests) {
+  if (plan.peers == 0)
     return;
-
-  for (int item = 0; item < topology.edgeDirectionCount; ++item) {
-    const int direction = topology.edgeDirections[item];
-    int bufferOffset = 0;
-    for (int edgeItem = 0; edgeItem < topology.edgeMultiplicity[direction];
-         ++edgeItem) {
-      const int segment = topology.edgeSegments[direction][edgeItem];
-      const HaloEdgePlan& edge = geometry.edges[direction][segment];
-      launchPack2D(d_haloBuf_send_[direction] + bufferOffset, d_ptrs, nFields,
-                   edge.sendBase, edge.stride, 1, edge.elements, 1, stream);
-      bufferOffset += edge.elements * nFields;
-    }
+  for (int p = 0; p < plan.peers; ++p) {
+    const HaloPeer& peer = plan.peer[p];
+    const int error =
+        MPI_Isend(d_haloSend_ + (size_t)peer.offset * nFields,
+                  peer.length * nFields, mpiTypeOf<cudaSolverType>(), peer.rank,
+                  HALO_TAG, plan.comm, &requests[plan.peers + p]);
+    if (error != MPI_SUCCESS)
+      batchedHaloMpiFailure(error, plan.comm, "MPI_Isend");
   }
+  MPI_Status statuses[2 * 26];
+  const int error = MPI_Waitall(2 * plan.peers, requests, statuses);
+  if (error != MPI_SUCCESS)
+    batchedHaloMpiFailure(error, plan.comm, "MPI_Waitall");
+  // a longer message fails in MPI; a shorter one would leave stale ghosts
+  for (int p = 0; p < plan.peers; ++p) {
+    int count = -1;
+    MPI_Get_count(&statuses[p], mpiTypeOf<cudaSolverType>(), &count);
+    if (count != plan.peer[p].length * nFields)
+      batchedHaloContractFailure("halo message shorter than its plan");
+  }
+}
+
+void EMfields3D::gpuHaloUnpack(const HaloPlan& plan, cudaSolverType* recv,
+                               int nFields, cudaStream_t stream) {
+  launchHaloCopy<false>(plan.unpack, recv, d_ptrArray_, nFields, stream);
+  // the fill holds self copies only, which the PACK variant runs
+  launchHaloCopy<true>(plan.fill, nullptr, d_ptrArray_, nFields, stream);
   cudaErrChk(cudaGetLastError());
-  if (topology.edgeDirectionCount > 0)
-    cudaErrChk(cudaStreamSynchronize(stream));
-
-  requestCount = 0;
-  for (int item = 0; item < topology.edgeDirectionCount; ++item) {
-    const int direction = topology.edgeDirections[item];
-    const int count = topology.edgeMultiplicity[direction] *
-                      geometry.edgeLength[direction / 2] * nFields;
-    haloIrecv(d_haloBuf_recv_[direction], count, mpiTypeOf<cudaSolverType>(),
-              neighbors[direction], HALO_RECV_TAG[direction], comm,
-              &requests[requestCount++]);
-  }
-  for (int item = 0; item < topology.edgeDirectionCount; ++item) {
-    const int direction = topology.edgeDirections[item];
-    const int count = topology.edgeMultiplicity[direction] *
-                      geometry.edgeLength[direction / 2] * nFields;
-    haloIsend(d_haloBuf_send_[direction], count, mpiTypeOf<cudaSolverType>(),
-              neighbors[direction], HALO_SEND_TAG[direction], comm,
-              &requests[requestCount++]);
-  }
-
-  const int edgeBlocks = geometry.edgeKernelBlocks;
-  if (topology.selfAxis[0]) {
-    const dim3 grid(edgeBlocks, nFields);
-    gpuBatchSelfCopyEdgeX<<<grid, 256, 0, stream>>>(
-        d_ptrs, nx, ny, nz, offset, topology.present[5], topology.present[4],
-        topology.present[3], topology.present[2]);
-  }
-  if (topology.selfAxis[1]) {
-    const dim3 grid(edgeBlocks, nFields);
-    gpuBatchSelfCopyEdgeY<<<grid, 256, 0, stream>>>(
-        d_ptrs, nx, ny, nz, offset, topology.present[1], topology.present[0],
-        topology.present[5], topology.present[4]);
-  }
-  if (topology.selfAxis[2]) {
-    const dim3 grid(edgeBlocks, nFields);
-    gpuBatchSelfCopyEdgeZ<<<grid, 256, 0, stream>>>(
-        d_ptrs, nx, ny, nz, offset, topology.present[3], topology.present[2],
-        topology.present[1], topology.present[0]);
-  }
-
-  if (requestCount > 0)
-    haloWaitall(requestCount, requests, statuses, comm);
-  for (int item = 0; item < topology.edgeDirectionCount; ++item) {
-    const int direction = topology.edgeDirections[item];
-    int bufferOffset = 0;
-    for (int edgeItem = 0; edgeItem < topology.edgeMultiplicity[direction];
-         ++edgeItem) {
-      const int segment = topology.edgeSegments[direction][edgeItem];
-      const HaloEdgePlan& edge = geometry.edges[direction][segment];
-      launchUnpack2D(d_haloBuf_recv_[direction] + bufferOffset, d_ptrs, nFields,
-                     edge.recvBase, edge.stride, 1, edge.elements, 1, stream);
-      bufferOffset += edge.elements * nFields;
-    }
-  }
-
-  requestCount = 0;
-  if (topology.hasRemoteYZ) {
-    for (int item = 0; item < topology.cornerDirectionCount; ++item) {
-      const int direction = topology.cornerDirections[item];
-      const int total = 4 * nFields;
-      k_batchPackCorners4<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
-          d_haloBuf_send_[direction], d_ptrs, nFields,
-          geometry.cornerSendBase[direction], ny, nz);
-    }
-    cudaErrChk(cudaGetLastError());
-    if (topology.cornerDirectionCount > 0)
-      cudaErrChk(cudaStreamSynchronize(stream));
-
-    for (int item = 0; item < topology.cornerDirectionCount; ++item) {
-      const int direction = topology.cornerDirections[item];
-      haloIrecv(d_haloBuf_recv_[direction], 4 * nFields,
-                mpiTypeOf<cudaSolverType>(), neighbors[direction],
-                HALO_RECV_TAG[direction], comm, &requests[requestCount++]);
-    }
-    for (int item = 0; item < topology.cornerDirectionCount; ++item) {
-      const int direction = topology.cornerDirections[item];
-      haloIsend(d_haloBuf_send_[direction], 4 * nFields,
-                mpiTypeOf<cudaSolverType>(), neighbors[direction],
-                HALO_SEND_TAG[direction], comm, &requests[requestCount++]);
-    }
-  }
-
-  if (topology.selfAxis[0])
-    gpuBatchSelfCopyCornerX<<<nFields, 1, 0, stream>>>(
-        d_ptrs, nx, ny, nz, offset, topology.present[2], topology.present[3],
-        topology.present[4], topology.present[5]);
-  else if (topology.selfAxis[1])
-    gpuBatchSelfCopyCornerY<<<nFields, 1, 0, stream>>>(
-        d_ptrs, nx, ny, nz, offset, topology.present[0], topology.present[1],
-        topology.present[4], topology.present[5]);
-  else if (topology.selfAxis[2])
-    gpuBatchSelfCopyCornerZ<<<nFields, 1, 0, stream>>>(
-        d_ptrs, nx, ny, nz, offset, topology.present[2], topology.present[3],
-        topology.present[0], topology.present[1]);
-
-  if (requestCount > 0)
-    haloWaitall(requestCount, requests, statuses, comm);
-  if (topology.hasRemoteYZ) {
-    for (int item = 0; item < topology.cornerDirectionCount; ++item) {
-      const int direction = topology.cornerDirections[item];
-      const int total = 4 * nFields;
-      k_batchUnpackCorners4<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
-          d_haloBuf_recv_[direction], d_ptrs, nFields,
-          geometry.cornerRecvBase[direction], ny, nz);
-    }
-  }
 }
 
 void EMfields3D::gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs,
@@ -761,99 +748,36 @@ void EMfields3D::gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs,
                                         bool offsetZero, bool isFaceOnlyFlag,
                                         bool needInterp, bool isParticle,
                                         cudaStream_t stream) {
-  if (!h_fieldPtrs)
-    batchedHaloContractFailure("null blocking-exchange field table");
-  if (!haloBufsAllocated_)
-    batchedHaloContractFailure("blocking halo buffers are not initialized");
-  if (nFields <= 0 || nFields > HALO_MAX_BATCH)
-    batchedHaloContractFailure("invalid blocking-exchange field count");
-  const HaloGeometryPlan& geometry =
-      gpuSelectHaloGeometry(nx, ny, nz, offsetZero);
-  const HaloTopologyPlan& topology =
-      haloTopologyPlans_[isParticle ? HALO_PARTICLE : HALO_FIELD];
-  if (haloExchange_.active)
-    batchedHaloContractFailure("overlapping use of shared GPU halo buffers");
+  const HaloPlan& plan = gpuSelectHaloPlan(
+      h_fieldPtrs, nFields, nx, ny, nz, offsetZero, isFaceOnlyFlag, isParticle);
+  if (needInterp && (!offsetZero || isFaceOnlyFlag))
+    batchedHaloContractFailure("additive exchange needs every box, offset 0");
+
+  MPI_Request requests[2 * 26];
+  cudaSolverType* const recv = gpuHaloPostReceives(plan, nFields, requests);
   // With the split exchange resources (HaloOverlap), this orders a blocking
   // exchange on an arbitrary CUDA stream after the final buffer consumer of
   // the preceding blocking or split exchange.
   if (haloBuffersReady_)
     cudaErrChk(cudaStreamWaitEvent(stream, haloBuffersReady_, 0));
-  gpuQueueHaloFacePack(h_fieldPtrs, nFields, topology, geometry, stream);
-  // CUDA-aware MPI may consume the send buffers only after face packing.
-  // This also completes the pinned pointer-table upload before reuse.
-  cudaErrChk(cudaStreamSynchronize(stream));
-  gpuCompleteHaloPhases(topology, geometry, nFields, isFaceOnlyFlag, stream);
-
-  auto* const* d_ptrs = reinterpret_cast<cudaSolverType* const*>(d_ptrArray_);
-
-  // =====================================================================
-  //  Additive interpolation  (for moments: ghost → interior boundary)
-  // =====================================================================
-  if (needInterp) {
-    // Unpack and additive kernels share the same stream — CUDA
-    // stream ordering guarantees all ghost data is visible.
-
-    // Additive kernels use neighbor presence from the topology selected for
-    // this exchange.
-    const bool hasXR = topology.present[1];
-    const bool hasXL = topology.present[0];
-    const bool hasYR = topology.present[3];
-    const bool hasYL = topology.present[2];
-    const bool hasZR = topology.present[5];
-    const bool hasZL = topology.present[4];
-
-    const int nxr = geometry.active[0];
-    const int nyr = geometry.active[1];
-    const int nzr = geometry.active[2];
-
-    // Face add
-    {
-      int total = nyr * nzr * nFields;
-      k_batchAddFaceX<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
-          d_ptrs, nFields, nx, ny, nz, hasXR, hasXL);
-    }
-    {
-      int total = nxr * nzr * nFields;
-      k_batchAddFaceY<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
-          d_ptrs, nFields, nx, ny, nz, hasYR, hasYL);
-    }
-    {
-      int total = nxr * nyr * nFields;
-      k_batchAddFaceZ<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
-          d_ptrs, nFields, nx, ny, nz, hasZR, hasZL);
-    }
-
-    // Edge add
-    {
-      int total = nzr * nFields;
-      k_batchAddEdgeZ<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
-          d_ptrs, nFields, nx, ny, nz, hasXR, hasXL, hasYR, hasYL);
-    }
-    {
-      int total = nyr * nFields;
-      k_batchAddEdgeY<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
-          d_ptrs, nFields, nx, ny, nz, hasXR, hasXL, hasZR, hasZL);
-    }
-    {
-      int total = nxr * nFields;
-      k_batchAddEdgeX<<<haloBatchBlocks(total), BATCH_BLK, 0, stream>>>(
-          d_ptrs, nFields, nx, ny, nz, hasYR, hasYL, hasZR, hasZL);
-    }
-
-    // Corner add
-    k_batchAddCorner<<<haloBatchBlocks(nFields), BATCH_BLK, 0, stream>>>(
-        d_ptrs, nFields, nx, ny, nz, hasXR, hasXL, hasYR, hasYL, hasZR, hasZL);
-  }
-
-  cudaErrChk(cudaGetLastError());
+  gpuHaloPack(plan, h_fieldPtrs, nFields, stream);
+  // CUDA-aware MPI may read the send buffer only once packed; without a
+  // remote neighbour the exchange stays asynchronous
+  if (plan.peers > 0)
+    cudaErrChk(cudaStreamSynchronize(stream));
+  gpuHaloSendAndWait(plan, nFields, requests);
+  gpuHaloUnpack(plan, recv, nFields, stream);
+  // moments: the ghosts now hold the neighbours' values of the shared nodes
+  if (needInterp)
+    launchHaloAdd(plan.present, d_ptrArray_, nFields, nx, ny, nz, stream);
 
   if (haloBuffersReady_)
     cudaErrChk(cudaEventRecord(haloBuffersReady_, stream));
 }
 
 // =========================================================================
-//  Split exchange (HaloOverlap): asynchronous face packing plus shared halo
-//  completion
+//  Split exchange (HaloOverlap): receives and packing in Begin, sends,
+//  completion and unpacking in End
 // =========================================================================
 
 void EMfields3D::gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs,
@@ -862,55 +786,40 @@ void EMfields3D::gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs,
                                              bool isFaceOnlyFlag,
                                              bool isParticle,
                                              cudaStream_t computeStream) {
-  if (!h_fieldPtrs)
-    batchedHaloContractFailure("null split-exchange field table");
-  if (haloExchange_.active)
-    batchedHaloContractFailure("overlapping use of shared GPU halo buffers");
-  if (nFields <= 0 || nFields > HALO_MAX_BATCH)
-    batchedHaloContractFailure("invalid split halo field count");
-  if (!haloBufsAllocated_)
-    batchedHaloContractFailure("split halo buffers are not initialized");
-  if (!haloStream_ || !haloInputReady_ || !haloPhaseReady_ ||
-      !haloBuffersReady_)
+  const HaloPlan& plan = gpuSelectHaloPlan(
+      h_fieldPtrs, nFields, nx, ny, nz, offsetZero, isFaceOnlyFlag, isParticle);
+  if (!haloStream_ || !haloInputReady_ || !haloPacked_ || !haloBuffersReady_)
     batchedHaloContractFailure("split halo stream/events are not initialized");
 
-  const HaloGeometryPlan& geometry =
-      gpuSelectHaloGeometry(nx, ny, nz, offsetZero);
-  const HaloTopologyPlan& topology =
-      haloTopologyPlans_[isParticle ? HALO_PARTICLE : HALO_FIELD];
   haloExchange_.active = true;
-  haloExchange_.topology = &topology;
-  haloExchange_.geometry = &geometry;
+  haloExchange_.plan = &plan;
   haloExchange_.nFields = nFields;
-  haloExchange_.faceOnly = isFaceOnlyFlag;
   haloExchange_.computeStream = computeStream;
+  // receives first: a neighbour that packs sooner can deliver at once
+  haloExchange_.recv =
+      gpuHaloPostReceives(plan, nFields, haloExchange_.requests);
 
   // Capture the producer tail before the caller queues dependency-free work.
   cudaErrChk(cudaEventRecord(haloInputReady_, computeStream));
   cudaErrChk(cudaStreamWaitEvent(haloStream_, haloInputReady_, 0));
   cudaErrChk(cudaStreamWaitEvent(haloStream_, haloBuffersReady_, 0));
-  gpuQueueHaloFacePack(h_fieldPtrs, nFields, topology, geometry, haloStream_);
-
+  gpuHaloPack(plan, h_fieldPtrs, nFields, haloStream_);
   // End waits at this exact point before CUDA-aware MPI reads send buffers.
-  cudaErrChk(cudaEventRecord(haloPhaseReady_, haloStream_));
+  cudaErrChk(cudaEventRecord(haloPacked_, haloStream_));
 }
 
 void EMfields3D::gpuBatchedHaloEndExchange() {
   if (!haloExchange_.active)
     batchedHaloContractFailure("EndExchange without a matching BeginExchange");
 
-  const HaloTopologyPlan& topology = *haloExchange_.topology;
-  const HaloGeometryPlan& geometry = *haloExchange_.geometry;
+  const HaloPlan& plan = *haloExchange_.plan;
   const int nFields = haloExchange_.nFields;
-  const bool faceOnly = haloExchange_.faceOnly;
-  const cudaStream_t computeStream = haloExchange_.computeStream;
-
-  // This fence also protects the pinned pointer staging table when a topology
-  // has no remote faces.
-  cudaErrChk(cudaEventSynchronize(haloPhaseReady_));
-  gpuCompleteHaloPhases(topology, geometry, nFields, faceOnly, haloStream_);
-  cudaErrChk(cudaGetLastError());
+  if (plan.peers > 0)
+    cudaErrChk(cudaEventSynchronize(haloPacked_));
+  gpuHaloSendAndWait(plan, nFields, haloExchange_.requests);
+  gpuHaloUnpack(plan, haloExchange_.recv, nFields, haloStream_);
   cudaErrChk(cudaEventRecord(haloBuffersReady_, haloStream_));
-  cudaErrChk(cudaStreamWaitEvent(computeStream, haloBuffersReady_, 0));
+  cudaErrChk(
+      cudaStreamWaitEvent(haloExchange_.computeStream, haloBuffersReady_, 0));
   haloExchange_ = HaloExchangeState{};
 }

@@ -186,8 +186,8 @@ void gpuInterpC2N_range(cudaSolverType* fieldN, const cudaSolverType* fieldC,
 
 /** Interpolate the active node domain except for a caller-supplied inclusive
  *  safe box.  The complement is mapped as six disjoint boundary slabs.  If the
- *  clamped safe box is empty, interpolates the full active domain.  This lets
- *  callers exclude center layers modified by post-halo fixups. */
+ *  clamped safe box is empty, interpolates the full active domain
+ *  (gpuInterpC2N_boundary: the complement of the interior box). */
 void gpuInterpC2N_complement(cudaSolverType* fieldN,
                              const cudaSolverType* fieldC, int nxn, int nyn,
                              int nzn, int safeILo, int safeIHi, int safeJLo,

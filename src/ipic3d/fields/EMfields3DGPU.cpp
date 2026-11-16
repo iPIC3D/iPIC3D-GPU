@@ -614,20 +614,26 @@ void EMfields3D::gpuAllocateHaloBuffers() {
   haloBufsAllocated_ = true;
 
   try {
-    // Node extents dominate center extents.  Each cached maximum covers face,
-    // edge, and corner phases for one direction and one field.
-    const HaloGeometryPlan& nodePlan = haloGeometryPlans_[HALO_NODE_OFFSET1];
-    for (int d = 0; d < 6; ++d) {
-      const size_t bytes = (size_t)nodePlan.maxBufferElements[d] *
-                           HALO_MAX_BATCH * sizeof(cudaSolverType);
-      cudaErrChk(cudaMalloc(&d_haloBuf_send_[d], bytes));
-      cudaErrChk(cudaMalloc(&d_haloBuf_recv_[d], bytes));
+    // the longest exchange of all plans, for HALO_MAX_BATCH fields; none
+    // without a remote neighbour
+    size_t points = 0;
+    for (const auto& topology : haloPlans_)
+      for (const auto& geometry : topology)
+        for (const HaloPlan& plan : geometry)
+          points = std::max(points, (size_t)plan.bufferPoints);
+    points *= HALO_MAX_BATCH;
+    if (points > INT_MAX) {
+      cerr << "ERROR: GPU halo messages exceed INT_MAX elements" << endl;
+      MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+    }
+    if (points > 0) {
+      const size_t bytes = points * sizeof(cudaSolverType);
+      cudaErrChk(cudaMalloc(&d_haloSend_, bytes));
+      cudaErrChk(cudaMalloc(&d_haloRecv_[0], 2 * bytes));
+      d_haloRecv_[1] = d_haloRecv_[0] + points;
     }
     cudaErrChk(
         cudaMalloc(&d_ptrArray_, HALO_MAX_BATCH * sizeof(cudaSolverType*)));
-    cudaErrChk(cudaHostAlloc(&h_ptrArray_,
-                             HALO_MAX_BATCH * sizeof(cudaSolverType*),
-                             cudaHostAllocDefault));
 
     // Split exchange resources (HaloOverlap) belong to the halo subsystem, so
     // tests and communication-only users do not need the full field solver.
@@ -641,7 +647,7 @@ void EMfields3D::gpuAllocateHaloBuffers() {
       cudaErrChk(
           cudaEventCreateWithFlags(&haloInputReady_, cudaEventDisableTiming));
       cudaErrChk(
-          cudaEventCreateWithFlags(&haloPhaseReady_, cudaEventDisableTiming));
+          cudaEventCreateWithFlags(&haloPacked_, cudaEventDisableTiming));
       cudaErrChk(
           cudaEventCreateWithFlags(&haloBuffersReady_, cudaEventDisableTiming));
     }
@@ -667,32 +673,27 @@ void EMfields3D::gpuFreeHaloBuffers() {
   if (haloBuffersReady_)
     cudaErrChk(cudaEventSynchronize(haloBuffersReady_));
 
-  for (int d = 0; d < 6; ++d) {
-    if (d_haloBuf_send_[d]) {
-      cudaFree(d_haloBuf_send_[d]);
-      d_haloBuf_send_[d] = nullptr;
-    }
-    if (d_haloBuf_recv_[d]) {
-      cudaFree(d_haloBuf_recv_[d]);
-      d_haloBuf_recv_[d] = nullptr;
-    }
+  if (d_haloSend_) {
+    cudaFree(d_haloSend_);
+    d_haloSend_ = nullptr;
   }
+  if (d_haloRecv_[0]) {
+    cudaFree(d_haloRecv_[0]); // both receive buffers
+    d_haloRecv_[0] = d_haloRecv_[1] = nullptr;
+  }
+  haloRecvSlot_ = 0;
   if (d_ptrArray_) {
     cudaFree(d_ptrArray_);
     d_ptrArray_ = nullptr;
-  }
-  if (h_ptrArray_) {
-    cudaFreeHost(h_ptrArray_);
-    h_ptrArray_ = nullptr;
   }
 
   if (haloInputReady_) {
     cudaErrChk(cudaEventDestroy(haloInputReady_));
     haloInputReady_ = nullptr;
   }
-  if (haloPhaseReady_) {
-    cudaErrChk(cudaEventDestroy(haloPhaseReady_));
-    haloPhaseReady_ = nullptr;
+  if (haloPacked_) {
+    cudaErrChk(cudaEventDestroy(haloPacked_));
+    haloPacked_ = nullptr;
   }
   if (haloBuffersReady_) {
     cudaErrChk(cudaEventDestroy(haloBuffersReady_));
@@ -749,6 +750,14 @@ void EMfields3D::gpuSolverSyncH2D(cudaStream_t stream) {
   d_Bz_ext.copyFromHostAsync(Bz_ext.fetch_arr(), stream);
 
   cudaStreamSynchronize(stream);
+
+  // The ghost cells of the cell B, whatever the initialisation of the case
+  // left in them: gpuMaxwellSource reads them as they are, and gpuCalculateB
+  // keeps them current from then on
+  const Collective* col = &get_col();
+  gpuCommunicateCenterBC_3mixed(nxc, nyc, nzc, d_Bxc, col->bcBx, d_Byc,
+                                col->bcBy, d_Bzc, col->bcBz);
+  cudaErrChk(cudaStreamSynchronize(solverStream_));
 }
 
 void EMfields3D::gpuSolverSyncD2H(cudaStream_t stream) {
@@ -1516,17 +1525,20 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
       d_temp2X.devPtr(), d_temp2Y.devPtr(), d_temp2Z.devPtr()};
   gpuSetAll0_N(zptrs2, 9, nodeSize, solverStream_);
 
-  // Communicate Bc ghost cells (batched 3-field, mixed BCs)
-  gpuCommunicateCenterBC_3mixed(nxc, nyc, nzc, d_Bxc, col->bcBx, d_Byc,
-                                col->bcBy, d_Bzc, col->bcBz);
+  // No halo exchange of Bc: its ghost cells hold the neighbours' final values
+  // (gpuCalculateB exchanges the treated cells, gpuSolverSyncH2D once at
+  // start-up).  The case layers and the open-face ghost layers below change
+  // values only on the first cycle, after a div(B) cleaning cycle (which
+  // leaves the case layers cleaned) and, with ForceFree and open faces, in
+  // the order of the two; otherwise they rewrite the same values.
 
   // Case-specific B fix before the curl (gpuFixBnGEM is not needed: the source
   // curl below reads cell-centered B only)
   if (isForceFreeCase())
     gpuFixBforcefree();
 
-  // Open faces: the exchange above reset their ghost layer, restore it.  The
-  // layers themselves were treated once, after Faraday's law (gpuCalculateB).
+  // Open faces: their ghost layers, after the ForceFree layers.  The layers
+  // themselves were treated once, after Faraday's law (gpuCalculateB).
   gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
                          nyc, nzc, true);
 
@@ -1553,7 +1565,8 @@ void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
   gpuScale3(d_temp2X.devPtr(), d_temp2Y.devPtr(), d_temp2Z.devPtr(), delt,
             nodeSize, solverStream_);
 
-  // Communicate rhoh (on an X-right outflow face rhohat is already 0 from the
+  // Communicate rhoh, its only exchange (gpuCalculateHatFunctions does not
+  // exchange it; on an X-right outflow face rhohat is already 0 from the
   // reference node to the ghost cell, gpuZeroOutflowRhohat)
   gpuCommunicateCenterBC_P(nxc, nyc, nzc, d_rhoh, 2, 2, 2, 2, 2, 2);
 
@@ -2533,7 +2546,7 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateB(int cycle) {
   const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
-  const bool gemCase = isGemCase(), forceFreeCase = isForceFreeCase();
+  const bool gemCase = isGemCase();
   double _invdx = grid->get_invdx();
   double _invdy = grid->get_invdy();
   double _invdz = grid->get_invdz();
@@ -2580,75 +2593,36 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateB(int cycle) {
   reportMagneticField("B_after_faraday_update");
 #endif
 
+  // The open-face layers are treated before the halo exchange, so that it
+  // sends the treated cells: every ghost cell then holds its neighbour's
+  // final value, as the interpolation below and the curl of gpuMaxwellSource
+  // (which has no exchange of its own) read it.
+  gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
+                         nyc, nzc);
+  // After the exchange and the face BCs: the ghost layers of the open faces,
+  // then the case layers (all of them: the face BCs rewrite their ghost cells)
+  auto treatGhosts = [&]() {
+    gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
+                           nyc, nzc, true);
+    gpuFixBcCase();
+  };
+
   // Communicate center B ghost cells (batched: 3 fields in 1 MPI round)
   if constexpr (M == HaloMode::Overlap) {
-    // C2N at node (i,j,k) reads centers (i-1..i, j-1..j, k-1..k).
-    // Start with the halo-independent core, then exclude every node whose
-    // stencil can intersect a center layer modified after the halo exchange.
-    int safeILo = 2, safeIHi = nxn - 3;
-    int safeJLo = 2, safeJHi = nyn - 3;
-    int safeKLo = 2, safeKHi = nzn - 3;
-
-    if (vct->getXleft_neighbor() == MPI_PROC_NULL && bcEMfaceXleft == 2 &&
-        nxc > 10)
-      safeILo = std::max(safeILo, n_layers_sal + 2);
-    if (vct->getXright_neighbor() == MPI_PROC_NULL && bcEMfaceXright == 2 &&
-        nxc > 10)
-      safeIHi = std::min(safeIHi, nxn - layersXright() - 3);
-    if (vct->getYleft_neighbor() == MPI_PROC_NULL && bcEMfaceYleft == 2 &&
-        nyc > 10)
-      safeJLo = std::max(safeJLo, n_layers_sal + 2);
-    if (vct->getYright_neighbor() == MPI_PROC_NULL && bcEMfaceYright == 2 &&
-        nyc > 10)
-      safeJHi = std::min(safeJHi, nyn - n_layers_sal - 3);
-    if (vct->getZleft_neighbor() == MPI_PROC_NULL && bcEMfaceZleft == 2 &&
-        nzc > 10)
-      safeKLo = std::max(safeKLo, n_layers_sal + 2);
-    if (vct->getZright_neighbor() == MPI_PROC_NULL && bcEMfaceZright == 2 &&
-        nzc > 10)
-      safeKHi = std::min(safeKHi, nzn - n_layers_sal - 3);
-
-    // The case-specific fixes do not modify all three components to the same
-    // depth.  Preserve a separate Y-safe box per component so work that is
-    // genuinely independent is not needlessly delayed:
-    //   GEM:       Bx/Bz change on 3 layers, By only on the ghost layer.
-    //   ForceFree: Bz changes on 3 layers, Bx/By only on the ghost layer.
-    int bxSafeJLo = safeJLo, bxSafeJHi = safeJHi;
-    int bySafeJLo = safeJLo, bySafeJHi = safeJHi;
-    int bzSafeJLo = safeJLo, bzSafeJHi = safeJHi;
-    const bool lowYPhysical = vct->getYleft_neighbor() == MPI_PROC_NULL;
-    const bool highYPhysical = vct->getYright_neighbor() == MPI_PROC_NULL;
-    if (gemCase) {
-      if (lowYPhysical) {
-        bxSafeJLo = std::max(bxSafeJLo, 4);
-        bzSafeJLo = std::max(bzSafeJLo, 4);
-      }
-      if (highYPhysical) {
-        bxSafeJHi = std::min(bxSafeJHi, nyn - 5);
-        bzSafeJHi = std::min(bzSafeJHi, nyn - 5);
-      }
-    } else if (forceFreeCase) {
-      if (lowYPhysical)
-        bzSafeJLo = std::max(bzSafeJLo, 4);
-      if (highYPhysical)
-        bzSafeJHi = std::min(bzSafeJHi, nyn - 5);
-    }
-
+    // the interior nodes read the case layers before treatGhosts
+    gpuFixBcCase();
     cudaSolverType* bptrs[3] = {d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr()};
     gpuBatchedHaloBeginExchange(bptrs, 3, nxc, nyc, nzc, true, false, false,
                                 solverStream_);
 
-    // This safe core reads neither in-flight halo cells nor center layers that
-    // the open/SAL or case-specific fixups below will change.
-    gpuInterpC2N_range(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn, safeILo,
-                       safeIHi, bxSafeJLo, bxSafeJHi, safeKLo, safeKHi,
-                       solverStream_);
-    gpuInterpC2N_range(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn, safeILo,
-                       safeIHi, bySafeJLo, bySafeJHi, safeKLo, safeKHi,
-                       solverStream_);
-    gpuInterpC2N_range(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn, safeILo,
-                       safeIHi, bzSafeJLo, bzSafeJHi, safeKLo, safeKHi,
-                       solverStream_);
+    // C2N at node (i,j,k) reads centers (i-1..i, j-1..j, k-1..k): the nodes
+    // [2, n-3] read no ghost cell, and their cells are final already
+    gpuInterpC2N_interior(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn,
+                          solverStream_);
+    gpuInterpC2N_interior(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn,
+                          solverStream_);
+    gpuInterpC2N_interior(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn,
+                          solverStream_);
 
     gpuBatchedHaloEndExchange();
 
@@ -2659,36 +2633,19 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateB(int cycle) {
               col->bcBy[3], col->bcBy[4], col->bcBy[5], &_vct, solverStream_);
     gpuBCface(nxc, nyc, nzc, d_Bzc, col->bcBz[0], col->bcBz[1], col->bcBz[2],
               col->bcBz[3], col->bcBz[4], col->bcBz[5], &_vct, solverStream_);
+    treatGhosts();
 
-    // Open boundary conditions on center-based B
-    gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
-                           nyc, nzc);
-
-    // Case-specific fixes on center-based B
-    gpuFixBcCase();
-
-    // Complete exactly the nodes excluded above after halo data and every
-    // center-B fixup are visible.  The range and complement phases are
-    // disjoint and together cover the same domain as a full gpuInterpC2N call.
-    gpuInterpC2N_complement(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn,
-                            safeILo, safeIHi, bxSafeJLo, bxSafeJHi, safeKLo,
-                            safeKHi, solverStream_);
-    gpuInterpC2N_complement(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn,
-                            safeILo, safeIHi, bySafeJLo, bySafeJHi, safeKLo,
-                            safeKHi, solverStream_);
-    gpuInterpC2N_complement(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn,
-                            safeILo, safeIHi, bzSafeJLo, bzSafeJHi, safeKLo,
-                            safeKHi, solverStream_);
+    // The nodes next to the faces, which read the ghost cells
+    gpuInterpC2N_boundary(d_Bxn.devPtr(), d_Bxc.devPtr(), nxn, nyn, nzn,
+                          solverStream_);
+    gpuInterpC2N_boundary(d_Byn.devPtr(), d_Byc.devPtr(), nxn, nyn, nzn,
+                          solverStream_);
+    gpuInterpC2N_boundary(d_Bzn.devPtr(), d_Bzc.devPtr(), nxn, nyn, nzn,
+                          solverStream_);
   } else {
     gpuCommunicateCenterBC_3mixed(nxc, nyc, nzc, d_Bxc, col->bcBx, d_Byc,
                                   col->bcBy, d_Bzc, col->bcBz);
-
-    // Open boundary conditions on center-based B
-    gpuOpenBoundaryInflowB(d_Bxc.devPtr(), d_Byc.devPtr(), d_Bzc.devPtr(), nxc,
-                           nyc, nzc);
-
-    // Case-specific fixes on center-based B
-    gpuFixBcCase();
+    treatGhosts();
 
     // div(B) cleaning of the cell B, before its interpolation to the nodes
     // (gpuCalculateB(int) runs every cleaning cycle Blocking)
@@ -2757,7 +2714,7 @@ void EMfields3D::gpuCalculateHatFunctions(int cycle) {
                             solverStream_);
       gpuInterpC2N_interior(d_tempZN.devPtr(), d_tempZC.devPtr(), nxn, nyn, nzn,
                             solverStream_);
-      // --- end exchange: MPI faces, edges and corners + unpack ---
+      // --- end exchange: MPI of all ghost boxes + unpack ---
       gpuBatchedHaloEndExchange();
       // BC
       gpuBCface_P(nxc, nyc, nzc, d_tempXC, 2, 2, 2, 2, 2, 2, &get_vct(),
@@ -2855,8 +2812,10 @@ void EMfields3D::gpuCalculateHatFunctions(int cycle) {
   }
 #endif
 
-  // Communicate rhoh
-  gpuCommunicateCenterBC_P(nxc, nyc, nzc, d_rhoh, 2, 2, 2, 2, 2, 2);
+  // No halo exchange of rhohat: its one reader, the gradient in
+  // gpuMaxwellSource, exchanges it first, and that exchange and its face BCs
+  // rewrite every ghost cell from the interior, so the ghost values left
+  // here are never read.
 }
 
 // =========================================================================
@@ -3738,7 +3697,7 @@ void EMfields3D::gpuPoissonCorrection(int cycle) {
 //  divergence is left alone.  The GEM and ForceFree wall layers are the
 //  exception: the case fixes reset them (here their ghost layers;
 //  gpuFixBnGEM the GEM node planes after the interpolation; the next
-//  gpuMaxwellSource the ForceFree cell layers; the next gpuCalculateB, after
+//  gpuMaxwellSource the cell layers of both; the next gpuCalculateB, after
 //  Faraday's law, the cell layers of both).
 // =========================================================================
 

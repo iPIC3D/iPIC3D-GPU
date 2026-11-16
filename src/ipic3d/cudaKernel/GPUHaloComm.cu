@@ -311,8 +311,8 @@ __global__ void gpuSelfCopyCornerZ(cudaSolverType* __restrict__ arr, int nx,
 }
 
 // =========================================================================
-//  Batched self-copy kernels – face (uses blockIdx.z for field index; the
-//  contiguous index of the plane on threadIdx.x)
+//  Batched self-copy kernels – face, not used (uses blockIdx.z for field
+//  index; the contiguous index of the plane on threadIdx.x)
 // =========================================================================
 
 __global__ void
@@ -358,7 +358,8 @@ gpuBatchSelfCopyFaceZ(cudaSolverType* const* __restrict__ fields, int nx,
 }
 
 // =========================================================================
-//  Batched self-copy kernels – edge (uses blockIdx.y for field index)
+//  Batched self-copy kernels – edge, not used (uses blockIdx.y for field
+//  index)
 // =========================================================================
 
 __global__ void
@@ -482,7 +483,8 @@ gpuBatchSelfCopyEdgeZ(cudaSolverType* const* __restrict__ fields, int nx,
 }
 
 // =========================================================================
-//  Batched self-copy kernels – corner (uses blockIdx.x for field index)
+//  Batched self-copy kernels – corner, not used (uses blockIdx.x for field
+//  index)
 // =========================================================================
 
 __global__ void
@@ -756,8 +758,8 @@ void gpuBCface_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
 // =========================================================================
 //  EMfields3D GPU halo exchange wrapper methods
 //
-//  Single-field wrappers route through gpuBatchedHaloExchange (nFields=1).
-//  Batched wrappers route through gpuBatchedHaloExchange (nFields=3 or 9).
+//  Every wrapper routes through gpuBatchedHaloExchange: nFields = 1 for the
+//  single-field ones, 3, 6 or 9 for the batched ones.
 // =========================================================================
 
 void EMfields3D::gpuCommunicateCenterBC(int nx, int ny, int nz,
@@ -848,7 +850,7 @@ void EMfields3D::gpuCommunicateCenterBoxStencilBC(
 }
 
 // =========================================================================
-//  Multi-field communicate wrappers: one batched exchange for 3 or 9
+//  Multi-field communicate wrappers: one batched exchange for 3, 6 or 9
 //  arrays, then the face BCs of each.
 // =========================================================================
 

@@ -231,6 +231,19 @@ void Collective::ReadInput(const ConfigFile& config) {
     spatiallyVaryingThermal = config.read<int>("spatiallyVaryingThermal", 0);
 
     Case = config.read<string>("Case");
+    // the Harris pressure law on the perturbed flux function needs the Harris
+    // sheet, a periodic flux function (no uniform B_y) and the Ampere loader
+    requireInput(!spatiallyVaryingThermal ||
+                     (Case == "GEMHarris" && currentFromAmpere && B0x != 0.0 &&
+                      B0y == 0.0),
+                 "spatiallyVaryingThermal = 1 needs Case = GEMHarris, "
+                 "currentFromAmpere = 1, B0x != 0 and B0y = 0");
+    // the GEM perturbation current fills the box, where the sheet electrons
+    // that carry the perturbation currents have no density
+    requireInput(Case != "GEMHarris" || !currentFromAmpere || pertGEM == 0.0,
+                 "pertGEM needs currentFromAmpere = 0: its current fills the "
+                 "box, where the sheet electrons that would carry it have no "
+                 "density");
     wmethod = config.read<string>("WriteMethod");
     SimName = config.read<string>("SimulationName");
     PoissonCorrection = config.read<string>("PoissonCorrection", "no");
@@ -1088,7 +1101,8 @@ void Collective::Print() {
   cout << "Planet Boundary" << endl;
   cout << "---------------------" << endl;
   cout << "Reflection type            : " << planetReflectionType
-       << (planetReflectionType == 0 ? " (specular)" : " (diffuse, Lambert cosine law)")
+       << (planetReflectionType == 0 ? " (specular)"
+                                     : " (diffuse, Lambert cosine law)")
        << endl;
   cout << "Diagnostics cycle          : " << PlanetDiagnosticsCycle
        << (PlanetDiagnosticsCycle > 0 ? " (PlanetBC.txt)" : " (disabled)")

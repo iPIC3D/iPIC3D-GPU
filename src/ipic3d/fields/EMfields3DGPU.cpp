@@ -3736,8 +3736,10 @@ void EMfields3D::gpuPoissonCorrection(int cycle) {
 //  the cell B, the field Faraday's law advances: the node B is its
 //  interpolation (gpuCalculateB interpolates after this), and a field without
 //  divergence is left alone.  The GEM and ForceFree wall layers are the
-//  exception: the case fixes reset them (gpuFixBnGEM the GEM node planes after
-//  the interpolation, the next gpuMaxwellSource the cell layers of both).
+//  exception: the case fixes reset them (here their ghost layers;
+//  gpuFixBnGEM the GEM node planes after the interpolation; the next
+//  gpuMaxwellSource the ForceFree cell layers; the next gpuCalculateB, after
+//  Faraday's law, the cell layers of both).
 // =========================================================================
 
 void EMfields3D::gpuApplyDivBCleaning(int cycle) {

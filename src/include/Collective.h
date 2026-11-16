@@ -600,8 +600,8 @@ private:
   double kyHump;         ///< hump y-wavenumber (<0 = PI/Ly)
   int currentFromAmpere; ///< 1 = J from curl(B) with u0 weights, 0 = J from u0
                          ///< drift
-  int spatiallyVaryingThermal; ///< 1 = use reference-state pressure for local
-                               ///< vth, 0 = global uth
+  int spatiallyVaryingThermal; ///< 1 = sheet temperature from the Harris
+                               ///< p(A) of the perturbed flux, 0 = uth
 
   /*! boolean value for verbose results */
   // bool verbose;

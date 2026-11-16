@@ -50,7 +50,7 @@ deltayHump              = 1.0           # Hump y-envelope width in units of delt
 kxHump                  = 0.62832       # Hump x-wavenumber; <0 uses 2*PI/Lx [default: -1.0]
 kyHump                  = 0.62832       # Hump y-wavenumber; <0 uses PI/Ly [default: -1.0]
 currentFromAmpere       = 1             # J from curl(B) with normalized u0/v0/w0 weights [default: 0]
-spatiallyVaryingThermal = 1             # Local thermal speed from reference-state pressure [default: 0]
+spatiallyVaryingThermal = 1             # Sheet temperature from the Harris p(A) on the perturbed flux [default: 0]
 # To match the GEM case exactly (pertX=0.4, delta=0.5), set pertGEM = 0.0,
 # pertHump = 0.12566 (0.4*PI/10), deltaxHump = deltayHump = 1.0,
 # kxHump = kyHump = 0.62832 (PI/(10*delta)), currentFromAmpere = 0 and
@@ -88,7 +88,7 @@ PERIODICZ = 1                           # [default: true]
 ns = 4                                  # Total species count [required]
 
 # Initial density
-rhoINIT   = 0.969  0.969  0.23  0.23    # Initial densities [required]
+rhoINIT   = 0.9797 0.9797 0.23  0.23    # Initial densities [required]
 rhoINJECT = 0.0    0.0    0.0   0.0     # Boundary injection densities [required]
 
 npcelx = 8  8  8  8                     # Particles per cell in x [required]
@@ -104,10 +104,13 @@ uth = 0.146  0.0163  0.127  0.0142      # x thermal speeds [required]
 vth = 0.146  0.0163  0.127  0.0142      # y thermal speeds [required]
 wth = 0.146  0.0163  0.127  0.0142      # z thermal speeds [required]
 
-# Drift velocity
+# Drift velocity: the Harris drifts w0_s = -2 c T_s / (q_s B0x delta), whose
+# ratio u_e/u_i = -T_e/T_i the Harris equilibrium (E = 0) needs; with
+# currentFromAmpere = 1 they split the Harris current.  The sheet densities
+# give the pressure balance n0 (T_e + T_i) = B0x^2 / 8 pi
 u0 = 0.0     0.0      0.0  0.0          # x drift speeds [required]
 v0 = 0.0     0.0      0.0  0.0          # y drift speeds [required]
-w0 = 0.0042  -0.0021  0.0  0.0          # z drift speeds [required]
+w0 = 0.008526 -0.04251 0.0  0.0         # z drift speeds [required]
 
 TrackParticleID = 0  0  0  0            # Per-species ID mask [default: all 0]
 

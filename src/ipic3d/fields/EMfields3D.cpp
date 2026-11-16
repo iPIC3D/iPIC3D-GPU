@@ -25,6 +25,7 @@
 #include "Collective.h"
 #include "Com3DNonblk.h"
 #include "Grid3DCU.h"
+#include "MPIdata.h"
 #include "Moments.h"
 #include "Parameters.h"
 #include "ParticleSoAHost.h"
@@ -43,6 +44,15 @@
 using std::cout;
 using std::endl;
 using namespace iPic3D;
+
+namespace {
+/** Mean square thermal speed (uth^2 + vth^2 + wth^2) / 3 of species s. */
+double thermalSpeed2(const Collective* col, int s) {
+  return (col->getUth(s) * col->getUth(s) + col->getVth(s) * col->getVth(s) +
+          col->getWth(s) * col->getWth(s)) /
+         3.0;
+}
+} // namespace
 
 /*! constructor */
 //
@@ -1148,7 +1158,7 @@ void EMfields3D::initGEM() {
   }
 }
 
-void EMfields3D::initSpeciesCurrents(bool fromAmpere, bool varyingThermal) {
+void EMfields3D::initSpeciesCurrents(bool fromAmpere) {
   const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
@@ -1185,11 +1195,6 @@ void EMfields3D::initSpeciesCurrents(bool fromAmpere, bool varyingThermal) {
          << "N_u=" << sumU << "  N_v=" << sumV << "  N_w=" << sumW << endl;
   }
 
-  // --- Reference pressure state for spatially varying thermal velocity ---
-  if (varyingThermal && vct->getCartesian_rank() == 0)
-    cout << "Building reference pressure state (spatiallyVaryingThermal=1)"
-         << endl;
-
   for (int is = 0; is < ns; is++) {
     const double qs = (col->getQOM(is) > 0.0) ? 1.0 : -1.0;
     const double wU = (sumU != 0.0) ? qs * col->getU0(is) / sumU : 0.0;
@@ -1198,9 +1203,6 @@ void EMfields3D::initSpeciesCurrents(bool fromAmpere, bool varyingThermal) {
     const double factU = wU * c / FourPI;
     const double factV = wV * c / FourPI;
     const double factW = wW * c / FourPI;
-    const double uthS2 = col->getUth(is) * col->getUth(is);
-    const double vthS2 = col->getVth(is) * col->getVth(is);
-    const double wthS2 = col->getWth(is) * col->getWth(is);
 
 #pragma omp parallel for collapse(3)
     for (int i = 0; i < nxn; i++)
@@ -1210,21 +1212,6 @@ void EMfields3D::initSpeciesCurrents(bool fromAmpere, bool varyingThermal) {
           Jys[is][i][j][k] = factV * tempYN[i][j][k];
           Jzs[is][i][j][k] = factW * tempZN[i][j][k];
         }
-
-    if (varyingThermal) {
-#pragma omp parallel for collapse(3)
-      for (int i = 0; i < nxn; i++)
-        for (int j = 0; j < nyn; j++)
-          for (int k = 0; k < nzn; k++) {
-            const double rho = rhons[is][i][j][k];
-            const double Jx = Jxs[is][i][j][k];
-            const double Jy = Jys[is][i][j][k];
-            const double Jz = Jzs[is][i][j][k];
-            pXXsn[is][i][j][k] = Jx * Jx / rho + uthS2 * rho;
-            pYYsn[is][i][j][k] = Jy * Jy / rho + vthS2 * rho;
-            pZZsn[is][i][j][k] = Jz * Jz / rho + wthS2 * rho;
-          }
-    }
   }
 }
 
@@ -1240,13 +1227,74 @@ void EMfields3D::initGEMHarris() {
   const double deltay = col->getDeltayHump() * delta;
   const int ampere = col->getCurrentFromAmpere();
 
-  // --- wavenumbers ---
-  const double kxG = 2.0 * M_PI / Lx; // pertGEM tearing-mode kx
-  const double kyG = 2.0 * M_PI / Ly; // pertGEM tearing-mode ky
+  // --- the perturbations as one flux function A_p (Bx = dA/dy,
+  //     By = -dA/dx), from the box centre (xM, yM) ---
+  // GEM (Birn et al. 2001): psiGEM cos(kxG xM) cos(kyG yM), psiGEM =
+  // pertGEM B0x / kxG, so that delta By peaks at pertGEM B0x; kyG = pi/Ly
+  // leaves By = 0 on the walls yM = +-Ly/2.  Hump:
+  // A0 exp(-xM^2/deltax^2 - yM^2/deltay^2) cos(kx xM) cos(kyH yM).
+  const double kxG = 2.0 * M_PI / Lx;
+  const double kyG = M_PI / Ly;
+  const double psiGEM = pertGEM * B0x / kxG;
   const double kx =
       (col->getKxHump() < 0.0) ? 2.0 * M_PI / Lx : col->getKxHump();
   const double kyH = (col->getKyHump() < 0.0) ? M_PI / Ly : col->getKyHump();
   const double A0 = (pertHump != 0.0) ? pertHump * B0x / kyH : 0.0;
+  struct Flux {
+    double a, dx, dy; // A_p, dA_p/dx, dA_p/dy
+  };
+  const auto perturbation = [&](double xM, double yM) {
+    Flux f{0.0, 0.0, 0.0};
+    if (pertGEM != 0.0) {
+      const double cx = cos(kxG * xM), sx = sin(kxG * xM);
+      const double cy = cos(kyG * yM), sy = sin(kyG * yM);
+      f.a += psiGEM * cx * cy;
+      f.dx -= psiGEM * kxG * sx * cy;
+      f.dy -= psiGEM * kyG * cx * sy;
+    }
+    if (pertHump != 0.0) {
+      const double g =
+          exp(-xM * xM / (deltax * deltax) - yM * yM / (deltay * deltay));
+      const double cx = cos(kx * xM), sx = sin(kx * xM);
+      const double cy = cos(kyH * yM), sy = sin(kyH * yM);
+      f.a += A0 * g * cx * cy;
+      f.dx += A0 * g * cy * (-2.0 * xM / (deltax * deltax) * cx - kx * sx);
+      f.dy += A0 * g * cx * (-2.0 * yM / (deltay * deltay) * cy - kyH * sy);
+    }
+    return f;
+  };
+  const auto xMN = [&](int i, int j, int k) {
+    return grid->getXN(i, j, k) - 0.5 * Lx;
+  };
+  const auto yMN = [&](int i, int j, int k) {
+    return grid->getYN(i, j, k) - 0.5 * Ly;
+  };
+  // node fields to the centres, with the ghost rules of B
+  const auto nodesToCentres = [&](arr3_double xn, arr3_double yn,
+                                  arr3_double zn, arr3_double xc,
+                                  arr3_double yc, arr3_double zc) {
+    communicateNodeBC(nxn, nyn, nzn, xn, col->bcBx[0], col->bcBx[1],
+                      col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
+                      vct, this);
+    communicateNodeBC(nxn, nyn, nzn, yn, col->bcBy[0], col->bcBy[1],
+                      col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
+                      vct, this);
+    communicateNodeBC(nxn, nyn, nzn, zn, col->bcBz[0], col->bcBz[1],
+                      col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
+                      vct, this);
+    grid->interpN2C(xc, xn);
+    grid->interpN2C(yc, yn);
+    grid->interpN2C(zc, zn);
+    communicateCenterBC(nxc, nyc, nzc, xc, col->bcBx[0], col->bcBx[1],
+                        col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
+                        vct, this);
+    communicateCenterBC(nxc, nyc, nzc, yc, col->bcBy[0], col->bcBy[1],
+                        col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
+                        vct, this);
+    communicateCenterBC(nxc, nyc, nzc, zc, col->bcBz[0], col->bcBz[1],
+                        col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
+                        vct, this);
+  };
 
   if (restart1 == 0) {
     if (vct->getCartesian_rank() == 0) {
@@ -1278,93 +1326,166 @@ void EMfields3D::initGEMHarris() {
       cout << "---------------------------------------------------" << endl;
     }
 
-    // === B and density on nodes ===
+    // === B (Harris + perturbations), density and E = 0 on the nodes ===
 #pragma omp parallel for collapse(3)
     for (int i = 0; i < nxn; i++)
       for (int j = 0; j < nyn; j++)
         for (int k = 0; k < nzn; k++) {
-          const double xM = grid->getXN(i, j, k) - 0.5 * Lx;
-          const double yM = grid->getYN(i, j, k) - 0.5 * Ly;
-
-          // --- density ---
-          for (int is = 0; is < ns; is++) {
-            if (DriftSpecies[is]) {
-              const double sech = 1.0 / cosh(yM / delta);
-              rhons[is][i][j][k] = rhoINIT[is] * sech * sech / FourPI;
-            } else
-              rhons[is][i][j][k] = rhoINIT[is] / FourPI;
-          }
-
-          // --- E = 0 ---
+          const double xM = xMN(i, j, k), yM = yMN(i, j, k);
+          const double sech = 1.0 / cosh(yM / delta);
+          for (int is = 0; is < ns; is++)
+            rhons[is][i][j][k] = DriftSpecies[is]
+                                     ? rhoINIT[is] * sech * sech / FourPI
+                                     : rhoINIT[is] / FourPI;
           Ex[i][j][k] = 0.0;
           Ey[i][j][k] = 0.0;
           Ez[i][j][k] = 0.0;
-
-          // === Harris equilibrium ===
-          Bxn[i][j][k] = B0x * tanh(yM / delta);
-          Byn[i][j][k] = B0y;
+          const Flux f = perturbation(xM, yM);
+          Bxn[i][j][k] = B0x * tanh(yM / delta) + f.dy;
+          Byn[i][j][k] = B0y - f.dx;
           Bzn[i][j][k] = B0z;
-
-          // === GEM perturbation (from vector potential, div-free) ===
-          if (pertGEM != 0.0) {
-            Bxn[i][j][k] +=
-                -pertGEM * B0x * (Lx / Ly) * cos(kxG * xM) * sin(kyG * yM);
-            Byn[i][j][k] += pertGEM * B0x * sin(kxG * xM) * cos(kyG * yM);
-          }
-
-          // === Hump perturbation (from vector potential, div-free) ===
-          if (pertHump != 0.0) {
-            const double g =
-                exp(-xM * xM / (deltax * deltax) - yM * yM / (deltay * deltay));
-            const double Cx = cos(kx * xM);
-            const double Sx = sin(kx * xM);
-            const double Cy = cos(kyH * yM);
-            const double Sy = sin(kyH * yM);
-
-            // dAz/dy  ->  delta Bx
-            Bxn[i][j][k] +=
-                A0 * g * Cx * (-2.0 * yM / (deltay * deltay) * Cy - kyH * Sy);
-            // -dAz/dx ->  delta By
-            Byn[i][j][k] +=
-                A0 * g * Cy * (2.0 * xM / (deltax * deltax) * Cx + kx * Sx);
-          }
         }
-
-    // --- ghost communication on nodes ---
-    communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0], col->bcBx[1],
-                      col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0], col->bcBy[1],
-                      col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0], col->bcBz[1],
-                      col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                      vct, this);
-
-    // --- B on centers via interpolation ---
-    grid->interpN2C(Bxc, Bxn);
-    grid->interpN2C(Byc, Byn);
-    grid->interpN2C(Bzc, Bzn);
-
-    // --- ghost communication on centers ---
-    communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1],
-                        col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                        vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1],
-                        col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                        vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1],
-                        col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                        vct, this);
-
-    // --- density on centers ---
+    nodesToCentres(Bxn, Byn, Bzn, Bxc, Byc, Bzc);
     for (int is = 0; is < ns; is++)
       grid->interpN2C(rhocs, is, rhons);
 
     // --- current initialization ---
-    initSpeciesCurrents(ampere, col->getSpatiallyVaryingThermal());
-    // without Ampere: Jxs/Jys/Jzs stay at zero and particle init uses each
-    // species' uniform u0/v0/w0 as drift velocities
+    // Without Ampere, Jxs/Jys/Jzs stay at zero and particle init uses each
+    // species' uniform u0/v0/w0 as drift velocities.
+    initSpeciesCurrents(false);
+    if (ampere) {
+      // The Harris current J_z = -(c/4pi) (B0x/delta) sech^2(yM/delta),
+      // analytic, is split by the w0 weights sign(q_s) w0_s / sum_r sign(q_r)
+      // w0_r: each drifting species gets a uniform drift.  The Harris sheet
+      // (E = 0) needs u_s = -2 c T_s / (q_s B0x delta), i.e. the shares
+      // n_s T_s ~ rho_s vth_s^2 / |qom_s|; warn when the weights differ.
+      double sumW = 0.0, sumP = 0.0;
+      for (int is = 0; is < ns; is++) {
+        sumW += (col->getQOM(is) > 0.0 ? 1.0 : -1.0) * col->getW0(is);
+        if (DriftSpecies[is])
+          sumP += rhoINIT[is] * thermalSpeed2(col, is) / fabs(col->getQOM(is));
+      }
+      std::vector<double> weight(ns, 0.0);
+      for (int is = 0; is < ns && sumW != 0.0; is++) {
+        weight[is] =
+            (col->getQOM(is) > 0.0 ? 1.0 : -1.0) * col->getW0(is) / sumW;
+        if (!DriftSpecies[is] || sumP <= 0.0)
+          continue;
+        const double harris =
+            rhoINIT[is] * thermalSpeed2(col, is) / fabs(col->getQOM(is)) / sumP;
+        if (fabs(weight[is] - harris) > 0.01 && vct->getCartesian_rank() == 0)
+          cout << "WARNING: species " << is << " carries the share "
+               << weight[is]
+               << " of the Harris current (w0 weights), but the Harris "
+                  "equilibrium needs "
+               << harris << " (its share of n T); set the w0 in this ratio"
+               << endl;
+      }
+#pragma omp parallel for collapse(3)
+      for (int i = 0; i < nxn; i++)
+        for (int j = 0; j < nyn; j++)
+          for (int k = 0; k < nzn; k++) {
+            const double sech = 1.0 / cosh(yMN(i, j, k) / delta);
+            const double jHarris = -c / FourPI * B0x / delta * sech * sech;
+            for (int is = 0; is < ns; is++)
+              Jzs[is][i][j][k] = weight[is] * jHarris;
+          }
+
+      // The perturbation current (c/4pi) curl(dB), dB = (dA_p/dy, -dA_p/dx)
+      // taken to the centres as B is (the ghost rules are linear), is
+      // carried by the drifting (sheet) electrons in proportion to their
+      // density.
+      if (pertGEM != 0.0 || pertHump != 0.0) {
+        bool sheetElectrons = false;
+        for (int is = 0; is < ns; is++)
+          sheetElectrons |= DriftSpecies[is] && col->getQOM(is) < 0.0;
+        if (!sheetElectrons) {
+          if (vct->getCartesian_rank() == 0)
+            printf("ERROR: GEMHarris with currentFromAmpere = 1 and a "
+                   "perturbation needs a drifting electron species (u0 or w0 "
+                   "!= 0) to carry the perturbation current\n");
+          fflush(stdout);
+          MPIdata::exit(1);
+        }
+#pragma omp parallel for collapse(3)
+        for (int i = 0; i < nxn; i++)
+          for (int j = 0; j < nyn; j++)
+            for (int k = 0; k < nzn; k++) {
+              const Flux f = perturbation(xMN(i, j, k), yMN(i, j, k));
+              tempXN[i][j][k] = f.dy;
+              tempYN[i][j][k] = -f.dx;
+              tempZN[i][j][k] = 0.0;
+            }
+        array3_double dBxc(nxc, nyc, nzc), dByc(nxc, nyc, nzc),
+            dBzc(nxc, nyc, nzc);
+        nodesToCentres(tempXN, tempYN, tempZN, dBxc, dByc, dBzc);
+        eqValue(0.0, tempXN, nxn, nyn, nzn);
+        eqValue(0.0, tempYN, nxn, nyn, nzn);
+        eqValue(0.0, tempZN, nxn, nyn, nzn);
+        grid->curlC2N(tempXN, tempYN, tempZN, dBxc, dByc, dBzc);
+#pragma omp parallel for collapse(3)
+        for (int i = 0; i < nxn; i++)
+          for (int j = 0; j < nyn; j++)
+            for (int k = 0; k < nzn; k++) {
+              double rhoE = 0.0;
+              for (int is = 0; is < ns; is++)
+                if (DriftSpecies[is] && col->getQOM(is) < 0.0)
+                  rhoE += rhons[is][i][j][k];
+              if (rhoE <= 0.0)
+                continue;
+              for (int is = 0; is < ns; is++) {
+                if (!DriftSpecies[is] || col->getQOM(is) >= 0.0)
+                  continue;
+                const double f = rhons[is][i][j][k] / rhoE * c / FourPI;
+                Jxs[is][i][j][k] += f * tempXN[i][j][k];
+                Jys[is][i][j][k] += f * tempYN[i][j][k];
+                Jzs[is][i][j][k] += f * tempZN[i][j][k];
+              }
+            }
+      }
+    }
+
+    // --- spatially varying thermal speed ---
+    // The sheet pressure is the Harris law p(A) = p0 exp(-2 A / (B0x delta))
+    // of the perturbed flux function A = A_Harris + A_p (A_Harris =
+    // B0x delta ln cosh(yM / delta)), so it is constant along the field
+    // lines.  With the density n0 sech^2(yM / delta) kept, a drifting (sheet)
+    // species has the temperature T_s exp(-2 A_p / (B0x delta)); the
+    // background stays isothermal.  p**sn hold the thermal pressure
+    // rho vth^2 that maxwellianFromSpeciesCurrents reads.  Unperturbed
+    // (A_p = 0) this is the Harris equilibrium.
+    if (col->getSpatiallyVaryingThermal()) {
+      std::vector<double> uth2(ns), vth2(ns), wth2(ns);
+      for (int is = 0; is < ns; is++) {
+        uth2[is] = col->getUth(is) * col->getUth(is);
+        vth2[is] = col->getVth(is) * col->getVth(is);
+        wth2[is] = col->getWth(is) * col->getWth(is);
+      }
+      double range[2] = {1.0, -1.0}; // min and -max of the factor
+#pragma omp parallel for collapse(3) reduction(min : range[ : 2])
+      for (int i = 0; i < nxn; i++)
+        for (int j = 0; j < nyn; j++)
+          for (int k = 0; k < nzn; k++) {
+            const double factor =
+                exp(-2.0 * perturbation(xMN(i, j, k), yMN(i, j, k)).a /
+                    (B0x * delta));
+            range[0] = std::min(range[0], factor);
+            range[1] = std::min(range[1], -factor);
+            for (int is = 0; is < ns; is++) {
+              const double rho = rhons[is][i][j][k];
+              const double f = DriftSpecies[is] ? factor : 1.0;
+              pXXsn[is][i][j][k] = f * uth2[is] * rho;
+              pYYsn[is][i][j][k] = f * vth2[is] * rho;
+              pZZsn[is][i][j][k] = f * wth2[is] * rho;
+            }
+          }
+      MPI_Allreduce(MPI_IN_PLACE, range, 2, MPI_DOUBLE, MPI_MIN,
+                    vct->getFieldComm());
+      if (vct->getCartesian_rank() == 0)
+        cout << "Sheet temperature from the Harris pressure law of the "
+                "perturbed flux (spatiallyVaryingThermal = 1): factor in ["
+             << range[0] << ", " << -range[1] << "]" << endl;
+    }
   } else {
     init(); // restart
   }
@@ -1374,6 +1495,9 @@ void EMfields3D::initNullPoints() {
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
   if (restart1 == 0) {
+    // div B = 0 for any box: B_x scaled by k_y/k_x = Lx/Ly and B_z by
+    // k_y/k_z = Lz/Ly (1 in a cubic box)
+    const double bxAmp = -B0x * (Lx / Ly), bzAmp = 2. * B0x * (Lz / Ly);
     if (vct->getCartesian_rank() == 0) {
       cout << "----------------------------------------" << endl;
       cout << "       Initialize 3D null point(s)" << endl;
@@ -1401,12 +1525,12 @@ void EMfields3D::initNullPoints() {
           Ey[i][j][k] = 0.0;
           Ez[i][j][k] = 0.0;
           // Magnetic field
-          Bxn[i][j][k] = -B0x * cos(2. * M_PI * grid->getXN(i, j, k) / Lx) *
+          Bxn[i][j][k] = bxAmp * cos(2. * M_PI * grid->getXN(i, j, k) / Lx) *
                          sin(2. * M_PI * grid->getYN(i, j, k) / Ly);
           Byn[i][j][k] = B0x * cos(2. * M_PI * grid->getYN(i, j, k) / Ly) *
                          (-2. * sin(2. * M_PI * grid->getZN(i, j, k) / Lz) +
                           sin(2. * M_PI * grid->getXN(i, j, k) / Lx));
-          Bzn[i][j][k] = 2. * B0x * cos(2. * M_PI * grid->getZN(i, j, k) / Lz) *
+          Bzn[i][j][k] = bzAmp * cos(2. * M_PI * grid->getZN(i, j, k) / Lz) *
                          sin(2. * M_PI * grid->getYN(i, j, k) / Ly);
         }
 
@@ -1414,12 +1538,12 @@ void EMfields3D::initNullPoints() {
     for (int i = 0; i < nxc; i++)
       for (int j = 0; j < nyc; j++)
         for (int k = 0; k < nzc; k++) {
-          Bxc[i][j][k] = -B0x * cos(2. * M_PI * grid->getXC(i, j, k) / Lx) *
+          Bxc[i][j][k] = bxAmp * cos(2. * M_PI * grid->getXC(i, j, k) / Lx) *
                          sin(2. * M_PI * grid->getYC(i, j, k) / Ly);
           Byc[i][j][k] = B0x * cos(2. * M_PI * grid->getYC(i, j, k) / Ly) *
                          (-2. * sin(2. * M_PI * grid->getZC(i, j, k) / Lz) +
                           sin(2. * M_PI * grid->getXC(i, j, k) / Lx));
-          Bzc[i][j][k] = 2. * B0x * cos(2. * M_PI * grid->getZC(i, j, k) / Lz) *
+          Bzc[i][j][k] = bzAmp * cos(2. * M_PI * grid->getZC(i, j, k) / Lz) *
                          sin(2. * M_PI * grid->getYC(i, j, k) / Ly);
         }
 
@@ -1460,6 +1584,9 @@ void EMfields3D::initNullPoints() {
 void EMfields3D::initTaylorGreen() {
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
+  // div u = 0 and div B = 0 for any box: u_y scaled by k_x/k_y = Ly/Lx, B_z
+  // by (k_x + k_y)/k_z = Lz/Lx + Lz/Ly (1 and 2 in a cubic box)
+  const double uyScale = Ly / Lx, bzAmp = -(Lz / Lx + Lz / Ly) * B0x;
   if (restart1 == 0) {
     if (vct->getCartesian_rank() == 0) {
       cout << "----------------------------------------" << endl;
@@ -1490,7 +1617,7 @@ void EMfields3D::initTaylorGreen() {
                                sin(2. * M_PI * grid->getXN(i, j, k) / Lx) *
                                cos(2. * M_PI * grid->getYN(i, j, k) / Ly) *
                                cos(2. * M_PI * grid->getZN(i, j, k) / Lz);
-            Jys[is][i][j][k] = -flowAmp *
+            Jys[is][i][j][k] = -flowAmp * uyScale *
                                cos(2. * M_PI * grid->getXN(i, j, k) / Lx) *
                                sin(2. * M_PI * grid->getYN(i, j, k) / Ly) *
                                cos(2. * M_PI * grid->getZN(i, j, k) / Lz);
@@ -1508,8 +1635,7 @@ void EMfields3D::initTaylorGreen() {
           Byn[i][j][k] = B0x * sin(2. * M_PI * grid->getXN(i, j, k) / Lx) *
                          cos(2. * M_PI * grid->getYN(i, j, k) / Ly) *
                          sin(2. * M_PI * grid->getZN(i, j, k) / Lz);
-          Bzn[i][j][k] = -2. * B0x *
-                         sin(2. * M_PI * grid->getXN(i, j, k) / Lx) *
+          Bzn[i][j][k] = bzAmp * sin(2. * M_PI * grid->getXN(i, j, k) / Lx) *
                          sin(2. * M_PI * grid->getYN(i, j, k) / Ly) *
                          cos(2. * M_PI * grid->getZN(i, j, k) / Lz);
         }
@@ -1524,8 +1650,7 @@ void EMfields3D::initTaylorGreen() {
           Byc[i][j][k] = B0x * sin(2. * M_PI * grid->getXC(i, j, k) / Lx) *
                          cos(2. * M_PI * grid->getYC(i, j, k) / Ly) *
                          sin(2. * M_PI * grid->getZC(i, j, k) / Lz);
-          Bzc[i][j][k] = -2. * B0x *
-                         sin(2. * M_PI * grid->getXC(i, j, k) / Lx) *
+          Bzc[i][j][k] = bzAmp * sin(2. * M_PI * grid->getXC(i, j, k) / Lx) *
                          sin(2. * M_PI * grid->getYC(i, j, k) / Ly) *
                          cos(2. * M_PI * grid->getZC(i, j, k) / Lz);
         }
@@ -1648,19 +1773,17 @@ void EMfields3D::initGEMDoubleHarris() {
           const double yT = grid->getYN(i, j, k) - 0.75 * Ly;
           const double yBd = yB / delta;
           const double yTd = yT / delta;
-          // initialize the density for species
-          for (int is = 0; is < ns; is++) {
-            // dprintf("is=%d, DriftSpecies[is]=%d",is,DriftSpecies[is]);
-            if (DriftSpecies[is]) {
-              const double sech_yBd = 1. / cosh(yBd); //+1e-5;
-              const double sech_yTd = 1. / cosh(yTd); //+1e-5;
-              if (is == 0 || is == 1)
-                rhons[is][i][j][k] = rhoINIT[is] * sech_yBd * sech_yBd / FourPI;
-              else if (is == 2 || is == 3)
-                rhons[is][i][j][k] = rhoINIT[is] * sech_yTd * sech_yTd / FourPI;
-            } else
-              rhons[is][i][j][k] = rhoINIT[is] / FourPI;
-          }
+          // density: a drifting species carries both sheets (drift w0 in the
+          // lower half, -w0 in the upper one: maxwellianDoubleHarris), the
+          // others are uniform
+          const double sech_yBd = 1. / cosh(yBd);
+          const double sech_yTd = 1. / cosh(yTd);
+          for (int is = 0; is < ns; is++)
+            rhons[is][i][j][k] =
+                DriftSpecies[is]
+                    ? rhoINIT[is] *
+                          (sech_yBd * sech_yBd + sech_yTd * sech_yTd) / FourPI
+                    : rhoINIT[is] / FourPI;
           // electric field
           Ex[i][j][k] = 0.0;
           Ey[i][j][k] = 0.0;
@@ -1715,6 +1838,7 @@ void EMfields3D::initDoublePeriodicHarrisWithGaussianHumpPerturbation() {
   const double pertX = 0.4;
   const double deltax = 8. * delta;
   const double deltay = 4. * delta;
+  const double yRatio = deltay / deltax; // By of the flux-derived humps
   if (restart1 == 0) {
     // initialize
     if (get_vct().getCartesian_rank() == 0) {
@@ -1760,17 +1884,17 @@ void EMfields3D::initDoublePeriodicHarrisWithGaussianHumpPerturbation() {
           // Magnetic field
           Bxn[i][j][k] = B0x * (-1.0 + tanh(yBd) - tanh(yTd));
           Byn[i][j][k] = B0y;
-          // add the initial X perturbation
+          // the X perturbations of the two sheets: the curl of the fluxes
+          // +-B0x pertX deltay hump (Bx = dA/dy, By = -dA/dx), div-free
           const double xMdx = xM / deltax;
           const double yBdy = yB / deltay;
           const double yTdy = yT / deltay;
           const double humpB = exp(-xMdx * xMdx - yBdy * yBdy);
           Bxn[i][j][k] -= (B0x * pertX) * humpB * (2.0 * yBdy);
-          Byn[i][j][k] += (B0x * pertX) * humpB * (2.0 * xMdx);
-          // add the second initial X perturbation
+          Byn[i][j][k] += (B0x * pertX) * humpB * (2.0 * xMdx) * yRatio;
           const double humpT = exp(-xMdx * xMdx - yTdy * yTdy);
           Bxn[i][j][k] += (B0x * pertX) * humpT * (2.0 * yTdy);
-          Byn[i][j][k] -= (B0x * pertX) * humpT * (2.0 * xMdx);
+          Byn[i][j][k] -= (B0x * pertX) * humpT * (2.0 * xMdx) * yRatio;
 
           // guide field
           Bzn[i][j][k] = B0z;
@@ -1791,24 +1915,23 @@ void EMfields3D::initDoublePeriodicHarrisWithGaussianHumpPerturbation() {
     for (int i = 0; i < nxc; i++)
       for (int j = 0; j < nyc; j++)
         for (int k = 0; k < nzc; k++) {
-          const double xM = grid->getXN(i, j, k) - .5 * Lx;
-          const double yB = grid->getYN(i, j, k) - .25 * Ly;
-          const double yT = grid->getYN(i, j, k) - .75 * Ly;
+          const double xM = grid->getXC(i, j, k) - .5 * Lx;
+          const double yB = grid->getYC(i, j, k) - .25 * Ly;
+          const double yT = grid->getYC(i, j, k) - .75 * Ly;
           const double yBd = yB / delta;
           const double yTd = yT / delta;
           Bxc[i][j][k] = B0x * (-1.0 + tanh(yBd) - tanh(yTd));
           Byc[i][j][k] = B0y;
-          // add the initial X perturbation
+          // the X perturbations, as on the nodes
           const double xMdx = xM / deltax;
           const double yBdy = yB / deltay;
           const double yTdy = yT / deltay;
           const double humpB = exp(-xMdx * xMdx - yBdy * yBdy);
           Bxc[i][j][k] -= (B0x * pertX) * humpB * (2.0 * yBdy);
-          Byc[i][j][k] += (B0x * pertX) * humpB * (2.0 * xMdx);
-          // add the second initial X perturbation
+          Byc[i][j][k] += (B0x * pertX) * humpB * (2.0 * xMdx) * yRatio;
           const double humpT = exp(-xMdx * xMdx - yTdy * yTdy);
           Bxc[i][j][k] += (B0x * pertX) * humpT * (2.0 * yTdy);
-          Byc[i][j][k] -= (B0x * pertX) * humpT * (2.0 * xMdx);
+          Byc[i][j][k] -= (B0x * pertX) * humpT * (2.0 * xMdx) * yRatio;
           // guide field
           Bzc[i][j][k] = B0z;
         }
@@ -1937,17 +2060,42 @@ void EMfields3D::initGEMDipoleLikeTailNoPert() {
   // parameters controling the field topology
   // e.g., x1=Lx/5,x2=Lx/4 give 'separated' fields, x1=Lx/4,x2=Lx/3 give
   // 'reconnected' topology
-
-  double x1 = Lx / 6.0; // minimal position of the gaussian peak
-  double x2 = Lx / 4.0; // maximal position of the gaussian peak (the one closer
-                        // to the center)
-  double sigma = Lx / 15; // width of the gaussian
-  double stretch_curve =
+  const double x1 = Lx / 6.0; // minimal position of the gaussian peak
+  const double x2 = Lx / 4.0; // maximal position of the gaussian peak (the one
+                              // closer to the center)
+  const double sigma = Lx / 15; // width of the gaussian
+  const double stretch_curve =
       2.0; // stretch the sin^2 function over the x dimension - also can
            // regulate the number of 'knots/reconnecitons points' if less than 1
-  double skew_parameter = 0.50; // skew of the shape of the gaussian
-  double pi = 3.1415927;
-  double r1, r2, delta_x1x2;
+  const double skew_parameter = 0.50; // skew of the shape of the gaussian
+
+  // The tail field Bx = B0x/2 (exp(-r2^2/sigma^2) - exp(-r1^2/sigma^2)),
+  // r_i = (y - y_i(x)) s(x), comes from the flux function (Bx = dA/dy)
+  //   A = B0x sigma sqrt(pi) / (4 s) (erf(r2/sigma) - erf(r1/sigma)),
+  // and By = B0y - dA/dx, so that div B = 0; with
+  //   y1 = x1 + d(x), y2 = Lx - x1 - d(x), d = x1 - x2 sin^2(a x'),
+  //   s = 1 - skew sin^2(b x'),  x' = x - Lx/2, a = pi/(Lx stretch),
+  //   b = pi/Lx.
+  const double aW = M_PI / (Lx * stretch_curve), bW = M_PI / Lx;
+  const double K = B0x * sigma * sqrt(M_PI) / 4.0;
+  auto field = [&](double x, double y, double& bx, double& by) {
+    const double xp = x - Lx / 2;
+    const double sa = sin(aW * xp), sb = sin(bW * xp);
+    const double d = x1 - x2 * sa * sa;
+    const double dd = -x2 * sin(2.0 * aW * xp) * aW; // d'(x)
+    const double sk = 1.0 - skew_parameter * sb * sb;
+    const double dsk = -skew_parameter * sin(2.0 * bW * xp) * bW; // s'(x)
+    const double y1 = x1 + d, y2 = (Lx - x1) - d;
+    const double u1 = (y - y1) * sk / sigma, u2 = (y - y2) * sk / sigma;
+    const double g1 = exp(-u1 * u1), g2 = exp(-u2 * u2);
+    bx = 0.5 * B0x * (g2 - g1);
+    // dA/dx: the 1/s factor, then the erf arguments (y1' = d', y2' = -d')
+    const double du1 = (-dd * sk + (y - y1) * dsk) / sigma;
+    const double du2 = (dd * sk + (y - y2) * dsk) / sigma;
+    const double dAdx = -K * dsk / (sk * sk) * (erf(u2) - erf(u1)) +
+                        K / sk * (2.0 / sqrt(M_PI)) * (g2 * du2 - g1 * du1);
+    by = B0y - dAdx;
+  };
 
   if (restart1 == 0) {
 
@@ -1970,7 +2118,7 @@ void EMfields3D::initGEMDipoleLikeTailNoPert() {
       cout << "-------------------------" << endl;
     }
 
-#pragma omp parallel for collapse(3) private(delta_x1x2, r1, r2)
+#pragma omp parallel for collapse(3)
     for (int i = 0; i < nxn; i++)
       for (int j = 0; j < nyn; j++)
         for (int k = 0; k < nzn; k++) {
@@ -1989,73 +2137,18 @@ void EMfields3D::initGEMDipoleLikeTailNoPert() {
           Ex[i][j][k] = 0.0;
           Ey[i][j][k] = 0.0;
           Ez[i][j][k] = 0.0;
-          // Magnetic field
-
-          delta_x1x2 = x1 - x2 *
-                                (sin(((grid->getXN(i, j, k) - Lx / 2) / Lx *
-                                      180.0 / stretch_curve) *
-                                     (0.25 * FourPI) / 180.0)) *
-                                (sin(((grid->getXN(i, j, k) - Lx / 2) / Lx *
-                                      180.0 / stretch_curve) *
-                                     (0.25 * FourPI) / 180.0));
-
-          r1 = (grid->getYN(i, j, k) - (x1 + delta_x1x2)) *
-               (1.0 - skew_parameter *
-                          (sin(((grid->getXN(i, j, k) - Lx / 2) / Lx * 180.0) *
-                               (0.25 * FourPI) / 180.0)) *
-                          (sin(((grid->getXN(i, j, k) - Lx / 2) / Lx * 180.0) *
-                               (0.25 * FourPI) / 180.0)));
-          r2 = (grid->getYN(i, j, k) - ((Lx - x1) - delta_x1x2)) *
-               (1.0 - skew_parameter *
-                          (sin(((grid->getXN(i, j, k) - Lx / 2) / Lx * 180.0) *
-                               (0.25 * FourPI) / 180.0)) *
-                          (sin(((grid->getXN(i, j, k) - Lx / 2) / Lx * 180.0) *
-                               (0.25 * FourPI) / 180.0)));
-
-          // tail-like field topology
-          Bxn[i][j][k] = B0x * 0.5 *
-                         (-exp(-((r1) * (r1)) / (sigma * sigma)) +
-                          exp(-((r2) * (r2)) / (sigma * sigma)));
-
-          Byn[i][j][k] = B0y;
-          // guide field
+          // tail-like field topology, guide field
+          field(grid->getXN(i, j, k), grid->getYN(i, j, k), Bxn[i][j][k],
+                Byn[i][j][k]);
           Bzn[i][j][k] = B0z;
         }
     // initialize B on centers
-#pragma omp parallel for collapse(3) private(delta_x1x2, r1, r2)
+#pragma omp parallel for collapse(3)
     for (int i = 0; i < nxc; i++)
       for (int j = 0; j < nyc; j++)
         for (int k = 0; k < nzc; k++) {
-          // Magnetic field
-
-          delta_x1x2 = x1 - x2 *
-                                (sin(((grid->getXC(i, j, k) - Lx / 2) / Lx *
-                                      180.0 / stretch_curve) *
-                                     (0.25 * FourPI) / 180.0)) *
-                                (sin(((grid->getXC(i, j, k) - Lx / 2) / Lx *
-                                      180.0 / stretch_curve) *
-                                     (0.25 * FourPI) / 180.0));
-
-          r1 = (grid->getYC(i, j, k) - (x1 + delta_x1x2)) *
-               (1.0 - skew_parameter *
-                          (sin(((grid->getXC(i, j, k) - Lx / 2) / Lx * 180.0) *
-                               (0.25 * FourPI) / 180.0)) *
-                          (sin(((grid->getXC(i, j, k) - Lx / 2) / Lx * 180.0) *
-                               (0.25 * FourPI) / 180.0)));
-          r2 = (grid->getYC(i, j, k) - ((Lx - x1) - delta_x1x2)) *
-               (1.0 - skew_parameter *
-                          (sin(((grid->getXC(i, j, k) - Lx / 2) / Lx * 180.0) *
-                               (0.25 * FourPI) / 180.0)) *
-                          (sin(((grid->getXC(i, j, k) - Lx / 2) / Lx * 180.0) *
-                               (0.25 * FourPI) / 180.0)));
-
-          // tail-like field topology
-          Bxc[i][j][k] = B0x * 0.5 *
-                         (-exp(-((r1) * (r1)) / (sigma * sigma)) +
-                          exp(-((r2) * (r2)) / (sigma * sigma)));
-
-          Byc[i][j][k] = B0y;
-          // guide field
+          field(grid->getXC(i, j, k), grid->getYC(i, j, k), Bxc[i][j][k],
+                Byc[i][j][k]);
           Bzc[i][j][k] = B0z;
         }
     for (int is = 0; is < ns; is++)
@@ -2348,7 +2441,7 @@ void EMfields3D::initForceFree() {
 
     // J = (c/4pi) curl(B) of the sheet and its perturbation, split among the
     // species by u0/v0/w0 as in GEMHarris with currentFromAmpere = 1
-    initSpeciesCurrents(true, false);
+    initSpeciesCurrents(true);
   } else {
     init(); // use the fields from restart file
   }

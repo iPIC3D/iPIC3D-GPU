@@ -2260,8 +2260,8 @@ void c_Solver::processPlanetParticles() {
   // cutoff.
   const int reflectionType = col->getPlanetReflectionType();
   if (reflectionType == 1) {
-    // Diffuse reflection: uniform direction on the outward hemisphere,
-    // speed kept.
+    // Diffuse reflection: Lambert (cosine-law) direction on the outward
+    // hemisphere, speed kept.
     planetDiffuseCompactKernel<<<getGridSize(totalElecPlanet,
                                              DEFAULT_BLOCK_SIZE),
                                  DEFAULT_BLOCK_SIZE, 0, planetStream>>>(

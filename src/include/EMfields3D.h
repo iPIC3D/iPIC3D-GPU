@@ -1044,10 +1044,8 @@ private: // initialization helpers
    *  f_s,x = sign(q_s) u0_s / sum_r sign(q_r) u0_r (v0 for y, w0 for z), so
    *  the drift J_s / (sign(q_s) rho_s) of maxwellianFromSpeciesCurrents is
    *  u0_s J_x / (N_u rho_s), N_u = sum_r sign(q_r) u0_r; a component whose
-   *  weights sum to 0 gets no current. With varyingThermal, also set the
-   *  diagonal pressures p_s,xx = J_s,x^2 / rho_s + uth_s^2 rho_s (yy, zz
-   *  alike), read by maxwellianFromSpeciesCurrents for the thermal speed. */
-  void initSpeciesCurrents(bool fromAmpere, bool varyingThermal);
+   *  weights sum to 0 gets no current (ForceFree). */
+  void initSpeciesCurrents(bool fromAmpere);
 
 private: // ideal drift field
   /** E0 = -(u0 x B0) / c: the ideal electric field of the plasma drifting at
@@ -1229,8 +1227,8 @@ private:
   array3_double Byn;
   array3_double Bzn;
 
-  /*! temporary node arrays of the initializations (initSpeciesCurrents for
-   * GEMHarris and ForceFree, initNullPoints) */
+  /*! temporary node arrays of the initializations (initSpeciesCurrents,
+   * initGEMHarris, initNullPoints) */
   array3_double tempXN;
   array3_double tempYN;
   array3_double tempZN;

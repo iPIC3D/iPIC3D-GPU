@@ -206,6 +206,18 @@ def print_report(cfg: Input) -> None:
     if (poisson == "yes" or divb == "yes") and not 0.0 < div_cleaning_tol < 1.0:
         raise SystemExit(f"DivCleaningTol must be in (0, 1), not {cxx(div_cleaning_tol)}")
     solver_type = cfg.string("SolverType", "GMRES")
+    # same rejections as Collective::ReadInput: the Harris pressure law on the
+    # perturbed flux function; the GEM perturbation current, which fills the
+    # box, cannot be carried by the sheet electrons
+    ampere = cfg.integer("currentFromAmpere", 0)
+    if cfg.integer("spatiallyVaryingThermal", 0) and not (
+            case == "GEMHarris" and ampere and b0x != 0.0 and b0y == 0.0):
+        raise SystemExit("spatiallyVaryingThermal = 1 needs Case = GEMHarris, "
+                         "currentFromAmpere = 1, B0x != 0 and B0y = 0")
+    if case == "GEMHarris" and ampere and cfg.real("pertGEM", 0.0) != 0.0:
+        raise SystemExit("pertGEM needs currentFromAmpere = 0: its current fills "
+                         "the box, where the sheet electrons that would carry it "
+                         "have no density")
 
     c = cfg.real("c", 1.0)
     if not c > 0.0:

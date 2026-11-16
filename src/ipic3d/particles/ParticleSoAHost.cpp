@@ -16,6 +16,8 @@
 #include "ompdefs.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <random>
@@ -131,17 +133,42 @@ uint64_t ParticleSoAHost::loadingSeed(int i, int j, int k) const {
   const uint64_t gi = grid_->getCellOffsetX() + i - 1,
                  gj = grid_->getCellOffsetY() + j - 1,
                  gk = grid_->getCellOffsetZ() + k - 1;
-  uint64_t z = (((uint64_t)speciesNumber_ * col_->getNxc() + gi) *
-                    col_->getNyc() +
-                gj) *
-                   col_->getNzc() +
-               gk;
+  uint64_t z =
+      (((uint64_t)speciesNumber_ * col_->getNxc() + gi) * col_->getNyc() + gj) *
+          col_->getNzc() +
+      gk;
   // SplitMix64 (Steele, Lea & Flood 2014): a bijection that spreads
   // neighbouring keys over all 64 bits
   z += 0x9e3779b97f4a7c15ULL;
   z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
   z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
   return z ^ (z >> 31);
+}
+
+void ParticleSoAHost::requireSubluminalDrift(double maxDrift,
+                                             const double* pos) const {
+  int rank;
+  MPI_Comm_rank(mpiComm_, &rank);
+  struct {
+    double speed;
+    int rank;
+  } local{maxDrift, rank}, global;
+  MPI_Allreduce(&local, &global, 1, MPI_DOUBLE_INT, MPI_MAXLOC, mpiComm_);
+  if (global.speed < speedOfLight_)
+    return;
+  if (rank == global.rank) {
+    if (pos)
+      printf("ERROR: species %d: the initial state needs a drift speed of "
+             "%g c at (%g, %g, %g); a drift must stay below c\n",
+             speciesNumber_, maxDrift / speedOfLight_, pos[0], pos[1], pos[2]);
+    else
+      printf("ERROR: species %d: the drift (u0, v0, w0) has the speed %g c; "
+             "a drift must stay below c\n",
+             speciesNumber_, maxDrift / speedOfLight_);
+    fflush(stdout);
+  }
+  MPI_Barrier(mpiComm_);
+  MPIdata::exit(1);
 }
 
 /**
@@ -151,6 +178,7 @@ uint64_t ParticleSoAHost::loadingSeed(int i, int j, int k) const {
  */
 void ParticleSoAHost::maxwellian(Field* EMf) {
   assert_eq(getNOP(), 0);
+  requireSubluminalDrift();
 
   const int nxr = numCellsX_ - 2;
   const int nyr = numCellsY_ - 2;
@@ -238,9 +266,10 @@ inline double trilinear(const double c[2][2][2], double fx, double fy,
  *
  * The drift of each particle is J_s / (sign(q) rho_s), with rho_s and J_s
  * interpolated trilinearly from the 8 nodes of its cell to its position.
- * With varyingThermal, the thermal speed is sqrt(p_ii,s / rho_s - drift_i^2)
- * with p_ii,s interpolated the same way (the ECsim reference-state
- * initialisation); otherwise it is the species uth/vth/wth.
+ * With varyingThermal, the thermal speed is sqrt(p_ii,s / rho_s), with the
+ * thermal pressure p_ii,s = rho_s vth_i^2 interpolated the same way;
+ * otherwise it is the species uth/vth/wth.  The run stops when a drift
+ * reaches c (requireSubluminalDrift).
  *
  * @param EMf Field object providing the species density, current and, with
  * varyingThermal, pressure.
@@ -274,9 +303,11 @@ void ParticleSoAHost::maxwellianFromSpeciesCurrents(Field* EMf,
 
   prepareSoAForNOP(nop);
 
+  double maxDrift = 0.0, maxDriftPos[3] = {0.0, 0.0, 0.0};
 #pragma omp parallel
   {
     std::mt19937_64 rng; // seeded per cell (loadingSeed)
+    double threadMax = 0.0, threadPos[3] = {0.0, 0.0, 0.0};
 
 #pragma omp for collapse(3) schedule(static)
     for (int i = 1; i < numCellsX_ - 1; i++)
@@ -312,26 +343,22 @@ void ParticleSoAHost::maxwellianFromSpeciesCurrents(Field* EMf,
                 const double fz = (kk + .5) / numPclPerCellZ_;
                 const double rhoP = trilinear(cRho, fx, fy, fz);
                 const double signedRho = chargeSign * rhoP;
-                const double driftX = trilinear(cJx, fx, fy, fz) / signedRho;
-                const double driftY = trilinear(cJy, fx, fy, fz) / signedRho;
-                const double driftZ = trilinear(cJz, fx, fy, fz) / signedRho;
+                // no current, no drift (also at rho = 0: an empty species);
+                // a current at rho = 0 is an infinite drift, which
+                // requireSubluminalDrift refuses
+                const auto driftOf = [signedRho](double j) {
+                  return j == 0.0 ? 0.0 : j / signedRho;
+                };
+                const double driftX = driftOf(trilinear(cJx, fx, fy, fz));
+                const double driftY = driftOf(trilinear(cJy, fx, fy, fz));
+                const double driftZ = driftOf(trilinear(cJz, fx, fy, fz));
 
                 double vthX = thermalVelocityX_, vthY = thermalVelocityY_,
                        vthZ = thermalVelocityZ_;
-                if (varyingThermal) {
-                  const double vthX2 =
-                      trilinear(cPxx, fx, fy, fz) / rhoP - driftX * driftX;
-                  const double vthY2 =
-                      trilinear(cPyy, fx, fy, fz) / rhoP - driftY * driftY;
-                  const double vthZ2 =
-                      trilinear(cPzz, fx, fy, fz) / rhoP - driftZ * driftZ;
-                  // Keep uth/vth/wth where round-off makes the square negative
-                  if (vthX2 > 0.0)
-                    vthX = sqrt(vthX2);
-                  if (vthY2 > 0.0)
-                    vthY = sqrt(vthY2);
-                  if (vthZ2 > 0.0)
-                    vthZ = sqrt(vthZ2);
+                if (varyingThermal && rhoP > 0.0) { // p**sn = rho vth^2
+                  vthX = sqrt(trilinear(cPxx, fx, fy, fz) / rhoP);
+                  vthY = sqrt(trilinear(cPyy, fx, fy, fz) / rhoP);
+                  vthZ = sqrt(trilinear(cPzz, fx, fy, fz) / rhoP);
                 }
 
                 double velX, velY, velZ;
@@ -351,9 +378,24 @@ void ParticleSoAHost::maxwellianFromSpeciesCurrents(Field* EMf,
                 if (trackParticleID_)
                   id[idx] =
                       particleIDGenerator_.idFromSequence(baseSequence + idx);
+
+                const double drift =
+                    sqrt(driftX * driftX + driftY * driftY + driftZ * driftZ);
+                if (!(drift <= threadMax)) { // a NaN counts as infinite
+                  threadMax = std::isnan(drift) ? INFINITY : drift;
+                  threadPos[0] = x[idx];
+                  threadPos[1] = y[idx];
+                  threadPos[2] = z[idx];
+                }
               }
         }
+#pragma omp critical
+    if (threadMax > maxDrift) {
+      maxDrift = threadMax;
+      std::copy(threadPos, threadPos + 3, maxDriftPos);
+    }
   }
+  requireSubluminalDrift(maxDrift, maxDriftPos);
 }
 
 /**
@@ -363,6 +405,7 @@ void ParticleSoAHost::maxwellianFromSpeciesCurrents(Field* EMf,
  */
 void ParticleSoAHost::maxwellianDoubleHarris(Field* EMf) {
   assert_eq(getNOP(), 0);
+  requireSubluminalDrift();
 
   const int nxr = numCellsX_ - 2;
   const int nyr = numCellsY_ - 2;
@@ -408,17 +451,14 @@ void ParticleSoAHost::maxwellianDoubleHarris(Field* EMf) {
                     (kk + .5) * (gridSpacingZ_ / numPclPerCellZ_) +
                     grid_->getZN(i, j, k);
 
+                // the upper sheet carries the opposite current
+                const double driftZ =
+                    posY > domainYUpper ? -driftVelocityZ_ : driftVelocityZ_;
                 double velX, velY, velZ;
-                if (posY > domainYUpper)
-                  sample_maxwellian(velX, velY, velZ, thermalVelocityX_,
-                                    thermalVelocityY_, thermalVelocityZ_,
-                                    driftVelocityX_, driftVelocityY_,
-                                    driftVelocityZ_, rng);
-                else
-                  sample_maxwellian(velX, velY, velZ, thermalVelocityX_,
-                                    thermalVelocityY_, thermalVelocityZ_,
-                                    driftVelocityX_, driftVelocityY_,
-                                    driftVelocityZ_, rng);
+                sample_maxwellian(velX, velY, velZ, thermalVelocityX_,
+                                  thermalVelocityY_, thermalVelocityZ_,
+                                  driftVelocityX_, driftVelocityY_, driftZ,
+                                  rng);
 
                 u[idx] = velX;
                 v[idx] = velY;
@@ -442,6 +482,7 @@ void ParticleSoAHost::maxwellianDoubleHarris(Field* EMf) {
  */
 void ParticleSoAHost::maxwellianHumpPerturbation(Field* EMf) {
   assert_eq(getNOP(), 0);
+  requireSubluminalDrift();
 
   const int nxr = numCellsX_ - 2;
   const int nyr = numCellsY_ - 2;

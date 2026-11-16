@@ -328,8 +328,9 @@ public:
    * rho_s interpolated from the cell's nodes to each particle position.
    *
    * @param EMf Field object used to sample local current-driven drifts.
-   * @param varyingThermal Take the thermal speed sqrt(p_ii,s / rho_s -
-   * drift_i^2) from the species pressure instead of uth/vth/wth.
+   * @param varyingThermal Take the thermal speed sqrt(p_ii,s / rho_s) from
+   * the thermal pressure p_ii,s = rho_s vth_i^2 of the field initialisation
+   * (GEMHarris spatiallyVaryingThermal) instead of uth/vth/wth.
    */
   void maxwellianFromSpeciesCurrents(Field* EMf, bool varyingThermal = false);
   /**
@@ -543,6 +544,17 @@ private:
    *  particles depend neither on the domain decomposition nor on the number
    *  of OpenMP threads. */
   uint64_t loadingSeed(int i, int j, int k) const;
+
+  /** Stops the run on every rank when the largest drift speed loaded on any
+   *  rank reaches c: maxDrift is this rank's, at pos (nullptr: a uniform
+   *  drift). */
+  void requireSubluminalDrift(double maxDrift,
+                              const double* pos = nullptr) const;
+  /** requireSubluminalDrift for the uniform drift (u0, v0, w0). */
+  void requireSubluminalDrift() const {
+    requireSubluminalDrift(
+        std::hypot(driftVelocityX_, driftVelocityY_, driftVelocityZ_));
+  }
 
   // ===== Species parameters (extracted from Collective in constructor) =====
   int numParticlesPerCell_ = 0;   // npcel

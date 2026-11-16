@@ -117,10 +117,12 @@ __device__ __forceinline__ void sampleFieldsAtPosition(
 }
 
 /**
- * @brief Compute the predictor-corrector convergence metric.
+ * @brief Predictor-corrector convergence test.
  *
- * The return value is the relative squared change between two successive
- * average-velocity estimates.
+ * The relative squared change between two successive average-velocity
+ * estimates, |v - v_old|^2 / |v_old|^2, is compared with PC_err_2 without the
+ * division.  As with the division, a NaN stops the iteration, and so does a
+ * zero change of a zero velocity.
  *
  * @param uavg Current averaged x velocity.
  * @param vavg Current averaged y velocity.
@@ -128,15 +130,16 @@ __device__ __forceinline__ void sampleFieldsAtPosition(
  * @param uavg_old Previous averaged x velocity.
  * @param vavg_old Previous averaged y velocity.
  * @param wavg_old Previous averaged z velocity.
- * @return Relative squared change between successive averaged velocities.
+ * @return True while the relative squared change exceeds PC_err_2.
  */
-__device__ __forceinline__ commonType
-computePCError(commonType uavg, commonType vavg, commonType wavg,
+__device__ __forceinline__ bool
+pcNotConverged(commonType uavg, commonType vavg, commonType wavg,
                commonType uavg_old, commonType vavg_old, commonType wavg_old) {
-  return ((uavg_old - uavg) * (uavg_old - uavg) +
-          (vavg_old - vavg) * (vavg_old - vavg) +
-          (wavg_old - wavg) * (wavg_old - wavg)) /
-         (uavg_old * uavg_old + vavg_old * vavg_old + wavg_old * wavg_old);
+  const commonType change2 = (uavg_old - uavg) * (uavg_old - uavg) +
+                             (vavg_old - vavg) * (vavg_old - vavg) +
+                             (wavg_old - wavg) * (wavg_old - wavg);
+  return change2 > PC_err_2 * (uavg_old * uavg_old + vavg_old * vavg_old +
+                               wavg_old * wavg_old);
 }
 
 // ======= End inline mover helpers =======
@@ -147,6 +150,9 @@ computePCError(commonType uavg, commonType vavg, commonType wavg,
  * @param xpcl Particle x position after the mover.
  * @param ypcl Particle y position after the mover.
  * @param zpcl Particle z position after the mover.
+ * @param xstart Particle x position before the mover.
+ * @param ystart Particle y position before the mover.
+ * @param zstart Particle z position before the mover.
  * @param pclsArray Device-side particle SoA container.
  * @param pidx Particle index in the species SoA buffer.
  * @param moverParam Device-side mover parameter bundle.
@@ -156,7 +162,8 @@ computePCError(commonType uavg, commonType vavg, commonType wavg,
  * compaction.
  */
 __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl,
-                                      commonType zpcl,
+                                      commonType zpcl, commonType xstart,
+                                      commonType ystart, commonType zstart,
                                       particleArrayCUDA* pclsArray,
                                       uint32_t pidx, moverParameter* moverParam,
                                       departureArrayType* departureArray,
@@ -175,9 +182,9 @@ __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl,
  * @param fieldForPcls Packed mover field buffer.
  * @param grid Device-side grid descriptor.
  */
-__global__ void moverKernel(moverParameter* moverParam,
-                            cudaTypeArray1<cudaFieldType> fieldForPcls,
-                            grid3DCUDA* grid) {
+__global__ void MOVER_LAUNCH_BOUNDS
+moverKernel(moverParameter* moverParam,
+            cudaTypeArray1<cudaFieldType> fieldForPcls, grid3DCUDA* grid) {
   uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
 
   auto pclsArray = moverParam->pclsArray;
@@ -188,12 +195,15 @@ __global__ void moverKernel(moverParameter* moverParam,
   // q dt / (2 m) E, the rotation vector q dt / (2 m c) B
   const commonType dto2 = .5 * moverParam->dt;
   const commonType qdto2m = moverParam->qom * dto2;
-  const commonType qdto2mc = qdto2m / moverParam->c;
+  const commonType qdto2mc = qdto2m * moverParam->invc;
 
   // Early exit for particles already deleted (e.g. during merging)
   if (moverParam->departureArray->getArray()[pidx].dest != 0) {
-    prepareDepartureArray(pclsArray->getX()[pidx], pclsArray->getY()[pidx],
-                          pclsArray->getZ()[pidx], pclsArray, pidx, moverParam,
+    // not moved: the position is both start and end
+    const commonType x = pclsArray->getX()[pidx];
+    const commonType y = pclsArray->getY()[pidx];
+    const commonType z = pclsArray->getZ()[pidx];
+    prepareDepartureArray(x, y, z, x, y, z, pclsArray, pidx, moverParam,
                           moverParam->departureArray, grid,
                           moverParam->hashedSumArray);
     return;
@@ -215,10 +225,10 @@ __global__ void moverKernel(moverParameter* moverParam,
   commonType wavg_old = worig;
 
   int innter = 0;
-  cudaTypeDouble currErr = PC_err_2 + 1.; // initialize to a larger value
+  bool notConverged = true;
 
   // calculate the average velocity iteratively
-  while (currErr > PC_err_2 && innter < moverParam->NiterMover) {
+  while (notConverged && innter < moverParam->NiterMover) {
 
     // sample E and B field components at current average position
     commonType weights[8];
@@ -255,7 +265,8 @@ __global__ void moverKernel(moverParameter* moverParam,
     zavg = zorig + wavg * dto2;
 
     innter++;
-    currErr = computePCError(uavg, vavg, wavg, uavg_old, vavg_old, wavg_old);
+    notConverged =
+        pcNotConverged(uavg, vavg, wavg, uavg_old, vavg_old, wavg_old);
     // capture the new velocity for the next iteration
     uavg_old = uavg;
     vavg_old = vavg;
@@ -272,7 +283,7 @@ __global__ void moverKernel(moverParameter* moverParam,
   commonType wfinal = 2.0 * wavg - worig;
 
   // Cap velocity to prevent superluminal particles.
-  // The non-relativistic Boris pusher has no intrinsic speed-of-light limit,
+  // The non-relativistic implicit mover has no intrinsic speed-of-light limit,
   // so extreme E fields can produce |v| >= c.
   const commonType vmax = kVelocityCapOverC * moverParam->c;
   if (capVelocityOrDelete(ufinal, vfinal, wfinal, vmax * vmax, moverParam,
@@ -288,8 +299,8 @@ __global__ void moverKernel(moverParameter* moverParam,
   pclsArray->getW()[pidx] = wfinal;
 
   // prepare the departure array
-  prepareDepartureArray(xfinal, yfinal, zfinal, pclsArray, pidx, moverParam,
-                        moverParam->departureArray, grid,
+  prepareDepartureArray(xfinal, yfinal, zfinal, xorig, yorig, zorig, pclsArray,
+                        pidx, moverParam, moverParam->departureArray, grid,
                         moverParam->hashedSumArray);
 }
 
@@ -305,9 +316,9 @@ __global__ void moverKernel(moverParameter* moverParam,
  * @param fieldForPcls Packed mover field buffer.
  * @param grid Device-side grid descriptor.
  */
-__global__ void moverSubcyclesKernel(moverParameter* moverParam,
-                                     cudaTypeArray1<cudaFieldType> fieldForPcls,
-                                     grid3DCUDA* grid) {
+__global__ void MOVER_LAUNCH_BOUNDS moverSubcyclesKernel(
+    moverParameter* moverParam, cudaTypeArray1<cudaFieldType> fieldForPcls,
+    grid3DCUDA* grid) {
   uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
 
   auto pclsArray = moverParam->pclsArray;
@@ -316,8 +327,11 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
 
   // Early exit for particles already deleted (e.g. during merging)
   if (moverParam->departureArray->getArray()[pidx].dest != 0) {
-    prepareDepartureArray(pclsArray->getX()[pidx], pclsArray->getY()[pidx],
-                          pclsArray->getZ()[pidx], pclsArray, pidx, moverParam,
+    // not moved: the position is both start and end
+    const commonType x = pclsArray->getX()[pidx];
+    const commonType y = pclsArray->getY()[pidx];
+    const commonType z = pclsArray->getZ()[pidx];
+    prepareDepartureArray(x, y, z, x, y, z, pclsArray, pidx, moverParam,
                           moverParam->departureArray, grid,
                           moverParam->hashedSumArray);
     return;
@@ -328,7 +342,7 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
   // (gamma = 1 / sqrt(1 - beta^2), momentum u = gamma beta), and positions
   // advance with c beta.
   const commonType c = moverParam->c;
-  const commonType invc = 1.0 / c;
+  const commonType invc = moverParam->invc;
   commonType cur_x = pclsArray->getX()[pidx];
   commonType cur_y = pclsArray->getY()[pidx];
   commonType cur_z = pclsArray->getZ()[pidx];
@@ -336,31 +350,33 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
   commonType cur_v = pclsArray->getV()[pidx] * invc;
   commonType cur_w = pclsArray->getW()[pidx] * invc;
 
-  // first step: evaluate local B magnitude
+  // The fields at the start position: |B| there sets the number of
+  // subcycles, and the first iteration of the first subcycle samples there
   commonType weights[8];
   int cx, cy, cz;
   commonType sampled_field[6];
-  sampleFieldsAtPosition<3>(cur_x, cur_y, cur_z, grid, fieldForPcls, weights,
+  sampleFieldsAtPosition<6>(cur_x, cur_y, cur_z, grid, fieldForPcls, weights,
                             cx, cy, cz, sampled_field);
+  bool fieldsAtAvg = true; // sampled_field holds the fields at x/y/zavg
 
   // evaluate local B field magnitude
   const commonType B_mag = sqrt(sampled_field[0] * sampled_field[0] +
                                 sampled_field[1] * sampled_field[1] +
                                 sampled_field[2] * sampled_field[2]);
 
-  // evaluate dt_substep and number of sub cycles: at most pi/4 of gyration
-  // per subcycle.  int() of a NaN or of a value past INT_MAX is undefined:
-  // a NaN |B| takes one subcycle (its NaN result deletes the particle after
-  // the push), a huge one kMaxSubcycles.
-  commonType dt_sub = M_PI * c / (4 * fabs(moverParam->qom) * B_mag);
-  const commonType nsub = moverParam->dt / dt_sub;
+  // number of sub cycles: at most pi/4 of gyration per subcycle, so
+  // nsub = dt |q/m| |B| / (c pi/4).  int() of a NaN or of a value past
+  // INT_MAX is undefined: a NaN |B| takes one subcycle (its NaN result
+  // deletes the particle after the push), a huge one kMaxSubcycles.
+  const commonType nsub =
+      (4 / M_PI) * fabs(moverParam->qom) * moverParam->dt * invc * B_mag;
   const int sub_cycles = !(nsub >= 0)               ? 1
                          : nsub < kMaxSubcycles - 1 ? (int)nsub + 1
                                                     : kMaxSubcycles;
-  dt_sub = moverParam->dt / (commonType)(sub_cycles);
+  const commonType dt_sub = moverParam->dt / (commonType)(sub_cycles);
 
   const commonType dto2_sub = .5 * dt_sub;
-  const commonType qdto2mc_sub = moverParam->qom * dto2_sub / c;
+  const commonType qdto2mc_sub = moverParam->qom * dto2_sub * invc;
   // position steps for a velocity in units of c
   const commonType cdto2_sub = c * dto2_sub;
   const commonType cdt_sub = c * dt_sub;
@@ -368,9 +384,9 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
   // Safety: check initial velocity before entering subcycle loop.
   // If beta² >= 1 or NaN (e.g. from MPI injection or previous-cycle noise),
   // gamma0 = 1/sqrt(1-beta²) would produce NaN, cascading through the mover.
-  // After subcycle 0, the velocity cap (S2) at the end of each subcycle
-  // guarantees beta² < kVelocityCapOverC² < 1, so this check is only needed
-  // once.
+  // After subcycle 0, the velocity cap at the end of each subcycle keeps
+  // beta² at kVelocityCapOverC² or below (to round-off), well below 1, so
+  // this check is only needed once.
   {
     const commonType v2_init = cur_u * cur_u + cur_v * cur_v + cur_w * cur_w;
     if (!(v2_init < 1.0)) {
@@ -396,19 +412,21 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
     commonType wavg_old = worig;
 
     const commonType vorig_sq = uorig * uorig + vorig * vorig + worig * worig;
-    const commonType gamma0 = 1.0 / (sqrt(1.0 - vorig_sq));
-    commonType gamma1;
+    const commonType gamma0 = rsqrt(1.0 - vorig_sq);
+    commonType invGamma1; // 1 / gamma~
 
     int innter = 0;
-    cudaTypeDouble currErr = PC_err_2 + 1.; // initialize to a larger value
+    bool notConverged = true;
 
     // calculate the average velocity iteratively - predictor corrector
     // uses dt_subcycle
-    while (currErr > PC_err_2 && innter < moverParam->NiterMover) {
+    while (notConverged && innter < moverParam->NiterMover) {
 
       // sample E and B field components at current average position
-      sampleFieldsAtPosition<6>(xavg, yavg, zavg, grid, fieldForPcls, weights,
-                                cx, cy, cz, sampled_field);
+      if (!fieldsAtAvg)
+        sampleFieldsAtPosition<6>(xavg, yavg, zavg, grid, fieldForPcls, weights,
+                                  cx, cy, cz, sampled_field);
+      fieldsAtAvg = false;
 
       const commonType Bxl = sampled_field[0];
       const commonType Byl = sampled_field[1];
@@ -421,17 +439,17 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
       const commonType ut = uorig * gamma0 + qdto2mc_sub * Exl;
       const commonType vt = vorig * gamma0 + qdto2mc_sub * Eyl;
       const commonType wt = worig * gamma0 + qdto2mc_sub * Ezl;
-      gamma1 = sqrt(1.0 + ut * ut + vt * vt + wt * wt);
+      invGamma1 = rsqrt(1.0 + ut * ut + vt * vt + wt * wt);
 
       // rotation vector w / gamma~ with w = (q h / 2 m c) B (Peng et al.
       // 2015, Eq. 2.8): the relativistic gyrofrequency is Omega / gamma
-      const commonType qdto2mcg = qdto2mc_sub / gamma1;
+      const commonType qdto2mcg = qdto2mc_sub * invGamma1;
       const commonType Omx = qdto2mcg * Bxl;
       const commonType Omy = qdto2mcg * Byl;
       const commonType Omz = qdto2mcg * Bzl;
       const commonType omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
       // beta_bar = alpha(w / gamma~) u~ / gamma~
-      const commonType denom = 1.0 / ((1.0 + omsq) * gamma1);
+      const commonType denom = invGamma1 / (1.0 + omsq);
 
       const commonType udotOm = ut * Omx + vt * Omy + wt * Omz;
       // solve the velocity equation
@@ -443,7 +461,8 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
       yavg = yorig + vavg * cdto2_sub;
       zavg = zorig + wavg * cdto2_sub;
 
-      currErr = computePCError(uavg, vavg, wavg, uavg_old, vavg_old, wavg_old);
+      notConverged =
+          pcNotConverged(uavg, vavg, wavg, uavg_old, vavg_old, wavg_old);
       // capture the new velocity for the next iteration
       uavg_old = uavg;
       vavg_old = vavg;
@@ -478,19 +497,24 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
       // cfc < 0); only round-off with |beta_bar| -> 1 lands here.  Estimate
       // the momentum u(m+1) = 2 gamma~ beta_bar - u(m) and store it as a
       // velocity, beta = u / sqrt(1 + u^2), which keeps |beta| < 1.
-      const commonType un = (2.0 * gamma1) * uavg - ut;
-      const commonType vn = (2.0 * gamma1) * vavg - vt;
-      const commonType wn = (2.0 * gamma1) * wavg - wt;
-      const commonType invGammaNew =
-          1.0 / sqrt(1.0 + un * un + vn * vn + wn * wn);
+      const commonType twoGamma1 = 2.0 / invGamma1;
+      const commonType un = twoGamma1 * uavg - ut;
+      const commonType vn = twoGamma1 * vavg - vt;
+      const commonType wn = twoGamma1 * wavg - wt;
+      const commonType invGammaNew = rsqrt(1.0 + un * un + vn * vn + wn * wn);
       cur_u = un * invGammaNew;
       cur_v = vn * invGammaNew;
       cur_w = wn * invGammaNew;
     } else {
-      const commonType gamma1_rel = (-cfb + sqrt(delta_rel)) / 2.0 / cfa;
-      cur_u = (1.0 + gamma0 / gamma1_rel) * uavg - ut / gamma1_rel;
-      cur_v = (1.0 + gamma0 / gamma1_rel) * vavg - vt / gamma1_rel;
-      cur_w = (1.0 + gamma0 / gamma1_rel) * wavg - wt / gamma1_rel;
+      // 1 / gamma(m+1), gamma(m+1) = (-cfb + sqrt(delta_rel)) / (2 cfa) the
+      // positive root of cfa g^2 + cfb g + cfc = 0.  Then beta(m+1) =
+      // u(m+1) / gamma(m+1) with u(m+1) = (gamma(m) + gamma(m+1)) beta_bar -
+      // u(m).
+      const commonType invGammaNew = (2.0 * cfa) / (sqrt(delta_rel) - cfb);
+      const commonType coef = 1.0 + gamma0 * invGammaNew;
+      cur_u = coef * uavg - ut * invGammaNew;
+      cur_v = coef * vavg - vt * invGammaNew;
+      cur_w = coef * wavg - wt * invGammaNew;
     }
 
     // Cap velocity to prevent superluminal particles.
@@ -502,6 +526,15 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
 
   } // end iteration over subcycles
 
+  // The open outflow faces need the position before the push, which the
+  // subcycles overwrote in registers; the SoA holds it until the write below.
+  commonType xstart = cur_x, ystart = cur_y, zstart = cur_z;
+  if (moverParam->doOpenBC) {
+    xstart = pclsArray->getX()[pidx];
+    ystart = pclsArray->getY()[pidx];
+    zstart = pclsArray->getZ()[pidx];
+  }
+
   // Write final state to SoA once (velocities back from units of c)
   pclsArray->getX()[pidx] = cur_x;
   pclsArray->getY()[pidx] = cur_y;
@@ -511,142 +544,12 @@ __global__ void moverSubcyclesKernel(moverParameter* moverParam,
   pclsArray->getW()[pidx] = cur_w * c;
 
   // prepare the departure array
-  prepareDepartureArray(cur_x, cur_y, cur_z, pclsArray, pidx, moverParam,
-                        moverParam->departureArray, grid,
+  prepareDepartureArray(cur_x, cur_y, cur_z, xstart, ystart, zstart, pclsArray,
+                        pidx, moverParam, moverParam->departureArray, grid,
                         moverParam->hashedSumArray);
 }
 
 // ======= Boundary classification helpers =======
-
-/**
- * @brief Apply open-boundary outflow logic and optionally append a translated
- * duplicate.
- *
- * When a particle crosses an open-boundary layer, the original particle can be
- * deleted while a translated duplicate is appended and immediately classified
- * for exchange on the opposite side.
- *
- * @param xpcl Particle x position after the mover.
- * @param ypcl Particle y position after the mover.
- * @param zpcl Particle z position after the mover.
- * @param pclsArray Device-side particle SoA container.
- * @param pidx Particle index in the species SoA buffer.
- * @param moverParam Device-side mover parameter bundle.
- * @param departureArray Device-side departure metadata array.
- * @param grid Device-side grid descriptor.
- * @param hashedSumArray Device-side hashed-sum buckets for departure
- * compaction.
- * @return Departure destination for the original particle, or 0 when this
- *         helper does not claim it.
- */
-__device__ uint32_t deleteAppendOpenBCOutflow(
-    commonType xpcl, commonType ypcl, commonType zpcl,
-    particleArrayCUDA* pclsArray, uint32_t pidx, moverParameter* moverParam,
-    departureArrayType* departureArray, grid3DCUDA* grid,
-    hashedSum* hashedSumArray) {
-
-  if (!moverParam->doOpenBC)
-    return 0;
-
-  auto& delBdry = moverParam->deleteBoundary;
-  auto& openBdry = moverParam->openBoundary;
-
-  const commonType pos[3] = {xpcl, ypcl, zpcl};
-
-  for (int side = 0; side < 6; side++) {
-
-    if (!moverParam->applyOpenBC[side])
-      continue;
-
-    const auto direction = side / 2; // x,y,z
-    const auto location = pos[direction];
-    const bool leftRight = side % 2; // 0: left, 1: right
-
-    // delete boundary
-    if ((leftRight == 0 && location < delBdry[side]) ||
-        (leftRight == 1 && location > delBdry[side])) {
-      // delete the particle
-      return departureArrayElementType::DELETE;
-    }
-
-    // open boundary
-    if ((leftRight == 0 && location < openBdry[side]) ||
-        (leftRight == 1 && location > openBdry[side])) {
-      // Read velocity and charge from SoA for particle duplication
-      const commonType vel[3] = {pclsArray->getU()[pidx],
-                                 pclsArray->getV()[pidx],
-                                 pclsArray->getW()[pidx]};
-      const commonType charge = pclsArray->getQ()[pidx];
-
-      // Compute new particle position
-      commonType newPos[3] = {pos[0], pos[1], pos[2]};
-      newPos[direction] += (leftRight == 0 ? -1 : 1) * openBdry[direction * 2];
-      newPos[0] += vel[0] * moverParam->dt;
-      newPos[1] += vel[1] * moverParam->dt;
-      newPos[2] += vel[2] * moverParam->dt;
-
-      // if the new particle is still in the domain
-      if (newPos[0] > delBdry[0] && newPos[0] < delBdry[1] &&
-          newPos[1] > delBdry[2] && newPos[1] < delBdry[3] &&
-          newPos[2] > delBdry[4] && newPos[2] < delBdry[5]) {
-        const uint32_t appendBase = pclsArray->getNOP();
-        const uint32_t capacity = pclsArray->getCapacity();
-        const uint32_t appendCapacity =
-            appendBase < capacity ? capacity - appendBase : 0u;
-        const uint32_t appendOffset =
-            atomicAdd(&moverParam->openBCAppendCounters.accepted, 1u);
-
-        if (appendOffset >= appendCapacity) {
-          // Keep the final accepted count equal to the dense initialized
-          // append prefix. The rejected ticket is necessarily outside that
-          // prefix, so rollback cannot make a valid slot available twice.
-          atomicSub(&moverParam->openBCAppendCounters.accepted, 1u);
-          atomicAdd(&moverParam->openBCAppendCounters.rejected, 1u);
-          return departureArrayElementType::DELETE;
-        }
-
-        const uint32_t index = appendBase + appendOffset;
-        departureArrayElementType element;
-        // Write new particle to SoA arrays
-        pclsArray->getX()[index] = newPos[0];
-        pclsArray->getY()[index] = newPos[1];
-        pclsArray->getZ()[index] = newPos[2];
-        pclsArray->getU()[index] = vel[0];
-        pclsArray->getV()[index] = vel[1];
-        pclsArray->getW()[index] = vel[2];
-        pclsArray->getQ()[index] = charge;
-        if (pclsArray->tracksParticleID())
-          pclsArray->getID()[index] =
-              moverParam->particleIDGenerator.generateID();
-
-        if (newPos[0] < grid->xStart) {
-          element.dest = departureArrayElementType::XLOW;
-        } else if (newPos[0] > grid->xEnd) {
-          element.dest = departureArrayElementType::XHIGH;
-        } else if (newPos[1] < grid->yStart) {
-          element.dest = departureArrayElementType::YLOW;
-        } else if (newPos[1] > grid->yEnd) {
-          element.dest = departureArrayElementType::YHIGH;
-        } else if (newPos[2] < grid->zStart) {
-          element.dest = departureArrayElementType::ZLOW;
-        } else if (newPos[2] > grid->zEnd) {
-          element.dest = departureArrayElementType::ZHIGH;
-        } else
-          element.dest = departureArrayElementType::STAY;
-
-        if (element.dest != 0) {
-          element.hashedId = hashedSumArray[element.dest - 1].add(index);
-        } else {
-          element.hashedId = 0;
-        }
-
-        departureArray->getArray()[index] = element;
-      }
-    }
-  }
-
-  return 0;
-}
 
 /**
  * @brief Delete particles that end the push in the repopulation layers, the 3
@@ -683,6 +586,187 @@ __device__ uint32_t deleteRepopulateInjection(commonType xpcl, commonType ypcl,
   } else {
     return 0;
   }
+}
+
+/**
+ * @brief Append a particle that enters through the open outflow faces, and
+ * classify it for the exchange.
+ *
+ * @param pos Position of the new particle.
+ * @param vel Velocity of the new particle.
+ * @param charge Charge of the new particle.
+ * @param pclsArray Device-side particle SoA container.
+ * @param moverParam Device-side mover parameter bundle.
+ * @param departureArray Device-side departure metadata array.
+ * @param grid Device-side grid descriptor.
+ * @param hashedSumArray Device-side hashed-sum buckets for departure
+ * compaction.
+ * @return False when the append tail is full (the run then aborts).
+ */
+__device__ bool appendOpenBCCopy(const commonType pos[3],
+                                 const commonType vel[3], commonType charge,
+                                 particleArrayCUDA* pclsArray,
+                                 moverParameter* moverParam,
+                                 departureArrayType* departureArray,
+                                 grid3DCUDA* grid, hashedSum* hashedSumArray) {
+  const uint32_t appendBase = pclsArray->getNOP();
+  const uint32_t capacity = pclsArray->getCapacity();
+  const uint32_t appendCapacity =
+      appendBase < capacity ? capacity - appendBase : 0u;
+  const uint32_t appendOffset =
+      atomicAdd(&moverParam->openBCAppendCounters.accepted, 1u);
+
+  if (appendOffset >= appendCapacity) {
+    // Keep the final accepted count equal to the dense initialized
+    // append prefix. The rejected ticket is necessarily outside that
+    // prefix, so rollback cannot make a valid slot available twice.
+    atomicSub(&moverParam->openBCAppendCounters.accepted, 1u);
+    atomicAdd(&moverParam->openBCAppendCounters.rejected, 1u);
+    return false;
+  }
+
+  const uint32_t index = appendBase + appendOffset;
+  departureArrayElementType element;
+  // Write new particle to SoA arrays
+  pclsArray->getX()[index] = pos[0];
+  pclsArray->getY()[index] = pos[1];
+  pclsArray->getZ()[index] = pos[2];
+  pclsArray->getU()[index] = vel[0];
+  pclsArray->getV()[index] = vel[1];
+  pclsArray->getW()[index] = vel[2];
+  pclsArray->getQ()[index] = charge;
+  if (pclsArray->tracksParticleID())
+    pclsArray->getID()[index] = moverParam->particleIDGenerator.generateID();
+
+  if (pos[0] < grid->xStart) {
+    element.dest = departureArrayElementType::XLOW;
+  } else if (pos[0] > grid->xEnd) {
+    element.dest = departureArrayElementType::XHIGH;
+  } else if (pos[1] < grid->yStart) {
+    element.dest = departureArrayElementType::YLOW;
+  } else if (pos[1] > grid->yEnd) {
+    element.dest = departureArrayElementType::YHIGH;
+  } else if (pos[2] < grid->zStart) {
+    element.dest = departureArrayElementType::ZLOW;
+  } else if (pos[2] > grid->zEnd) {
+    element.dest = departureArrayElementType::ZHIGH;
+  } else
+    element.dest = departureArrayElementType::STAY;
+
+  if (element.dest != 0) {
+    element.hashedId = hashedSumArray[element.dest - 1].add(index);
+  } else {
+    element.hashedId = 0;
+  }
+
+  departureArray->getArray()[index] = element;
+  return true;
+}
+
+/**
+ * @brief Delete particles beyond an open outflow face, and append the
+ * particles that enter through it.
+ *
+ * Beyond each open outflow face the plasma is the band of the last 3 cells
+ * shifted 3 cells outward (zero-gradient continuation), and its particles move
+ * as their sources in the band.  A particle that crosses the inner edge of the
+ * band inward during the push therefore re-enters through the face: a copy
+ * with its velocity and charge is appended at its end position shifted 3
+ * cells outward, and pushed from the next cycle.  Beyond an edge or a corner
+ * of the domain the plasma is the band shifted across each of its faces, so a
+ * particle that crosses the band edges of several faces gives one copy for
+ * each set of them.  A copy is kept if it lies inside the domain and outside
+ * the repopulation layers, which injectionKernel refills.
+ *
+ * @param xpcl Particle x position after the mover.
+ * @param ypcl Particle y position after the mover.
+ * @param zpcl Particle z position after the mover.
+ * @param xstart Particle x position before the mover.
+ * @param ystart Particle y position before the mover.
+ * @param zstart Particle z position before the mover.
+ * @param pclsArray Device-side particle SoA container.
+ * @param pidx Particle index in the species SoA buffer.
+ * @param moverParam Device-side mover parameter bundle.
+ * @param departureArray Device-side departure metadata array.
+ * @param grid Device-side grid descriptor.
+ * @param hashedSumArray Device-side hashed-sum buckets for departure
+ * compaction.
+ * @return `DELETE` for a particle beyond an open outflow face, otherwise 0.
+ */
+__device__ uint32_t deleteAppendOpenBCOutflow(
+    commonType xpcl, commonType ypcl, commonType zpcl, commonType xstart,
+    commonType ystart, commonType zstart, particleArrayCUDA* pclsArray,
+    uint32_t pidx, moverParameter* moverParam,
+    departureArrayType* departureArray, grid3DCUDA* grid,
+    hashedSum* hashedSumArray) {
+
+  if (!moverParam->doOpenBC)
+    return 0;
+
+  auto& delBdry = moverParam->deleteBoundary;
+  auto& openBdry = moverParam->openBoundary;
+
+  const commonType pos[3] = {xpcl, ypcl, zpcl};
+  const commonType start[3] = {xstart, ystart, zstart};
+
+  // The axes whose band edge the particle crossed inward (one bit each), and
+  // the outward shift of the copies across them
+  int crossed = 0;
+  commonType shift[3] = {0, 0, 0};
+
+  for (int side = 0; side < 6; side++) {
+
+    if (!moverParam->applyOpenBC[side])
+      continue;
+
+    const int direction = side / 2; // x,y,z
+    const bool right = side % 2;
+    const commonType location = pos[direction];
+    const commonType from = start[direction];
+
+    // Beyond the face: deleted.  Its copies would lie beyond it too.
+    if (right ? location > delBdry[side] : location < delBdry[side])
+      return departureArrayElementType::DELETE;
+
+    // inner edge of the band crossed inward: the particle re-enters (the
+    // band includes its edge, so a particle that ends a push on it is
+    // counted when it leaves)
+    if (right ? from >= openBdry[side] && location < openBdry[side]
+              : from <= openBdry[side] && location > openBdry[side]) {
+      crossed |= 1 << direction;
+      shift[direction] =
+          right ? openBdry[direction * 2] : -openBdry[direction * 2];
+    }
+  }
+
+  if (crossed == 0)
+    return 0;
+
+  // Velocity (already the new one) and charge from SoA for the copies
+  const commonType vel[3] = {pclsArray->getU()[pidx], pclsArray->getV()[pidx],
+                             pclsArray->getW()[pidx]};
+  const commonType charge = pclsArray->getQ()[pidx];
+
+  // One copy for each nonempty set of the crossed faces
+  for (int set = crossed; set != 0; set = (set - 1) & crossed) {
+    commonType newPos[3];
+    for (int d = 0; d < 3; d++)
+      newPos[d] = (set >> d) & 1 ? pos[d] + shift[d] : pos[d];
+
+    // kept inside the domain and outside the repopulation layers
+    if (!(newPos[0] > delBdry[0] && newPos[0] < delBdry[1] &&
+          newPos[1] > delBdry[2] && newPos[1] < delBdry[3] &&
+          newPos[2] > delBdry[4] && newPos[2] < delBdry[5]) ||
+        deleteRepopulateInjection(newPos[0], newPos[1], newPos[2], moverParam,
+                                  grid))
+      continue;
+
+    if (!appendOpenBCCopy(newPos, vel, charge, pclsArray, moverParam,
+                          departureArray, grid, hashedSumArray))
+      return departureArrayElementType::DELETE;
+  }
+
+  return 0;
 }
 
 /**
@@ -743,6 +827,9 @@ __device__ uint32_t deleteInsideSphere(commonType xpcl, commonType ypcl,
  * @param xpcl Particle x position after the mover.
  * @param ypcl Particle y position after the mover.
  * @param zpcl Particle z position after the mover.
+ * @param xstart Particle x position before the mover.
+ * @param ystart Particle y position before the mover.
+ * @param zstart Particle z position before the mover.
  * @param pclsArray Device-side particle SoA container.
  * @param pidx Particle index in the species SoA buffer.
  * @param moverParam Device-side mover parameter bundle.
@@ -752,7 +839,8 @@ __device__ uint32_t deleteInsideSphere(commonType xpcl, commonType ypcl,
  * compaction.
  */
 __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl,
-                                      commonType zpcl,
+                                      commonType zpcl, commonType xstart,
+                                      commonType ystart, commonType zstart,
                                       particleArrayCUDA* pclsArray,
                                       uint32_t pidx, moverParameter* moverParam,
                                       departureArrayType* departureArray,
@@ -784,9 +872,9 @@ __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl,
   do {
 
     // OpenBC_outflow
-    element.dest =
-        deleteAppendOpenBCOutflow(xpcl, ypcl, zpcl, pclsArray, pidx, moverParam,
-                                  departureArray, grid, hashedSumArray);
+    element.dest = deleteAppendOpenBCOutflow(
+        xpcl, ypcl, zpcl, xstart, ystart, zstart, pclsArray, pidx, moverParam,
+        departureArray, grid, hashedSumArray);
     if (element.dest != 0)
       break;
 

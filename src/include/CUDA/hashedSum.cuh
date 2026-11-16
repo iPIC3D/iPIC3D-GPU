@@ -29,7 +29,11 @@ public:
   //     resetBucket();
   // }
 
-  __device__ int add(int key);
+#if defined(__CUDACC__) || defined(__HIPCC__)
+  __device__ __forceinline__ int add(int key) {
+    return atomicAdd(&(bucket[hash(key)]), 1);
+  }
+#endif
 
   __host__ __device__ int getIndex(int key, int id) {
     int index = 0;

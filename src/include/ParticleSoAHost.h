@@ -471,7 +471,8 @@ public:
    *
    * @param doOpenBC Output global open-boundary enable flag.
    * @param applyOpenBC Output per-face open-boundary enable flags.
-   * @param deleteBoundary Output per-face delete-boundary positions.
+   * @param deleteBoundary Output per-face delete-boundary positions
+   * (unbounded on periodic particle axes).
    * @param openBoundary Output per-face open-boundary positions.
    */
   void openbc_particles_outflowInfo(bool* doOpenBC, bool* applyOpenBC,

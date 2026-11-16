@@ -294,6 +294,9 @@ void Collective::ReadInput(const ConfigFile& config) {
                      (DivCleaningTol > 0.0 && DivCleaningTol < 1.0),
                  "DivCleaningTol must be in (0, 1), not %g", DivCleaningTol);
     NiterMover = config.read<int>("NiterMover", 3);
+    // the movers take the average velocity from the first iteration
+    requireInput(NiterMover >= 1, "NiterMover must be at least 1, not %d",
+                 NiterMover);
     // Maxwell solver: "GMRES" (default), "FGMRESBlockJacobi" or "Chebyshev"
     SolverType = config.read<string>("SolverType", "GMRES");
     ChebyshevMaxIter = config.read<int>("ChebyshevMaxIter", 20);
@@ -1454,7 +1457,7 @@ void Collective::save(const std::string& header) {
   my_file << "GMRES error tolerance    = " << GMREStol << endl;
   my_file << "DivCleaningTol           = " << DivCleaningTol << endl;
   my_file << "CG error tolerance       = " << CGtol << endl;
-  my_file << "Mover error tolerance    = " << NiterMover << endl;
+  my_file << "Mover iterations         = " << NiterMover << endl;
   my_file << "---------------------------" << endl;
   my_file << "Results saved in: " << SaveDirName << endl;
   my_file << "Restart saved in: " << RestartDirName << endl;

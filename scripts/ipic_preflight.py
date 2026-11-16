@@ -197,6 +197,9 @@ def print_report(cfg: Input) -> None:
     poisson_cycle = cfg.integer("PoissonCorrectionCycle", 10)
     divb = cfg.string("divBCorrection", "no")
     divb_cycle = cfg.integer("divBCorrectionCycle", 10)
+    niter_mover = cfg.integer("NiterMover", 3)
+    if niter_mover < 1:  # same rejection as Collective::ReadInput
+        raise SystemExit(f"NiterMover must be at least 1, not {niter_mover}")
     # same rejections as Collective::ReadInput
     for name, on, every in (("PoissonCorrectionCycle", poisson == "yes", poisson_cycle),
                             ("divBCorrectionCycle", divb == "yes", divb_cycle)):

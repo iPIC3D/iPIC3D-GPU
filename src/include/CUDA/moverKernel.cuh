@@ -39,6 +39,8 @@ public: // common parameter
 
   cudaParticleType c;
 
+  cudaParticleType invc; ///< 1 / c
+
   int NiterMover;
 
   cudaParticleType umax, umin, vmax, vmin, wmax, wmin;
@@ -72,7 +74,8 @@ public: // common parameter
 public:
   __host__ moverParameter(ParticleSoAHost* pclHost, VirtualTopology3D* vct)
       : dt(pclHost->timeStep_), qom(pclHost->chargeOverMass_),
-        c(pclHost->speedOfLight_), NiterMover(pclHost->numMoverIterations_),
+        c(pclHost->speedOfLight_), invc(1.0 / pclHost->speedOfLight_),
+        NiterMover(pclHost->numMoverIterations_),
         umax(pclHost->velocityCapMaxX_), umin(pclHost->velocityCapMinX_),
         vmax(pclHost->velocityCapMaxY_), vmin(pclHost->velocityCapMinY_),
         wmax(pclHost->velocityCapMaxZ_), wmin(pclHost->velocityCapMinZ_) {
@@ -97,7 +100,8 @@ public:
                           departureArrayType* departureArrayCUDAPtr,
                           hashedSum* hashedSumArrayCUDAPtr)
       : dt(pclHost->timeStep_), qom(pclHost->chargeOverMass_),
-        c(pclHost->speedOfLight_), NiterMover(pclHost->numMoverIterations_),
+        c(pclHost->speedOfLight_), invc(1.0 / pclHost->speedOfLight_),
+        NiterMover(pclHost->numMoverIterations_),
         umax(pclHost->velocityCapMaxX_), umin(pclHost->velocityCapMinX_),
         vmax(pclHost->velocityCapMaxY_), vmin(pclHost->velocityCapMinY_),
         wmax(pclHost->velocityCapMaxZ_), wmin(pclHost->velocityCapMinZ_) {
@@ -110,6 +114,21 @@ public:
   }
 };
 
+/** Threads per block of the mover kernels. */
+constexpr int kMoverBlockSize = 256;
+
+// CUDA: at least 3 blocks of kMoverBlockSize threads per SM, which bounds the
+// registers to 80 per thread (65536 per SM); without it
+// moverSubcyclesKernel takes 88 and runs 2 blocks.  The block size alone
+// would let ptxas take about 160.  HIP reads the second argument as waves per
+// execution unit and is not tuned here, so it gets no bound, nor do host
+// compilers.
+#if defined(__CUDACC__) && !defined(__HIPCC__)
+#define MOVER_LAUNCH_BOUNDS __launch_bounds__(kMoverBlockSize, 3)
+#else
+#define MOVER_LAUNCH_BOUNDS
+#endif
+
 /**
  * @brief Advance one species with the standard predictor-corrector mover.
  *
@@ -117,9 +136,9 @@ public:
  * @param fieldForPcls Packed mover field buffer sampled from the grid.
  * @param grid Device-side grid descriptor.
  */
-__global__ void moverKernel(moverParameter* moverParam,
-                            cudaTypeArray1<cudaFieldType> fieldForPcls,
-                            grid3DCUDA* grid);
+__global__ void MOVER_LAUNCH_BOUNDS
+moverKernel(moverParameter* moverParam,
+            cudaTypeArray1<cudaFieldType> fieldForPcls, grid3DCUDA* grid);
 
 /**
  * @brief Advance one species with the adaptive-subcycling mover used for planet
@@ -132,9 +151,9 @@ __global__ void moverKernel(moverParameter* moverParam,
  * @param fieldForPcls Packed mover field buffer sampled from the grid.
  * @param grid Device-side grid descriptor.
  */
-__global__ void moverSubcyclesKernel(moverParameter* moverParam,
-                                     cudaTypeArray1<cudaFieldType> fieldForPcls,
-                                     grid3DCUDA* grid);
+__global__ void MOVER_LAUNCH_BOUNDS moverSubcyclesKernel(
+    moverParameter* moverParam, cudaTypeArray1<cudaFieldType> fieldForPcls,
+    grid3DCUDA* grid);
 
 // __global__ void castingField(grid3DCUDA *grid, cudaTypeArray1<cudaCommonType>
 // fieldForPcls);

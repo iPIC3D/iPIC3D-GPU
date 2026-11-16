@@ -1755,13 +1755,13 @@ int c_Solver::cudaLauncherAsync(const int species,
   const uint32_t nop = pclsArrayHostPtr[species]->getNOP();
   if (nop > 0) {
     if (doPlanet_)
-      moverSubcyclesKernel<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE),
-                             DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
+      moverSubcyclesKernel<<<getGridSize((int)nop, kMoverBlockSize),
+                             kMoverBlockSize, 0, streams[species]>>>(
           moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
     else
-      moverKernel<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE),
-                    DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
-          moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+      moverKernel<<<getGridSize((int)nop, kMoverBlockSize), kMoverBlockSize, 0,
+                    streams[species]>>>(moverParamCUDAPtr[species],
+                                        fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
   }
 
   cudaErrChk(cudaEventRecord(event1, streams[species]));

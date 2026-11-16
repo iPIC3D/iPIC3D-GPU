@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <random>
 
 using std::cout;
@@ -971,7 +972,8 @@ void ParticleSoAHost::repopulate_particlesInfo(
  *
  * @param doOpenBC Output global flag enabling open-boundary logic.
  * @param applyOpenBC Output per-face open-boundary enable flags.
- * @param deleteBoundary Output per-face delete-boundary positions.
+ * @param deleteBoundary Output per-face delete-boundary positions (unbounded
+ * on periodic particle axes).
  * @param openBoundary Output per-face open-boundary positions.
  */
 void ParticleSoAHost::openbc_particles_outflowInfo(
@@ -1020,12 +1022,17 @@ void ParticleSoAHost::openbc_particles_outflowInfo(
   const double yHgh = domainLengthY_ - yLow;
   const double zHgh = domainLengthZ_ - zLow;
 
-  deleteBoundary[0] = 0;
-  deleteBoundary[1] = domainLengthX_;
-  deleteBoundary[2] = 0;
-  deleteBoundary[3] = domainLengthY_;
-  deleteBoundary[4] = 0;
-  deleteBoundary[5] = domainLengthZ_;
+  // The mover keeps a copy of an entering particle only inside these bounds.
+  // A copy that crossed a periodic boundary is wrapped by the particle
+  // exchange, like its source, so periodic axes are unbounded: finite limits,
+  // not infinities, so the comparisons hold under any floating-point flags.
+  const cudaCommonType unbounded = std::numeric_limits<cudaCommonType>::max();
+  deleteBoundary[0] = vct_->getPERIODICX_P() ? -unbounded : 0;
+  deleteBoundary[1] = vct_->getPERIODICX_P() ? unbounded : domainLengthX_;
+  deleteBoundary[2] = vct_->getPERIODICY_P() ? -unbounded : 0;
+  deleteBoundary[3] = vct_->getPERIODICY_P() ? unbounded : domainLengthY_;
+  deleteBoundary[4] = vct_->getPERIODICZ_P() ? -unbounded : 0;
+  deleteBoundary[5] = vct_->getPERIODICZ_P() ? unbounded : domainLengthZ_;
   openBoundary[0] = xLow;
   openBoundary[1] = xHgh;
   openBoundary[2] = yLow;

@@ -20,6 +20,7 @@
 
 #include "GPUMaxwellLocal.cuh"
 #include "GPUPointLaunch.cuh"
+#include "GPUStencils.cuh" // stencilIdx, divN2CAt, imagePlanes
 
 // =========================================================================
 //  Kernel 1:  Fused center-level operations
@@ -41,16 +42,14 @@ __global__ void k_maxwellLocalCenterOps(
     T* __restrict__ divD, const T* __restrict__ vX, const T* __restrict__ vY,
     const T* __restrict__ vZ, const T* __restrict__ dX,
     const T* __restrict__ dY, const T* __restrict__ dZ, int nyc, int nzc,
-    int nyn, int nzn, T invdx, T invdy, T invdz, Points points) {
+    int nyn, int nzn, T invdx, T invdy, T invdz, ImageWalls walls,
+    Points points) {
   int i, j, k;
   if (!pointOf(points, i, j, k))
     return;
 
-// The 8 corner node positions for this center cell (i,j,k):
-//   node indices: (i, i+1) × (j, j+1) × (k, k+1)
-
-// Flat index helper for node arrays  [nxn][nyn][nzn]
-#define NI(ii, jj, kk) ((ii) * nyn * nzn + (jj) * nzn + (kk))
+  // The 8 corner node positions for this center cell (i,j,k):
+  //   node indices: (i, i+1) × (j, j+1) × (k, k+1)
 
   // Load 8 corner positions — process one input field at a time
   // to limit register pressure.  Compiler may still keep them
@@ -61,14 +60,14 @@ __global__ void k_maxwellLocalCenterOps(
 
   // ---- gradN2C(Ex) → gExX, gExY, gExZ ----
   {
-    T n000 = vX[NI(i, j, k)];
-    T n001 = vX[NI(i, j, k + 1)];
-    T n010 = vX[NI(i, j + 1, k)];
-    T n011 = vX[NI(i, j + 1, k + 1)];
-    T n100 = vX[NI(i + 1, j, k)];
-    T n101 = vX[NI(i + 1, j, k + 1)];
-    T n110 = vX[NI(i + 1, j + 1, k)];
-    T n111 = vX[NI(i + 1, j + 1, k + 1)];
+    T n000 = vX[stencilIdx(i, j, k, nyn, nzn)];
+    T n001 = vX[stencilIdx(i, j, k + 1, nyn, nzn)];
+    T n010 = vX[stencilIdx(i, j + 1, k, nyn, nzn)];
+    T n011 = vX[stencilIdx(i, j + 1, k + 1, nyn, nzn)];
+    T n100 = vX[stencilIdx(i + 1, j, k, nyn, nzn)];
+    T n101 = vX[stencilIdx(i + 1, j, k + 1, nyn, nzn)];
+    T n110 = vX[stencilIdx(i + 1, j + 1, k, nyn, nzn)];
+    T n111 = vX[stencilIdx(i + 1, j + 1, k + 1, nyn, nzn)];
 
     gExX[ci] = Q * invdx *
                ((n100 - n000) + (n101 - n001) + (n110 - n010) + (n111 - n011));
@@ -80,14 +79,14 @@ __global__ void k_maxwellLocalCenterOps(
 
   // ---- gradN2C(Ey) → gEyX, gEyY, gEyZ ----
   {
-    T n000 = vY[NI(i, j, k)];
-    T n001 = vY[NI(i, j, k + 1)];
-    T n010 = vY[NI(i, j + 1, k)];
-    T n011 = vY[NI(i, j + 1, k + 1)];
-    T n100 = vY[NI(i + 1, j, k)];
-    T n101 = vY[NI(i + 1, j, k + 1)];
-    T n110 = vY[NI(i + 1, j + 1, k)];
-    T n111 = vY[NI(i + 1, j + 1, k + 1)];
+    T n000 = vY[stencilIdx(i, j, k, nyn, nzn)];
+    T n001 = vY[stencilIdx(i, j, k + 1, nyn, nzn)];
+    T n010 = vY[stencilIdx(i, j + 1, k, nyn, nzn)];
+    T n011 = vY[stencilIdx(i, j + 1, k + 1, nyn, nzn)];
+    T n100 = vY[stencilIdx(i + 1, j, k, nyn, nzn)];
+    T n101 = vY[stencilIdx(i + 1, j, k + 1, nyn, nzn)];
+    T n110 = vY[stencilIdx(i + 1, j + 1, k, nyn, nzn)];
+    T n111 = vY[stencilIdx(i + 1, j + 1, k + 1, nyn, nzn)];
 
     gEyX[ci] = Q * invdx *
                ((n100 - n000) + (n101 - n001) + (n110 - n010) + (n111 - n011));
@@ -99,14 +98,14 @@ __global__ void k_maxwellLocalCenterOps(
 
   // ---- gradN2C(Ez) → gEzX, gEzY, gEzZ ----
   {
-    T n000 = vZ[NI(i, j, k)];
-    T n001 = vZ[NI(i, j, k + 1)];
-    T n010 = vZ[NI(i, j + 1, k)];
-    T n011 = vZ[NI(i, j + 1, k + 1)];
-    T n100 = vZ[NI(i + 1, j, k)];
-    T n101 = vZ[NI(i + 1, j, k + 1)];
-    T n110 = vZ[NI(i + 1, j + 1, k)];
-    T n111 = vZ[NI(i + 1, j + 1, k + 1)];
+    T n000 = vZ[stencilIdx(i, j, k, nyn, nzn)];
+    T n001 = vZ[stencilIdx(i, j, k + 1, nyn, nzn)];
+    T n010 = vZ[stencilIdx(i, j + 1, k, nyn, nzn)];
+    T n011 = vZ[stencilIdx(i, j + 1, k + 1, nyn, nzn)];
+    T n100 = vZ[stencilIdx(i + 1, j, k, nyn, nzn)];
+    T n101 = vZ[stencilIdx(i + 1, j, k + 1, nyn, nzn)];
+    T n110 = vZ[stencilIdx(i + 1, j + 1, k, nyn, nzn)];
+    T n111 = vZ[stencilIdx(i + 1, j + 1, k + 1, nyn, nzn)];
 
     gEzX[ci] = Q * invdx *
                ((n100 - n000) + (n101 - n001) + (n110 - n010) + (n111 - n011));
@@ -116,31 +115,37 @@ __global__ void k_maxwellLocalCenterOps(
                ((n001 - n000) + (n101 - n100) + (n011 - n010) + (n111 - n110));
   }
 
-  // ---- divN2C(D) → divD ----
-  //   ∇·D = d(Dx)/dx + d(Dy)/dy + d(Dz)/dz
-  {
-    // d(Dx)/dx
-    T compX = Q * invdx *
-              ((dX[NI(i + 1, j, k)] - dX[NI(i, j, k)]) +
-               (dX[NI(i + 1, j, k + 1)] - dX[NI(i, j, k + 1)]) +
-               (dX[NI(i + 1, j + 1, k)] - dX[NI(i, j + 1, k)]) +
-               (dX[NI(i + 1, j + 1, k + 1)] - dX[NI(i, j + 1, k + 1)]));
-    // d(Dy)/dy
-    T compY = Q * invdy *
-              ((dY[NI(i, j + 1, k)] - dY[NI(i, j, k)]) +
-               (dY[NI(i, j + 1, k + 1)] - dY[NI(i, j, k + 1)]) +
-               (dY[NI(i + 1, j + 1, k)] - dY[NI(i + 1, j, k)]) +
-               (dY[NI(i + 1, j + 1, k + 1)] - dY[NI(i + 1, j, k + 1)]));
-    // d(Dz)/dz
-    T compZ = Q * invdz *
-              ((dZ[NI(i, j, k + 1)] - dZ[NI(i, j, k)]) +
-               (dZ[NI(i + 1, j, k + 1)] - dZ[NI(i + 1, j, k)]) +
-               (dZ[NI(i, j + 1, k + 1)] - dZ[NI(i, j + 1, k)]) +
-               (dZ[NI(i + 1, j + 1, k + 1)] - dZ[NI(i + 1, j + 1, k)]));
+  // ---- divN2C(D) → divD, D read through the conductor image ----
+  divD[ci] = divN2CAt(dX, dY, dZ, i, j, k, nyn, nzn,
+                      DiffScale<T>{Q * invdx, Q * invdy, Q * invdz},
+                      imagePlanes(walls, i, j, k));
+}
 
-    divD[ci] = compX + compY + compZ;
-  }
-#undef NI
+/** The 8 cells around a node: index c<di><dj><dk> is the cell at offset
+ *  (di - 1, dj - 1, dk - 1) from the node's (i, j, k) cell. */
+struct NodeCells {
+  int c000, c001, c010, c011, c100, c101, c110, c111;
+};
+
+/** divC2N of the cell vector (X, Y, Z) at a node from its 8 cells, Q =
+ *  0.25: the stencil of divC2NAt (GPUStencils.cuh) with the z differences
+ *  summed in this kernel's own order (the 2nd and 3rd terms swapped), which
+ *  its results keep bitwise. */
+template <typename T>
+__device__ __forceinline__ T divC2NCells(const T* __restrict__ X,
+                                         const T* __restrict__ Y,
+                                         const T* __restrict__ Z,
+                                         const NodeCells& c, T Q, T invdx,
+                                         T invdy, T invdz) {
+  return Q * invdx *
+             ((X[c.c111] - X[c.c011]) + (X[c.c110] - X[c.c010]) +
+              (X[c.c101] - X[c.c001]) + (X[c.c100] - X[c.c000])) +
+         Q * invdy *
+             ((Y[c.c111] - Y[c.c101]) + (Y[c.c110] - Y[c.c100]) +
+              (Y[c.c011] - Y[c.c001]) + (Y[c.c010] - Y[c.c000])) +
+         Q * invdz *
+             ((Z[c.c111] - Z[c.c110]) + (Z[c.c101] - Z[c.c100]) +
+              (Z[c.c011] - Z[c.c010]) + (Z[c.c001] - Z[c.c000]));
 }
 
 // =========================================================================
@@ -198,32 +203,20 @@ __global__ void k_maxwellLocalNodeFused(
 
   const T Q = 0.25;
 
-// ================================================================
-//  Compute lapX = divC2N( gExX, gExY, gExZ )
-//
-//  divC2N stencil (from k_divC2N in GPUStencils.cu):
-//    compX = 0.25*invdx * Σ (vecXC[i,*,*] - vecXC[i-1,*,*])
-//    compY = 0.25*invdy * Σ (vecYC[*,j,*] - vecYC[*,j-1,*])
-//    compZ = 0.25*invdz * Σ (vecZC[*,*,k] - vecZC[*,*,k-1])
-//    div = compX + compY + compZ
-// ================================================================
+  // ================================================================
+  //  Compute lapX = divC2N( gExX, gExY, gExZ )
+  //
+  //  divC2N stencil (from k_divC2N in GPUStencils.cu):
+  //    compX = 0.25*invdx * Σ (vecXC[i,*,*] - vecXC[i-1,*,*])
+  //    compY = 0.25*invdy * Σ (vecYC[*,j,*] - vecYC[*,j-1,*])
+  //    compZ = 0.25*invdz * Σ (vecZC[*,*,k] - vecZC[*,*,k-1])
+  //    div = compX + compY + compZ
+  // ================================================================
 
-// Helper macro: divC2N for a triplet of center arrays (vXC,vYC,vZC)
-// Returns the scalar divergence at node (i,j,k).
-#define DIVC2N(arrX, arrY, arrZ)                                               \
-  (Q * invdx *                                                                 \
-       ((arrX[c111] - arrX[c011]) + (arrX[c110] - arrX[c010]) +                \
-        (arrX[c101] - arrX[c001]) + (arrX[c100] - arrX[c000])) +               \
-   Q * invdy *                                                                 \
-       ((arrY[c111] - arrY[c101]) + (arrY[c110] - arrY[c100]) +                \
-        (arrY[c011] - arrY[c001]) + (arrY[c010] - arrY[c000])) +               \
-   Q * invdz *                                                                 \
-       ((arrZ[c111] - arrZ[c110]) + (arrZ[c101] - arrZ[c100]) +                \
-        (arrZ[c011] - arrZ[c010]) + (arrZ[c001] - arrZ[c000])))
-
-  T lapX = DIVC2N(gExX, gExY, gExZ);
-  T lapY = DIVC2N(gEyX, gEyY, gEyZ);
-  T lapZ = DIVC2N(gEzX, gEzY, gEzZ);
+  const NodeCells cells = {c000, c001, c010, c011, c100, c101, c110, c111};
+  T lapX = divC2NCells(gExX, gExY, gExZ, cells, Q, invdx, invdy, invdz);
+  T lapY = divC2NCells(gEyX, gEyY, gEyZ, cells, Q, invdx, invdy, invdz);
+  T lapZ = divC2NCells(gEzX, gEzY, gEzZ, cells, Q, invdx, invdy, invdz);
 
   // ================================================================
   //  Compute gdivX/Y/Z = gradC2N( divD )
@@ -248,8 +241,6 @@ __global__ void k_maxwellLocalNodeFused(
   T gdivZ =
       Q * invdz *
       ((dd111 - dd110) + (dd101 - dd100) + (dd011 - dd010) + (dd001 - dd000));
-
-#undef DIVC2N
 
   // ================================================================
   //  Arithmetic:  im = dt² * (-lap - gdiv) + D + E
@@ -296,7 +287,7 @@ void gpuMaxwellLocalCenterOps(
     const cudaSolverType* vZ, const cudaSolverType* dX,
     const cudaSolverType* dY, const cudaSolverType* dZ, int nxc, int nyc,
     int nzc, cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
-    const Points& points, cudaStream_t stream) {
+    const ImageWalls& walls, const Points& points, cudaStream_t stream) {
   if (points.empty())
     return;
   const PointLaunch L = pointLaunch(points);
@@ -304,7 +295,7 @@ void gpuMaxwellLocalCenterOps(
       <<<L.grid, L.block, 0, stream>>>(gExX, gExY, gExZ, gEyX, gEyY, gEyZ, gEzX,
                                        gEzY, gEzZ, divD, vX, vY, vZ, dX, dY, dZ,
                                        nyc, nzc, nyc + 1, nzc + 1, invdx, invdy,
-                                       invdz, points);
+                                       invdz, walls, points);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -341,27 +332,40 @@ void gpuMaxwellLocalNodeFused(
 
 // The two point sets: PointList (1D launch, the images) and PointBox (3D
 // launch, the unit tests)
-#define MAXWELL_LOCAL_INSTANTIATE(Points)                                      \
-  template void gpuMaxwellLocalCenterOps<Points>(                              \
-      cudaSolverType*, cudaSolverType*, cudaSolverType*, cudaSolverType*,      \
-      cudaSolverType*, cudaSolverType*, cudaSolverType*, cudaSolverType*,      \
-      cudaSolverType*, cudaSolverType*, const cudaSolverType*,                 \
-      const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,     \
-      const cudaSolverType*, const cudaSolverType*, int, int, int,             \
-      cudaSolverType, cudaSolverType, cudaSolverType, const Points&,           \
-      cudaStream_t);                                                           \
-  template void gpuMaxwellLocalNodeFused<Points>(                              \
-      cudaSolverType*, const cudaSolverType*, const cudaSolverType*,           \
-      const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,     \
-      const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,     \
-      const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,     \
-      const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,     \
-      const cudaSolverType*, const cudaSolverType*, int, int, int,             \
-      cudaSolverType, cudaSolverType, cudaSolverType, cudaSolverType,          \
-      const Points&, const CellIndex&, cudaStream_t);
-MAXWELL_LOCAL_INSTANTIATE(PointBox)
-MAXWELL_LOCAL_INSTANTIATE(PointList)
-#undef MAXWELL_LOCAL_INSTANTIATE
+template void gpuMaxwellLocalCenterOps<PointBox>(
+    cudaSolverType*, cudaSolverType*, cudaSolverType*, cudaSolverType*,
+    cudaSolverType*, cudaSolverType*, cudaSolverType*, cudaSolverType*,
+    cudaSolverType*, cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, int, int, int, cudaSolverType,
+    cudaSolverType, cudaSolverType, const ImageWalls&, const PointBox&,
+    cudaStream_t);
+template void gpuMaxwellLocalNodeFused<PointBox>(
+    cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, int, int, int, cudaSolverType,
+    cudaSolverType, cudaSolverType, cudaSolverType, const PointBox&,
+    const CellIndex&, cudaStream_t);
+template void gpuMaxwellLocalCenterOps<PointList>(
+    cudaSolverType*, cudaSolverType*, cudaSolverType*, cudaSolverType*,
+    cudaSolverType*, cudaSolverType*, cudaSolverType*, cudaSolverType*,
+    cudaSolverType*, cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, int, int, int, cudaSolverType,
+    cudaSolverType, cudaSolverType, const ImageWalls&, const PointList&,
+    cudaStream_t);
+template void gpuMaxwellLocalNodeFused<PointList>(
+    cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, const cudaSolverType*,
+    const cudaSolverType*, const cudaSolverType*, int, int, int, cudaSolverType,
+    cudaSolverType, cudaSolverType, cudaSolverType, const PointList&,
+    const CellIndex&, cudaStream_t);
 
 // =========================================================================
 //  Launch sets

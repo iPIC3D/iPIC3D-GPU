@@ -11,8 +11,11 @@
  * solver, so that subtracting grad u removes the divergence to the solver
  * tolerance:
  *   div(E): phi on the cells, divN2C(gradC2N phi) = divN2C(E) - 4 pi rho,
- *           then E -= gradC2N phi on the nodes; phi = 0 in the ghost cells
- *           of the physical faces.
+ *           then E -= gradC2N phi on the nodes.  The ghost cells of phi
+ *           (GhostSet::Phi, filled after the exchange of every image): the
+ *           conductor image on a perfect conductor, odd (phi = 0 on the
+ *           wall, so the correction has no tangential part there), 0 on the
+ *           other physical faces.
  *   div(B): psi on the nodes, divC2N(gradN2C psi) = divC2N(Bc), then
  *           Bc -= gradN2C psi on the cells.  The nodes of a physical face are
  *           identity rows; the operator reads psi = 0 there on the physical
@@ -191,11 +194,13 @@ void gpuSubGradC2N(cudaSolverType* ex, cudaSolverType* ey, cudaSolverType* ez,
 /**
  * The null space of a cleaning operator, which a right-hand side must not
  * touch (EMfields3D::gpuRemoveCleaningNullSpace): the constants (mean), and
- * the checkerboards (-1)^(i_a + i_b) f(i_c) of two periodic axes a, b with
- * even cell counts, for any profile f along the third axis (both gradients
- * map them to 0).  With three such axes the three families share the triple
- * checkerboard: P = P_ab + P_ac + P_bc - 2 P_abc (projections onto Fourier
- * subsets).
+ * the checkerboards (-1)^(i_a + i_b) f(i_c) of two checkerboard axes a, b,
+ * for any profile f along the third axis (both gradients map them to 0).  An
+ * axis carries the checkerboard (-1)^i when its end rules do: periodic with
+ * an even cell count, or odd ghosts on both faces (oddWalls: the cells of
+ * div(E) between two perfect conductors), whatever the count.  With three
+ * such axes the three families share the triple checkerboard: P = P_ab +
+ * P_ac + P_bc - 2 P_abc (projections onto Fourier subsets).
  *
  * A projection takes signed sums over the rows the rank owns (sums[s].box: a
  * row shared with the right neighbour, or its periodic image, belongs to the
@@ -221,12 +226,14 @@ struct CleaningNullSpace {
 
 /** The null space of op (node or cell rows) on a rank whose packed rows
  *  start at the global index offset (N global cells per axis; sharedRight:
- *  the last row along an axis belongs to the right neighbour; mean:
- *  constants in the null space). */
+ *  the last row along an axis belongs to the right neighbour; oddWalls: the
+ *  axes with odd ghosts on both global faces; mean: constants in the null
+ *  space).  Every rank passes the same global flags. */
 CleaningNullSpace cleaningNullSpace(const Lap27Op& op, bool nodes,
                                     const int N[3], const int offset[3],
                                     const bool periodic[3],
-                                    const bool sharedRight[3], bool mean);
+                                    const bool sharedRight[3],
+                                    const bool oddWalls[3], bool mean);
 
 /** One pass of the null-space removal on one rank, before the sum over the
  *  ranks: the signed sums of b into the localSize device slots d_sums, then

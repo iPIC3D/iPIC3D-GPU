@@ -129,10 +129,6 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
     }
     return static_cast<int>(count);
   };
-  divEKrylovSize_ = checkedKrylovLength("div(E)", 1, nxc, nyc, nzc);
-  maxwellKrylovSize_ = checkedKrylovLength("Maxwell", 3, nxn, nyn, nzn);
-  divBKrylovSize_ = checkedKrylovLength("div(B)", 1, divBExtent(0),
-                                        divBExtent(1), divBExtent(2));
 
   // External imposed fields
   //
@@ -178,34 +174,23 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
   bcEMfaceYleft = col->getBcEMfaceYleft();
   bcEMfaceZright = col->getBcEMfaceZright();
   bcEMfaceZleft = col->getBcEMfaceZleft();
-  {
-    const bool own[6] = {vct->getXleft_neighbor() == MPI_PROC_NULL,
-                         vct->getXright_neighbor() == MPI_PROC_NULL,
-                         vct->getYleft_neighbor() == MPI_PROC_NULL,
-                         vct->getYright_neighbor() == MPI_PROC_NULL,
-                         vct->getZleft_neighbor() == MPI_PROC_NULL,
-                         vct->getZright_neighbor() == MPI_PROC_NULL};
-    const int bcEM[6] = {bcEMfaceXleft,  bcEMfaceXright, bcEMfaceYleft,
-                         bcEMfaceYright, bcEMfaceZleft,  bcEMfaceZright};
-    const int bcP[6] = {col->getBcPfaceXleft(), col->getBcPfaceXright(),
-                        col->getBcPfaceYleft(), col->getBcPfaceYright(),
-                        col->getBcPfaceZleft(), col->getBcPfaceZright()};
-    for (int f = 0; f < 6; f++) {
-      conductorFace_[f] = own[f] && bcEM[f] == 0;
-      // X-right (f = 1) is never an inflow face: an open X-right face keeps
-      // its operator rows
-      openInflowFace_[f] = own[f] && f != 1 && bcEM[f] == 2 && bcP[f] == 2;
-    }
-  }
-  // absorbing boundary
-  yes_sal = col->getYes_sal();
-  n_layers_sal = col->getN_layers_sal();
-  sal_tangential_B = col->getSal_tangential_B();
   // GEM challenge parameters
   B0x = col->getB0x();
   B0y = col->getB0y();
   B0z = col->getB0z();
   delta = col->getDelta();
+  // the field boundary of this rank, decided once (FieldBoundary.h)
+  {
+    const int cells[3] = {nxc, nyc, nzc};
+    double E0[3];
+    driftElectricField(E0);
+    bc_.setSpec(FieldBoundarySpec::build(*col, *vct, cells, E0, yStart, dy));
+  }
+  // the Krylov lengths (div(B): its rows drop a flat axis, from the spec)
+  divEKrylovSize_ = checkedKrylovLength("div(E)", 1, nxc, nyc, nzc);
+  maxwellKrylovSize_ = checkedKrylovLength("Maxwell", 3, nxn, nyn, nzn);
+  divBKrylovSize_ = checkedKrylovLength("div(B)", 1, divBExtent(0),
+                                        divBExtent(1), divBExtent(2));
   Smooth = col->getSmooth();
   SmoothNiter = col->getSmoothNiter();
   haloOverlap_ = col->getHaloOverlap();
@@ -637,52 +622,12 @@ void EMfields3D::driftElectricField(double E0[3]) const {
   E0[2] = -(ue0 * B0y - ve0 * B0x) / c;
 }
 
-bool EMfields3D::flatAxis(int a) const {
-  const int n[3] = {nxc, nyc, nzc};
-  const int self = _vct.getCartesian_rank();
-  const int left[3] = {_vct.getXleft_neighbor(), _vct.getYleft_neighbor(),
-                       _vct.getZleft_neighbor()};
-  const int right[3] = {_vct.getXright_neighbor(), _vct.getYright_neighbor(),
-                        _vct.getZright_neighbor()};
-  return n[a] - 2 == 1 && left[a] == self && right[a] == self;
-}
-
-bool EMfields3D::ownsOutflowFaceXright() const {
-  return get_vct().getXright_neighbor() == MPI_PROC_NULL &&
-         bcEMfaceXright == 2 && get_col().getBcPfaceXright() == 3;
-}
-
-int EMfields3D::layersXright() const {
-  return ownsOutflowFaceXright() ? std::max(3, n_layers_sal) : n_layers_sal;
-}
-
-int EMfields3D::fieldCopyLayersXright() const {
-  return ownsOutflowFaceXright() && get_col().getOutflowLayerSolved()
-             ? 0
-             : layersXright();
-}
-
 // =========================================================================
 //  Zero-gradient ghost node on the X-right outflow face (Maxwell operator)
 // =========================================================================
 
 int EMfields3D::operatorCellEnd() const {
-  return ownsOutflowFaceXright() ? nxc - 1 : nxc - 2;
-}
-
-int EMfields3D::operatorBCXright(int code) const {
-  return ownsOutflowFaceXright() ? BC_FACE_KEEP : code;
-}
-
-void EMfields3D::outflowGhostRowRules(int rule[4]) const {
-  const VirtualTopology3D& vct = get_vct();
-  const int self = vct.getCartesian_rank();
-  const int nb[4] = {vct.getYleft_neighbor(), vct.getYright_neighbor(),
-                     vct.getZleft_neighbor(), vct.getZright_neighbor()};
-  for (int s = 0; s < 4; s++)
-    rule[s] = nb[s] == MPI_PROC_NULL ? GHOST_ROW_KEEP
-              : nb[s] == self        ? GHOST_ROW_PERIODIC
-                                     : GHOST_ROW_ADJACENT;
+  return bc_.spec().outflowXright ? nxc - 1 : nxc - 2;
 }
 
 /**
@@ -909,49 +854,15 @@ void EMfields3D::init() {
       ConstantChargeOpenBC();
     }
 
-    // communicate ghost
-    communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0], col->bcBx[1],
-                      col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0], col->bcBy[1],
-                      col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0], col->bcBz[1],
-                      col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                      vct, this);
-
-    // initialize B on centers
+    // B on the centres: interpN2C reads the active nodes only.  The ghosts
+    // of E, B and the cell B are filled by the GPU start-up
+    // (gpuSolverSyncH2D, FieldBoundary).
     grid->interpN2C(Bxc, Bxn);
     grid->interpN2C(Byc, Byn);
     grid->interpN2C(Bzc, Bzn);
 
-    // communicate ghost
-    communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1],
-                        col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                        vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1],
-                        col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                        vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1],
-                        col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                        vct, this);
-
-    // communicate E
-    communicateNodeBC(nxn, nyn, nzn, Ex, col->bcEx[0], col->bcEx[1],
-                      col->bcEx[2], col->bcEx[3], col->bcEx[4], col->bcEx[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Ey, col->bcEy[0], col->bcEy[1],
-                      col->bcEy[2], col->bcEy[3], col->bcEy[4], col->bcEy[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Ez, col->bcEz[0], col->bcEz[1],
-                      col->bcEz[2], col->bcEz[3], col->bcEz[4], col->bcEz[5],
-                      vct, this);
-
-    for (int is = 0; is < ns; is++) {
+    for (int is = 0; is < ns; is++)
       grid->interpN2C(rhocs, is, rhons);
-      communicateCenterBC_P(nxc, nyc, nzc, getRHOcs(is), 2, 2, 2, 2, 2, 2, vct,
-                            this);
-    }
   }
 }
 
@@ -1269,31 +1180,14 @@ void EMfields3D::initGEMHarris() {
   const auto yMN = [&](int i, int j, int k) {
     return grid->getYN(i, j, k) - 0.5 * Ly;
   };
-  // node fields to the centres, with the ghost rules of B
+  // node fields to the centres (interpN2C reads the active nodes only; the
+  // ghosts of B are filled by the GPU start-up, gpuSolverSyncH2D)
   const auto nodesToCentres = [&](arr3_double xn, arr3_double yn,
                                   arr3_double zn, arr3_double xc,
                                   arr3_double yc, arr3_double zc) {
-    communicateNodeBC(nxn, nyn, nzn, xn, col->bcBx[0], col->bcBx[1],
-                      col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, yn, col->bcBy[0], col->bcBy[1],
-                      col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, zn, col->bcBz[0], col->bcBz[1],
-                      col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                      vct, this);
     grid->interpN2C(xc, xn);
     grid->interpN2C(yc, yn);
     grid->interpN2C(zc, zn);
-    communicateCenterBC(nxc, nyc, nzc, xc, col->bcBx[0], col->bcBx[1],
-                        col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                        vct, this);
-    communicateCenterBC(nxc, nyc, nzc, yc, col->bcBy[0], col->bcBy[1],
-                        col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                        vct, this);
-    communicateCenterBC(nxc, nyc, nzc, zc, col->bcBz[0], col->bcBz[1],
-                        col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                        vct, this);
   };
 
   if (restart1 == 0) {
@@ -1419,6 +1313,18 @@ void EMfields3D::initGEMHarris() {
         array3_double dBxc(nxc, nyc, nzc), dByc(nxc, nyc, nzc),
             dBzc(nxc, nyc, nzc);
         nodesToCentres(tempXN, tempYN, tempZN, dBxc, dByc, dBzc);
+        // The ghost cells of dB, which the curl reads on the face nodes: the
+        // halo and the codes of the cell B (Collective), the only host ghost
+        // fill, as the GPU and its FieldBoundary do not exist yet.
+        communicateCenterBC(nxc, nyc, nzc, dBxc, col->bcBx[0], col->bcBx[1],
+                            col->bcBx[2], col->bcBx[3], col->bcBx[4],
+                            col->bcBx[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, dByc, col->bcBy[0], col->bcBy[1],
+                            col->bcBy[2], col->bcBy[3], col->bcBy[4],
+                            col->bcBy[5], vct, this);
+        communicateCenterBC(nxc, nyc, nzc, dBzc, col->bcBz[0], col->bcBz[1],
+                            col->bcBz[2], col->bcBz[3], col->bcBz[4],
+                            col->bcBz[5], vct, this);
         eqValue(0.0, tempXN, nxn, nyn, nzn);
         eqValue(0.0, tempYN, nxn, nyn, nzn);
         eqValue(0.0, tempZN, nxn, nyn, nzn);
@@ -1739,7 +1645,6 @@ void EMfields3D::initOriginalGEM() {
 }
 
 void EMfields3D::initGEMDoubleHarris() {
-  const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
 
@@ -1811,18 +1716,10 @@ void EMfields3D::initGEMDoubleHarris() {
                    cos(M_PI * ypert / 10.0 / delta) * M_PI / 10.0);
         }
 
-    // communicate ghost
-    communicateNodeBC(nxn, nyn, nzn, Bxn, 1, 1, 2, 2, 1, 1, vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Byn, 1, 1, 1, 1, 1, 1, vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Bzn, 1, 1, 2, 2, 1, 1, vct, this);
-    // initialize B on centers
+    // B on the centres (the ghosts: the GPU start-up, gpuSolverSyncH2D)
     grid->interpN2C(Bxc, Bxn);
     grid->interpN2C(Byc, Byn);
     grid->interpN2C(Bzc, Bzn);
-    // communicate ghost
-    communicateCenterBC(nxc, nyc, nzc, Bxc, 2, 2, 2, 2, 2, 2, vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Byc, 1, 1, 1, 1, 1, 1, vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Bzc, 2, 2, 2, 2, 2, 2, vct, this);
     for (int is = 0; is < ns; is++)
       grid->interpN2C(rhocs, is, rhons);
   } else {
@@ -1831,8 +1728,6 @@ void EMfields3D::initGEMDoubleHarris() {
 }
 
 void EMfields3D::initDoublePeriodicHarrisWithGaussianHumpPerturbation() {
-  const Collective* col = &get_col();
-  const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
   // perturbation localized in X
   const double pertX = 0.4;
@@ -1899,17 +1794,6 @@ void EMfields3D::initDoublePeriodicHarrisWithGaussianHumpPerturbation() {
           // guide field
           Bzn[i][j][k] = B0z;
         }
-    // communicate ghost
-    communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0], col->bcBx[1],
-                      col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0], col->bcBy[1],
-                      col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0], col->bcBz[1],
-                      col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                      vct, this);
-
     // initialize B on centers
 #pragma omp parallel for collapse(3)
     for (int i = 0; i < nxc; i++)
@@ -1935,16 +1819,6 @@ void EMfields3D::initDoublePeriodicHarrisWithGaussianHumpPerturbation() {
           // guide field
           Bzc[i][j][k] = B0z;
         }
-    // communicate ghost
-    communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1],
-                        col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                        vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1],
-                        col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                        vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1],
-                        col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                        vct, this);
     for (int is = 0; is < ns; is++)
       grid->interpN2C(rhocs, is, rhons);
   } else {
@@ -1953,8 +1827,6 @@ void EMfields3D::initDoublePeriodicHarrisWithGaussianHumpPerturbation() {
 }
 
 void EMfields3D::initHumpPerturbation() {
-  const Collective* col = &get_col();
-  const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
   if (restart1 == 0) {
     // initialize
@@ -2004,17 +1876,6 @@ void EMfields3D::initHumpPerturbation() {
           Bzn[i][j][k] =
               B0z * (0.5 * sech_xMd * sech_xMd * sech_yMd * sech_yMd + 1.0);
         }
-    // communicate ghost
-    communicateNodeBC(nxn, nyn, nzn, Bxn, col->bcBx[0], col->bcBx[1],
-                      col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Byn, col->bcBy[0], col->bcBy[1],
-                      col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                      vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Bzn, col->bcBz[0], col->bcBz[1],
-                      col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                      vct, this);
-
     // initialize B on centers
 #pragma omp parallel for collapse(3)
     for (int i = 0; i < nxc; i++)
@@ -2036,16 +1897,6 @@ void EMfields3D::initHumpPerturbation() {
           Bzc[i][j][k] =
               B0z * (0.5 * sech_xMd * sech_xMd * sech_yMd * sech_yMd + 1.0);
         }
-    // communicate ghost
-    communicateCenterBC(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1],
-                        col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                        vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1],
-                        col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                        vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1],
-                        col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                        vct, this);
     for (int is = 0; is < ns; is++)
       grid->interpN2C(rhocs, is, rhons);
   } else {
@@ -2350,19 +2201,10 @@ void EMfields3D::initRandomField() {
               // B0x*cos(grid->getXN(i,j,k)*kx+grid->getYN(i,j,k)*ky+2.0*M_PI*modes_seed[m+3][n+3]);
             }
         }
-    // communicate ghost
-    communicateNodeBC(nxn, nyn, nzn, Bxn, 1, 1, 2, 2, 1, 1, vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Byn, 1, 1, 1, 1, 1, 1, vct, this);
-    communicateNodeBC(nxn, nyn, nzn, Bzn, 1, 1, 2, 2, 1, 1, vct, this);
-
     // initialize B on centers
     grid->interpN2C(Bxc, Bxn);
     grid->interpN2C(Byc, Byn);
     grid->interpN2C(Bzc, Bzn);
-    // communicate ghost
-    communicateCenterBC(nxc, nyc, nzc, Bxc, 2, 2, 2, 2, 2, 2, vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Byc, 1, 1, 1, 1, 1, 1, vct, this);
-    communicateCenterBC(nxc, nyc, nzc, Bzc, 2, 2, 2, 2, 2, 2, vct, this);
     for (int is = 0; is < ns; is++)
       grid->interpN2C(rhocs, is, rhons);
   } else {
@@ -2504,7 +2346,6 @@ void EMfields3D::initBEAM(double x_center, double y_center, double z_center,
  * @brief Initialize the 3D magnetic-dipole planetary configuration.
  */
 void EMfields3D::initDipole() {
-  const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
 
@@ -2591,16 +2432,6 @@ void EMfields3D::initDipole() {
   grid->interpN2C(Bzc, Bzn);
   dprintf("1 Bzc[1][15][0]=%f", Bzc[1][15][0]);
 
-  communicateCenterBC_P(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1],
-                        col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                        vct, this);
-  communicateCenterBC_P(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1],
-                        col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                        vct, this);
-  communicateCenterBC_P(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1],
-                        col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                        vct, this);
-
   for (int is = 0; is < ns; is++)
     grid->interpN2C(rhocs, is, rhons);
 
@@ -2613,7 +2444,6 @@ void EMfields3D::initDipole() {
  * @brief Initialize the 2D magnetic-dipole planetary configuration.
  */
 void EMfields3D::initDipole2D() {
-  const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
 
@@ -2697,16 +2527,6 @@ void EMfields3D::initDipole2D() {
   grid->interpN2C(Bxc, Bxn);
   grid->interpN2C(Byc, Byn);
   grid->interpN2C(Bzc, Bzn);
-
-  communicateCenterBC_P(nxc, nyc, nzc, Bxc, col->bcBx[0], col->bcBx[1],
-                        col->bcBx[2], col->bcBx[3], col->bcBx[4], col->bcBx[5],
-                        vct, this);
-  communicateCenterBC_P(nxc, nyc, nzc, Byc, col->bcBy[0], col->bcBy[1],
-                        col->bcBy[2], col->bcBy[3], col->bcBy[4], col->bcBy[5],
-                        vct, this);
-  communicateCenterBC_P(nxc, nyc, nzc, Bzc, col->bcBz[0], col->bcBz[1],
-                        col->bcBz[2], col->bcBz[3], col->bcBz[4], col->bcBz[5],
-                        vct, this);
 
   for (int is = 0; is < ns; is++)
     grid->interpN2C(rhocs, is, rhons);

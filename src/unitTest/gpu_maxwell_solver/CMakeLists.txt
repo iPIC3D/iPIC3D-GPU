@@ -93,101 +93,53 @@ endif()
 
 enable_testing()
 
-add_test(
-  NAME gpuMaxwellSolverPeriodic
-  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
-          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
-          --case periodic ${MPIEXEC_POSTFLAGS})
-set_tests_properties(
-  gpuMaxwellSolverPeriodic
-  PROPERTIES
-    TIMEOUT 90
-  )
-
-add_test(
-  NAME gpuMaxwellSolverReflective
-  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
-          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
-          --case reflective ${MPIEXEC_POSTFLAGS})
-set_tests_properties(
-  gpuMaxwellSolverReflective
-  PROPERTIES
-    TIMEOUT 90
-  )
-
-add_test(
-  NAME gpuMaxwellSolverManufactured
-  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
-          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
-          --case manufactured ${MPIEXEC_POSTFLAGS})
-set_tests_properties(
-  gpuMaxwellSolverManufactured
-  PROPERTIES
-    TIMEOUT 90
-  )
-
-add_test(
-  NAME gpuMaxwellSolverBoundaryRows
-  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
-          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
-          --case boundary-rows ${MPIEXEC_POSTFLAGS})
-set_tests_properties(
-  gpuMaxwellSolverBoundaryRows
-  PROPERTIES
-    TIMEOUT 90
-  )
-
-add_test(
-  NAME gpuMaxwellSolverSmoothedFaces
-  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
-          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
-          --case smoothed-faces ${MPIEXEC_POSTFLAGS})
-set_tests_properties(
-  gpuMaxwellSolverSmoothedFaces
-  PROPERTIES
-    TIMEOUT 90
-  )
-
-add_test(
-  NAME gpuMaxwellSolverImageReference
-  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
-          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
-          --case image-reference ${MPIEXEC_POSTFLAGS})
-set_tests_properties(
-  gpuMaxwellSolverImageReference
-  PROPERTIES
-    TIMEOUT 90
-  )
-
-add_test(
-  NAME gpuMaxwellSolverObliqueWaveConvergence
-  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
-          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
-          --case oblique-wave ${MPIEXEC_POSTFLAGS})
-set_tests_properties(
-  gpuMaxwellSolverObliqueWaveConvergence
-  PROPERTIES
-    PROCESSORS ${GPU_MAXWELL_MPI_PROCS}
-    RUN_SERIAL TRUE
-    TIMEOUT 300
-  )
-
-# The solver cases with HaloOverlap = 1 (image-reference runs both modes)
-foreach(test_case periodic reflective manufactured boundary-rows smoothed-faces
-                  oblique-wave)
-  string(REPLACE "-" "_" test_name ${test_case})
+# gpuMaxwellSolver<name>: the test case test_case on GPU_MAXWELL_MPI_PROCS
+# ranks, with the extra arguments in ARGN; the oblique-wave convergence study
+# runs alone (its levels use the whole GPU)
+function(add_solver_test name test_case timeout)
   add_test(
-    NAME gpuMaxwellSolverOverlap_${test_name}
+    NAME gpuMaxwellSolver${name}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
             ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
-            --case ${test_case} --halo-overlap ${MPIEXEC_POSTFLAGS})
+            --case ${test_case} ${ARGN} ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(gpuMaxwellSolver${name} PROPERTIES TIMEOUT ${timeout})
   if(test_case STREQUAL "oblique-wave")
     set_tests_properties(
-      gpuMaxwellSolverOverlap_${test_name}
-      PROPERTIES PROCESSORS ${GPU_MAXWELL_MPI_PROCS} RUN_SERIAL TRUE
-                 TIMEOUT 300)
-  else()
-    set_tests_properties(gpuMaxwellSolverOverlap_${test_name}
-                         PROPERTIES TIMEOUT 90)
+      gpuMaxwellSolver${name}
+      PROPERTIES PROCESSORS ${GPU_MAXWELL_MPI_PROCS} RUN_SERIAL TRUE)
+  endif()
+endfunction()
+
+# name, case, timeout (s)
+set(solver_tests
+    Periodic periodic 90
+    Reflective reflective 90
+    Manufactured manufactured 90
+    BoundaryRows boundary-rows 90
+    SmoothedFaces smoothed-faces 90
+    InflowLayers inflow-layers 90
+    ConductorWall conductor-wall 90
+    ConductorEdges conductor-edges 90
+    LocalImage local-image 90
+    GhostFill ghost-fill 90
+    ConductorModes conductor-modes 120
+    ImageReference image-reference 90
+    ObliqueWaveConvergence oblique-wave 300)
+# the cases also run with HaloOverlap = 1 (image-reference runs both modes)
+set(overlap_cases periodic reflective manufactured boundary-rows smoothed-faces
+                  inflow-layers conductor-wall conductor-modes oblique-wave)
+list(LENGTH solver_tests n_items)
+math(EXPR last "${n_items} - 1")
+foreach(i RANGE 0 ${last} 3)
+  math(EXPR i_case "${i} + 1")
+  math(EXPR i_timeout "${i} + 2")
+  list(GET solver_tests ${i} name)
+  list(GET solver_tests ${i_case} test_case)
+  list(GET solver_tests ${i_timeout} timeout)
+  add_solver_test(${name} ${test_case} ${timeout})
+  if(test_case IN_LIST overlap_cases)
+    string(REPLACE "-" "_" overlap_name ${test_case})
+    add_solver_test(Overlap_${overlap_name} ${test_case} ${timeout}
+                    --halo-overlap)
   endif()
 endforeach()

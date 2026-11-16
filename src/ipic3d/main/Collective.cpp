@@ -107,6 +107,17 @@ const char* Collective::get_name_of_enum(int in) {
   return enumNames[in];
 }
 
+// The Smooth filter, a f + (1-a)/6 (sum of the 6 neighbours), has the
+// response a + (1-a)/3 (cos kx + cos ky + cos kz).  Along a single periodic
+// cell the cos stays 1, so with d other directions the lowest response is
+// a - (1-a)(2d-3)/3, negative below a = (2d-3)/(2d): 1/2 in 3D, 1/4 in 2D,
+// never in 1D.
+double Collective::smoothFlipBound() const {
+  const int d = !(nxc == 1 && PERIODICX) + !(nyc == 1 && PERIODICY) +
+                !(nzc == 1 && PERIODICZ);
+  return d > 1 ? (2.0 * d - 3.0) / (2.0 * d) : 0.0;
+}
+
 // Every rank reads the same input and stops together (eprintf would abort
 // rank 0 and leave the others in MPI_Finalize).
 void Collective::requireInput(bool ok, const char* fmt, ...) const {
@@ -369,20 +380,11 @@ void Collective::ReadInput(const ConfigFile& config) {
   PERIODICY_P = config.read<bool>("PERIODICY_P", PERIODICY);
   PERIODICZ_P = config.read<bool>("PERIODICZ_P", PERIODICZ);
 
-  // The Smooth filter, a f + (1-a)/6 (sum of the 6 neighbours), has the
-  // response a + (1-a)/3 (cos kx + cos ky + cos kz).  Along a single
-  // periodic cell the cos stays 1, so with d other directions the lowest
-  // response is a - (1-a)(2d-3)/3: negative, flipping modes every pass,
-  // below a = (2d-3)/(2d), i.e. 1/2 in 3D and 1/4 in 2D.  Above a = 1 every
-  // mode but k = 0 grows.
-  {
-    const int d = !(nxc == 1 && PERIODICX) + !(nyc == 1 && PERIODICY) +
-                  !(nzc == 1 && PERIODICZ);
-    const double smoothMin = d > 1 ? (2.0 * d - 3.0) / (2.0 * d) : 0.0;
-    requireInput(Smooth >= smoothMin && Smooth <= 1.0,
-                 "Smooth must be in [%g, 1] for this %dD grid, not %g",
-                 smoothMin, d, Smooth);
-  }
+  // The Smooth filter damps every mode but k = 0 only for Smooth in [0, 1]:
+  // above 1 every other mode grows, below 0 the shortest ones do.  Below
+  // smoothFlipBound() it flips the shortest modes (a warning in Print).
+  requireInput(Smooth >= 0.0 && Smooth <= 1.0,
+               "Smooth must be in [0, 1], not %g", Smooth);
   // the div(B) face rules take the next inner node: a non-periodic direction
   // needs 2 cells
   requireInput(divBCorrection != "yes" ||
@@ -685,8 +687,9 @@ void Collective::ReadInput(const ConfigFile& config) {
   bcEMfaceZright = config.read<int>("bcEMfaceZright");
   bcEMfaceZleft = config.read<int>("bcEMfaceZleft");
 
-  // EM field absorbing boundary condition parameters
-  yes_sal = config.read<int>("yes_sal", 0);
+  // EM field absorbing boundary condition parameters (SAL on by default; it
+  // acts only on open faces, bcEMface = 2)
+  yes_sal = config.read<int>("yes_sal", 1);
   n_layers_sal = config.read<int>("n_layers_sal", 3);
   // B SAL on the components tangential to the face only (see README):
   // the global div(B) correction is consistent only with this choice
@@ -699,7 +702,17 @@ void Collective::ReadInput(const ConfigFile& config) {
   /*    - E_tangential = 0   (Dirichlet, bc=1)                            */
   /*    - E_normal     = free (Neumann,  bc=2)                            */
   /*    - B_tangential = free (Neumann,  bc=2)                            */
-  /*    - B_normal     = 0   (Dirichlet, bc=1)                            */
+  /*    - B_normal     = bc=1 here; the GPU solver then sets the ghost    */
+  /*      cells of the cell B to 2 W - (first cell), W the initial wall   */
+  /*      value: a conductor freezes B_n on the wall                      */
+  /*      (GHOST_WALL rule of FieldBoundary, GPUFieldBoundary.cuh)       */
+  /*    These are the codes of the cell B, of the host fields, and of     */
+  /*    the GPU node fields on other faces.  On a conductor the GPU node  */
+  /*    fields (E, B) instead get the image of the field in the wall,     */
+  /*    E_n and B_t even, E_t and B_n odd about the face value            */
+  /*    (GhostSet::ENode, BNode), and E_t = 0 on the wall                 */
+  /*    (FieldBoundary::zeroTangential).  The GPU rules:                  */
+  /*    FieldBoundary.cpp.                                                */
   /*  bcEM* != 0 : Perfect Magnetic Conductor (PMC, "perfect mirror")     */
   /*    - E_tangential = free (Neumann,  bc=2)                            */
   /*    - E_normal     = 0   (Dirichlet, bc=1)                            */
@@ -766,6 +779,10 @@ void Collective::ReadInput(const ConfigFile& config) {
 
   // E field inflow BC: master switch for the inflow rows of the Maxwell image
   applyInflowBcsEImage = config.read<int>("ApplyInflowBcsEImage", 1);
+
+  // The equilibrium B forced on the y-wall layers of the GEM and ForceFree
+  // cases every cycle: off by default (only the conductor walls' BCs)
+  forceWallB = config.read<int>("ForceWallB", 0);
 
   // Fields on the X-right outflow layer: kept as solved (default), or copied
   // from the reference plane
@@ -978,6 +995,15 @@ void Collective::Print() {
   cout << "Simulation name   : " << SimName << endl;
   cout << "Smoothing         : " << (Smooth == 1.0 ? "off" : "on")
        << " (alpha=" << Smooth << ", Niter=" << SmoothNiter << ")" << endl;
+  if (Smooth != 1.0 && SmoothNiter % 2 == 1 && Smooth < smoothFlipBound())
+    cout << "WARNING: Smooth = " << Smooth << " is below " << smoothFlipBound()
+         << " on this grid: the filter's response to the shortest grid modes "
+            "is negative, so every pass flips their sign, and the odd "
+            "SmoothNiter = "
+         << SmoothNiter
+         << " leaves them inverted in the smoothed E and Jhat; use an even "
+            "SmoothNiter"
+         << endl;
   cout << "Halo overlap      : " << (haloOverlap ? "on" : "off")
        << " (field solver)" << endl;
   cout << "Solver guard      : ||b|| growth limit " << solverSourceGrowthLimit
@@ -1016,7 +1042,7 @@ void Collective::Print() {
     cout << ", n_layers=" << n_layers_sal
          << (sal_tangential_B ? ", B tangential only" : ", all B components");
   cout << endl;
-  // The open-face B treatment (gpuOpenBoundaryInflowB) runs only on wall
+  // The open-face B layers (FieldBoundarySpec::openBLayers) run only on wall
   // ranks with more than 8 cells along the face normal, a gate meant for the
   // flat direction of a 2D run: flag a thinner split of any other direction.
   // Cells per rank as in Grid3DCU: the last rank takes the remainder.
@@ -1071,6 +1097,9 @@ void Collective::Print() {
   cout << "E inflow BCs in Maxwell image : "
        << (applyInflowBcsEImage ? "yes" : "no")
        << " (applied per-face where bcPface == 2)" << endl;
+  cout << "B forced on the y walls (ForceWallB) : "
+       << (forceWallB ? "yes (GEM/ForceFree equilibrium layers)" : "no")
+       << endl;
   if (bcEMfaceXright == 2 && bcPfaceXright == 3)
     cout << "X-right outflow layer fields : "
          << (outflowLayerSolved
@@ -1094,12 +1123,29 @@ void Collective::Print() {
             "carries the SAL's B_n = B0_n at the faces into the whole box; use "
             "sal_tangential_B = 1"
          << endl;
-  if (divBCorrection == "yes" && !yes_sal && !PERIODICX && bcEMfaceXleft == 2)
-    cout << "WARNING: open Xleft face without SAL and the global div(B) "
-            "cleaning: the face sets the whole B, B_n included, to B0 every "
-            "cycle and the cleaning carries that face flux into the whole box; "
-            "use yes_sal = 1 with sal_tangential_B = 1"
-         << endl;
+  if (divBCorrection == "yes" && !yes_sal) {
+    // Without the SAL these open faces set the whole B to B0: X-left, and the
+    // Y/Z inflow faces (bcPface = 2)
+    string faces;
+    int count = 0;
+    auto addFace = [&](const char* name, bool set) {
+      if (set)
+        faces += count++ ? string(", ") + name : string(name);
+    };
+    addFace("Xleft", !PERIODICX && bcEMfaceXleft == 2);
+    addFace("Yleft", !PERIODICY && bcEMfaceYleft == 2 && bcPfaceYleft == 2);
+    addFace("Yright", !PERIODICY && bcEMfaceYright == 2 && bcPfaceYright == 2);
+    addFace("Zleft", !PERIODICZ && bcEMfaceZleft == 2 && bcPfaceZleft == 2);
+    addFace("Zright", !PERIODICZ && bcEMfaceZright == 2 && bcPfaceZright == 2);
+    if (!faces.empty())
+      cout << "WARNING: open " << faces << (count > 1 ? " faces" : " face")
+           << " without SAL and the global div(B) cleaning: "
+           << (count > 1 ? "these faces set" : "the face sets")
+           << " the whole B, B_n included, to B0 every cycle and the cleaning "
+              "carries that face flux into the whole box; use yes_sal = 1 with "
+              "sal_tangential_B = 1"
+           << endl;
+  }
   cout << "---------------------" << endl;
   cout << "Planet Boundary" << endl;
   cout << "---------------------" << endl;

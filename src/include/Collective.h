@@ -175,6 +175,10 @@ public:
   int getImplSusceptMode() const { return ImplSusceptMode; }
   double getSmooth() const { return (Smooth); }
   int getSmoothNiter() const { return SmoothNiter; }
+  /*! The Smooth below which the filter's response to the shortest grid modes
+   *  is negative, so that every pass flips their sign: 1/2 in 3D, 1/4 in 2D
+   *  (directions of one periodic cell do not count), 0 in 1D. */
+  double smoothFlipBound() const;
   bool getHaloOverlap() const { return haloOverlap; }
   double getSolverSourceGrowthLimit() const { return solverSourceGrowthLimit; }
   bool getSolverStopOnNonConvergence() const {
@@ -211,6 +215,7 @@ public:
   int getBcPfaceZright() const { return (bcPfaceZright); }
   int getBcPfaceZleft() const { return (bcPfaceZleft); }
   bool getApplyInflowBcsEImage() const { return applyInflowBcsEImage; }
+  bool getForceWallB() const { return forceWallB; }
   bool getOutflowLayerSolved() const { return outflowLayerSolved; }
   int getBcPHIfaceXright() const { return (bcPHIfaceXright); }
   int getBcPHIfaceXleft() const { return (bcPHIfaceXleft); }
@@ -535,6 +540,12 @@ private:
   /*! Apply inflow E field BCs in GMRes image iterations (default true).
    *  Inflow BCs are applied per-face only where bcPface == 2 (reemission). */
   bool applyInflowBcsEImage;
+
+  /*! ForceWallB (default false): with Case GEM, GEMnoPert, GEMDoubleHarris or
+   *  ForceFree, reset B on the y-wall layers to the case's equilibrium
+   *  profile every cycle.  Off: the conductor walls evolve B by their own
+   *  boundary conditions only. */
+  bool forceWallB;
 
   /*! Fields on the X-right open outflow layer (OutflowLayerFields): true =
    *  "solved" (default), the solver's E and B kept, only the ghost node and

@@ -1,6 +1,7 @@
 /* Unit tests of the divergence cleanings and of the B absorbing layer on the
  * GPU kernels, one --case each:
- *   sal-tangential      gpuSALBlendLayers3: the normal component bit-identical,
+ *   sal-tangential      gpuLayerOp (LAYER_BLEND): the normal component, left
+ *                       out of the mask, bit-identical,
  *                       the tangential ones blended, nothing outside touched.
  *   adjoint             gradC2N = -divN2Cᵀ with zero ghost centres, not with
  *                       copies.
@@ -15,6 +16,10 @@
  *                       B_n kept, curlN2C(E) unchanged.
  *   dive-projection     the div(E) right-hand side; divN2C(E) = 4 pi rho after
  *                       one cleaning.
+ *   dive-walls          the div(E) cleaning between perfect conductors: the
+ *                       odd ghosts of GhostSet::Phi in the image (symmetric,
+ *                       the wall checkerboards null), the wall E_t kept, the
+ *                       charge's checkerboard the only part left.
  *   null-space          gpuCleaningNullSums/Subtract on emulated ranks: no
  *                       null component left, only null-space parts removed.
  *   krylov-kernels      gpuBatchedDotNorm beyond 32 vectors; gpuSubCombination
@@ -27,11 +32,13 @@
 #include "GPUBlas.cuh"
 #include "GPUChebyshev.cuh"
 #include "GPUCleaning.cuh"
+#include "GPUFieldBoundary.cuh"
 #include "GPUPhysicsKernels.cuh"
 #include "GPUStencils.cuh"
 #include "cudaTypeDef.cuh"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -139,13 +146,22 @@ static void testSalTangential() {
       for (int asc = 0; asc < 2; asc++) {
         Vec h[3] = {randomVec(N, gen), randomVec(N, gen), randomVec(N, gen)};
         Dev d[3] = {Dev(h[0]), Dev(h[1]), Dev(h[2])};
-        // the calls of gpuOpenBoundaryInflowB: left face layers 0..nsal
-        // ascending, right face layers n-nsal-1..n-1 descending
+        // the B layers of the open faces (LayerSet::B): left face layers
+        // 0..nsal ascending, right face layers n-nsal-1..n-1 descending
         const int lo = asc ? 0 : n[dir] - nsal - 1;
         const int hi = asc ? nsal : n[dir] - 1;
         const int skip = skipMode ? dir : -1;
-        gpuSALBlendLayers3(d[0].p, d[1].p, d[2].p, tgt[0], tgt[1], tgt[2], dir,
-                           lo, hi, invNL, asc, n[0], n[1], n[2], 0, skip);
+        LayerOp op;
+        op.kind = LAYER_BLEND;
+        op.axis = dir;
+        op.first = lo;
+        op.last = hi;
+        for (int c = 0; c < 3; c++)
+          op.target[c] = tgt[c];
+        op.mask = skip >= 0 ? 7 & ~(1 << skip) : 7;
+        op.invLayers = invNL;
+        op.ascending = asc;
+        gpuLayerOp(op, d[0].p, d[1].p, d[2].p, n, 0);
         Vec blend, normal, outside; // result minus expected value
         Vec r[3] = {d[0].get(), d[1].get(), d[2].get()};
         for (int i = 0; i < n[0]; i++)
@@ -328,11 +344,12 @@ static bool hostFaceRow(const Lap27Op& op, int i, int j, int k) {
 }
 
 /** +L x by the 27 coefficients, independent of the GPU code: beyond the
- *  rows 0 (a cut, or the zero ghost of a cell face) or, along an axis of
- *  wrap, the periodic image; a face-plane neighbour 0 or the reading row; a
- *  flat axis the row; -diag x on a face row. */
+ *  rows 0 (a cut, or the zero ghost of a cell face), along an axis of wrap
+ *  the periodic image, along an axis of odd minus the row itself (the odd
+ *  ghost of phi on a perfect conductor); a face-plane neighbour 0 or the
+ *  reading row; a flat axis the row; -diag x on a face row. */
 static Vec hostLap27(const Vec& x, const Lap27Op& op,
-                     const bool* wrap = nullptr) {
+                     const bool* wrap = nullptr, const bool* odd = nullptr) {
   const int n[3] = {op.ni, op.nj, op.nk};
   const double m[3] = {0.25, 0.5, 0.25}, d2[3] = {1, -2, 1};
   Vec r(x.size());
@@ -354,15 +371,20 @@ static Vec hostLap27(const Vec& x, const Lap27Op& op,
               const int o[3] = {oa, ob, oc};
               int t[3];
               bool zero = false;
+              double sign = 1;
               for (int a = 0; a < 3; a++) {
                 t[a] = idx[a] + o[a];
                 if (op.flat[a] || o[a] == 0) {
                   t[a] = idx[a];
                 } else if (t[a] < 0 || t[a] > n[a] - 1) {
-                  if (wrap && wrap[a])
+                  if (wrap && wrap[a]) {
                     t[a] = (t[a] + n[a]) % n[a];
-                  else
+                  } else if (odd && odd[a]) {
+                    t[a] = idx[a];
+                    sign = -sign;
+                  } else {
                     zero = true;
+                  }
                 } else {
                   const int face = 2 * a + (o[a] > 0);
                   const bool plane =
@@ -379,7 +401,7 @@ static Vec hostLap27(const Vec& x, const Lap27Op& op,
               for (int a = 0; a < 3; a++)
                 c += op.invh2[a] * d2[o[a] + 1] * m[o[(a + 1) % 3] + 1] *
                      m[o[(a + 2) % 3] + 1];
-              sum += c * x[P(t[0], t[1], t[2])];
+              sum += c * sign * x[P(t[0], t[1], t[2])];
             }
         r[P(i, j, k)] = sum;
       }
@@ -771,14 +793,15 @@ static void testLap27Local() {
         "identity rows: |diag - (lo + hi)/2| / hi (dense lo, hi)", errDiag);
 }
 
-/** Solve L x = b by CG on -L x = -b (-L symmetric positive definite on the
- *  given operator, which has a zero-psi face or zero ghosts). */
-static Vec cgLap27(const Vec& b, const Lap27Op& op) {
+/** Solve L x = b by CG on -L x = -b (-L symmetric positive semi-definite on
+ *  the given operator, which has a zero-psi face, zero ghosts or the odd
+ *  ghosts of odd; b in its range). */
+static Vec cgLap27(const Vec& b, const Lap27Op& op, const bool* odd = nullptr) {
   Vec x(b.size(), 0), r = negated(b), p = r;
   double rr = dot(r, r);
   const double r0 = std::sqrt(rr);
   for (int it = 0; it < 20000 && std::sqrt(rr) > 1e-14 * r0; it++) {
-    const Vec Ap = negated(hostLap27(p, op));
+    const Vec Ap = negated(hostLap27(p, op, nullptr, odd));
     const double a = rr / dot(p, Ap);
     for (size_t q = 0; q < x.size(); q++) {
       x[q] += a * p[q];
@@ -1070,14 +1093,14 @@ static double nullComponent(const Vec& g, const int G[3], const int lo[3],
  *  axes, no null component is left, the removed part d is in the null space
  *  of the global operator, and the shared copies and face rows agree. */
 static void nullSpaceCase(const int N[3], int ranks, bool nodes,
-                          const bool periodic[3], bool mean,
+                          const bool periodic[3], const bool odd[3], bool mean,
                           std::mt19937_64& gen) {
   int G[3], lo[3], hi[3], families = 0; // unique global rows, non-face box
   bool flat[3], shared[3], even[3], row[6];
   for (int a = 0; a < 3; a++) {
     flat[a] = N[a] == 1;
     shared[a] = nodes && periodic[a] && !flat[a];
-    even[a] = periodic[a] && !flat[a] && N[a] % 2 == 0;
+    even[a] = !flat[a] && ((periodic[a] && N[a] % 2 == 0) || odd[a]);
     row[2 * a] = row[2 * a + 1] = nodes && !periodic[a];
     G[a] = N[a] + row[2 * a];
     lo[a] = row[2 * a];
@@ -1095,7 +1118,8 @@ static void nullSpaceCase(const int N[3], int ranks, bool nodes,
     const int n[3] = {(r + 1) * N[0] / ranks - x0 + shared[0], G[1] + shared[1],
                       G[2] + shared[2]};
     op[r] = makeOp(n, flat, row, row, nodes);
-    ns[r] = cleaningNullSpace(op[r], nodes, N, offset, periodic, shared, mean);
+    ns[r] =
+        cleaningNullSpace(op[r], nodes, N, offset, periodic, shared, odd, mean);
     badSums += ns[r].nSums != mean + families;
   }
   auto at = [&](int i, int j, int k) { // global row, periodic wrap
@@ -1124,8 +1148,8 @@ static void nullSpaceCase(const int N[3], int ranks, bool nodes,
         keepMax(mismatch, std::fabs(v[r][p] - g[q]));
     });
   // L d = 0 for the global operator, defined on every row: periodic wrap,
-  // and along a wall its zero ghost cells or conductor face rows; d = 0 on
-  // the face rows
+  // and along a wall its zero or odd ghost cells or conductor face rows; d =
+  // 0 on the face rows
   const Lap27Op global = makeOp(G, flat, row, row, nodes);
   const Vec d = minus(g0, g);
   double wsum = 0, faceRows = 0;
@@ -1142,16 +1166,20 @@ static void nullSpaceCase(const int N[3], int ranks, bool nodes,
             keepMax(faceRows, std::fabs(d[at(i, j, k)]));
       }
   const double left = nullComponent(g, G, lo, hi, even, mean);
-  const double Ld = maxAbs(hostLap27(d, global, periodic)) / (wsum * maxAbs(d));
+  const double Ld =
+      maxAbs(hostLap27(d, global, periodic, odd)) / (wsum * maxAbs(d));
   std::string walls;
   for (int a = 0; a < 3; a++)
     if (!periodic[a])
       walls += "xyz"[a];
-  char label[96];
+  bool anyOdd = false;
+  for (int a = 0; a < 3; a++)
+    anyOdd = anyOdd || odd[a];
+  char label[112];
   std::snprintf(label, sizeof(label),
-                "%s %dx%dx%d%s%s, %d rank(s): ", nodes ? "nodes" : "cells",
+                "%s %dx%dx%d%s%s%s, %d rank(s): ", nodes ? "nodes" : "cells",
                 N[0], N[1], N[2], walls.empty() ? "" : ", walls ",
-                walls.c_str(), ranks);
+                walls.c_str(), anyOdd ? " (odd ghosts)" : "", ranks);
   const std::string l = label;
   check(badSums == 0,
         l + "nSums = " + std::to_string(mean + families) +
@@ -1169,6 +1197,7 @@ static void testNullSpace() {
   std::printf("null-space\n");
   std::mt19937_64 gen(23);
   const bool all[3] = {true, true, true}, yWalls[3] = {true, false, true};
+  const bool none[3] = {}, yOdd[3] = {false, true, false};
   // three even axes, a flat z, an odd y (no family through y); 4 ranks: odd
   // x offsets
   const int even3[3] = {12, 24, 32}, flatZ[3] = {12, 24, 1},
@@ -1176,10 +1205,189 @@ static void testNullSpace() {
   for (int ranks : {1, 3, 4}) {
     for (const int* N : {even3, flatZ, oddY})
       for (const bool nodes : {false, true})
-        nullSpaceCase(N, ranks, nodes, all, true, gen);
+        nullSpaceCase(N, ranks, nodes, all, none, true, gen);
     // y walls: zero ghost cells (no mean), conductor node faces
-    nullSpaceCase(even3, ranks, false, yWalls, false, gen);
-    nullSpaceCase(even3, ranks, true, yWalls, true, gen);
+    nullSpaceCase(even3, ranks, false, yWalls, none, false, gen);
+    nullSpaceCase(even3, ranks, true, yWalls, none, true, gen);
+    // y conductors of div(E): odd ghost cells, families through y for an
+    // even and an odd cell count
+    for (const int* N : {even3, flatZ, oddY})
+      nullSpaceCase(N, ranks, false, yWalls, yOdd, false, gen);
+  }
+}
+
+/** The div(E) cleaning between perfect conductors:
+ *  x and y perfect conductors, z open, one rank, an even and an odd grid,
+ *  with the boundary kernels of the solver and the rules its plan gives
+ *  GhostSet::Phi (the solver test's rule table checks those): odd ghost
+ *  cells on the walls, 0 beyond the open faces, the conductor rows.
+ *  - the image with these ghosts (odd on the walls, even at their edges, 0
+ *    beyond the open faces) against hostLap27, its symmetry and its null
+ *    space: the x-y checkerboards, whatever the cell counts;
+ *  - one cleaning: the right-hand side loses its null-space part (the
+ *    charge's checkerboard), CG, then E -= gradC2N phi: the wall E_t stays 0
+ *    to round-off, and exactly 0 after rowValues; divN2C(E) - 4 pi rho is
+ *    left only on the null space, while the wall E_n changes;
+ *  - a pure checkerboard charge: nothing left to clean. */
+static void testDivEWalls() {
+  std::printf("dive-walls\n");
+  std::mt19937_64 gen(31);
+  for (const auto& m : {std::array<int, 3>{8, 6, 4}, {9, 7, 5}}) {
+    const Grid g = makeGrid(m[0], m[1], m[2]);
+    const bool odd[3] = {true, true, false}; // the conductor axes
+    // the ghosts of GhostSet::Phi on every face, one launch
+    GhostRuleDev rules[kFaces];
+    bool all[kFaces], walls[kFaces];
+    RowFaces rowFaces;
+    for (int f = 0; f < kFaces; f++) {
+      rules[f].kind = odd[faceAxis(f)] ? GHOST_ODD_CELL : GHOST_ZERO;
+      all[f] = true;
+      walls[f] = odd[faceAxis(f)];
+      rowFaces.kind[f] = walls[f] ? ROW_CONDUCTOR : ROW_NONE;
+    }
+    rowFaces.planes = nodePlanes(g.nn, walls);
+    GhostRuleDev* d_rules = nullptr;
+    cudaErrChk(cudaMalloc(&d_rules, sizeof rules));
+    cudaErrChk(
+        cudaMemcpy(d_rules, rules, sizeof rules, cudaMemcpyHostToDevice));
+    const FaceSlabs shell = ghostShell(g.nc, all);
+    auto fillPhi = [&](T* p) {
+      GhostBatch batch;
+      batch.p[0] = p;
+      batch.n = 1;
+      batch.rules = d_rules;
+      gpuFillGhosts(batch, shell, 0);
+    };
+    const int n[3] = {m[0], m[1], m[2]};
+    const size_t rows = (size_t)n[0] * n[1] * n[2];
+    const bool flat[3] = {}, none[6] = {}, noAxes[3] = {};
+    const Lap27Op op = makeOp(n, flat, none, none, false);
+    const T invd[3] = {1 / g.h[0], 1 / g.h[1], 1 / g.h[2]};
+    char label[48];
+    std::snprintf(label, sizeof(label), "%dx%dx%d: ", n[0], n[1], n[2]);
+    const std::string l = label;
+    auto row = [&](int i, int j, int k) {
+      return ((size_t)i * n[1] + j) * n[2] + k;
+    };
+
+    // the image: unpack into NaN, the ghosts of GhostSet::Phi, 27 points
+    auto image = [&](const Vec& x) {
+      Dev f(Vec(g.C(), kNaN)), dx(x), im(Vec(rows, kNaN));
+      gpuSolver2PhysLap27(f.p, dx.p, g.nc[1], g.nc[2], op, 0);
+      fillPhi(f.p);
+      const Lap27Rows lr = lap27Rows(g.nc, flat, false);
+      gpuLap27ToKrylov(im.p, f.p, dx.p, g.nc[1], g.nc[2], op, lr.all, 0);
+      return im.get();
+    };
+    const Vec u = randomVec(rows, gen), v = randomVec(rows, gen);
+    const Vec Lu = image(u), Lv = image(v);
+    check(relDiff(Lu, hostLap27(u, op, nullptr, odd)) < 1e-13,
+          l + "image with the Phi ghosts vs host (odd walls, zero open)",
+          relDiff(Lu, hostLap27(u, op, nullptr, odd)));
+    const double asym =
+        std::fabs(dot(u, Lv) - dot(Lu, v)) / (norm2(u) * norm2(Lv));
+    check(asym < 1e-13, l + "symmetric: |<u, L v> - <L u, v>| / |u||L v|",
+          asym);
+    // the x-y checkerboards are null, a single-axis one is not
+    Vec cxy(rows), cx(rows);
+    const Vec fz = randomVec(n[2], gen), fyz = randomVec(n[1] * n[2], gen);
+    for (int i = 0; i < n[0]; i++)
+      for (int j = 0; j < n[1]; j++)
+        for (int k = 0; k < n[2]; k++) {
+          cxy[row(i, j, k)] = ((i + j) % 2 ? -1 : 1) * fz[k];
+          cx[row(i, j, k)] = (i % 2 ? -1 : 1) * fyz[j * n[2] + k];
+        }
+    const double scale = maxAbs(Lu) / maxAbs(u);
+    check(maxAbs(image(cxy)) < 1e-13 * scale * maxAbs(cxy),
+          l + "L of an x-y checkerboard: 0", maxAbs(image(cxy)) / scale);
+    check(maxAbs(image(cx)) > 1e-2 * scale * maxAbs(cx),
+          l + "L of an x checkerboard: not 0", maxAbs(image(cx)) / scale);
+
+    // one cleaning: E with E_t = 0 on the walls, a random charge
+    Dev ex(randomVec(g.N(), gen)), ey(randomVec(g.N(), gen)),
+        ez(randomVec(g.N(), gen)), dr(randomVec(g.C(), gen));
+    T* const E[3] = {ex.p, ey.p, ez.p};
+    gpuBoundaryFaceValues(rowFaces, E, false, 0); // zeroTangential
+    const T rhoScale = -4 * M_PI;
+    auto rhs = [&](const Dev& rho) {
+      Dev db(Vec(rows, 0));
+      gpuDivN2CRhoToKrylov(db.p, ex.p, ey.p, ez.p, rho.p, rhoScale, g.nn[1],
+                           g.nn[2], invd, op, 0);
+      return db.get();
+    };
+    const CleaningNullSpace ns = cleaningNullSpace(
+        op, false, n, std::array<int, 3>{}.data(), noAxes, noAxes, odd, false);
+    auto project = [&](const Vec& b) {
+      std::vector<Vec> parts = {b};
+      projectNullSpace(parts, {ns});
+      return parts[0];
+    };
+    // max |E_c| over the wall nodes, c tangential to the wall
+    auto wallEt = [&](const Vec Ev[3]) {
+      double w = 0;
+      for (int i = 1; i < g.nn[0] - 1; i++)
+        for (int j = 1; j < g.nn[1] - 1; j++)
+          for (int k = 1; k < g.nn[2] - 1; k++) {
+            const int t[3] = {i, j, k};
+            for (int a = 0; a < 2; a++) // the wall axes
+              if (t[a] == 1 || t[a] == g.nn[a] - 2)
+                for (int c = 0; c < 3; c++)
+                  if (c != a)
+                    keepMax(w, std::fabs(Ev[c][g.n(i, j, k)]));
+          }
+      return w;
+    };
+    auto wallEn = [&](const Vec Ev[3]) {
+      Vec w;
+      for (int i = 1; i < g.nn[0] - 1; i++)
+        for (int j = 1; j < g.nn[1] - 1; j++)
+          for (int k = 1; k < g.nn[2] - 1; k++)
+            for (int a = 0; a < 2; a++)
+              if ((a ? j : i) == 1 || (a ? j : i) == g.nn[a] - 2)
+                w.push_back(Ev[a][g.n(i, j, k)]);
+      return w;
+    };
+    const Vec E0[3] = {ex.get(), ey.get(), ez.get()};
+    const Vec b = rhs(dr), bp = project(b), d = minus(b, bp);
+    const Vec x = cgLap27(bp, op, odd);
+    Dev phi(Vec(g.C(), kNaN)), dx(x);
+    gpuSolver2PhysLap27(phi.p, dx.p, g.nc[1], g.nc[2], op, 0);
+    fillPhi(phi.p);
+    gpuSubGradC2N(ex.p, ey.p, ez.p, phi.p, g.nn[0], g.nn[1], g.nn[2], invd, 0);
+    const Vec E1[3] = {ex.get(), ey.get(), ez.get()};
+    const double eMax = std::max({maxAbs(E1[0]), maxAbs(E1[1]), maxAbs(E1[2])});
+    check(wallEt(E1) < 1e-13 * eMax,
+          l + "wall E_t after the correction / max |E| (round-off)",
+          wallEt(E1) / eMax);
+    gpuBoundaryFaceValues(rowFaces, E, true, 0); // rowValues
+    const Vec E2[3] = {ex.get(), ey.get(), ez.get()};
+    check(wallEt(E2) == 0, l + "wall E_t after rowValues (exactly 0)",
+          wallEt(E2));
+    const double dEn = maxAbs(minus(wallEn(E2), wallEn(E0)));
+    check(dEn > 1e-3 * maxAbs(wallEn(E0)), l + "the wall E_n is corrected",
+          dEn / maxAbs(wallEn(E0)));
+    const double left = maxAbs(minus(rhs(dr), d)) / maxAbs(b);
+    check(left < 1e-11,
+          l + "divN2C(E) - 4 pi rho after = its null-space part (/ before)",
+          left);
+    check(maxAbs(d) > 1e-6 * maxAbs(b),
+          l + "the charge has a null-space part to leave",
+          maxAbs(d) / maxAbs(b));
+
+    // a pure checkerboard charge with E = 0: nothing to clean
+    Vec rc(g.C(), 0);
+    for (int i = 1; i < g.nc[0] - 1; i++)
+      for (int j = 1; j < g.nc[1] - 1; j++)
+        for (int k = 1; k < g.nc[2] - 1; k++)
+          rc[g.c(i, j, k)] = ((i + j) % 2 ? -1 : 1) * fz[k - 1];
+    for (T* e : E)
+      cudaErrChk(cudaMemset(e, 0, g.N() * sizeof(T)));
+    Dev drc(rc);
+    const Vec bc0 = rhs(drc);
+    check(maxAbs(project(bc0)) < 1e-13 * maxAbs(bc0),
+          l + "checkerboard charge: right-hand side null (/ before)",
+          maxAbs(project(bc0)) / maxAbs(bc0));
+    cudaErrChk(cudaFree(d_rules));
   }
 }
 
@@ -1372,6 +1580,7 @@ int main(int argc, char** argv) {
       {"chebyshev-cleaning", testChebyshevCleaning},
       {"divb-projection", testDivBProjection},
       {"dive-projection", testDivEProjection},
+      {"dive-walls", testDivEWalls},
       {"null-space", testNullSpace},
       {"krylov-kernels", testKrylovKernels},
       {"poisson-local", testPoissonLocal},

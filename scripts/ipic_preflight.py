@@ -237,15 +237,14 @@ def print_report(cfg: Input) -> None:
     periodic_x = cfg.boolean("PERIODICX", True)
     periodic_y = cfg.boolean("PERIODICY", True)
     periodic_z = cfg.boolean("PERIODICZ", True)
-    # same rejection as Collective::ReadInput: the Smooth filter's response
-    # is negative below (2d-3)/(2d), d the directions that are not a single
-    # periodic cell, and grows above 1
+    # same rejection as Collective::ReadInput: outside [0, 1] some mode grows
+    if not 0.0 <= smooth <= 1.0:
+        raise SystemExit(f"Smooth must be in [0, 1], not {cxx(smooth)}")
+    # Collective::smoothFlipBound: the filter's response is negative below
+    # (2d-3)/(2d), d the directions that are not a single periodic cell
     dims = sum(not (n == 1 and p) for n, p in
                ((nxc, periodic_x), (nyc, periodic_y), (nzc, periodic_z)))
-    smooth_min = (2 * dims - 3) / (2 * dims) if dims > 1 else 0.0
-    if not smooth_min <= smooth <= 1.0:
-        raise SystemExit(f"Smooth must be in [{cxx(smooth_min)}, 1] for this "
-                         f"{dims}D grid, not {cxx(smooth)}")
+    smooth_flip = (2 * dims - 3) / (2 * dims) if dims > 1 else 0.0
     # same rejection as Collective::ReadInput: the div(B) face rules take the
     # next inner node
     if divb == "yes" and any(n < 2 and not p for n, p in
@@ -283,7 +282,7 @@ def print_report(cfg: Input) -> None:
     bc_em_yl = cfg.integer("bcEMfaceYleft")
     bc_em_zr = cfg.integer("bcEMfaceZright")
     bc_em_zl = cfg.integer("bcEMfaceZleft")
-    yes_sal = cfg.integer("yes_sal", 0)
+    yes_sal = cfg.integer("yes_sal", 1)
     sal_tangential_b = cfg.integer("sal_tangential_B", 1)
     n_layers_sal = cfg.integer("n_layers_sal", 3)
 
@@ -320,6 +319,10 @@ def print_report(cfg: Input) -> None:
     print(f"Case type         : {case}")
     print(f"Simulation name   : {sim_name}")
     print(f"Smoothing         : {'off' if smooth == 1.0 else 'on'} (alpha={cxx(smooth)}, Niter={smooth_niter})")
+    if smooth != 1.0 and smooth_niter % 2 == 1 and smooth < smooth_flip:
+        print(f"WARNING: Smooth = {cxx(smooth)} is below {cxx(smooth_flip)} on this grid: the filter's response "
+              f"to the shortest grid modes is negative, so every pass flips their sign, and the odd "
+              f"SmoothNiter = {smooth_niter} leaves them inverted in the smoothed E and Jhat; use an even SmoothNiter")
     print(f"Halo overlap      : {'on' if halo_overlap else 'off'} (field solver)")
     print("---------------------")
     print("EM Field Boundary Conditions")
@@ -358,6 +361,8 @@ def print_report(cfg: Input) -> None:
     print(f"Zleft  : {bc_p_zl} ({bc_p_name(bc_p_zl)})")
     print(f"Zright : {bc_p_zr} ({bc_p_name(bc_p_zr)})")
     print(f"E inflow BCs in Maxwell image : {'yes' if apply_inflow else 'no'} (applied per-face where bcPface == 2)")
+    force_wall_b = cfg.integer("ForceWallB", 0)
+    print(f"B forced on the y walls (ForceWallB) : {'yes (GEM/ForceFree equilibrium layers)' if force_wall_b else 'no'}")
     print("---------------------")
     print("Field Corrections")
     print("---------------------")
@@ -373,11 +378,24 @@ def print_report(cfg: Input) -> None:
         print("WARNING: full B SAL with the global div(B) cleaning: the cleaning "
               "carries the SAL's B_n = B0_n at the faces into the whole box; use "
               "sal_tangential_B = 1")
-    if divb == "yes" and not yes_sal and not periodic_x and bc_em_xl == 2:
-        print("WARNING: open Xleft face without SAL and the global div(B) "
-              "cleaning: the face sets the whole B, B_n included, to B0 every "
-              "cycle and the cleaning carries that face flux into the whole box; "
-              "use yes_sal = 1 with sal_tangential_B = 1")
+    if divb == "yes" and not yes_sal:
+        # without the SAL these open faces set the whole B to B0: X-left, and
+        # the Y/Z inflow faces (bcPface = 2)
+        b0_faces = [name for name, sets_b0 in (
+            ("Xleft", not periodic_x and bc_em_xl == 2),
+            ("Yleft", not periodic_y and bc_em_yl == 2 and bc_p_yl == 2),
+            ("Yright", not periodic_y and bc_em_yr == 2 and bc_p_yr == 2),
+            ("Zleft", not periodic_z and bc_em_zl == 2 and bc_p_zl == 2),
+            ("Zright", not periodic_z and bc_em_zr == 2 and bc_p_zr == 2),
+        ) if sets_b0]
+        if b0_faces:
+            many = len(b0_faces) > 1
+            print(f"WARNING: open {', '.join(b0_faces)} "
+                  f"{'faces' if many else 'face'} without SAL and the global "
+                  f"div(B) cleaning: {'these faces set' if many else 'the face sets'} "
+                  "the whole B, B_n included, to B0 every cycle and the cleaning "
+                  "carries that face flux into the whole box; use yes_sal = 1 "
+                  "with sal_tangential_B = 1")
     print("---------------------")
     print("Planet Boundary")
     print("---------------------")

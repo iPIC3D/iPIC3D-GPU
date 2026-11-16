@@ -156,10 +156,10 @@ static bool diffuseReflectionCase(int doSphere, cudaCommonType ox,
   std::normal_distribution<double> normal;
   std::vector<SpeciesParticle> in(n);
   for (int i = 0; i < n; i++) {
-    double d[3] = {normal(gen), doSphere == 1 ? normal(gen) : 0.0,
-                   normal(gen)};
+    double d[3] = {normal(gen), doSphere == 1 ? normal(gen) : 0.0, normal(gen)};
     const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-    const double depth = 0.9 * R * std::uniform_real_distribution<double>()(gen);
+    const double depth =
+        0.9 * R * std::uniform_real_distribution<double>()(gen);
     in[i].set(0.1 * normal(gen), 0.1 * normal(gen), 0.1 * normal(gen), -1.0,
               ox + depth * d[0] / len,
               doSphere == 1 ? oy + depth * d[1] / len : oy + 0.3,
@@ -217,8 +217,8 @@ static bool diffuseReflectionCase(int doSphere, cudaCommonType ox,
     const double nv[3] = {d[0] / r, d[1] / r, d[2] / r};
     const double v[3] = {p.get_u(), p.get_v(), p.get_w()};
     const double s = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    const double s0 = std::sqrt(q.get_u() * q.get_u() +
-                                q.get_v() * q.get_v() + q.get_w() * q.get_w());
+    const double s0 = std::sqrt(q.get_u() * q.get_u() + q.get_v() * q.get_v() +
+                                q.get_w() * q.get_w());
     errSpeed = std::max(errSpeed, std::fabs(s - s0) / s0);
     errRadius = std::max(errRadius, std::fabs(r - 1.05 * R) / R);
     if (doSphere == 2)
@@ -255,8 +255,8 @@ static bool diffuseReflectionCase(int doSphere, cudaCommonType ox,
   const double sigMu = std::sqrt(1.0 / 18.0 / N), sigT = std::sqrt(0.25 / N),
                sigTq = std::sqrt(1.0 / 16.0 / N);
   const char* geom = doSphere == 1 ? "3D sphere" : "2D circle";
-  std::cout << "  " << geom << ": <mu> = " << meanMu << " (2/3), KS "
-            << ks << ", tangential means " << sT1 / N << " " << sT2 / N
+  std::cout << "  " << geom << ": <mu> = " << meanMu << " (2/3), KS " << ks
+            << ", tangential means " << sT1 / N << " " << sT2 / N
             << ", mean squares " << sT1q / N << " " << sT2q / N
             << " (1/4), speed error " << errSpeed << "\n";
   bool ok = count == n;

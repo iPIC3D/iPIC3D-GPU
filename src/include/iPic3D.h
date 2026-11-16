@@ -458,13 +458,13 @@ private:
   int* planetPclCount; // per species, planet particle count this cycle
 
   // Cross-species planet processing buffers (device)
-  cudaParticleType* planetEnergyBuf;       // merged electron energies
-  uint32_t* planetGlobalIdxBuf;            // encodes species + local index
+  cudaParticleType* planetEnergyBuf;  // merged electron energies
+  uint32_t* planetGlobalIdxBuf;       // encodes species + local index
   PlanetBCState* planetBCStateDevice; // carried charge + scalar diagnostics
   cudaEvent_t planetDoneEvent; // recorded on planetStream when its work is not
                                // followed by a host sync
-  int* planetCutoffDevice; // single-element device buffer for cutoff index
-                           // output
+  int* planetCutoffDevice;     // single-element device buffer for cutoff index
+                               // output
   planetArray** planetArrayCUDAPtrDevice; // device array of device pointers
                                           // (for chargeCutoffKernel)
   int* planetElecOffsetsDevice; // device array of per-electron-species offsets

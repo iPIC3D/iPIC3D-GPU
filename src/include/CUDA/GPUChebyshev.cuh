@@ -67,7 +67,7 @@ void gpuChebyshevStepN(cudaSolverType* d_w, const cudaSolverType* d_y,
  *  p = (i nj + j) nk + k, 0 <= i < ni, ... (the Poisson Krylov layout of
  *  gpuPhys2Solver1): a neighbour outside the rank's interior is g[f] times
  *  the cell, f = Xleft, Xright, Yleft, Yright, Zleft, Zright, g in
- *  {-1, 0, +1} (poissonLocalGhostRules).  Not used currently: the cleaning
+ *  {-1, 0, +1} (PoissonLocalGhostRules).  Not used currently: the cleaning
  *  solves use the 27-point Lap27Op (GPUCleaning.cuh). */
 struct PoissonLocalOperator {
   int ni, nj, nk;

@@ -29,6 +29,7 @@ set(INCLUDE_CODE_DIR ${PROJECT_ROOT}/src/include)
 set(src_files
     ${CMAKE_CURRENT_SOURCE_DIR}/divbCleaningTest.cu
     ${SOURCE_CODE_DIR}/cudaKernel/GPUPhysicsKernels.cu
+    ${SOURCE_CODE_DIR}/cudaKernel/GPUFieldBoundary.cu
     ${SOURCE_CODE_DIR}/cudaKernel/GPUStencils.cu
     ${SOURCE_CODE_DIR}/cudaKernel/GPUBlas.cu
     ${SOURCE_CODE_DIR}/cudaKernel/GPUChebyshev.cu
@@ -59,7 +60,7 @@ endif()
 enable_testing()
 
 foreach(test_case sal-tangential adjoint lap27-image lap27-local
-                  chebyshev-cleaning divb-projection dive-projection null-space
+                  chebyshev-cleaning divb-projection dive-projection dive-walls null-space
                   krylov-kernels poisson-local poisson-image)
   string(REPLACE "-" "_" test_name ${test_case})
   add_test(NAME divbCleaning_${test_name}

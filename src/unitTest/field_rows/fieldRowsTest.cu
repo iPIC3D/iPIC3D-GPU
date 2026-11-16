@@ -2,16 +2,11 @@
  * EMfields3D::gpuMaxwellImage / gpuMaxwellSource): the boundary rows,
  * MUdot, PointList/FastDiv and the launch sets and kernels of the image.
  *
- *   --case pec-linear      gpuPerfectConductorImage is linear in the Krylov
- *                          vector: image(0) = 0 on the face rows and image(a u
- *                          + b v) = a image(u) + b image(v), every face.
- *   --case pec-equivalent  image(x) - source equals the conductor row
- *                          x_n - (E_n - chi_na x_a - chi_nb x_b - 4 pi theta
- *                          dt J_n) / chi_nn with chi the rows of MUdot (host),
- *                          and the tangential rows are x_t - ebc_t.
- *   --case open-rows       gpuOpenBCSetFace3 / gpuOpenBCCopyFace3 write the
- *                          constants / identity on the face rows only;
- *                          with tangentialOnly, the tangential constants.
+ *   --case open-rows       the boundary rows of one face (GPUFieldBoundary):
+ *                          an inflow face's identity rows and E0 values, a
+ *                          conductor's E_t = 0 and identity rows with its
+ *                          normal row left to the operator, on the face rows
+ *                          only.
  *   --case mudot           gpuMUdot (all species in one kernel) against a host
  *                          per-species MUdot and the per-species kernel
  *                          gpuMUdotSpecies, for 1..6, 16, 17 and 33 species
@@ -46,6 +41,7 @@
  *
  * Array layout as in the code: (i * ny + j) * nz + k; the image rows are
  * written into the interleaved Krylov image of gpuPhys2Solver3. */
+#include "GPUFieldBoundary.cuh"
 #include "GPUMaxwellLocal.cuh"
 #include "GPUPhysicsKernels.cuh"
 #include "cudaTypeDef.cuh"
@@ -95,64 +91,12 @@ static Vec randomVec(size_t n, std::mt19937_64& g, double lo = -1,
   return v;
 }
 
-// grid, species and constants of a small plasma
-constexpr int NX = 9, NY = 8, NZ = 7, NS = 2;
+// grid and constants of the tests
+constexpr int NX = 9, NY = 8, NZ = 7;
 constexpr size_t N = (size_t)NX * NY * NZ;
 const T kDt = 0.3, kC = 1.0, kTh = 1.0, kFourPI = 16.0 * std::atan(1.0),
         kDelt = kC * kTh * kDt;
-const T kQom[NS] = {-25.0, 1.0};
-const T kEbc[3] = {0.11, -0.07, 0.05};
-
-struct Plasma {
-  Vec B[3], Be[3], rho;
-  Dev *dB[3], *dBe[3], *drho, *dqom;
-  explicit Plasma(std::mt19937_64& g) {
-    for (int c = 0; c < 3; c++) {
-      B[c] = randomVec(N, g, -0.5, 0.5);
-      Be[c] = randomVec(N, g, -0.2, 0.2);
-      dB[c] = new Dev(B[c]);
-      dBe[c] = new Dev(Be[c]);
-    }
-    rho = randomVec(N * NS, g, 0.05, 0.2);
-    for (size_t q = 0; q < N; q++)
-      rho[q] = -rho[q]; // species 0 negative (electrons)
-    drho = new Dev(rho);
-    dqom = new Dev(Vec(kQom, kQom + NS));
-  }
-  ~Plasma() {
-    for (int c = 0; c < 3; c++) {
-      delete dB[c];
-      delete dBe[c];
-    }
-    delete drho;
-    delete dqom;
-  }
-  // host susceptibility row n at node q: the rows of the interior operator
-  // MUdot, (v + v x w + (v.w) w) d per species
-  void chiRow(int n, size_t q, double row[3]) const {
-    row[0] = row[1] = row[2] = 0;
-    row[n] = 1;
-    for (int s = 0; s < NS; s++) {
-      const double beta = 0.5 * kQom[s] * kDt / kC;
-      const double w[3] = {beta * (B[0][q] + Be[0][q]),
-                           beta * (B[1][q] + Be[1][q]),
-                           beta * (B[2][q] + Be[2][q])};
-      const double d = kFourPI / 2.0 * kDelt * kDt / kC * kQom[s] *
-                       rho[s * N + q] /
-                       (1.0 + w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
-      // MUdot row n applied to the unit vector e_j
-      for (int j = 0; j < 3; j++) {
-        double e[3] = {0, 0, 0};
-        e[j] = 1;
-        const double edotw = e[0] * w[0] + e[1] * w[1] + e[2] * w[2];
-        const double cross[3] = {e[1] * w[2] - e[2] * w[1],
-                                 e[2] * w[0] - e[0] * w[2],
-                                 e[0] * w[1] - e[1] * w[0]};
-        row[j] += (e[n] + cross[n] + edotw * w[n]) * d;
-      }
-    }
-  }
-};
+const T kEbc[3] = {0.11, -0.07, 0.05}; // an inflow face's E0 (open-rows)
 
 static size_t at(int i, int j, int k) { return ((size_t)i * NY + j) * NZ + k; }
 
@@ -168,7 +112,7 @@ template <typename F> static void forInterior(F fn) {
       for (int k = 1; k < NZ - 1; k++)
         fn(at(i, j, k), kAt(i, j, k));
 }
-// node arrays -> Krylov vector (interior), and back (ghost nodes 0)
+// node arrays -> Krylov vector (interior)
 static Vec pack(const Vec v[3]) {
   Vec K(3 * NK);
   forInterior([&](size_t q, size_t p) {
@@ -176,14 +120,6 @@ static Vec pack(const Vec v[3]) {
       K[3 * p + c] = v[c][q];
   });
   return K;
-}
-static void unpack(const Vec& K, Vec out[3]) {
-  for (int c = 0; c < 3; c++)
-    out[c] = Vec(N, 0.0);
-  forInterior([&](size_t q, size_t p) {
-    for (int c = 0; c < 3; c++)
-      out[c][q] = K[3 * p + c];
-  });
 }
 
 // face rows of face (dir, high): node plane 1 or n-2, tangential interior
@@ -199,18 +135,6 @@ template <typename F> static void forFaceRows(int dir, bool high, F fn) {
     }
 }
 
-// conductor image rows into a zero Krylov image, returned as node arrays
-static void image(const Plasma& p, const Vec v[3], Vec out[3], int dir,
-                  bool high) {
-  Dev vx(v[0]), vy(v[1]), vz(v[2]);
-  Dev im(Vec(3 * NK, 0.0));
-  gpuPerfectConductorImage(im.p, vx.p, vy.p, vz.p, p.dB[0]->p, p.dB[1]->p,
-                           p.dB[2]->p, p.dBe[0]->p, p.dBe[1]->p, p.dBe[2]->p,
-                           p.drho->p, p.dqom->p, NS, kDt, kC, kFourPI, kDelt,
-                           NX, NY, NZ, dir, high);
-  unpack(im.get(), out);
-}
-
 static const char* faceName(int dir, bool high) {
   static const char* const names[6] = {"x-left",  "x-right", "y-left",
                                        "y-right", "z-left",  "z-right"};
@@ -218,106 +142,36 @@ static const char* faceName(int dir, bool high) {
 }
 
 // ---------------------------------------------------------------------------
-static void testPecLinear() {
-  std::printf("pec-linear\n");
-  std::mt19937_64 gen(21);
-  Plasma p(gen);
-  const double a = 0.7, b = -1.3;
-  for (int dir = 0; dir < 3; dir++)
-    for (bool high : {false, true}) {
-      Vec u[3] = {randomVec(N, gen), randomVec(N, gen), randomVec(N, gen)};
-      Vec v[3] = {randomVec(N, gen), randomVec(N, gen), randomVec(N, gen)};
-      Vec w[3], z[3];
-      for (int c = 0; c < 3; c++) {
-        w[c] = Vec(N);
-        z[c] = Vec(N, 0.0);
-        for (size_t q = 0; q < N; q++)
-          w[c][q] = a * u[c][q] + b * v[c][q];
-      }
-      Vec iu[3], iv[3], iw[3], iz[3];
-      image(p, u, iu, dir, high);
-      image(p, v, iv, dir, high);
-      image(p, w, iw, dir, high);
-      image(p, z, iz, dir, high);
-      double errLin = 0, errZero = 0;
-      forFaceRows(dir, high, [&](size_t q) {
-        for (int c = 0; c < 3; c++) {
-          errLin = std::max(
-              errLin, std::fabs(iw[c][q] - (a * iu[c][q] + b * iv[c][q])));
-          errZero = std::max(errZero, (double)std::fabs(iz[c][q]));
-        }
-      });
-      char what[96];
-      std::snprintf(what, sizeof(what), "%s: image(0) = 0",
-                    faceName(dir, high));
-      check(errZero == 0.0, what, errZero);
-      std::snprintf(what, sizeof(what), "%s: image(a u + b v) - (a Au + b Av)",
-                    faceName(dir, high));
-      check(errLin < 1e-13, what, errLin);
-    }
-}
-
-static void testPecEquivalent() {
-  std::printf("pec-equivalent\n");
-  std::mt19937_64 gen(22);
-  Plasma p(gen);
-  for (int dir = 0; dir < 3; dir++)
-    for (bool high : {false, true}) {
-      Vec x[3] = {randomVec(N, gen), randomVec(N, gen), randomVec(N, gen)};
-      const Vec En = randomVec(N, gen), Jn = randomVec(N, gen);
-      Vec im[3];
-      image(p, x, im, dir, high);
-      Dev sx(Vec(N, 0.0)), sy(Vec(N, 0.0)), sz(Vec(N, 0.0)), dE(En), dJ(Jn);
-      gpuPerfectConductorSource(sx.p, sy.p, sz.p, dE.p, dJ.p, p.dB[0]->p,
-                                p.dB[1]->p, p.dB[2]->p, p.dBe[0]->p,
-                                p.dBe[1]->p, p.dBe[2]->p, p.drho->p, p.dqom->p,
-                                NS, kDt, kC, kTh, kFourPI, kDelt, kEbc[0],
-                                kEbc[1], kEbc[2], NX, NY, NZ, dir, high);
-      const Vec src[3] = {sx.get(), sy.get(), sz.get()};
-      double err = 0, scale = 0;
-      forFaceRows(dir, high, [&](size_t q) {
-        double chi[3];
-        p.chiRow(dir, q, chi);
-        const int na = (dir + 1) % 3, nb = (dir + 2) % 3;
-        // the same rows in affine form (constants in the image, RHS 0; the
-        // tangential RHS is ebc)
-        const double oldN =
-            x[dir][q] - (En[q] - chi[na] * x[na][q] - chi[nb] * x[nb][q] -
-                         Jn[q] * kDt * kTh * kFourPI) /
-                            chi[dir];
-        err = std::max(err, std::fabs((im[dir][q] - src[dir][q]) - oldN));
-        scale = std::max(scale, std::fabs(oldN));
-        for (int t : {na, nb})
-          err = std::max(
-              err, std::fabs((im[t][q] - src[t][q]) - (x[t][q] - kEbc[t])));
-      });
-      char what[96];
-      std::snprintf(what, sizeof(what),
-                    "%s: image - source == affine row (rel.)",
-                    faceName(dir, high));
-      check(err < 1e-12 * std::max(scale, 1.0), what, err / scale);
-    }
-}
-
 static void testOpenRows() {
   std::printf("open-rows\n");
   std::mt19937_64 gen(23);
+  const int n[3] = {NX, NY, NZ};
   for (int dir = 0; dir < 3; dir++)
     for (bool high : {false, true}) {
-      const int n[3] = {NX, NY, NZ};
-      const int plane = high ? n[dir] - 2 : 1;
+      const int face = 2 * dir + (high ? 1 : 0);
       Vec d0[3] = {randomVec(N, gen), randomVec(N, gen), randomVec(N, gen)};
       Vec v[3] = {randomVec(N, gen), randomVec(N, gen), randomVec(N, gen)};
+      std::vector<char> row(N, 0);
+      forFaceRows(dir, high, [&](size_t q) { row[q] = 1; });
+      char what[96];
+
+      // an inflow face: the identity rows (image = v) with E0 in the RHS
+      RowFaces inflow;
+      bool active[kFaces] = {};
+      active[face] = true;
+      inflow.kind[face] = ROW_INFLOW;
+      for (int c = 0; c < 3; c++)
+        inflow.E0[c] = kEbc[c];
+      inflow.planes = nodePlanes(n, active);
       Dev sx(d0[0]), sy(d0[1]), sz(d0[2]);
       Dev im(pack(d0)); // the image rows go into the Krylov image
       Dev vx(v[0]), vy(v[1]), vz(v[2]);
-      gpuOpenBCSetFace3(sx.p, sy.p, sz.p, kEbc[0], kEbc[1], kEbc[2], dir, plane,
-                        NX, NY, NZ);
-      gpuOpenBCCopyFace3(im.p, vx.p, vy.p, vz.p, dir, plane, NX, NY, NZ);
+      cudaSolverType* const S[3] = {sx.p, sy.p, sz.p};
+      gpuBoundaryFaceValues(inflow, S, true, 0);
+      const cudaSolverType* const V[3] = {vx.p, vy.p, vz.p};
+      gpuBoundaryImageRows(inflow, im.p, V, 0);
       const Vec s[3] = {sx.get(), sy.get(), sz.get()};
       const Vec K = im.get();
-      std::vector<char> row(N, 0);
-      forFaceRows(dir, high, [&](size_t q) { row[q] = 1; });
       double errRow = 0, errOut = 0;
       for (size_t q = 0; q < N; q++)
         for (int c = 0; c < 3; c++) {
@@ -336,28 +190,48 @@ static void testOpenRows() {
             errOut = std::max(errOut, e);
         }
       });
-      char what[96];
-      std::snprintf(what, sizeof(what), "%s: RHS = E0, image = v on face rows",
+      std::snprintf(what, sizeof(what),
+                    "%s inflow: RHS = E0, image = v on face rows",
                     faceName(dir, high));
       check(errRow == 0.0, what, errRow);
-      std::snprintf(what, sizeof(what), "%s: elsewhere untouched",
+      std::snprintf(what, sizeof(what), "%s inflow: elsewhere untouched",
                     faceName(dir, high));
       check(errOut == 0.0, what, errOut);
 
+      // a conductor: E_t = 0 on the face rows (the identity rows' value) and
+      // image = v there; the normal row is left to the operator (the
+      // interior row of the conductor image)
+      RowFaces wall;
+      wall.kind[face] = ROW_CONDUCTOR;
+      wall.planes = nodePlanes(n, active);
       Dev tx(d0[0]), ty(d0[1]), tz(d0[2]);
-      gpuOpenBCSetFace3(tx.p, ty.p, tz.p, kEbc[0], kEbc[1], kEbc[2], dir, plane,
-                        NX, NY, NZ, 0, true);
+      cudaSolverType* const Tn[3] = {tx.p, ty.p, tz.p};
+      gpuBoundaryFaceValues(wall, Tn, true, 0);
+      Dev imw(pack(d0));
+      gpuBoundaryImageRows(wall, imw.p, V, 0);
       const Vec t[3] = {tx.get(), ty.get(), tz.get()};
-      double errTan = 0;
+      const Vec W = imw.get();
+      double errTan = 0, errRows = 0;
       for (size_t q = 0; q < N; q++)
         for (int c = 0; c < 3; c++)
           errTan = std::max(
-              errTan, (double)std::fabs(
-                          t[c][q] - (row[q] && c != dir ? kEbc[c] : d0[c][q])));
+              errTan, (double)std::fabs(t[c][q] -
+                                        (row[q] && c != dir ? 0.0 : d0[c][q])));
+      forInterior([&](size_t q, size_t p) {
+        for (int c = 0; c < 3; c++)
+          errRows = std::max(
+              errRows,
+              (double)std::fabs(W[3 * p + c] -
+                                (row[q] && c != dir ? v[c][q] : d0[c][q])));
+      });
       std::snprintf(what, sizeof(what),
-                    "%s: tangentialOnly sets E_t on face rows only",
+                    "%s conductor: E_t = 0 on face rows only",
                     faceName(dir, high));
       check(errTan == 0.0, what, errTan);
+      std::snprintf(what, sizeof(what),
+                    "%s conductor: identity rows for E_t only",
+                    faceName(dir, high));
+      check(errRows == 0.0, what, errRows);
     }
 }
 
@@ -858,11 +732,16 @@ static void testImageKernels() {
       cList.emplace_back(fillC);
       cSplit.emplace_back(fillC);
     }
+    // conductor walls at y-left and z-right: their wall cells read D
+    // through the conductor image, in every launch shape
+    ImageWalls walls;
+    walls.lo[1] = 1;
+    walls.hi[2] = nzc - 2;
     auto cellOps = [&](std::deque<Dev>& o, const auto& box) {
       gpuMaxwellLocalCenterOps(o[0].p, o[1].p, o[2].p, o[3].p, o[4].p, o[5].p,
                                o[6].p, o[7].p, o[8].p, o[9].p, dv[0].p, dv[1].p,
                                dv[2].p, mWhole[0].p, mWhole[1].p, mWhole[2].p,
-                               nxc, nyc, nzc, ix, iy, iz, box);
+                               nxc, nyc, nzc, ix, iy, iz, walls, box);
     };
     cellOps(cWhole, b.cells.box[0]);
     cellOps(cList, b.cells);
@@ -923,10 +802,6 @@ int main(int argc, char** argv) {
   for (int a = 1; a + 1 < argc; a++)
     if (std::strcmp(argv[a], "--case") == 0)
       which = argv[a + 1];
-  if (which == "all" || which == "pec-linear")
-    testPecLinear();
-  if (which == "all" || which == "pec-equivalent")
-    testPecEquivalent();
   if (which == "all" || which == "open-rows")
     testOpenRows();
   if (which == "all" || which == "mudot")

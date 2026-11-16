@@ -31,6 +31,7 @@
 #ifndef GPU_MAXWELL_LOCAL_CUH
 #define GPU_MAXWELL_LOCAL_CUH
 
+#include "FieldBoundary.h" // ImageWalls
 #include "GPUPointLaunch.cuh"
 #include "cudaTypeDef.cuh"
 
@@ -121,7 +122,9 @@ MaxwellImageBoxes maxwellImageBoxes(const int nCell[3], int cellEndX,
  * For each center cell (i,j,k) of points:
  *   - Reads the 8 corner nodes of (vectX,vectY,vectZ,Dx,Dy,Dz)
  *   - Computes 9 center-gradient components (3 per E-component)
- *   - Computes 1 center divergence of D
+ *   - Computes 1 center divergence of D, read through the conductor image
+ *     (ImageWalls: the cells next to a conductor read 0 for the face-node
+ *     components of D tangential to it)
  *
  * The other cells are not written.
  *
@@ -131,6 +134,7 @@ MaxwellImageBoxes maxwellImageBoxes(const int nCell[3], int cellEndX,
  * @param dX,dY,dZ    Node-based input D = μ̂·E components.
  * @param nxc,nyc,nzc Center grid dimensions (including ghost cells).
  * @param invdx,invdy,invdz  Inverse grid spacings.
+ * @param walls       The conductor walls of div D (FieldBoundary::imageWalls).
  * @param points      Cells to compute: a PointBox (3D launch) or a
  *                    PointList (1D launch).
  * @param stream      CUDA stream.
@@ -144,7 +148,7 @@ void gpuMaxwellLocalCenterOps(
     const cudaSolverType* vZ, const cudaSolverType* dX,
     const cudaSolverType* dY, const cudaSolverType* dZ, int nxc, int nyc,
     int nzc, cudaSolverType invdx, cudaSolverType invdy, cudaSolverType invdz,
-    const Points& points, cudaStream_t stream = 0);
+    const ImageWalls& walls, const Points& points, cudaStream_t stream = 0);
 
 // =========================================================================
 //  Fused node-level operations + Krylov packing

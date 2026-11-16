@@ -268,8 +268,7 @@ __global__ void cell_sort_prefix_sum_phase1_kernel(
   // partial-warp reduction.  Zero padding makes this valid for the final
   // partially filled tile as well.
   if (tid == SORT_SCAN_BLOCK_SIZE - 1)
-    block_sums[blockIdx.x] =
-        sdata[SORT_SCAN_ELEMENTS_PER_BLOCK - 1] + val2;
+    block_sums[blockIdx.x] = sdata[SORT_SCAN_ELEMENTS_PER_BLOCK - 1] + val2;
 }
 
 /**
@@ -666,9 +665,9 @@ __host__ int CellSorter::diagnosticEnqueueSortBufferMutationMask() const {
   if (!diagnostic_enqueue_snapshot_valid)
     return 1 << 14;
   const void* current[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT] = {
-      buffers.cell_counts, buffers.cell_offsets, buffers.cell_start_offsets,
-      buffers.sorted_indices, buffers.block_sums,
-      buffers.diagnostic_phase1_block_sums};
+      buffers.cell_counts,        buffers.cell_offsets,
+      buffers.cell_start_offsets, buffers.sorted_indices,
+      buffers.block_sums,         buffers.diagnostic_phase1_block_sums};
   int mask = 0;
   for (int buffer = 0; buffer < CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT;
        ++buffer)
@@ -777,9 +776,9 @@ __host__ void CellSorter::enqueueSortAsync(particleArrayCUDA* hostPtr,
         reinterpret_cast<std::uintptr_t>(enqueuePointers[field]);
   diagnostic_enqueue_scratch = reinterpret_cast<std::uintptr_t>(scratch.ptr);
   const void* enqueueSortBuffers[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT] = {
-      buffers.cell_counts, buffers.cell_offsets, buffers.cell_start_offsets,
-      buffers.sorted_indices, buffers.block_sums,
-      buffers.diagnostic_phase1_block_sums};
+      buffers.cell_counts,        buffers.cell_offsets,
+      buffers.cell_start_offsets, buffers.sorted_indices,
+      buffers.block_sums,         buffers.diagnostic_phase1_block_sums};
   for (int buffer = 0; buffer < CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT;
        ++buffer)
     diagnostic_enqueue_sort_buffers[buffer] =

@@ -111,7 +111,9 @@ __global__ void k_curlC2N(T* __restrict__ curlXN, T* __restrict__ curlYN,
   if (i > nxn - 2 || j > nyn - 2 || k > nzn - 2)
     return;
 
-#define C_(arr, ii, jj, kk) arr[stencilIdx(ii, jj, kk, nyc, nzc)]
+  const auto C_ = [&](const T* a, int ii, int jj, int kk) {
+    return a[stencilIdx(ii, jj, kk, nyc, nzc)];
+  };
   // curl_X = dZdy - dYdz
   T compZDY =
       q.y * ((C_(vecZC, i, j, k) - C_(vecZC, i, j - 1, k)) +
@@ -152,7 +154,6 @@ __global__ void k_curlC2N(T* __restrict__ curlXN, T* __restrict__ curlYN,
   curlXN[nidx] = compZDY - compYDZ;
   curlYN[nidx] = compXDZ - compZDX;
   curlZN[nidx] = compYDX - compXDY;
-#undef C_
 }
 
 template <typename T>
@@ -186,30 +187,29 @@ template <typename T>
 __device__ __forceinline__ void
 d_interpC2N(T* __restrict__ fN, const T* __restrict__ fC, int i, int j, int k,
             int nyn, int nzn, int nyc, int nzc) {
-#define CI(ii, jj, kk) fC[stencilIdx(ii, jj, kk, nyc, nzc)]
+  const auto CI = [&](int ii, int jj, int kk) {
+    return fC[stencilIdx(ii, jj, kk, nyc, nzc)];
+  };
   fN[stencilIdx(i, j, k, nyn, nzn)] =
       0.125 * (CI(i, j, k) + CI(i - 1, j, k) + CI(i, j - 1, k) +
                CI(i, j, k - 1) + CI(i - 1, j - 1, k) + CI(i - 1, j, k - 1) +
                CI(i, j - 1, k - 1) + CI(i - 1, j - 1, k - 1));
-#undef CI
 }
 
+/** interpN2C, the face planes of the conductor walls w read as 0 (the
+ *  image of a charge-like scalar; without walls the plain mean). */
 template <typename T>
 __global__ void k_interpN2C(T* __restrict__ fieldC,
                             const T* __restrict__ fieldN, int nxc, int nyc,
-                            int nzc, int nyn, int nzn) {
+                            int nzc, int nyn, int nzn, ImageWalls w) {
   int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
   int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
   int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   if (i > nxc - 2 || j > nyc - 2 || k > nzc - 2)
     return;
 
-#define N_(ii, jj, kk) fieldN[stencilIdx(ii, jj, kk, nyn, nzn)]
   fieldC[stencilIdx(i, j, k, nyc, nzc)] =
-      0.125 * (N_(i, j, k) + N_(i + 1, j, k) + N_(i, j + 1, k) +
-               N_(i, j, k + 1) + N_(i + 1, j + 1, k) + N_(i + 1, j, k + 1) +
-               N_(i, j + 1, k + 1) + N_(i + 1, j + 1, k + 1));
-#undef N_
+      interpN2CAt(fieldN, i, j, k, nyn, nzn, imagePlanes(w, i, j, k));
 }
 
 // =========================================================================
@@ -343,11 +343,12 @@ void gpuInterpC2N(cudaSolverType* fieldN, const cudaSolverType* fieldC, int nxn,
 }
 
 void gpuInterpN2C(cudaSolverType* fieldC, const cudaSolverType* fieldN, int nxc,
-                  int nyc, int nzc, cudaStream_t stream) {
+                  int nyc, int nzc, cudaStream_t stream,
+                  const ImageWalls& walls) {
   int nyn = nyc + 1, nzn = nzc + 1;
   const PointLaunch L = pointLaunch(nxc - 2, nyc - 2, nzc - 2);
   k_interpN2C<<<L.grid, L.block, 0, stream>>>(fieldC, fieldN, nxc, nyc, nzc,
-                                              nyn, nzn);
+                                              nyn, nzn, walls);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -699,12 +700,13 @@ template <typename T>
 __device__ __forceinline__ void
 d_smoothStep(T* __restrict__ out, const T* __restrict__ in, int i, int j, int k,
              int ny, int nz, T alpha, T beta3D) {
-#define INS(ii, jj, kk) in[stencilIdx(ii, jj, kk, ny, nz)]
+  const auto INS = [&](int ii, int jj, int kk) {
+    return in[stencilIdx(ii, jj, kk, ny, nz)];
+  };
   out[stencilIdx(i, j, k, ny, nz)] =
       alpha * INS(i, j, k) +
       beta3D * (INS(i - 1, j, k) + INS(i + 1, j, k) + INS(i, j - 1, k) +
                 INS(i, j + 1, k) + INS(i, j, k - 1) + INS(i, j, k + 1));
-#undef INS
 }
 
 /** One smoothing pass of the N fields at the points of `points` (a PointBox

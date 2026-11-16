@@ -38,11 +38,11 @@
 #include <vector>
 
 #include "HeatFluxComponents.h"
-#include "OutflowBoundary.h"
 #include "cudaTypeDef.cuh"
 
 #include "GPUCleaning.cuh"
 #include "GPUFieldArray.cuh"
+#include "GPUFieldBoundary.cuh"
 #include "GPUHaloComm.cuh"
 #include "GPUMaxwellLocal.cuh"
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
@@ -500,92 +500,37 @@ public:
 
   // ---- GPU Solver: host ↔ device synchronisation ----
   /** Copy all primary field arrays from host to device (for initialisation /
-   * restart), then exchange the ghost cells of the cell B (gpuMaxwellSource
-   * reads them without an exchange of its own). */
+   * restart), then the boundary of the initial fields, whatever the case
+   * left in the ghosts: E_t = 0 on a conductor, the ghosts of E and the node
+   * B (ENode, BNode), the conductor wall values W from that node B
+   * (FieldBoundary::initWall), the ghosts of the cell B (BCellStart; the
+   * first gpuMaxwellSource reads them without an exchange of its own). */
   void gpuSolverSyncH2D(cudaStream_t stream = 0);
   /** Copy the fields and moments to the host (output, diagnostics, restart,
    * Catalyst). */
   void gpuSolverSyncD2H(cudaStream_t stream = 0);
-  // ---- GPU Solver: GPU-aware MPI halo exchange ----
-  /** Center-based halo exchange using GPU-aware MPI (operates on device
-   * pointer). */
-  void gpuCommunicateCenterBC(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
-                              int bcFaceXright, int bcFaceXleft,
-                              int bcFaceYright, int bcFaceYleft,
-                              int bcFaceZright, int bcFaceZleft);
-  /** Batched 9-field center-based halo exchange + BC in one MPI round.  Not
-   * used currently: the Maxwell image exchanges its 10 cell arrays with
-   * per-array face BCs (the image-reference test uses it as reference). */
-  void gpuCommunicateCenterBC_9(int nx, int ny, int nz, GPUFieldArray3& a1,
-                                GPUFieldArray3& a2, GPUFieldArray3& a3,
-                                GPUFieldArray3& a4, GPUFieldArray3& a5,
-                                GPUFieldArray3& a6, GPUFieldArray3& a7,
-                                GPUFieldArray3& a8, GPUFieldArray3& a9,
-                                int bcXR, int bcXL, int bcYR, int bcYL,
-                                int bcZR, int bcZL);
-  /** Batched 3-field center-based halo exchange + BC_P in one MPI round. */
-  void gpuCommunicateCenterBC_P_3(int nx, int ny, int nz, GPUFieldArray3& a1,
-                                  GPUFieldArray3& a2, GPUFieldArray3& a3,
-                                  int bcXR, int bcXL, int bcYR, int bcYL,
-                                  int bcZR, int bcZL);
-  /** Batched 3-field center-based halo exchange with per-field BCs (bc is
-   * int[6]). */
-  void gpuCommunicateCenterBC_3mixed(int nx, int ny, int nz, GPUFieldArray3& a1,
-                                     const int* bc1, GPUFieldArray3& a2,
-                                     const int* bc2, GPUFieldArray3& a3,
-                                     const int* bc3);
-  /** Batched 3-field node-based halo exchange with per-field BCs (bc is
-   * int[6]). */
-  void gpuCommunicateNodeBC_3mixed(int nx, int ny, int nz, GPUFieldArray3& a1,
-                                   const int* bc1, GPUFieldArray3& a2,
-                                   const int* bc2, GPUFieldArray3& a3,
-                                   const int* bc3);
-  /** Batched 6-field node-based halo exchange (one MPI round) with per-field
-   * BCs (bc[f] is int[6]). */
-  void gpuCommunicateNodeBC_6mixed(int nx, int ny, int nz,
-                                   GPUFieldArray3* const a[6],
-                                   const int* const bc[6]);
-  /** Batched 3-field node box-stencil halo exchange with per-field BCs. */
-  void gpuCommunicateNodeBoxStencilBC_3mixed(int nx, int ny, int nz,
-                                             GPUFieldArray3& a1, const int* bc1,
-                                             GPUFieldArray3& a2, const int* bc2,
-                                             GPUFieldArray3& a3,
-                                             const int* bc3);
-  /** Particle-communicator centre halo exchange (for moments). */
-  void gpuCommunicateCenterBC_P(int nx, int ny, int nz, GPUFieldArray3& gpuArr,
-                                int bcFaceXright, int bcFaceXleft,
-                                int bcFaceYright, int bcFaceYleft,
-                                int bcFaceZright, int bcFaceZleft);
-  /** Node-based box-stencil halo exchange using particle communicator (for
-   * smooth). */
-  void gpuCommunicateNodeBoxStencilBC_P(int nx, int ny, int nz,
-                                        GPUFieldArray3& gpuArr,
-                                        int bcFaceXright, int bcFaceXleft,
-                                        int bcFaceYright, int bcFaceYleft,
-                                        int bcFaceZright, int bcFaceZleft);
-  /** Batched 3-field node-based box-stencil halo exchange using particle
-   * communicator. */
-  void gpuCommunicateNodeBoxStencilBC_P_3(int nx, int ny, int nz,
-                                          GPUFieldArray3& a1,
-                                          GPUFieldArray3& a2,
-                                          GPUFieldArray3& a3, int bcXR,
-                                          int bcXL, int bcYR, int bcYL,
-                                          int bcZR, int bcZL);
-  /** Center-based box-stencil halo exchange using particle communicator (for
-   * smooth). */
-  void gpuCommunicateCenterBoxStencilBC_P(int nx, int ny, int nz,
-                                          GPUFieldArray3& gpuArr,
-                                          int bcFaceXright, int bcFaceXleft,
-                                          int bcFaceYright, int bcFaceYleft,
-                                          int bcFaceZright, int bcFaceZleft);
-  /** Batched 3-field center-based box-stencil halo exchange using particle
-   * communicator. */
-  void gpuCommunicateCenterBoxStencilBC_P_3(int nx, int ny, int nz,
-                                            GPUFieldArray3& a1,
-                                            GPUFieldArray3& a2,
-                                            GPUFieldArray3& a3, int bcXR,
-                                            int bcXL, int bcYR, int bcYL,
-                                            int bcZR, int bcZL);
+  // ---- GPU Solver: halo exchange and boundary of the fields ----
+  /** The field boundary conditions (GPUFieldBoundary.cuh): the spec, built
+   *  at construction, and the GPU plan, built in gpuSolverAllocate. */
+  const FieldBoundary& gpuBoundary() const { return bc_; }
+  /** The one halo entry of the field arrays: exchange the n arrays p with
+   *  the neighbours (facesOnly: the 6 face boxes, for box stencils), then
+   *  fill the ghosts of the physical faces with the rules of set s (one
+   *  launch).  The set gives the geometry (cells or nodes) and the
+   *  topology (field or particle communicator). */
+  void exchangeAndFill(GhostSet s, cudaSolverType* const* p, int n,
+                       bool facesOnly = false);
+  /** The same, split: begin queues the exchange (HaloOverlap), end
+   *  completes it and fills the ghosts. */
+  void beginExchange(GhostSet s, cudaSolverType* const* p, int n,
+                     bool facesOnly = false);
+  void endExchangeAndFill(GhostSet s, cudaSolverType* const* p, int n);
+  /** The boundary of a solved node E (n arrays, triples of components): the
+   *  ghost nodes (exchangeAndFill of GhostSet::ENode), then the layers of
+   *  the open faces (LayerSet::E: inflow E0 or the absorbing blend, the
+   *  X-right copy).  E(n+theta) after the solve, E^n after the div(E)
+   *  correction. */
+  void finishE(cudaSolverType* const* E, int n);
 
   // ---- GPU Solver: field-solver methods ----
   // gpuCalculateE, gpuCalculateB and gpuCalculateHatFunctions run the
@@ -594,7 +539,7 @@ public:
   /** Solve for E(n+theta): div(E) correction of E^n (PoissonCorrection),
    * implicit Maxwell solve into Exth, and, when E is smoothed, the smoothed
    * E(n+theta) in ExthSmooth; halo exchange and post-solve open-boundary
-   * update (gpuOpenBoundaryInflowE) of both.  The mover samples
+   * layers (LayerSet::E) of both.  The mover samples
    * gpuExForPcls().  E (d_Ex) still holds E^n afterwards: gpuCalculateB
    * advances it. */
   void gpuCalculateE(int cycle);
@@ -614,10 +559,16 @@ public:
   /** Maxwell operator A*x on device Krylov vectors (runs
    * gpuMaxwellImageFn(), the Krylov callback the field solvers take):
    *   A*x = delt^2 (-lap x - grad div(mu.x)) + mu.x + x
-   * on the interior nodes, then the boundary rows.  The cell gradients of x
+   * on every node, the normal rows of the conductor faces included (through
+   * the conductor image of x and mu.x), then the identity rows of the
+   * boundary (gpuBoundaryRows).  The cell gradients of x
    * and div(mu.x) are exchanged between ranks in one halo exchange;
    * gpuMaxwellLocalNodeFused writes the Krylov image. */
   void gpuMaxwellImage(cudaSolverType* d_im, cudaSolverType* d_vector);
+  /** The boundary rows (identity rows) of the Maxwell image whose vector
+   *  d_vectX/Y/Z holds written into d_im: the last step of the full and the
+   *  local image (and of the unit tests' reapplication). */
+  void gpuBoundaryRows(cudaSolverType* d_im);
   /** The Maxwell image in halo mode M.  Overlap (the split operator) computes
    *  the boundary layers first (with a flat axis: D and the cell arrays
    *  whole) and the interior while the exchange is in flight; it needs
@@ -637,8 +588,9 @@ public:
   /** Maxwell operator, communication-free: A*x for use as
    * preconditioner (the Richardson sweeps of gpuBlockJacobiPrecond, run when
    * BlockJacobiSweeps > 1). Ghost cells are treated as zero, apart from the
-   * X-right ghost cell plane on an outflow face, and physical boundary image
-   * corrections are enforced locally so the operator better matches the full
+   * X-right ghost cell plane on an outflow face and the image ghost cells of
+   * the conductor faces (GhostSet::OpCellsLocal), and the boundary rows are
+   * those of the full image, so the operator better matches the full
    * Maxwell image. */
   void gpuMaxwellImageLocal(cudaSolverType* d_im, cudaSolverType* d_vector);
   /** Build the RHS of the Maxwell system (result in device Krylov vector);
@@ -710,16 +662,6 @@ public:
   void gpuPIdot(GPUFieldArray3& PIX, GPUFieldArray3& PIY, GPUFieldArray3& PIZ,
                 GPUFieldArray3& vX, GPUFieldArray3& vY, GPUFieldArray3& vZ,
                 int is);
-  /** GPU perfect conductor BC, image rows (linear) on every conductor face
-   *  of this rank (bcEMface = 0), written into the Krylov image d_im:
-   *  gpuPerfectConductorImage. */
-  void gpuPerfectConductorImages(cudaSolverType* d_im, GPUFieldArray3& vX,
-                                 GPUFieldArray3& vY, GPUFieldArray3& vZ);
-  /** GPU perfect conductor BC, RHS rows on every conductor face of this rank
-   *  (bcEMface = 0): tangential -(u0 x B0) / c, normal the constant part of the
-   *  normal row (gpuPerfectConductorSource). */
-  void gpuPerfectConductorSources(cudaSolverType* dX, cudaSolverType* dY,
-                                  cudaSolverType* dZ);
 
   // ---- GPU Solver: moment post-processing on GPU ----
   /** D2D scatter: copy 10 packed moment arrays from the moment-kernel buffer
@@ -761,8 +703,8 @@ public:
    *  @param stream       CUDA stream for kernels.  With HaloOverlap off,
    *                      successive calls sharing the persistent buffers must
    *                      use this same stream or be externally synchronized. */
-  void gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs, int nFields, int nx,
-                              int ny, int nz, bool offsetZero,
+  void gpuBatchedHaloExchange(cudaSolverType* const* h_fieldPtrs, int nFields,
+                              int nx, int ny, int nz, bool offsetZero,
                               bool isFaceOnlyFlag, bool needInterp,
                               bool isParticle, cudaStream_t stream);
 
@@ -770,10 +712,10 @@ public:
    *  stream.  The caller then queues dependency-free work on
    *  @p computeStream.  Needs the split exchange resources (HaloOverlap on).
    */
-  void gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs, int nFields,
-                                   int nx, int ny, int nz, bool offsetZero,
-                                   bool isFaceOnlyFlag, bool isParticle,
-                                   cudaStream_t computeStream);
+  void gpuBatchedHaloBeginExchange(cudaSolverType* const* h_fieldPtrs,
+                                   int nFields, int nx, int ny, int nz,
+                                   bool offsetZero, bool isFaceOnlyFlag,
+                                   bool isParticle, cudaStream_t computeStream);
   /** Post the sends as soon as packing completes, wait for all messages,
    *  queue the unpack, then make the caller-provided compute stream wait for
    *  completion. */
@@ -791,7 +733,8 @@ public:
   /**
    * @brief Neutralize the species charge on the X-right open outflow layer.
    *
-   * The field solve sees the outflow layer (layersXright()) as neutral. With
+   * The field solve sees the outflow layer (FieldBoundarySpec::outflowLayers)
+   * as neutral. With
    * OutflowLayerFields = copy, E and B are copied over it from a reference
    * plane after every solve, so it carries no field gradient and, by Gauss's
    * law, must carry no net charge; with OutflowLayerFields = solved the
@@ -814,80 +757,15 @@ public:
    */
   void gpuCopyOutflowLayerMoments();
 
-  /**
-   * @brief rhohat = 0 on every cell beyond the reference node x_s of the
-   * X-right outflow face (the cell straddling x_s, the layer cells and the
-   * ghost cell), so the solver's charge exterior starts at x_s like the
-   * post-solve field copy. Without it the solve builds the field of the
-   * straddling half cell (half the charge of node x_s), the copy removes it
-   * every cycle, and the Gauss residual left behind is spread inward by the
-   * solver's cleaning. With OutflowLayerFields = solved nothing is copied,
-   * and the kept layer field is that of a neutral layer. Called in
-   * gpuCalculateHatFunctions().
-   */
-  void gpuZeroOutflowRhohat();
-
   /** rhon += sum_s(rhons_s) on device. */
   void gpuSumOverSpecies();
 
   /** Jx/Jy/Jz = sum_s(Jxs/Jys/Jzs)_s on device. */
   void gpuSumOverSpeciesJ();
 
-  /** rhoc = interpN2C(rhon) on device. */
+  /** rhoc = interpN2C(rhon) on device, through the conductor image (the
+   *  face-node charge read as 0; FieldBoundary::imageWalls). */
   void gpuInterpDensitiesN2C();
-
-  // ---- GPU Solver: open boundary conditions ----
-  /** GPU open BC: RHS rows (E0 = -(u0 x B0) / c) of the open inflow faces (only
-   *  with ApplyInflowBcsEImage). */
-  void gpuOpenBoundaryInflowESource(cudaSolverType* dX, cudaSolverType* dY,
-                                    cudaSolverType* dZ, int nx, int ny, int nz);
-  /** GPU open BC: identity image rows of the open inflow faces, written into
-   *  the Krylov image d_im. */
-  void gpuOpenBoundaryInflowEImage(cudaSolverType* d_im,
-                                   const cudaSolverType* vX,
-                                   const cudaSolverType* vY,
-                                   const cudaSolverType* vZ, int nx, int ny,
-                                   int nz);
-  /** GPU open BC (post-solve): on E inflow faces SAL blend, or without SAL
-   * Dirichlet (X-left) / extrapolation (Y, Z); and
-   * on an X-right outflow face the copy over fieldCopyLayersXright() node
-   * planes (gpuOutflowCopyE). */
-  void gpuOpenBoundaryInflowE(cudaSolverType* dX, cudaSolverType* dY,
-                              cudaSolverType* dZ, int nx, int ny, int nz);
-  /** GPU open BC: SAL blend / extrapolation on center B inflow faces; an
-   * open X-right face copies the plane before them over
-   * fieldCopyLayersXright() cell planes.  Applied once per cycle, after
-   * Faraday's law (gpuCalculateB): the blend is not idempotent.  ghostOnly
-   * treats only the ghost layer, whose value the full call sets independently
-   * of the layers: gpuCalculateB restores it after its exchange,
-   * gpuMaxwellSource after the ForceFree layers, gpuApplyDivBCleaning after
-   * its correction. */
-  void gpuOpenBoundaryInflowB(cudaSolverType* dX, cudaSolverType* dY,
-                              cudaSolverType* dZ, int nx, int ny, int nz,
-                              bool ghostOnly = false);
-
-  // ---- GPU Solver: ghost node on the X-right outflow face ----
-  // (see the X-right open boundary layer section below)
-  /** Ghost node plane of the node arrays a[0..2] := their face plane on an
-   * outflow face; no-op elsewhere. */
-  void gpuOutflowGhostNodes(GPUFieldArray3* const a[3]);
-  /** Fill the y/z ghost rows of the X-right ghost cell plane of the cell
-   * arrays a[0..n-1] on an outflow face; no-op elsewhere. */
-  void gpuOutflowGhostRows(cudaSolverType* const a[], int n);
-  /** Copy E (dX, dY, dZ, node arrays) over fieldCopyLayersXright() node
-   * planes of the X-right outflow face and its ghost node from the plane
-   * before them: the reference plane, or with OutflowLayerFields = solved
-   * the face; no-op elsewhere. */
-  void gpuOutflowCopyE(cudaSolverType* dX, cudaSolverType* dY,
-                       cudaSolverType* dZ);
-
-  // ---- GPU Solver: case-specific B fixes ----
-  /** GPU fix center B for GEM case (ghostOnly: the ghost layer only). */
-  void gpuFixBcGEM(bool ghostOnly = false);
-  /** GPU fix node B for GEM case. */
-  void gpuFixBnGEM();
-  /** GPU fix center B for ForceFree case (ghostOnly: the ghost layer only). */
-  void gpuFixBforcefree(bool ghostOnly = false);
 
   // ---- GPU Solver: ConstantChargePlanet ----
   /** GPU ConstantChargePlanet: set rhons inside sphere. */
@@ -909,8 +787,11 @@ public:
 
 private:
   /** div(E) cleaning (PoissonCorrection, on its cycles; gpuCalculateE):
-   *  solve divN2C(gradC2N phi) = divN2C(E) - 4 pi rho, then E -= gradC2N phi
-   *  on the nodes. */
+   *  solve divN2C(gradC2N phi) = divN2C(E) - 4 pi rho with the ghosts of
+   *  GhostSet::Phi (odd on a perfect conductor: phi = 0 on the wall), then
+   *  E -= gradC2N phi on the nodes, the values of the identity rows (the
+   *  conductor's E_t, inflow E0) restored and the ghost nodes of E
+   *  exchanged and filled. */
   void gpuPoissonCorrection(int cycle);
   /** div(B) cleaning (gpuCalculateB on a cleaning cycle, divBCorrection on):
    *  solve divC2N(gradN2C psi) = divC2N(Bc) on the nodes (zero normal
@@ -923,14 +804,16 @@ private:
     double min = 0.0, max = 0.0;
   };
   /** A cleaning solve, set up by gpuSolverAllocate when that cleaning is on;
-   *  buf is the array its image unpacks into (d_PHI, cells; d_PSI, nodes). */
+   *  buf is the array its image unpacks into (d_PHI on the cells, d_PSI on
+   *  the nodes), ghosts the set of its exchange (the geometry and the ghost
+   *  rules: GhostSet::Phi, GhostSet::Psi). */
   struct CleaningSolve {
     Lap27Op op{};
     Lap27Rows rows{};
     ChebBounds cheb;
     CleaningNullSpace null{};
     GPUFieldArray3* buf = nullptr;
-    bool cells = false;
+    GhostSet ghosts = GhostSet::Phi;
     const char* name = "";  // "div(E)", "div(B)"
     const char* label = ""; // of the FGMRES output
     GPUKrylovVector x, b;
@@ -939,8 +822,8 @@ private:
     return divBCorrection && cycle % divBCorrectionCycle == 0;
   }
   /** A flat axis: one periodic cell on one rank (the flat direction of a 2D
-   *  run). */
-  bool flatAxis(int a) const;
+   *  run; FieldBoundarySpec::flat). */
+  bool flatAxis(int a) const { return bc_.spec().flat[a]; }
   /** Extent with ghosts of the div(B) rows along axis a: the nodes, or the
    *  cells on a flat axis, whose two interior node planes are one periodic
    *  node (Lap27Op::twin). */
@@ -961,9 +844,9 @@ private:
     double weight;
   };
   /** Image of the solve cleaning_ points to, in halo mode M: unpack into its
-   *  buf (face rules), exchange the halo, 27-point image; the cell ghosts of
-   *  the physical faces must be 0 (gpuPoissonCorrection sets them once per
-   *  solve). */
+   *  buf (face rules of the rows), exchange the halo and fill the ghosts of
+   *  its set (the conductor ghosts of phi follow the iterate), 27-point
+   *  image. */
   template <HaloMode M>
   void gpuCleaningImage(cudaSolverType* d_im, cudaSolverType* d_vec);
   /** Its preconditioner: x ≈ L^-1 b (gpuChebyshevCleaning). */
@@ -982,11 +865,6 @@ private:
    *  ranks: then there is nothing to clean. */
   bool cleaningAtRoundOff(const cudaSolverType* d_b, int n,
                           const std::vector<RoundOffTerm>& fields);
-  /** The case-specific fixes of the cell B (GEM, ForceFree walls; ghostOnly:
-   *  their ghost layers only). */
-  void gpuFixBcCase(bool ghostOnly = false);
-  bool isGemCase() const; // GEM, GEMnoPert, GEMDoubleHarris
-  bool isForceFreeCase() const;
 
 public:
   // ---- Field-solver guard (SolverSourceGrowthLimit,
@@ -1001,15 +879,6 @@ public:
   /** Print why on rank 0 and abort every rank, before the result of the
    *  failed solve is used and before any further output or checkpoint. */
   [[noreturn]] void stopForSolverFailure(const std::string& reason) const;
-
-  // ---- GPU Solver: additional halo exchange ----
-  /** Center box-stencil halo exchange using field communicator.  Not used
-   *  currently (only gpuPoissonImage calls it). */
-  void gpuCommunicateCenterBoxStencilBC(int nx, int ny, int nz,
-                                        GPUFieldArray3& gpuArr,
-                                        int bcFaceXright, int bcFaceXleft,
-                                        int bcFaceYright, int bcFaceYleft,
-                                        int bcFaceZright, int bcFaceZleft);
 
   // ---- GPU Solver: accessor helpers ----
   GPUFieldArray3& gpuEx() { return d_Ex; } // unit tests only
@@ -1029,6 +898,13 @@ public:
    *  (Smooth != 1 and SmoothNiter > 0); otherwise ExthSmooth is neither
    *  allocated nor used. */
   bool smoothingOn() const { return Smooth != 1.0 && SmoothNiter > 0; }
+  GPUFieldArray3& gpuExth() { return d_Exth; } // unit tests only
+  GPUFieldArray3& gpuEyth() { return d_Eyth; } // unit tests only
+  GPUFieldArray3& gpuEzth() { return d_Ezth; } // unit tests only
+  GPUFieldArray3& gpuBxc() { return d_Bxc; }   // unit tests only
+  GPUFieldArray3& gpuByc() { return d_Byc; }   // unit tests only
+  GPUFieldArray3& gpuBzc() { return d_Bzc; }   // unit tests only
+  GPUFieldArray3& gpuRhoc() { return d_rhoc; } // unit tests only
   GPUFieldArray3& gpuBxn() { return d_Bxn; }
   GPUFieldArray3& gpuByn() { return d_Byn; }
   GPUFieldArray3& gpuBzn() { return d_Bzn; }
@@ -1063,37 +939,21 @@ private: // ideal drift field
   void driftElectricField(double E0[3]) const;
 
 private: // X-right open boundary layer
-  /** True on ranks owning an X-right open outflow face (bcEMfaceXright = 2,
-   *  bcPfaceXright = 3). */
-  bool ownsOutflowFaceXright() const;
-  /** Layers L of the X-right open face: node planes nxn-1-L..nxn-1
-   *  (centers nxc-1-L..nxc-1) take the values of plane nxn-2-L (nxc-2-L).
-   *  On an outflow face the neutralized charge, the copied moments and, with
-   *  OutflowLayerFields = copy, E and B share L = max(3, n_layers_sal), so
-   *  the L cells between the reference plane and the face contain the 3-cell
-   *  particle open layer; otherwise L = n_layers_sal. */
-  int layersXright() const;
-  /** Layers over which E and B are copied after a solve on the X-right open
-   *  face: layersXright(), except on an outflow face with
-   *  OutflowLayerFields = solved, where it is 0: only the ghost node plane
-   *  nxn-1 and the ghost cell plane nxc-1 take the face values, the
-   *  zero-gradient continuation the Maxwell operator assumes. */
-  int fieldCopyLayersXright() const;
-
-  // Maxwell-operator closure of the outflow face: see OutflowBoundary.h.
+  // Maxwell-operator closure of the outflow face: the ghost node plane of
+  // the operator's node arrays copies the face (LayerSet::OutflowNodes), the
+  // node-to-cell stencils evaluate the ghost cell plane (kept by the face's
+  // rule, GHOST_KEEP), and its ghost rows follow
+  // FieldBoundarySpec::outflowRows (FieldBoundary::outflowGhostRows).
   /** Last cell plane of the operator's node-to-cell stencils: the ghost
    *  plane nxc-1 on an outflow face, the interior nxc-2 elsewhere. */
   int operatorCellEnd() const;
-  /** Face code for the X-right face of the operator's cell arrays:
-   *  BC_FACE_KEEP on an outflow face, where the stencils fill the ghost
-   *  plane, otherwise code. */
-  int operatorBCXright(int code) const;
-  /** Ghost-row rules of the X-right ghost cell plane, rule[0..3] = y-left,
-   *  y-right, z-left, z-right: a physical face keeps its own BC, a periodic
-   *  image on this rank gives the exact partner row, and a neighbour rank's
-   *  row, whose face-plane nodes the operator does not exchange, is stood in
-   *  for by the adjacent row. */
-  void outflowGhostRowRules(int rule[4]) const;
+  /** X-right outflow face: the ghost node plane of the operator's node
+   *  arrays a[0..2] := their face plane (LayerSet::OutflowNodes); no-op
+   *  elsewhere. */
+  void outflowGhostNodes(GPUFieldArray3* const a[3]);
+  /** The 10 cell arrays of the Maxwell operator (full and local image):
+   *  the gradients grad_d E_c in cp[3 c + d] and div(mu E) in cp[9]. */
+  void operatorCells(cudaSolverType* cp[10]);
 
 private: // solver steps in halo mode M (see HaloMode)
   template <HaloMode M> void gpuCalculateE(int cycle);
@@ -1102,38 +962,31 @@ private: // solver steps in halo mode M (see HaloMode)
   /** SmoothNiter smoothing passes of the N fields src into dst (dst == src:
    *  in place).  The outputs alternate between dst and scratch so that the
    *  last pass writes dst, with no copies (in place with an odd SmoothNiter:
-   *  one copy at the end).  Each pass refreshes the ghosts of its input:
-   *  begin(in) starts the halo exchange (HaloMode::Overlap only, the
-   *  interior is smoothed meanwhile), end(in) completes it and applies the
-   *  boundary rules (HaloMode::Blocking: the whole refresh).  fix(out) then
-   *  corrects the output of the pass before the next pass reads it. */
-  template <HaloMode M, int N, typename Begin, typename End, typename Fix>
+   *  one copy at the end).  Each pass first refreshes the ghosts of its
+   *  input: the exchange of the 6 face boxes (the box stencil reads no edge)
+   *  and the ghost rules of set ghosts; with HaloMode::Overlap the interior
+   *  is smoothed while the exchange is in flight.  fix(out), on the device
+   *  pointers of the output, then corrects it before the next pass reads
+   *  it. */
+  template <HaloMode M, int N, typename Fix>
   void gpuSmoothPasses(GPUFieldArray3* const src[N],
                        GPUFieldArray3* const dst[N],
                        GPUFieldArray3* const scratch[N], int nx, int ny, int nz,
-                       Begin&& begin, End&& end, Fix&& fix);
-  /** Smoothing of arr in place (type 0: cells; rhoc), gpuSmoothPasses with
-   *  the scratch d_smoothTemp. */
-  template <HaloMode M> void gpuSmooth(GPUFieldArray3& arr, int type);
+                       GhostSet ghosts, Fix&& fix);
+  /** Smoothing in place of the N arrays a (rhoc: N = 1, Jhat: N = 3) with
+   *  the rules of ghosts, which also fixes cells or nodes: gpuSmoothPasses
+   *  with the scratch d_temp2X/Y/Z viewed with their shape. */
+  template <HaloMode M, int N>
+  void gpuSmoothInPlace(GPUFieldArray3* const a[N], GhostSet ghosts);
   /** Smoothing of the electric field src (3 components) into dst,
    *  gpuSmoothPasses with the scratch d_tempX/Y/Z.  On physical faces the
-   *  ghost nodes mirror the second node (BC_FACE_NODE_MIRROR), and every pass
-   *  restores the face values of gpuImposeFaceE, so those rows keep the
-   *  values the solve imposed.  Needs smoothingOn(); src keeps its interior,
-   *  its ghosts are overwritten. */
+   *  ghost nodes are even about the face node (GhostSet::ENodeSmooth), and
+   *  every pass restores the values of the identity rows (conductor E_t = 0,
+   *  inflow E0: FieldBoundary::rowValues), so those rows keep the values the
+   *  solve imposed.  Needs smoothingOn(); src keeps its interior, its ghosts
+   *  are overwritten. */
   template <HaloMode M>
   void gpuSmoothE(GPUFieldArray3* const src[3], GPUFieldArray3* const dst[3]);
-  /** Set the node E (dX, dY, dZ) to the values the identity rows of the
-   *  Maxwell system impose on this rank's faces: the tangential components
-   *  -(u0 x B0) / c on conductor faces, and E0 on the open inflow faces with
-   *  ApplyInflowBcsEImage. */
-  void gpuImposeFaceE(cudaSolverType* dX, cudaSolverType* dY,
-                      cudaSolverType* dZ);
-  /** Smoothing of 3 arrays in place (type 0: cells; Jhat), gpuSmoothPasses
-   *  with the scratch d_temp2X/Y/Z. */
-  template <HaloMode M>
-  void gpuSmooth3(GPUFieldArray3& a1, GPUFieldArray3& a2, GPUFieldArray3& a3,
-                  int type);
 
   /* ********************************* // VARIABLES
    * ********************************* */
@@ -1291,21 +1144,9 @@ private:
   int bcEMfaceYleft;
   int bcEMfaceZright;
   int bcEMfaceZleft;
-  // Faces of this rank (0 Xleft, 1 Xright, 2 Yleft, 3 Yright, 4 Zleft,
-  // 5 Zright), fixed at construction so the solver loops do not re-evaluate
-  // the topology and boundary codes:
-  // - openInflowFace_: bcEMface = 2 with bcPface = 2, never X-right (an open
-  //   X-right face keeps its operator rows).  With ApplyInflowBcsEImage its
-  //   Maxwell rows are the identity (image) and E0 = -(u0 x B0) / c (RHS);
-  // - conductorFace_: perfect conductor, bcEMface = 0.
-  bool openInflowFace_[6];
-  bool conductorFace_[6];
-
-  // Absorbing boundary parameters
-  int yes_sal;
-  int n_layers_sal;
-  // SAL on B leaves the face-normal component alone (sal_tangential_B)
-  int sal_tangential_B;
+  // The field boundary conditions: the spec (constructor) and the GPU plan
+  // (gpuSolverAllocate), the one source of every boundary rule
+  FieldBoundary bc_;
 
   /*! per-species initial density (4 pi n_s) */
   double* rhoINIT;
@@ -1422,9 +1263,6 @@ private:
 
   // Krylov vectors of the Maxwell solve (the cleanings: CleaningSolve)
   GPUKrylovVector d_xkrylovMaxwell, d_bkrylovMaxwell;
-
-  // Smooth temp buffer
-  GPUFieldArray3 d_smoothTemp;
 
   // Device copy of species q/m
   cudaSolverType* d_qom = nullptr;
@@ -1558,15 +1396,16 @@ private:
   void gpuInitializeHaloPlans();
   /** The plan of an exchange of nFields arrays of (nx, ny, nz); aborts on
    *  arguments outside the contract of the exchanges. */
-  const HaloPlan& gpuSelectHaloPlan(cudaSolverType** h_fieldPtrs, int nFields,
-                                    int nx, int ny, int nz, bool offsetZero,
-                                    bool faceOnly, bool isParticle) const;
+  const HaloPlan& gpuSelectHaloPlan(cudaSolverType* const* h_fieldPtrs,
+                                    int nFields, int nx, int ny, int nz,
+                                    bool offsetZero, bool faceOnly,
+                                    bool isParticle) const;
   /** Post the receives of plan into the next receive buffer; returns it and
    *  sets requests[0, plan.peers). */
   cudaSolverType* gpuHaloPostReceives(const HaloPlan& plan, int nFields,
                                       MPI_Request* requests);
   /** Upload the field pointers and queue the pack launch on stream. */
-  void gpuHaloPack(const HaloPlan& plan, cudaSolverType** h_fieldPtrs,
+  void gpuHaloPack(const HaloPlan& plan, cudaSolverType* const* h_fieldPtrs,
                    int nFields, cudaStream_t stream);
   /** Post the sends of plan (the send buffer is packed) into
    *  requests[plan.peers, 2 plan.peers) and complete all of them. */

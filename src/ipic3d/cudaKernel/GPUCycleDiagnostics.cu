@@ -866,7 +866,7 @@ __global__ void reduceSortPhase1Totals(const int* rawBlockTotals,
   for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
     if (threadIdx.x < offset)
       combineSortPhase1TotalPartial(shared[threadIdx.x],
-                                   shared[threadIdx.x + offset]);
+                                    shared[threadIdx.x + offset]);
     __syncthreads();
   }
   if (threadIdx.x == 0)
@@ -2262,7 +2262,7 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
       sorter.diagnosticEnqueueSortBufferMutationMask();
   local.enqueueFirstSortBuffer = -1;
   const void* currentSortBuffers[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT] = {
-      sorter.getCellCounts(), sorter.diagnosticCellOffsets(),
+      sorter.getCellCounts(),       sorter.diagnosticCellOffsets(),
       sorter.getCellStartOffsets(), sorter.diagnosticSortedIndices(),
       sorter.diagnosticBlockSums(), sorter.diagnosticPhase1BlockSums()};
   for (int buffer = 0; buffer < CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT;
@@ -2663,8 +2663,8 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
     if (enqueueSortBufferMutationOwner >= 0) {
       static const char* const
           bufferNames[CELL_SORT_DIAGNOSTIC_SORT_BUFFER_COUNT] = {
-              "cell_counts", "cell_offsets", "cell_start_offsets",
-              "sorted_indices", "block_sums", "phase1_block_sums"};
+              "cell_counts",    "cell_offsets", "cell_start_offsets",
+              "sorted_indices", "block_sums",   "phase1_block_sums"};
       const auto& mutation = reports[enqueueSortBufferMutationOwner];
       int cart[3];
       cartesianCoordinates(comm, enqueueSortBufferMutationOwner, cart);
@@ -2865,17 +2865,15 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
         << " coverage_mismatch_ranks=" << phase1CoverageMismatchRanks
         << " mismatching_ranks=" << phase1MismatchRanks
         << " mismatching_tiles=" << phase1RawMismatch
-        << " raw_sum=" << phase1RawSum
-        << " expected_sum=" << phase1ExpectedSum
+        << " raw_sum=" << phase1RawSum << " expected_sum=" << phase1ExpectedSum
         << " delta=" << (phase1RawSum - phase1ExpectedSum)
-        << " expected_out_of_int_range_tiles="
-        << phase1ExpectedOutOfIntRange << " max_abs_delta="
+        << " expected_out_of_int_range_tiles=" << phase1ExpectedOutOfIntRange
+        << " max_abs_delta="
         << (worstPhase1MismatchOwner >= 0
                 ? reports[worstPhase1MismatchOwner].phase1Totals.maxError
                 : 0);
     if (firstPhase1MismatchOwner >= 0) {
-      const auto& first =
-          reports[firstPhase1MismatchOwner].phase1Totals;
+      const auto& first = reports[firstPhase1MismatchOwner].phase1Totals;
       int cart[3];
       cartesianCoordinates(comm, firstPhase1MismatchOwner, cart);
       const unsigned long long firstCell =
@@ -2885,16 +2883,15 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
           reports[firstPhase1MismatchOwner].numCells);
       phase1Totals << " first_mismatch_rank=" << firstPhase1MismatchOwner
                    << " first_mismatch_cart=(" << cart[0] << ',' << cart[1]
-                   << ',' << cart[2] << ") first_mismatch_block="
-                   << first.firstBlock << " first_mismatch_cell_range=["
-                   << firstCell << ':' << firstCellEnd << ") first_raw="
-                   << first.firstRaw << " first_expected="
-                   << first.firstExpected << " first_delta="
-                   << first.firstDelta;
+                   << ',' << cart[2]
+                   << ") first_mismatch_block=" << first.firstBlock
+                   << " first_mismatch_cell_range=[" << firstCell << ':'
+                   << firstCellEnd << ") first_raw=" << first.firstRaw
+                   << " first_expected=" << first.firstExpected
+                   << " first_delta=" << first.firstDelta;
     }
     if (worstPhase1MismatchOwner >= 0) {
-      const auto& worst =
-          reports[worstPhase1MismatchOwner].phase1Totals;
+      const auto& worst = reports[worstPhase1MismatchOwner].phase1Totals;
       int cart[3];
       cartesianCoordinates(comm, worstPhase1MismatchOwner, cart);
       const unsigned long long worstCell =
@@ -2904,12 +2901,12 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
           reports[worstPhase1MismatchOwner].numCells);
       phase1Totals << " worst_mismatch_rank=" << worstPhase1MismatchOwner
                    << " worst_mismatch_cart=(" << cart[0] << ',' << cart[1]
-                   << ',' << cart[2] << ") worst_mismatch_block="
-                   << worst.worstBlock << " worst_mismatch_cell_range=["
-                   << worstCell << ':' << worstCellEnd << ") worst_raw="
-                   << worst.worstRaw << " worst_expected="
-                   << worst.worstExpected << " worst_delta="
-                   << worst.worstDelta;
+                   << ',' << cart[2]
+                   << ") worst_mismatch_block=" << worst.worstBlock
+                   << " worst_mismatch_cell_range=[" << worstCell << ':'
+                   << worstCellEnd << ") worst_raw=" << worst.worstRaw
+                   << " worst_expected=" << worst.worstExpected
+                   << " worst_delta=" << worst.worstDelta;
     }
     std::cout << phase1Totals.str() << std::endl;
 

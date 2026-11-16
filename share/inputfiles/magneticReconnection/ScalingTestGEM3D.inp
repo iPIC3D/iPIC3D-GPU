@@ -128,7 +128,7 @@ bcEMfaceYleft  = 0                      # [required]
 bcEMfaceZright = 0                      # [required]
 bcEMfaceZleft  = 0                      # [required]
 
-yes_sal      = 0                        # Enable absorbing layers [default: 0]
+yes_sal      = 0                        # Enable absorbing layers [default: 1]
 n_layers_sal = 3                        # Layer thickness in cells [default: 3]
 
 # Particle BC: 0=exit, 1=mirror, 2=reemit, 3=open outflow, 4=open inflow.

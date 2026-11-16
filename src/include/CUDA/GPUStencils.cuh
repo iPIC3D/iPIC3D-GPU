@@ -13,6 +13,7 @@
  * Grid dimensions include ghost cells.
  */
 
+#include "FieldBoundary.h" // ImageWalls
 #include "cudaTypeDef.cuh"
 
 // =========================================================================
@@ -116,10 +117,12 @@ void gpuInterpC2N(cudaSolverType* fieldN, const cudaSolverType* fieldC, int nxn,
 /**
  * Interpolate node→center:  fieldC = interp(fieldN).
  * 8-point average from surrounding nodes.
- * Output on center grid, interior i=1..nxc-2.
+ * Output on center grid, interior i=1..nxc-2.  walls: the face nodes of
+ * these conductor walls read as 0, the image of a charge-like scalar.
  */
 void gpuInterpN2C(cudaSolverType* fieldC, const cudaSolverType* fieldN, int nxc,
-                  int nyc, int nzc, cudaStream_t stream = 0);
+                  int nyc, int nzc, cudaStream_t stream = 0,
+                  const ImageWalls& walls = ImageWalls());
 
 // =========================================================================
 //  Symmetric tensor divergence
@@ -241,7 +244,8 @@ __host__ __device__ __forceinline__ int stencilIdx(int i, int j, int k, int ny,
   return (i * ny + j) * nz + k;
 }
 
-/** gradC2N at node (i, j, k): the centres (i-1..i, j-1..j, k-1..k). */
+/** gradC2N at node (i, j, k) of the cell array C: the centres (i-1..i,
+ *  j-1..j, k-1..k). */
 template <typename T>
 __device__ __forceinline__ void
 gradC2NAt(const T* __restrict__ C, int i, int j, int k, int nyc, int nzc,
@@ -275,18 +279,78 @@ gradN2CAt(const T* __restrict__ N, int i, int j, int k, int nyn, int nzn,
   gz = q.z * ((n001 - n000) + (n101 - n100) + (n011 - n010) + (n111 - n110));
 }
 
-/** divN2C at centre (i, j, k): the nodes (i..i+1, j..j+1, k..k+1). */
+/** The conductor face planes among the node planes of cell (i, j, k):
+ *  on[e][s] for its low (s = 0) and high (s = 1) node plane along axis e.
+ *  The default has none: the stencils below are then the plain ones (the
+ *  compiler folds the constant selects). */
+struct ImagePlanes {
+  bool on[3][2] = {};
+};
+__device__ __forceinline__ ImagePlanes imagePlanes(const ImageWalls& w, int i,
+                                                   int j, int k) {
+  ImagePlanes p;
+  p.on[0][0] = i == w.lo[0];
+  p.on[0][1] = i == w.hi[0];
+  p.on[1][0] = j == w.lo[1];
+  p.on[1][1] = j == w.hi[1];
+  p.on[2][0] = k == w.lo[2];
+  p.on[2][1] = k == w.hi[2];
+  return p;
+}
+
+/** divN2C at centre (i, j, k): the nodes (i..i+1, j..j+1, k..k+1), each
+ *  difference along an axis averaged over the 4 edges of the cell.  On the
+ *  conductor planes p a polar vector is read through the image: a component
+ *  is 0 on a face plane tangential to it, so a difference along an edge that
+ *  lies in such a plane is 0. */
 template <typename T>
 __device__ __forceinline__ T divN2CAt(const T* __restrict__ X,
                                       const T* __restrict__ Y,
                                       const T* __restrict__ Z, int i, int j,
                                       int k, int nyn, int nzn,
-                                      const DiffScale<T>& q) {
-  T cx, cy, cz, unused0, unused1;
-  gradN2CAt(X, i, j, k, nyn, nzn, q, cx, unused0, unused1);
-  gradN2CAt(Y, i, j, k, nyn, nzn, q, unused0, cy, unused1);
-  gradN2CAt(Z, i, j, k, nyn, nzn, q, unused0, unused1, cz);
+                                      const DiffScale<T>& q,
+                                      const ImagePlanes& p = ImagePlanes()) {
+  const bool (&x)[2] = p.on[0];
+  const bool (&y)[2] = p.on[1];
+  const bool (&z)[2] = p.on[2];
+  const auto n = [&](const T* a, int ii, int jj, int kk) {
+    return a[stencilIdx(ii, jj, kk, nyn, nzn)];
+  };
+  const auto d = [](bool inWall, T hi, T lo) {
+    return inWall ? T(0) : hi - lo;
+  };
+  const T cx =
+      q.x * (d(y[0] || z[0], n(X, i + 1, j, k), n(X, i, j, k)) +
+             d(y[0] || z[1], n(X, i + 1, j, k + 1), n(X, i, j, k + 1)) +
+             d(y[1] || z[0], n(X, i + 1, j + 1, k), n(X, i, j + 1, k)) +
+             d(y[1] || z[1], n(X, i + 1, j + 1, k + 1), n(X, i, j + 1, k + 1)));
+  const T cy =
+      q.y * (d(x[0] || z[0], n(Y, i, j + 1, k), n(Y, i, j, k)) +
+             d(x[0] || z[1], n(Y, i, j + 1, k + 1), n(Y, i, j, k + 1)) +
+             d(x[1] || z[0], n(Y, i + 1, j + 1, k), n(Y, i + 1, j, k)) +
+             d(x[1] || z[1], n(Y, i + 1, j + 1, k + 1), n(Y, i + 1, j, k + 1)));
+  const T cz =
+      q.z * (d(x[0] || y[0], n(Z, i, j, k + 1), n(Z, i, j, k)) +
+             d(x[1] || y[0], n(Z, i + 1, j, k + 1), n(Z, i + 1, j, k)) +
+             d(x[0] || y[1], n(Z, i, j + 1, k + 1), n(Z, i, j + 1, k)) +
+             d(x[1] || y[1], n(Z, i + 1, j + 1, k + 1), n(Z, i + 1, j + 1, k)));
   return cx + cy + cz;
+}
+
+/** interpN2C, the mean of the 8 nodes, at centre (i, j, k); on the
+ *  conductor planes p a charge-like scalar is read through the image, as
+ *  0. */
+template <typename T>
+__device__ __forceinline__ T interpN2CAt(const T* __restrict__ N, int i, int j,
+                                         int k, int nyn, int nzn,
+                                         const ImagePlanes& p = ImagePlanes()) {
+  const auto n = [&](int a, int b, int c) {
+    return p.on[0][a] || p.on[1][b] || p.on[2][c]
+               ? T(0)
+               : N[stencilIdx(i + a, j + b, k + c, nyn, nzn)];
+  };
+  return 0.125 * (n(0, 0, 0) + n(1, 0, 0) + n(0, 1, 0) + n(0, 0, 1) +
+                  n(1, 1, 0) + n(1, 0, 1) + n(0, 1, 1) + n(1, 1, 1));
 }
 
 /** divC2N at node (i, j, k): the centres (i-1..i, j-1..j, k-1..k).  Not

@@ -352,12 +352,12 @@ Any unrecognised `Case` string falls through to a **default** initialisation: un
 
 ### Runtime boundary conditions
 
-Some cases apply additional boundary-condition fixes during the time loop:
+Some cases apply additional boundary-condition fixes during the time loop. The GEM and ForceFree wall fixes force B and apply only with `ForceWallB = 1`. By default (`ForceWallB = 0`) the y walls keep the perfect-conductor conditions alone (below), and B there evolves by Faraday's law. The forcing is an external source of energy and reconnected flux: +13 % to +19 % total energy and flux 2.64 against 2.21 B0 d_i by tΩci = 19 in a 2D GEM.
 
 | `Case` | Runtime BC |
 |--------|------------|
-| `GEM`, `GEMnoPert`, `GEMDoubleHarris` | `gpuFixBcGEM` / `gpuFixBnGEM` — on the three cell and node planes next to each $y$ wall, $B_x = B_{0x}\tanh\!\bigl((y_g - L_y/2)/\delta\bigr)$ with $y_g$ the centre of the ghost cell, and $B_z = B_{0z}$; on the ghost plane also $B_y = B_{0y}$ |
-| `ForceFree` | `gpuFixBforcefree` — on the three cell planes next to each $y$ wall, $B_z = B_{0z}/\cosh\!\bigl((y - L_y/2)/\delta\bigr)$ at each plane's centre; on the ghost plane also $B_x = B_{0x}\tanh\!\bigl((y - L_y/2)/\delta\bigr)$ and $B_y = B_{0y}$ |
+| `GEM`, `GEMnoPert`, `GEMDoubleHarris` | with `ForceWallB = 1`: GEM case wall of `FieldBoundary` (the cell-B ghost rules, `LayerSet::CaseCells` and `CaseNodes`) — on the three cell and node planes next to each non-periodic $y$ wall, $B_x = B_{0x}\tanh\!\bigl((y_g - L_y/2)/\delta\bigr)$ with $y_g$ the centre of the ghost cell, and $B_z = B_{0z}$; on the ghost plane also $B_y = B_{0y}$, except on a perfect-conductor wall, whose rule for the normal $B_y$ (below) comes after it |
+| `ForceFree` | with `ForceWallB = 1`: ForceFree case wall of `FieldBoundary` (the cell-B ghost rules and `LayerSet::CaseCells`) — on the three cell planes next to each non-periodic $y$ wall, $B_z = B_{0z}/\cosh\!\bigl((y - L_y/2)/\delta\bigr)$ at each plane's centre; on the ghost plane also $B_x = B_{0x}\tanh\!\bigl((y - L_y/2)/\delta\bigr)$ and $B_y = B_{0y}$, except on a perfect-conductor wall, whose rule for the normal $B_y$ (below) comes after it |
 | `Dipole` | `gpuConstantChargePlanet` — maintain fixed charge inside the planet sphere (every cycle) |
 | `Dipole2D` | `gpuConstantChargePlanet2DPlaneXZ` — 2-D variant of the above (every cycle) |
 | `GEMHarris` | None |
@@ -376,7 +376,7 @@ Some cases apply additional boundary-condition fixes during the time loop:
 | `PoissonChebMaxIter` | `20` | The Chebyshev preconditioner of the ∇·E and ∇·B solves has degree `PoissonChebMaxIter` + 1 |
 | `PoissonChebEigRatio` | `300` | Floor of its lower eigenvalue bound, λ_max / `PoissonChebEigRatio` (see [the cleaning solves](#solves-of-the-e-and-b-corrections)) |
 | `PoissonChebRescaleEigMin`, `PoissonChebRescaleEigMax` | `1.0`, `1.0` | Factors applied to its lower and upper eigenvalue bounds |
-| `Smooth`, `SmoothNiter` | `1.0`, `6` | Smoothing coefficient (`1` disables) and number of passes, applied to E after each solve and to the hat moments. `Smooth` must lie in [(2d − 3)/(2d), 1], d being the number of directions that are not a single periodic cell: at least `0.5` in 3D and `0.25` in 2D. Below that the filter's response is negative at grid scale, and those modes flip sign every pass. On the physical faces the E smoothing keeps the values the solve imposes (tangential E on conductors, E0 on open inflow faces) and continues the other components evenly about the face node |
+| `Smooth`, `SmoothNiter` | `1.0`, `6` | Smoothing coefficient (`1` disables) and number of passes, applied to E after each solve and to the hat moments. `Smooth` must lie in [0, 1]. Below (2d − 3)/(2d), d being the number of directions that are not a single periodic cell (`0.5` in 3D, `0.25` in 2D), the filter's response is negative at grid scale and those modes flip sign every pass: with an odd `SmoothNiter` they come out inverted, and the run prints a warning; use an even `SmoothNiter` there. On the physical faces the E smoothing keeps the values the solve imposes (E_t = 0 on conductors, E0 on open inflow faces) and continues the other components evenly about the face node |
 | `HaloOverlap` | `0` | `1` overlaps the halo exchanges of the field solver (Maxwell image, the ∇·E and ∇·B images, smoothing, B and hat-moment interpolation; a ∇·B cleaning cycle runs the B update blocking) with the computation that does not read the exchanged values; same results as `0`. Meant for multi-rank runs: on a single rank there is no MPI to hide and the extra boundary-layer launches can make it slower. The Maxwell image overlaps on ranks with at least 3 cells along every axis, except an axis of a single cell that is periodic onto the rank itself (one rank along it, as y of an x-z run; then only its node stage overlaps); other ranks use the blocking exchange |
 | `SolverSourceGrowthLimit` | `100` | Stops the run when the 2-norm ‖b‖ of the Maxwell right-hand side is not finite or exceeds this factor times its value in the previous cycle; `0` disables the growth test. Between cycles ‖b‖ normally changes by tens of percent, and by up to a few times in the first cycles and on ∇·E correction cycles; a corrupted moment or field makes it jump by orders of magnitude. ‖b‖ is the norm the GMRES and FGMRES solvers compute for their status line, tested after the solve, so the check adds no work |
 | `SolverStopOnNonConvergence` | `1` | `1` stops the run when a Krylov field solve (Maxwell GMRES or FGMRES, ∇·E or ∇·B correction) reaches its restart limit (200 for Maxwell, 66 for a correction) without meeting `GMREStol` or `DivCleaningTol`; `0` only prints the solver's warning and uses the unconverged solution |
@@ -390,11 +390,41 @@ The Maxwell solve for E(n+θ) (GMRES or FGMRES with block Jacobi, selected by `S
 | face | image row | right-hand-side row |
 |---|---|---|
 | open inflow face (`bcEMface* = 2`, `bcPface* = 2`, X-right excluded), with `ApplyInflowBcsEImage = 1` (default) | v | E0 = −(u0×B0)/c |
-| perfect conductor (`bcEMface* = 0`), tangential components | v_t | E0_t |
-| perfect conductor, normal component n (Ampère's law without curl B, χ_n·E = Eⁿ_n − 4πθΔt Ĵ_n, χ_n the row n of the implicit susceptibility that `MUdot` applies in the interior) | v_n + (χ_na v_a + χ_nb v_b)/χ_nn | (Eⁿ_n − 4πθΔt Ĵ_n)/χ_nn |
+| perfect conductor (`bcEMface* = 0`), tangential components | v_t | 0 (a conductor at rest) |
+| perfect conductor, normal component n | the interior row, read through the conductor image (below) | the interior right-hand side, read through the image |
 | every other face, among them the open X-right face and open faces with `bcPface* ≠ 2` or `ApplyInflowBcsEImage = 0` | the operator's | the physical right-hand side |
 
-With the constants on the right-hand side, the image is the linear map that the Krylov solvers assume, and the conductor rows use row n of the interior susceptibility χ, as `MUdot` does.
+With the constants on the right-hand side, the image is the linear map that the Krylov solvers assume.
+
+### Fields on a perfect conductor
+
+A perfect conductor (`bcEMface* = 0`) is at rest, so the tangential E on it is zero. The identity rows of the solve impose E_t = 0 on the face nodes. Where conductor faces meet (edges, corners), every component is tangential to one of them, so all three are 0. Since GMRES meets them only to `GMREStol`, the solved E(n+θ) is set to E_t = 0 there after the solve, and so are the smoothed E after every pass and the initial E. The wall E is not the drift field −(u0×B0)/c of the plasma: a wall at rest does not carry it.
+
+Beyond the wall the fields are continued as their image in the conductor, the image that keeps E_t = 0 and that reverses the charges and the tangential currents:
+- E_n and B_t are even about the wall;
+- E_t and B_n are odd about their wall values (0 for E_t, the frozen W for B_n, below).
+
+**Cell B.** E_t is fixed on the wall, so Faraday's law freezes the normal B there. The ghost cells of the cell B are its image, the one Faraday's law gives with the image E:
+- tangential B: ghost = first cell;
+- normal B: its change is odd, so the wall value (the mean of the ghost and the first cell) stays at its value W at the start: ghost = 2W − first cell.
+
+W is the mean of the node B_n over the 4 face nodes of each cell face, taken from the initial field (or the restart file) when the solver starts. The face nodes then carry B_n = W for the whole run, and Faraday's law conserves divC2N(B) on them, as it does in the interior. The GEM and ForceFree wall fixes leave the normal component to this rule. A restart takes W from the checkpoint's node B. This averages W once more along the wall, which is exact for a wall field that is uniform or linear along the wall.
+
+**Normal E on the wall.** The face node's normal row is the interior row of the implicit solve, Ampère's law with Faraday's and Gauss's law substituted:
+
+(I+μ)E − δ²(∇²E + ∇∇·(μE)) = Eⁿ + δ(∇×Bⁿ − 4πĴ) − 4πδ²∇ρ̂,  δ = cθΔt,
+
+read through the conductor image. Every quantity of the field solve takes the parity of the image, in which the image charge is opposite (`imageOdd`, `FieldBoundary.h`):
+- **Ghost cells:** the gradients of E have the image of E, ∂_n E_n and ∂_t E_t odd. The charge-like ∇·(μE) and ρ̂ are odd, so the face row's Gauss term ∂_n(·) is twice the wall-cell value over Δ.
+- **Cell charge:** the field solve's ρ_c reads the face-node charge as 0 (real plus image); the output densities keep the folded charge.
+- **Wall-cell divergences of Ĵ and μE:** they read the face's tangential components as 0 and its normal component as stored. The face Ĵ_n is the image current, the change of the induced wall charge.
+- **Ĵ on the face:** its pressure term −(Δt/2)∇·Π has the ghosts of a current's image (tangential components odd), so its tangential part interpolates to 0 on the face node. Ĵ_t is set to 0 after it is formed; the Ĵ smoothing keeps it 0 through its odd ghosts, which makes it the adjoint of the E smoothing.
+
+With these, the Gauss term of the interior rows sums by parts up to the wall, which energy consistency needs. A face row without it, or with a copy ghost of the charge, leaves a wall term that drives a growing wall mode at θ = ½. The vacuum standing wave between the walls conserves energy at θ = ½ to round-off (unit test `conductor-modes`).
+
+**Ghost nodes of E and B** (the mover reads them for a particle beyond the wall):
+- E_n and B_t: even, ghost = the value of node 2 (the first node inside);
+- E_t and B_n: odd about the face value, ghost = 2·face − node 2. That is −E_t(node 2) for E, and for B the eight-cell mean of the image cells.
 
 ### Boundary injection (reemission faces)
 
@@ -414,28 +444,45 @@ With `bcEMfaceXright = 2` and `bcPfaceXright = 3` (and `PERIODICX = 0`), the las
 
 The written `rho`, `J` and pressure on the layer are these neutralized or copied values; the written E and B are the copied or the solved fields.
 
-Particles, on every face with `bcPface* = 3`: a particle that ends a push beyond the face is deleted. The plasma beyond the face is the last 3 cells shifted 3 cells outward, moving as its sources, so a particle that crosses the plane 3 cells inside the face inward during the push re-enters. A copy with its new velocity and charge is appended at its end position shifted 3 cells outward, and pushed from the next cycle. Beyond an edge or a corner between such faces the plasma is shifted across each of them, so a particle that crosses these planes of two faces in one push gives three copies (one shifted across each face and one across both), and of three faces seven. A copy is kept if it lies inside the domain and outside the injection layers of the `bcPface* = 2` faces, which are refilled every cycle; a copy beyond a periodic boundary is wrapped by the particle exchange, like its source (`Documentation/OUTFLOW_PARTICLE_COPIES.md`).
+Particles, on every face with `bcPface* = 3`: a particle that ends a push beyond the face is deleted. The plasma beyond the face is the last 3 cells shifted 3 cells outward, moving as its sources, so a particle that crosses the plane 3 cells inside the face inward during the push re-enters. A copy with its new velocity and charge is appended at its end position shifted 3 cells outward, and pushed from the next cycle. Beyond an edge or a corner between such faces the plasma is shifted across each of them, so a particle that crosses these planes of two faces in one push gives three copies (one shifted across each face and one across both), and of three faces seven. A copy is kept if it lies inside the domain and outside the injection layers of the `bcPface* = 2` faces, which are refilled every cycle; a copy beyond a periodic boundary is wrapped by the particle exchange, like its source.
 
 ### Absorbing layer and ∇·B cleaning on open faces
 
-On an open face (`bcEMface* = 2`) with `yes_sal = 1`, every cycle blends the fields once toward the upstream values on the layers 0…`n_layers_sal`: E toward −(u0×B0)/c after the field solve, and B toward B0 after Faraday's law, before B is interpolated to the nodes. The weight s rises linearly from 0 on the ghost layer by 1/`n_layers_sal` per layer to 1 inside, so the face node of E and the first cell of B get 1/`n_layers_sal`. X-right is excluded: it always continues the interior (see above). Below, B_n is the component of B normal to the face and B_t the tangential ones.
+On an open face (`bcEMface* = 2`) with `yes_sal = 1` (the default), every cycle blends the fields once toward the upstream values on the layers 0…`n_layers_sal`: E toward −(u0×B0)/c after the field solve, and B toward B0 after Faraday's law, before B is interpolated to the nodes. The weight s rises linearly from 0 on the ghost layer by 1/`n_layers_sal` per layer to 1 inside, so the face node of E and the first cell of B get 1/`n_layers_sal`. X-right is excluded: it always continues the interior (see above). Below, B_n is the component of B normal to the face and B_t the tangential ones.
 
 - `sal_tangential_B = 1` (default): only B_t is blended; B_n is left to the field solve.
   - Blending B_n creates ∇·B of about (B_n − B0_n)/(`n_layers_sal` Δx) in the layer every cycle, however smooth the field is. Blending only B_t creates (1 − s) ∂_n B_n, which the cleaning drives to zero.
   - B_n across the layer then follows the interior field (zero normal gradient) instead of being clamped to B0_n.
 - `sal_tangential_B = 0`: all three components are blended.
 
-The B treatment of an open face (the blend, or B0 on X-left and the zero-gradient continuation elsewhere without the SAL) runs only on wall ranks with at least 9 cells along the face normal (a gate meant for the flat direction of a 2D run, which is periodic and never reaches it). On a thinner wall rank of any other direction it is skipped, and the code and `scripts/ipic_preflight.py` print a warning: use fewer ranks along that direction (at least 9 cells per wall rank).
+Without the SAL (`yes_sal = 0`), every open inflow face (`bcEMface* = 2` and `bcPface* = 2`, X-right excluded) holds E0 = −(u0×B0)/c on its node layers 0…`n_layers_sal` after the field solve, the value its rows impose on the face node, and B0 (all three components) on its cell layers 0…`n_layers_sal` after Faraday's law: the fields in which the plasma injected there drifts at u0. An open X-left face gets B0 whatever its `bcPface*`. On the other open faces (`bcPface* ≠ 2`; X-right, see above) E is left as solved, and B on the layers 0…`n_layers_sal` is copied from the next cell layer inward (zero-gradient continuation).
+
+The B treatment of an open face (the blend; without the SAL, B0 or the zero-gradient continuation) runs only on wall ranks with at least 9 cells along the face normal (a gate meant for the flat direction of a 2D run, which is periodic and never reaches it). On a thinner wall rank of any other direction it is skipped, and the code and `scripts/ipic_preflight.py` print a warning: use fewer ranks along that direction (at least 9 cells per wall rank).
 
 `divBCorrection = yes` cleans the cell-centred B every `divBCorrectionCycle` cycles, in the B update (`gpuCalculateB`) after Faraday's law and the face treatments, before B is interpolated to the nodes. It needs at least 2 cells along every non-periodic direction; otherwise the run stops at startup. Faraday's law keeps divC2N(B) at round-off (divC2N∘curlN2C = 0), so the cleaning removes what the face treatments create; where that is round-off the solve is skipped (see below).
 1. It solves divC2N(gradN2C ψ) = divC2N(B) for ψ on the nodes (preconditioned FGMRES, see below). The nodes of a physical face are not unknowns: on a perfect conductor ψ there equals the next inner node (zero normal gradient), so B_n of the wall cells, and so at the wall, is left as Faraday's law made it; on the other faces ψ = 0 there, so the correction has no tangential part on the face.
 2. It subtracts gradN2C ψ from B on the cells. Since the solve uses the composite operator divC2N∘gradN2C itself, this is the projection of B onto fields without divergence at the interior nodes (to `DivCleaningTol`): a field without divergence is left alone, and nothing filters B. Because it keeps B_n on a perfect conductor, the projection is orthogonal only where B does not cross the conductor: the B energy changes by −‖gradN2C ψ‖² − 2∮ψ B_n, so where the initial B crosses a wall it can rise (by a few percent in a cold test with y walls).
 
-Use the cleaning with the tangential SAL. With `sal_tangential_B = 0`, the cleaning carries the SAL's B_n = B0_n at the faces into the whole box, and the code prints a warning. Without the SAL, an open X-left face sets the whole B, B_n included, to B0 every cycle, and the cleaning carries that face flux into the box; the code warns about this too. Without the cleaning, the tangential SAL lets ∇·B pile up in the layer.
+Use the cleaning with the tangential SAL. With `sal_tangential_B = 0`, the cleaning carries the SAL's B_n = B0_n at the faces into the whole box, and the code prints a warning. Without the SAL, an open X-left face and the open Y/Z inflow faces set the whole B, B_n included, to B0 every cycle, and the cleaning carries that face flux into the box; the code warns about this too. Without the cleaning, the tangential SAL lets ∇·B pile up in the layer.
 
 ### Solves of the ∇·E and ∇·B corrections
 
-`PoissonCorrection` (∇·E) solves divN2C(gradC2N φ) = divN2C(E) − 4πρ for φ on the cells, with φ = 0 in the ghost cells of the physical faces, and subtracts gradC2N φ from E on the nodes; with that ghost rule gradC2N is minus the transpose of divN2C, so the step is the orthogonal projection onto the E of the discrete Gauss law. Both corrections solve with the operator of their correction, the 27-point Σ_a δ_a² μ_b² μ_c² (δ² the (1, −2, 1)/h² difference, μ² the (¼, ½, ¼) average), not with a 7-point Laplacian, which would remove only part of the divergence.
+`PoissonCorrection` (∇·E) solves divN2C(gradC2N φ) = divN2C(E) − 4πρ for φ on the cells, and subtracts gradC2N φ from E on the nodes.
+
+The ghost cells of φ:
+- **On a perfect conductor (`bcEMface* = 0`):** the conductor image of φ, odd (`GhostSet::Phi`).
+  - φ = 0 on the wall, which stays an equipotential.
+  - The correction has no tangential part there.
+  - The solve fills these ghosts after the halo exchange of every iteration.
+- **On the other physical faces:** 0.
+
+With these rules gradC2N is minus the transpose of divN2C, in the lumped inner product with E_t = 0 on the walls. The step is therefore the orthogonal projection onto the E of the discrete Gauss law.
+
+After the correction:
+- the values of the identity rows are restored: a conductor's E_t = 0 exactly, E0 on inflow faces;
+- Eⁿ gets the boundary of a solved E (`EMfields3D::finishE`): its ghost nodes are exchanged and filled, then the layers of the open faces are set (inflow E0 or the absorbing blend, the X-right copy).
+
+So for θ < 1 the advance E^{n+1} = (S(E^{n+θ}) − (1−θ)Eⁿ)/θ keeps the imposed face values. Both corrections solve with the operator of their correction, the 27-point Σ_a δ_a² μ_b² μ_c² (δ² the (1, −2, 1)/h² difference, μ² the (¼, ½, ¼) average), not with a 7-point Laplacian, which would remove only part of the divergence.
 
 The solves use FGMRES(60), at most 66 restarts (about 4000 iterations), to `DivCleaningTol`: their vectors are at most a third of the Maxwell ones, so the GMRES workspace holds three times the Maxwell restart length, which the near-null modes of the averaged operators in 3D need. FGMRES is preconditioned on each rank by a Chebyshev polynomial of degree `PoissonChebMaxIter` + 1 in the rank's local operator (block Jacobi, zero values at rank cuts, the face rules on the physical faces). Along each axis μ² = 1 − T with T = −h²δ²/4 (the same end rules for both), so the eigenvalues of that operator are Σ_a (4/h_a²) t_a Π_{b≠a} (1 − t_b) over the eigenvalues t_a of the 1D T, and its exact bounds [λ_min, λ_max] come from the extreme 1D values.
 
@@ -445,11 +492,15 @@ On [λ_min, λ_max], the polynomial leaves a residual of at most 1/T_k(σ) ≈ 1
 
 The exact upper bound is the best one: `PoissonChebRescaleEigMax` below 1 leaves the top modes outside the interval, where the polynomial grows (0.95 multiplies the iterations by about 10), and above 1 it only spreads the upper cluster. A lower floor (a larger `PoissonChebEigRatio`, or `PoissonChebRescaleEigMin` below 1) trades iterations at loose tolerances for fewer at tight ones, and pays on one rank rather than on many.
 
-A cleaning leaves the fraction `DivCleaningTol` (default 10⁻⁶) of the divergence it found. A 10⁻⁶ solve costs 2 to 11 times a 10⁻³ one (NUMERICS_BUGS #8).
+A cleaning leaves the fraction `DivCleaningTol` (default 10⁻⁶) of the divergence it found. A 10⁻⁶ solve costs 2 to 11 times a 10⁻³ one.
 
 The operators are singular in two cases, and the right-hand side then loses its components on the null space before the solve (the gradient does not depend on them):
 - Constants: for ∇·E with all three directions periodic (removing the mean charge, a uniform neutralising background), and for ∇·B when every face is periodic or a perfect conductor (`bcEMface* = 0`). Between perfect conductors the mean of divC2N(B) is the net flux of the wall cells' B_n, which no correction can change; a uniform ∇·B of that size remains.
-- Checkerboards (−1)^(i_a+i_b) f(i_c) of two periodic directions a, b with even cell counts, for any profile f along the third: the averaged gradients map them to zero. The charge density can hold them, and no E produces them through divN2C; divC2N(B) holds them only at round-off.
+- Checkerboards (−1)^(i_a+i_b) f(i_c), for any profile f along the third direction c, of two directions a, b that each carry the checkerboard: the averaged gradients map them to zero. A direction carries it when it is:
+  - periodic with an even cell count;
+  - for ∇·E, between two perfect conductors, whatever its cell count (the odd ghosts of φ).
+
+  The charge density can hold them, and no E produces them through divN2C (with E_t = 0 on the walls). That part of the charge stays in the Gauss residual. divC2N(B) holds them only at round-off.
 
 A right-hand side at the round-off of the fields it comes from leaves nothing to clean, and the solve is skipped: ‖b‖ ≤ 10³ ε ‖B‖ (Σ_a h_a⁻²)^½ for ∇·B, ‖b‖ ≤ 10³ ε (‖E‖² Σ_a h_a⁻² + 16π² Σ_s ‖ρ_s‖²)^½ for ∇·E.
 

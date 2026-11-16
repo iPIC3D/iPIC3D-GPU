@@ -651,11 +651,10 @@ void EMfields3D::gpuInitializeHaloPlans() {
   }
 }
 
-const HaloPlan& EMfields3D::gpuSelectHaloPlan(cudaSolverType** h_fieldPtrs,
-                                              int nFields, int nx, int ny,
-                                              int nz, bool offsetZero,
-                                              bool faceOnly,
-                                              bool isParticle) const {
+const HaloPlan&
+EMfields3D::gpuSelectHaloPlan(cudaSolverType* const* h_fieldPtrs, int nFields,
+                              int nx, int ny, int nz, bool offsetZero,
+                              bool faceOnly, bool isParticle) const {
   if (!haloBufsAllocated_)
     batchedHaloContractFailure("halo buffers and plans are not initialized");
   if (haloExchange_.active)
@@ -699,8 +698,9 @@ cudaSolverType* EMfields3D::gpuHaloPostReceives(const HaloPlan& plan,
   return recv;
 }
 
-void EMfields3D::gpuHaloPack(const HaloPlan& plan, cudaSolverType** h_fieldPtrs,
-                             int nFields, cudaStream_t stream) {
+void EMfields3D::gpuHaloPack(const HaloPlan& plan,
+                             cudaSolverType* const* h_fieldPtrs, int nFields,
+                             cudaStream_t stream) {
   static_assert(HALO_MAX_BATCH <= 64, "HaloFieldPointers holds 64 pointers");
   HaloFieldPointers h;
   std::memcpy(h.p, h_fieldPtrs, nFields * sizeof(cudaSolverType*));
@@ -743,7 +743,7 @@ void EMfields3D::gpuHaloUnpack(const HaloPlan& plan, cudaSolverType* recv,
   cudaErrChk(cudaGetLastError());
 }
 
-void EMfields3D::gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs,
+void EMfields3D::gpuBatchedHaloExchange(cudaSolverType* const* h_fieldPtrs,
                                         int nFields, int nx, int ny, int nz,
                                         bool offsetZero, bool isFaceOnlyFlag,
                                         bool needInterp, bool isParticle,
@@ -780,7 +780,7 @@ void EMfields3D::gpuBatchedHaloExchange(cudaSolverType** h_fieldPtrs,
 //  completion and unpacking in End
 // =========================================================================
 
-void EMfields3D::gpuBatchedHaloBeginExchange(cudaSolverType** h_fieldPtrs,
+void EMfields3D::gpuBatchedHaloBeginExchange(cudaSolverType* const* h_fieldPtrs,
                                              int nFields, int nx, int ny,
                                              int nz, bool offsetZero,
                                              bool isFaceOnlyFlag,

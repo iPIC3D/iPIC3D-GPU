@@ -2,32 +2,94 @@
  * Run with mpirun -n 8 ./gpuMaxwellSolverTest --case all
  * to execute all test cases, or with --case periodic, --case reflective,
  * --case manufactured, --case oblique-wave, --case boundary-rows,
- * --case smoothed-faces or --case image-reference to run a single case.
+ * --case smoothed-faces, --case inflow-layers, --case conductor-wall,
+ * --case conductor-edges, --case conductor-modes, --case image-reference,
+ * --case local-image or --case ghost-fill to run a single case.
  *
  * boundary-rows, smoothed-faces, and image-reference where its layout leaves
  * x non-periodic, use an open inflow face at x-left (bcEMface = bcPface = 2,
  * ApplyInflowBcsEImage = 1).
  *   boundary-rows (x-right perfect conductor): gpuMaxwellImage of a random
- *     vector must already hold the face rows, i.e. equal itself after
- *     gpuPerfectConductorImages and gpuOpenBoundaryInflowEImage are applied
- *     to it again.
+ *     vector must already hold every boundary row (the identity rows of the
+ *     inflow face and of the conductor's E_t), i.e. equal itself after the
+ *     row pass is applied to it again.
  *   smoothed-faces (x-right perfect conductor, Smooth < 1, a drift u0 so that
  *     E0 = -(u0 x B0) / c is not zero): after gpuCalculateE the smoothed E
  *     the mover samples must hold the values the face rows impose, E0 on the
- *     inflow face and the tangential E0 on the conductor face, bitwise.
+ *     inflow face and E_t = 0 on the conductor face, bitwise.
+ *   inflow-layers (the smoothed-faces setup, plus open inflow faces at y-left
+ *     and y-right, no SAL): every inflow face must hold E0 on its node layers
+ *     0..n_layers_sal after gpuCalculateE, in the E Faraday's law uses and in
+ *     the smoothed E, and B0 on its cell layers 0..n_layers_sal after
+ *     gpuCalculateB, bitwise.
+ *   conductor-wall (conductor walls on the non-periodic x, the manufactured
+ *     fields, whose B_x varies along the walls, Smooth < 1 and a drift u0
+ *     whose E0 is tangential to the walls): over three E and B updates
+ *     - the face nodes keep the wall value of B_x, the initial node B_x
+ *       averaged to the cell faces and back, and divC2N(B) on the face nodes
+ *       its initial value, while B_x of the first cells changes;
+ *     - E_t = 0 on the face nodes, in the E Faraday's law uses and in the
+ *       smoothed E the mover samples;
+ *     - the ghost nodes hold the image of the fields in the wall: E_n and
+ *       B_t even (the value of node 2), E_t and B_n odd about the face
+ *       value (2 face - node 2);
+ *     - with the div(E) cleaning every cycle (odd phi ghosts on the
+ *       walls): the stored E^n keeps E_t = 0 on the face
+ *       nodes and the image in its ghost nodes, and its Gauss residual
+ *       divN2C(E^n) - 4 pi rho_c drops to the cleaning tolerance.
+ *   conductor-edges (a closed box, all six faces perfect conductors, the
+ *     manufactured fields and moments): every component tangential to a wall
+ *     has an identity row with source 0, in the image and in the row pass.
+ *     On the nodes of two or three walls (edges, corners) every component is
+ *     tangential to a wall, so all three are; on the nodes of one wall the
+ *     normal row is the operator's (the interior row of the conductor
+ *     image): the row pass does not write it, nor its source.
+ *   conductor-modes (vacuum, theta = 1/2, conductor walls at x = 0 and Lx,
+ *     y and z periodic, 32 x 32 x 8 cells, two periods): a TM standing wave,
+ *     B_z = cos(pi x) cos(2 pi y) cos(w t), whose E_x on the walls is the
+ *     largest E_x of the mode (the wall charge, from c curl(B)_n in the
+ *     normal row), and a TE one (E_z, no normal E).  The wall E_n must follow
+ *     the mode, div E stay at the solver's tolerance and the energy be
+ *     conserved, as the theta = 1/2 scheme does in vacuum.
  *   image-reference (x-right open, which keeps its operator rows, or an
  *     outflow face; conductor walls on the non-periodic y and z faces), on the
  *     layouts of kImageLayouts (3D and 2D, flat and self-periodic axes,
  *     odd and minimal subdomains): gpuMaxwellImage of a random vector against
  *     the image assembled step by step: the cell gradients exchanged,
  *     divC2N, MUdot, div D exchanged, gradC2N, delt^2 (-lap - grad div D) +
- *     D + E with the vector kernels, the packing and the face rows.  Each
+ *     D + E with the vector kernels, the packing and the identity rows, with
+ *     the face rules and rows of the test (not the solver's plan): on a
+ *     conductor the image of E and of div D (odd), and D through the image
+ *     (D_t = 0 on the wall) before its divergence.  The conductor's normal
+ *     row is also checked against an independent form, the interior row
+ *     E_n + D_n - delt^2 (lap E_n + d_n div D) from the node values of the
+ *     image of E and of D in the wall, on a vector with E_t = 0 on the
+ *     walls.  Each
  *     layout runs with HaloOverlap = 0 and 1; with 1 the image overlaps its
  *     exchange where the layout says so, and equals
  *     gpuMaxwellImage<HaloMode::Blocking> bitwise.
+ *   local-image (the closed box of conductor-edges): the local operator of
+ *     the block-Jacobi preconditioner equals the full image bitwise on every
+ *     row whose stencils read no neighbour rank's ghost cell, the conductor
+ *     rows included.
+ *   image-reference and local-image also check that the operator, boundary
+ *     rows included, is linear and not affine: for the full and the local
+ *     image A 0 = 0 bitwise and A(a u + b v) = a A u + b A v to round-off,
+ *     each image applied right after one of other data (a stale value read
+ *     before it is written would show).
+ *   ghost-fill (layouts: a closed GEM box, open faces with and without the
+ *     SAL, a ForceFree box with walls and open faces; the two cases with
+ *     ForceWallB = 1, so that their wall layers are in the plan): every ghost
+ *     set of the solver's plan, filled in one launch, equals the face-by-face
+ *     passes of its rules on random arrays, bitwise, edges and corners
+ *     included; the moment fold equals the face-by-face doubling.  The rules
+ *     themselves are checked against Collective's face codes and the
+ *     conductor image for the sets without open-face or case-wall passes
+ *     (checkRuleTable).
  *
  * --halo-overlap runs the selected cases with HaloOverlap = 1 (the solver
- * steps in HaloMode::Overlap); image-reference always runs both modes.
+ * steps in HaloMode::Overlap), and checks that the Maxwell image then
+ * overlaps its exchange; image-reference always runs both modes.
  */
 
 #include <mpi.h>
@@ -39,7 +101,6 @@
 #include "GPUStencils.cuh"
 #include "Grid3DCU.h"
 #include "MPIdata.h"
-#include "OutflowBoundary.h"
 #include "Parameters.h"
 #include "VCtopology3D.h"
 #include "cudaTypeDef.cuh"
@@ -91,6 +152,10 @@ constexpr FieldLabels kLeftGhostLabels = {"Ex left ghost", "Ey left ghost",
                                           "Ez left ghost"};
 constexpr FieldLabels kRightGhostLabels = {"Ex right ghost", "Ey right ghost",
                                            "Ez right ghost"};
+constexpr FieldLabels kLeftWallLabels = {"Ex left wall", "Ey left wall",
+                                         "Ez left wall"};
+constexpr FieldLabels kRightWallLabels = {"Ex right wall", "Ey right wall",
+                                          "Ez right wall"};
 constexpr FieldLabels kManufacturedLabels = {
     "manufactured Ex", "manufactured Ey", "manufactured Ez"};
 
@@ -120,13 +185,32 @@ enum class TestCase {
   ObliqueWave,
   BoundaryRows,
   SmoothedFaces,
-  ImageReference
+  InflowLayers,
+  ConductorWall,
+  ConductorEdges,
+  ConductorModes,
+  ImageReference,
+  LocalImage,
+  GhostFill
 };
 
-constexpr std::array<TestCase, 7> kAllTestCases = {
-    TestCase::Periodic,      TestCase::Reflective,   TestCase::Manufactured,
-    TestCase::ObliqueWave,   TestCase::BoundaryRows, TestCase::SmoothedFaces,
-    TestCase::ImageReference};
+constexpr std::array<TestCase, 13> kAllTestCases = {
+    TestCase::Periodic,       TestCase::Reflective,
+    TestCase::Manufactured,   TestCase::ObliqueWave,
+    TestCase::BoundaryRows,   TestCase::SmoothedFaces,
+    TestCase::InflowLayers,   TestCase::ConductorWall,
+    TestCase::ConductorEdges, TestCase::ConductorModes,
+    TestCase::ImageReference, TestCase::LocalImage,
+    TestCase::GhostFill};
+
+// conductor-modes acceptance.  Measured (2026-11-16): TM wall E_n / exact
+// 1.0005 (the discrete mode), div E 5e-14 and energy 6e-15 relative for TM
+// and TE.  The normal row without curl B kept the wall E_n at 0, and lost
+// 54 % of the energy with div E of 10-22 in the wall cells.
+constexpr double kModeWallMin = 0.98;
+constexpr double kModeWallMax = 1.02;
+constexpr double kModeDivMax = 1.0e-9;
+constexpr double kModeEnergyDev = 1.0e-9;
 
 struct TestSelection {
   bool runAll = true;
@@ -233,10 +317,13 @@ struct TestInput {
   double qom = -1.0;
   double density = 0.35;
   Vec3 backgroundB = {0.31, -0.17, 0.23};
-  // smoothed-faces: drift of species 0 along x, and the smoothing
+  // smoothed-faces and inflow-layers: drift of species 0 along x, and the
+  // smoothing
   double driftX = 0.1;
   double smooth = 0.5;
   int smoothPasses = 3;
+  // inflow-layers: n_layers_sal
+  int inflowLayers = 3;
 
   /** E0 = -(u0 x B0) / c with u0 = (driftX, 0, 0) (smoothed-faces). */
   Vec3 driftElectric() const {
@@ -252,14 +339,26 @@ struct TestInput {
   ConfigFile config(TestCase testCase) const {
     const bool openInflowXleft = testCase == TestCase::BoundaryRows ||
                                  testCase == TestCase::SmoothedFaces ||
+                                 testCase == TestCase::InflowLayers ||
                                  testCase == TestCase::ImageReference;
-    const bool periodicX = testCase != TestCase::Reflective && !openInflowXleft;
+    const bool periodicX = testCase != TestCase::Reflective &&
+                           testCase != TestCase::ConductorWall &&
+                           testCase != TestCase::ConductorEdges &&
+                           testCase != TestCase::LocalImage &&
+                           testCase != TestCase::ConductorModes &&
+                           !openInflowXleft;
+    const bool driftAndSmoothing = testCase == TestCase::SmoothedFaces ||
+                                   testCase == TestCase::InflowLayers ||
+                                   testCase == TestCase::ConductorWall;
 
     ConfigFile cfg;
     cfg.add("SaveDirName", ".");
     cfg.add("RestartDirName", ".");
     cfg.add("Case", "Default");
-    cfg.add("PoissonCorrection", "no");
+    // conductor-wall: the div(E) cleaning on every cycle
+    cfg.add("PoissonCorrection",
+            testCase == TestCase::ConductorWall ? "yes" : "no");
+    cfg.add("PoissonCorrectionCycle", 1);
     cfg.add("divBCorrection", "no");
     cfg.add("WriteMethod", "default");
     cfg.add("SimulationName", "gpu_maxwell_solver");
@@ -299,6 +398,8 @@ struct TestInput {
     addConfigValues(cfg, kPhiBoundaryKeys, 1);
     addConfigValues(cfg, kEmBoundaryKeys, 0);
     addConfigValues(cfg, kParticleBoundaryKeys, 1);
+    // the open faces of these cases without the SAL (on by default)
+    cfg.add("yes_sal", 0);
     cfg.add("ApplyInflowBcsEImage", 0);
     if (openInflowXleft) {
       // open inflow face at x-left
@@ -314,7 +415,25 @@ struct TestInput {
       cfg.add("PERIODICY", 0);
       cfg.add("PERIODICY_P", 0);
     }
-    if (testCase == TestCase::SmoothedFaces) {
+    if (testCase == TestCase::InflowLayers) {
+      // open inflow faces at y-left and y-right too, without the SAL
+      cfg.add("bcEMfaceYleft", 2);
+      cfg.add("bcEMfaceYright", 2);
+      cfg.add("bcPfaceYleft", 2);
+      cfg.add("bcPfaceYright", 2);
+      cfg.add("PERIODICY", 0);
+      cfg.add("PERIODICY_P", 0);
+      cfg.add("n_layers_sal", inflowLayers);
+    }
+    if (testCase == TestCase::ConductorEdges ||
+        testCase == TestCase::LocalImage) {
+      // a closed box: conductors on every face (x from periodicX)
+      cfg.add("PERIODICY", 0);
+      cfg.add("PERIODICY_P", 0);
+      cfg.add("PERIODICZ", 0);
+      cfg.add("PERIODICZ_P", 0);
+    }
+    if (driftAndSmoothing) {
       cfg.add("Smooth", smooth);
       cfg.add("SmoothNiter", smoothPasses);
       cfg.add("B0x", backgroundB[0]);
@@ -507,8 +626,20 @@ const char* caseName(TestCase testCase) {
     return "boundary-rows";
   case TestCase::SmoothedFaces:
     return "smoothed-faces";
+  case TestCase::InflowLayers:
+    return "inflow-layers";
+  case TestCase::ConductorWall:
+    return "conductor-wall";
+  case TestCase::ConductorEdges:
+    return "conductor-edges";
+  case TestCase::ConductorModes:
+    return "conductor-modes";
   case TestCase::ImageReference:
     return "image-reference";
+  case TestCase::LocalImage:
+    return "local-image";
+  case TestCase::GhostFill:
+    return "ghost-fill";
   }
   return "unknown";
 }
@@ -530,8 +661,9 @@ TestSelection parseCase(int argc, char** argv) {
       if (i + 1 >= argc) {
         throw std::runtime_error(
             "missing value for --case; expected all, periodic, reflective, "
-            "manufactured, oblique-wave, boundary-rows, smoothed-faces or "
-            "image-reference");
+            "manufactured, oblique-wave, boundary-rows, smoothed-faces, "
+            "inflow-layers, conductor-wall, conductor-edges, "
+            "conductor-modes, image-reference, local-image or ghost-fill");
       }
       const char* value = argv[i + 1];
       if (std::strcmp(value, "all") == 0)
@@ -554,13 +686,34 @@ TestSelection parseCase(int argc, char** argv) {
       if (std::strcmp(value, "smoothed-faces") == 0) {
         return {false, TestCase::SmoothedFaces};
       }
+      if (std::strcmp(value, "inflow-layers") == 0) {
+        return {false, TestCase::InflowLayers};
+      }
+      if (std::strcmp(value, "conductor-wall") == 0) {
+        return {false, TestCase::ConductorWall};
+      }
+      if (std::strcmp(value, "conductor-edges") == 0) {
+        return {false, TestCase::ConductorEdges};
+      }
+      if (std::strcmp(value, "conductor-modes") == 0) {
+        return {false, TestCase::ConductorModes};
+      }
       if (std::strcmp(value, "image-reference") == 0) {
         return {false, TestCase::ImageReference};
+      }
+      if (std::strcmp(value, "local-image") == 0) {
+        return {false, TestCase::LocalImage};
+      }
+      if (std::strcmp(value, "ghost-fill") == 0) {
+        return {false, TestCase::GhostFill};
       }
       throw std::runtime_error(std::string("unknown --case '") + value +
                                "'; expected all, periodic, reflective, "
                                "manufactured, oblique-wave, boundary-rows, "
-                               "smoothed-faces or image-reference");
+                               "smoothed-faces, inflow-layers, "
+                               "conductor-wall, conductor-edges, "
+                               "conductor-modes, image-reference, "
+                               "local-image or ghost-fill");
     }
   }
   return {};
@@ -701,22 +854,37 @@ void checkConstantElectric(const FieldArray& fields, Check& check,
                 [&](size_t, size_t, size_t) { return expected; });
 }
 
+// The x walls are perfect conductors: a uniform E keeps its value inside,
+// gets E_t = 0 on the face nodes, and the ghost nodes hold its image in the
+// wall: E_n even (the value of node 2), E_t odd (minus the value of node 2).
 void checkReflective(EMfields3D& fields, Check& check, const TestInput& input) {
   const VirtualTopology3D& vct = fields.get_vct();
   const FieldArray electric = electricFields(fields);
+  const bool left = vct.getXleft_neighbor() == MPI_PROC_NULL;
+  const bool right = vct.getXright_neighbor() == MPI_PROC_NULL;
+  const size_t n = electric[0].dim1();
+  const Vec3 e = input.reflectiveElectric();
+  const Vec3 wall = {e[0], 0.0, 0.0};
+  const Vec3 image = {e[0], -e[1], -e[2]};
 
-  checkConstantElectric(electric, check, input.reflectiveElectric(),
-                        interiorBounds(electric[0]), kElectricLabels);
+  FieldBounds inner = interiorBounds(electric[0]);
+  if (left)
+    inner.iBegin = 2;
+  if (right)
+    inner.iEnd = n - 2;
+  checkConstantElectric(electric, check, e, inner, kElectricLabels);
 
-  if (vct.getXleft_neighbor() == MPI_PROC_NULL) {
-    checkConstantElectric(electric, check, {input.exUniform, 0.0, 0.0},
-                          xFaceBounds(electric[0], 0), kLeftGhostLabels);
+  if (left) {
+    checkConstantElectric(electric, check, wall, xFaceBounds(electric[0], 1),
+                          kLeftWallLabels);
+    checkConstantElectric(electric, check, image, xFaceBounds(electric[0], 0),
+                          kLeftGhostLabels);
   }
-
-  if (vct.getXright_neighbor() == MPI_PROC_NULL) {
-    const size_t ghost = electric[0].dim1() - 1;
-    checkConstantElectric(electric, check, {input.exUniform, 0.0, 0.0},
-                          xFaceBounds(electric[0], ghost), kRightGhostLabels);
+  if (right) {
+    checkConstantElectric(electric, check, wall,
+                          xFaceBounds(electric[0], n - 2), kRightWallLabels);
+    checkConstantElectric(electric, check, image,
+                          xFaceBounds(electric[0], n - 1), kRightGhostLabels);
   }
 }
 
@@ -980,17 +1148,38 @@ void prepareManufacturedMoments(EMfields3D& fields) {
   fields.gpuCalculateHatFunctions();
 }
 
-void communicateElectricBoundaries(EMfields3D& fields, Grid3DCU& grid) {
-  fields.gpuCommunicateNodeBC_3mixed(
-      grid.getNXN(), grid.getNYN(), grid.getNZN(), fields.gpuEx(),
-      fields.get_col().bcEx, fields.gpuEy(), fields.get_col().bcEy,
-      fields.gpuEz(), fields.get_col().bcEz);
+void communicateElectricBoundaries(EMfields3D& fields, Grid3DCU&) {
+  cudaSolverType* const E[3] = {fields.gpuEx().devPtr(),
+                                fields.gpuEy().devPtr(),
+                                fields.gpuEz().devPtr()};
+  fields.exchangeAndFill(GhostSet::ENode, E, 3);
 }
 
 void zeroGpuFields(GpuFieldPtrs fields, cudaStream_t stream) {
   for (GPUFieldArray3* field : fields) {
     field->setAll(0.0, stream);
   }
+}
+
+/** The size values of the device array d, once the work queued on stream
+ *  is done. */
+std::vector<cudaSolverType> toHost(const cudaSolverType* d, size_t size,
+                                   cudaStream_t stream) {
+  std::vector<cudaSolverType> h(size);
+  cudaErrChk(cudaStreamSynchronize(stream));
+  cudaErrChk(cudaMemcpy(h.data(), d, size * sizeof(cudaSolverType),
+                        cudaMemcpyDeviceToHost));
+  return h;
+}
+
+/** n values uniform in [-1, 1), from a generator seeded with seed. */
+std::vector<cudaSolverType> randomValues(size_t n, unsigned seed) {
+  std::mt19937_64 gen(seed);
+  std::uniform_real_distribution<double> uniform(-1.0, 1.0);
+  std::vector<cudaSolverType> v(n);
+  for (auto& value : v)
+    value = uniform(gen);
+  return v;
 }
 
 int maxwellVectorSize(const Grid3DCU& grid) {
@@ -1086,35 +1275,26 @@ void runManufacturedCase(EMfields3D& fields, Grid3DCU& grid,
 void runBoundaryRowsCase(EMfields3D& fields, Grid3DCU& grid,
                          const TestInput& input, int rank, Check& check) {
   const cudaStream_t stream = fields.gpuSolverStream();
-  // non-uniform B and density, so the conductor rows are not trivial
+  // non-uniform B and density, so the operator (mu) is not trivial
   initializeManufacturedFields(fields, grid, input);
   fields.gpuSolverSyncH2D(stream);
   prepareManufacturedMoments(fields);
 
   const int n = maxwellVectorSize(grid);
-  const int nxn = grid.getNXN(), nyn = grid.getNYN(), nzn = grid.getNZN();
-  std::vector<cudaSolverType> hx(n);
-  std::mt19937_64 gen(1234 + rank);
-  std::uniform_real_distribution<double> uniform(-1.0, 1.0);
-  for (auto& v : hx)
-    v = uniform(gen);
+  const std::vector<cudaSolverType> hx = randomValues(n, 1234 + rank);
   GPUKrylovVector x(n), image(n), reapplied(n), rowsOnly(n);
-  GPUFieldArray3 vX(nxn, nyn, nzn), vY(nxn, nyn, nzn), vZ(nxn, nyn, nzn);
   // the allocations zero the arrays outside the solver stream
   cudaErrChk(cudaDeviceSynchronize());
   x.copyFromHost(hx.data(), stream);
   fields.gpuMaxwellImage(image.devPtr(), x.devPtr());
 
-  // the face rows applied to a copy of the image, and to a zero vector
-  gpuSolver2Phys3(vX.devPtr(), vY.devPtr(), vZ.devPtr(), x.devPtr(), nxn, nyn,
-                  nzn, stream);
+  // every boundary row (identity rows of the inflow face and of the
+  // conductor's E_t) applied again to a copy of the image, and to a zero
+  // vector
   gpuEq(reapplied.devPtr(), image.devPtr(), n, stream);
   rowsOnly.setZero(stream);
-  for (GPUKrylovVector* target : {&reapplied, &rowsOnly}) {
-    fields.gpuPerfectConductorImages(target->devPtr(), vX, vY, vZ);
-    fields.gpuOpenBoundaryInflowEImage(target->devPtr(), vX.devPtr(),
-                                       vY.devPtr(), vZ.devPtr(), nxn, nyn, nzn);
-  }
+  for (GPUKrylovVector* target : {&reapplied, &rowsOnly})
+    fields.gpuBoundaryRows(target->devPtr());
   std::vector<cudaSolverType> hImage(n), hReapplied(n), hRows(n);
   image.copyToHost(hImage.data(), stream);
   reapplied.copyToHost(hReapplied.data(), stream);
@@ -1149,46 +1329,644 @@ void runSmoothedFacesCase(EMfields3D& fields, Grid3DCU& grid,
 
   const int nxn = grid.getNXN(), nyn = grid.getNYN(), nzn = grid.getNZN();
   const size_t size = (size_t)nxn * nyn * nzn;
-  std::array<std::vector<cudaSolverType>, 3> e;
-  GPUFieldArray3* const smoothed[3] = {
-      &fields.gpuExForPcls(), &fields.gpuEyForPcls(), &fields.gpuEzForPcls()};
-  cudaErrChk(cudaStreamSynchronize(stream));
-  for (int c = 0; c < 3; c++) {
-    e[c].resize(size);
-    cudaErrChk(cudaMemcpy(e[c].data(), smoothed[c]->devPtr(),
-                          size * sizeof(cudaSolverType),
-                          cudaMemcpyDeviceToHost));
-  }
+  const std::array<std::vector<cudaSolverType>, 3> e = {
+      toHost(fields.gpuExForPcls().devPtr(), size, stream),
+      toHost(fields.gpuEyForPcls().devPtr(), size, stream),
+      toHost(fields.gpuEzForPcls().devPtr(), size, stream)};
 
-  // max |E - E0| over the face plane i of the components [c0, 3)
+  // max |E - value| over the face plane i of the components [c0, 3)
   const Vec3 e0 = input.driftElectric();
-  auto faceDeviation = [&](int i, int c0) {
+  auto faceDeviation = [&](int i, int c0, const Vec3& value) {
     double dev = 0.0;
     for (int j = 1; j < nyn - 1; j++)
       for (int k = 1; k < nzn - 1; k++)
         for (int c = c0; c < 3; c++)
           dev = std::max(
-              dev, std::fabs(e[c][((size_t)i * nyn + j) * nzn + k] - e0[c]));
+              dev, std::fabs(e[c][((size_t)i * nyn + j) * nzn + k] - value[c]));
     return dev;
   };
   const VirtualTopology3D& vct = fields.get_vct();
+  // the inflow face holds E0; the conductor face E_t = 0 (a wall at rest,
+  // whatever the plasma drift)
   double local[2] = {0.0, 0.0}; // inflow face, conductor face (tangential)
   if (vct.getXleft_neighbor() == MPI_PROC_NULL)
-    local[0] = faceDeviation(1, 0);
+    local[0] = faceDeviation(1, 0, e0);
   if (vct.getXright_neighbor() == MPI_PROC_NULL)
-    local[1] = faceDeviation(nxn - 2, 1);
+    local[1] = faceDeviation(nxn - 2, 1, {0.0, 0.0, 0.0});
   double global[2];
   MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_MAX,
                 MPIdata::get_PicGlobalComm());
   if (rank == 0) {
     std::cout << "smoothed-faces: max |E - E0| on the inflow face = "
               << global[0]
-              << ", max |E_t - E0_t| on the conductor face = " << global[1]
-              << "\n";
+              << ", max |E_t| on the conductor face = " << global[1] << "\n";
     if (!fields.smoothingOn())
       check.fail("the case runs without smoothing");
     if (global[0] != 0.0 || global[1] != 0.0)
       check.fail("the smoothed E does not hold the face values of the rows");
+  }
+}
+
+void runInflowLayersCase(EMfields3D& fields, Grid3DCU& grid,
+                         const TestInput& input, int rank, Check& check) {
+  const cudaStream_t stream = fields.gpuSolverStream();
+  initializeManufacturedFields(fields, grid, input);
+  fields.gpuSolverSyncH2D(stream);
+  prepareManufacturedMoments(fields);
+  fields.gpuCalculateE(0);
+
+  // max |a - value| over the layers 0..L of face f (0 x-left, 2 y-left,
+  // 3 y-right) of an array with extents n, on the interior of the other axes.
+  // For the node E (onNodes) also away from the face node planes of the
+  // other physical faces: where the y inflow layers cross the x-right
+  // conductor, they overwrite the wall's E_t = 0 after the solve, which the
+  // test does not assert as correct (kept as it is).
+  const int L = input.inflowLayers;
+  const VirtualTopology3D& topo = fields.get_vct();
+  const bool physicalLo[3] = {topo.getXleft_neighbor() == MPI_PROC_NULL,
+                              topo.getYleft_neighbor() == MPI_PROC_NULL,
+                              topo.getZleft_neighbor() == MPI_PROC_NULL};
+  const bool physicalHi[3] = {topo.getXright_neighbor() == MPI_PROC_NULL,
+                              topo.getYright_neighbor() == MPI_PROC_NULL,
+                              topo.getZright_neighbor() == MPI_PROC_NULL};
+  auto layerDeviation = [&](const std::vector<cudaSolverType>& a,
+                            const int n[3], int f, double value, bool onNodes) {
+    const int dir = f / 2;
+    const int first = f % 2 ? n[dir] - L - 1 : 0;
+    const int last = f % 2 ? n[dir] - 1 : L;
+    int lo[3] = {1, 1, 1}, hi[3] = {n[0] - 2, n[1] - 2, n[2] - 2};
+    for (int a = 0; a < 3 && onNodes; a++)
+      if (a != dir) {
+        lo[a] += physicalLo[a] ? 1 : 0;
+        hi[a] -= physicalHi[a] ? 1 : 0;
+      }
+    lo[dir] = first;
+    hi[dir] = last;
+    double dev = 0.0;
+    for (int i = lo[0]; i <= hi[0]; i++)
+      for (int j = lo[1]; j <= hi[1]; j++)
+        for (int k = lo[2]; k <= hi[2]; k++)
+          dev = std::max(
+              dev, std::fabs(a[((size_t)i * n[1] + j) * n[2] + k] - value));
+    return dev;
+  };
+  const VirtualTopology3D& vct = fields.get_vct();
+  const bool owns[6] = {vct.getXleft_neighbor() == MPI_PROC_NULL,
+                        false,
+                        vct.getYleft_neighbor() == MPI_PROC_NULL,
+                        vct.getYright_neighbor() == MPI_PROC_NULL,
+                        false,
+                        false};
+  // the deviation of three field components from a uniform value over the
+  // layers of every inflow face this rank owns
+  auto inflowDeviation = [&](GPUFieldArray3* const a[3], const int n[3],
+                             const Vec3& value, bool onNodes) {
+    const size_t size = (size_t)n[0] * n[1] * n[2];
+    double dev = 0.0;
+    for (int c = 0; c < 3; c++) {
+      const std::vector<cudaSolverType> h =
+          toHost(a[c]->devPtr(), size, stream);
+      for (int f = 0; f < 6; f++)
+        if (owns[f])
+          dev = std::max(dev, layerDeviation(h, n, f, value[c], onNodes));
+    }
+    return dev;
+  };
+
+  const int nodes[3] = {grid.getNXN(), grid.getNYN(), grid.getNZN()};
+  const int cells[3] = {grid.getNXC(), grid.getNYC(), grid.getNZC()};
+  const Vec3 e0 = input.driftElectric();
+  GPUFieldArray3* const solved[3] = {&fields.gpuExth(), &fields.gpuEyth(),
+                                     &fields.gpuEzth()};
+  GPUFieldArray3* const smoothed[3] = {
+      &fields.gpuExForPcls(), &fields.gpuEyForPcls(), &fields.gpuEzForPcls()};
+  double local[3];
+  local[0] = inflowDeviation(solved, nodes, e0, true);
+  local[1] = inflowDeviation(smoothed, nodes, e0, true);
+
+  fields.gpuCalculateB(0);
+  GPUFieldArray3* const bc[3] = {&fields.gpuBxc(), &fields.gpuByc(),
+                                 &fields.gpuBzc()};
+  local[2] = inflowDeviation(bc, cells, input.backgroundB, false);
+
+  double global[3];
+  MPI_Allreduce(local, global, 3, MPI_DOUBLE, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
+  if (rank == 0) {
+    std::cout << "inflow-layers: on the layers 0.." << L
+              << " of the inflow faces, max |E - E0| = " << global[0]
+              << " (solved), " << global[1]
+              << " (smoothed), max |B - B0| = " << global[2] << "\n";
+    if (!fields.smoothingOn())
+      check.fail("the case runs without smoothing");
+    if (global[0] != 0.0 || global[1] != 0.0)
+      check.fail("E on the inflow layers is not E0");
+    if (global[2] != 0.0)
+      check.fail("B on the inflow layers is not B0");
+  }
+}
+
+void runConductorWallCase(EMfields3D& fields, Grid3DCU& grid,
+                          const TestInput& input, int rank, Check& check) {
+  const cudaStream_t stream = fields.gpuSolverStream();
+  initializeManufacturedFields(fields, grid, input);
+  fields.gpuSolverSyncH2D(stream);
+  prepareManufacturedMoments(fields);
+
+  const int nxn = grid.getNXN(), nyn = grid.getNYN(), nzn = grid.getNZN();
+  const int nxc = grid.getNXC(), nyc = grid.getNYC(), nzc = grid.getNZC();
+  const size_t nodes = (size_t)nxn * nyn * nzn;
+  const size_t cells = (size_t)nxc * nyc * nzc;
+  auto node = [&](int i, int j, int k) {
+    return ((size_t)i * nyn + j) * nzn + k;
+  };
+  auto cell = [&](int i, int j, int k) {
+    return ((size_t)i * nyc + j) * nzc + k;
+  };
+  GPUFieldArray3 div(nxn, nyn, nzn);
+  cudaErrChk(cudaDeviceSynchronize());
+  auto divergence = [&]() {
+    gpuDivC2N(div.devPtr(), fields.gpuBxc().devPtr(), fields.gpuByc().devPtr(),
+              fields.gpuBzc().devPtr(), nxn, nyn, nzn, grid.get_invdx(),
+              grid.get_invdy(), grid.get_invdz(), stream);
+    return toHost(div.devPtr(), nodes, stream);
+  };
+
+  // the wall faces of this rank: (face node plane, first cell plane)
+  const VirtualTopology3D& vct = fields.get_vct();
+  std::vector<std::array<int, 2>> walls;
+  if (vct.getXleft_neighbor() == MPI_PROC_NULL)
+    walls.push_back({1, 1});
+  if (vct.getXright_neighbor() == MPI_PROC_NULL)
+    walls.push_back({nxn - 2, nxc - 2});
+
+  // the wall value on the face nodes: W, the mean of the 4 face nodes of a
+  // cell face, from the initial node B_x, averaged over the 4 cells of the
+  // node
+  const std::vector<cudaSolverType> bx0 =
+      toHost(fields.gpuBxn().devPtr(), nodes, stream);
+  auto wallValue = [&](int i, int j, int k) { // W of the cell face (j, k)
+    return 0.25 * (bx0[node(i, j, k)] + bx0[node(i, j + 1, k)] +
+                   bx0[node(i, j, k + 1)] + bx0[node(i, j + 1, k + 1)]);
+  };
+  std::vector<double> expected(nodes, 0.0);
+  for (const auto& w : walls)
+    for (int j = 1; j < nyn - 1; j++)
+      for (int k = 1; k < nzn - 1; k++)
+        expected[node(w[0], j, k)] =
+            0.25 * (wallValue(w[0], j - 1, k - 1) + wallValue(w[0], j, k - 1) +
+                    wallValue(w[0], j - 1, k) + wallValue(w[0], j, k));
+  const std::vector<cudaSolverType> div0 = divergence();
+  const std::vector<cudaSolverType> bxc0 =
+      toHost(fields.gpuBxc().devPtr(), cells, stream);
+
+  // the deviation of the ghost nodes of a node field from its image in the
+  // wall: odd about the face value (2 face - node 2) or even (node 2)
+  auto imageDeviation = [&](const std::vector<cudaSolverType>& a, bool odd) {
+    double dev = 0.0;
+    for (const auto& w : walls) {
+      const int face = w[0];
+      const int ghost = face == 1 ? 0 : nxn - 1;
+      const int second = face == 1 ? 2 : nxn - 3;
+      for (int j = 1; j < nyn - 1; j++)
+        for (int k = 1; k < nzn - 1; k++) {
+          const double image =
+              odd ? 2.0 * a[node(face, j, k)] - a[node(second, j, k)]
+                  : a[node(second, j, k)];
+          dev = std::max(dev, std::fabs(a[node(ghost, j, k)] - image));
+        }
+    }
+    return dev;
+  };
+  // max |value| over the face nodes of the walls
+  auto wallMax = [&](const std::vector<cudaSolverType>& a) {
+    double m = 0.0;
+    for (const auto& w : walls)
+      for (int j = 1; j < nyn - 1; j++)
+        for (int k = 1; k < nzn - 1; k++)
+          m = std::max(m, std::fabs(a[node(w[0], j, k)]));
+    return m;
+  };
+  if (!fields.smoothingOn())
+    check.fail("the case runs without smoothing");
+  GPUFieldArray3* const solvedE[3] = {&fields.gpuExth(), &fields.gpuEyth(),
+                                      &fields.gpuEzth()};
+  GPUFieldArray3* const smoothedE[3] = {
+      &fields.gpuExForPcls(), &fields.gpuEyForPcls(), &fields.gpuEzForPcls()};
+  GPUFieldArray3* const nodeB[3] = {&fields.gpuBxn(), &fields.gpuByn(),
+                                    &fields.gpuBzn()};
+
+  // the Gauss residual divN2C(E^n) - 4 pi rho_c on the interior cells
+  GPUFieldArray3 gauss(nxc, nyc, nzc);
+  cudaErrChk(cudaDeviceSynchronize());
+  auto gaussResidual = [&]() {
+    gpuDivN2C(gauss.devPtr(), fields.gpuEx().devPtr(), fields.gpuEy().devPtr(),
+              fields.gpuEz().devPtr(), nxc, nyc, nzc, grid.get_invdx(),
+              grid.get_invdy(), grid.get_invdz(), stream);
+    const std::vector<cudaSolverType> d = toHost(gauss.devPtr(), cells, stream);
+    const std::vector<cudaSolverType> rho =
+        toHost(fields.gpuRhoc().devPtr(), cells, stream);
+    double r = 0.0;
+    for (int i = 1; i < nxc - 1; i++)
+      for (int j = 1; j < nyc - 1; j++)
+        for (int k = 1; k < nzc - 1; k++)
+          r = std::max(
+              r, std::fabs(d[cell(i, j, k)] - 4.0 * M_PI * rho[cell(i, j, k)]));
+    return r;
+  };
+  GPUFieldArray3* const storedE[3] = {&fields.gpuEx(), &fields.gpuEy(),
+                                      &fields.gpuEz()};
+
+  // max over the cycles of |B_x - wall value| and |div - div0| on the face
+  // nodes, of the change of B_x in the first cells, of |E_t| on the face
+  // nodes, of the ghost nodes' deviation from the image (x is normal); of
+  // E^n after its cleaning: |E_t| on the face nodes and the deviation of its
+  // ghost nodes; the Gauss residual of E^n before the first cleaning and
+  // after each
+  double local[9] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  local[7] = gaussResidual();
+  for (int cycle = 0; cycle < 3; cycle++) {
+    fields.gpuCalculateE(cycle);
+    for (int c = 0; c < 3; c++) {
+      const std::vector<cudaSolverType> h =
+          toHost(storedE[c]->devPtr(), nodes, stream);
+      if (c != 0)
+        local[5] = std::max(local[5], wallMax(h));
+      local[6] = std::max(local[6], imageDeviation(h, c != 0));
+    }
+    local[8] = std::max(local[8], gaussResidual());
+    for (GPUFieldArray3* const* E : {solvedE, smoothedE})
+      for (int c = 0; c < 3; c++) {
+        const std::vector<cudaSolverType> h =
+            toHost(E[c]->devPtr(), nodes, stream);
+        if (c != 0)
+          local[3] = std::max(local[3], wallMax(h));
+        local[4] = std::max(local[4], imageDeviation(h, c != 0));
+      }
+    fields.gpuCalculateB(cycle);
+    for (int c = 0; c < 3; c++)
+      local[4] = std::max(
+          local[4],
+          imageDeviation(toHost(nodeB[c]->devPtr(), nodes, stream), c == 0));
+    const std::vector<cudaSolverType> bx =
+        toHost(fields.gpuBxn().devPtr(), nodes, stream);
+    const std::vector<cudaSolverType> d = divergence();
+    const std::vector<cudaSolverType> bxc =
+        toHost(fields.gpuBxc().devPtr(), cells, stream);
+    for (const auto& w : walls)
+      for (int j = 1; j < nyn - 1; j++)
+        for (int k = 1; k < nzn - 1; k++) {
+          const size_t n = node(w[0], j, k);
+          local[0] = std::max(local[0], std::fabs(bx[n] - expected[n]));
+          local[1] = std::max(local[1], std::fabs(d[n] - div0[n]));
+          if (j < nyc - 1 && k < nzc - 1)
+            local[2] = std::max(local[2], std::fabs(bxc[cell(w[1], j, k)] -
+                                                    bxc0[cell(w[1], j, k)]));
+        }
+  }
+  double global[9];
+  MPI_Allreduce(local, global, 9, MPI_DOUBLE, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
+  if (rank == 0) {
+    std::cout << "conductor-wall: over 3 cycles, on the face nodes max |B_x - "
+                 "wall value| = "
+              << global[0] << ", max |div(B) - initial| = " << global[1]
+              << ", max |E_t| = " << global[3]
+              << "; max change of B_x in the first cells = " << global[2]
+              << "; ghost nodes of E and B, max deviation from the image = "
+              << global[4] << "\n";
+    if (global[3] != 0.0)
+      check.fail("E_t on the conductor face nodes is not 0");
+    if (global[4] != 0.0)
+      check.fail("the ghost nodes on the conductor faces are not the image "
+                 "of the fields");
+    if (global[0] > 1.0e-12)
+      check.fail("B_x on the conductor face nodes left its wall value");
+    if (global[1] > 1.0e-7)
+      check.fail("div(B) on the conductor face nodes changed");
+    if (global[2] < 1.0e-6)
+      check.fail("B_x of the first cells did not change: the case tests "
+                 "nothing");
+    std::cout << "conductor-wall: div(E) cleaning of E^n, max |E_t| on the "
+                 "face nodes = "
+              << global[5]
+              << ", ghost nodes' max deviation from the image = " << global[6]
+              << "; max |div E - 4 pi rho_c| before = " << global[7]
+              << ", after = " << global[8] << "\n";
+    if (global[5] != 0.0)
+      check.fail("the cleaning left E_t on the conductor face nodes of E^n");
+    if (global[6] != 0.0)
+      check.fail("the ghost nodes of the cleaned E^n are not its image");
+    if (!(global[8] < 1.0e-5 * global[7]))
+      check.fail("the cleaning did not remove the Gauss residual of E^n");
+  }
+}
+
+void runConductorEdgesCase(EMfields3D& fields, Grid3DCU& grid,
+                           const TestInput& input, int rank, Check& check) {
+  const cudaStream_t stream = fields.gpuSolverStream();
+  initializeManufacturedFields(fields, grid, input);
+  fields.gpuSolverSyncH2D(stream);
+  prepareManufacturedMoments(fields);
+
+  const int n[3] = {grid.getNXN(), grid.getNYN(), grid.getNZN()};
+  const size_t nodes = (size_t)n[0] * n[1] * n[2];
+  auto node = [&](int i, int j, int k) {
+    return ((size_t)i * n[1] + j) * n[2] + k;
+  };
+  const VirtualTopology3D& vct = fields.get_vct();
+  const bool lo[3] = {vct.getXleft_neighbor() == MPI_PROC_NULL,
+                      vct.getYleft_neighbor() == MPI_PROC_NULL,
+                      vct.getZleft_neighbor() == MPI_PROC_NULL};
+  const bool hi[3] = {vct.getXright_neighbor() == MPI_PROC_NULL,
+                      vct.getYright_neighbor() == MPI_PROC_NULL,
+                      vct.getZright_neighbor() == MPI_PROC_NULL};
+
+  // the image of a random vector, the boundary rows of that image on a zero
+  // vector, and the values of the identity rows written over a sentinel,
+  // all back on the nodes
+  const int nK = maxwellVectorSize(grid);
+  const std::vector<cudaSolverType> hx = randomValues(nK, 777 + rank);
+  std::vector<GPUFieldArray3> v, im, rows, src;
+  for (int c = 0; c < 3; c++) {
+    v.emplace_back(n[0], n[1], n[2]);
+    im.emplace_back(n[0], n[1], n[2]);
+    rows.emplace_back(n[0], n[1], n[2]);
+    src.emplace_back(n[0], n[1], n[2]);
+  }
+  GPUKrylovVector x(nK), image(nK), rowsOnly(nK);
+  // the allocations zero the arrays outside the solver stream
+  cudaErrChk(cudaDeviceSynchronize());
+  x.copyFromHost(hx.data(), stream);
+  std::vector<cudaSolverType> sentinel(nodes, 7.0);
+  for (int c = 0; c < 3; c++)
+    src[c].copyFromHost(sentinel.data());
+  // the uploads ran on the default stream, which the non-blocking solver
+  // stream does not wait for
+  cudaErrChk(cudaDeviceSynchronize());
+  fields.gpuMaxwellImage(image.devPtr(), x.devPtr());
+  // zeroed on the solver stream, which the row kernels use
+  cudaErrChk(cudaMemsetAsync(rowsOnly.devPtr(), 0,
+                             rowsOnly.size() * sizeof(cudaSolverType), stream));
+  fields.gpuBoundaryRows(rowsOnly.devPtr());
+  gpuSolver2Phys3(v[0].devPtr(), v[1].devPtr(), v[2].devPtr(), x.devPtr(), n[0],
+                  n[1], n[2], stream);
+  gpuSolver2Phys3(im[0].devPtr(), im[1].devPtr(), im[2].devPtr(),
+                  image.devPtr(), n[0], n[1], n[2], stream);
+  gpuSolver2Phys3(rows[0].devPtr(), rows[1].devPtr(), rows[2].devPtr(),
+                  rowsOnly.devPtr(), n[0], n[1], n[2], stream);
+  cudaSolverType* const srcPtr[3] = {src[0].devPtr(), src[1].devPtr(),
+                                     src[2].devPtr()};
+  fields.gpuBoundary().rowValues(srcPtr, stream);
+  cudaErrChk(cudaStreamSynchronize(stream));
+  std::array<std::vector<cudaSolverType>, 3> hv, him, hrows, hs;
+  for (int c = 0; c < 3; c++) {
+    hv[c] = toHost(v[c].devPtr(), nodes, stream);
+    him[c] = toHost(im[c].devPtr(), nodes, stream);
+    hrows[c] = toHost(rows[c].devPtr(), nodes, stream);
+    hs[c] = toHost(src[c].devPtr(), nodes, stream);
+  }
+
+  // [0] tangential rows that are not identity rows with source 0, in the
+  // image or in the row pass (edges, corners, faces); [1] edge and corner
+  // nodes; [2] normal rows of single walls that the row pass or the identity
+  // rows' values wrote (the interior row of the image is the operator's);
+  // [3] normal rows of single walls
+  long local[4] = {0, 0, 0, 0};
+  for (int i = 1; i < n[0] - 1; i++)
+    for (int j = 1; j < n[1] - 1; j++)
+      for (int k = 1; k < n[2] - 1; k++) {
+        const int idx[3] = {i, j, k};
+        bool on[3];
+        int walls = 0;
+        for (int a = 0; a < 3; a++) {
+          on[a] = (lo[a] && idx[a] == 1) || (hi[a] && idx[a] == n[a] - 2);
+          walls += on[a];
+        }
+        if (walls == 0)
+          continue;
+        if (walls >= 2)
+          local[1]++;
+        const size_t q = node(i, j, k);
+        for (int c = 0; c < 3; c++) {
+          bool tangential = false;
+          for (int a = 0; a < 3; a++)
+            tangential = tangential || (on[a] && a != c);
+          if (tangential) {
+            if (him[c][q] != hv[c][q] || hrows[c][q] != hv[c][q] ||
+                hs[c][q] != 0.0)
+              local[0]++;
+          } else {
+            local[2] += hrows[c][q] != 0.0 || hs[c][q] != 7.0;
+            local[3]++;
+          }
+        }
+      }
+  long global[4];
+  MPI_Allreduce(local, global, 4, MPI_LONG, MPI_SUM,
+                MPIdata::get_PicGlobalComm());
+  if (rank == 0) {
+    std::cout << "conductor-edges: " << global[1]
+              << " edge and corner nodes; tangential rows that are not "
+                 "identity rows with source 0: "
+              << global[0] << "; normal rows on single walls: " << global[3]
+              << ", written by the row pass: " << global[2] << "\n";
+    if (global[0] != 0)
+      check.fail("a component tangential to a wall has a non-identity row");
+    if (global[1] == 0 || global[3] == 0)
+      check.fail("the box has no edge, corner or single-wall node");
+    if (global[2] != 0)
+      check.fail("the row pass wrote a single wall's normal row");
+  }
+}
+
+// One vacuum standing wave between the conductor walls at x = 0 and Lx (see
+// conductor-modes), two periods.  Returns, over the run: max over time of the
+// wall E_n relative to its exact amplitude (TM; 0 for TE), max |div E| on the
+// cells relative to max |E| / dx, and max |energy / initial - 1|.
+std::array<double, 3> runConductorMode(EMfields3D& fields, Grid3DCU& grid,
+                                       const TestInput& input, int rank,
+                                       bool tm) {
+  const cudaStream_t stream = fields.gpuSolverStream();
+  zeroFields(fields);
+  const double kx = M_PI / input.Lx, ky = 2.0 * M_PI / input.Ly, c = input.c;
+  const double w = c * std::sqrt(kx * kx + ky * ky);
+  // t = 0: E = 0; TM B_z = cos(kx x) cos(ky y), TE the B of E_z = sin(kx x)
+  // cos(ky y) sin(w t)
+  auto mode = [&](const GridPoint& p) -> Vec3 {
+    if (tm)
+      return {0.0, 0.0, std::cos(kx * p.x) * std::cos(ky * p.y)};
+    return {-(c * ky / w) * std::sin(kx * p.x) * std::sin(ky * p.y),
+            -(c * kx / w) * std::cos(kx * p.x) * std::cos(ky * p.y), 0.0};
+  };
+  FieldArray Bn = magneticNodeFields(fields), Bc = magneticCenterFields(fields);
+  forEachIndex(fullBounds(Bn[0]), [&](size_t i, size_t j, size_t k) {
+    setFieldPoint(Bn, i, j, k, mode(nodePoint(grid, i, j, k)));
+  });
+  forEachIndex(fullBounds(Bc[0]), [&](size_t i, size_t j, size_t k) {
+    setFieldPoint(Bc, i, j, k, mode(centerPoint(grid, i, j, k)));
+  });
+  fields.gpuSolverSyncH2D(stream);
+  prepareManufacturedMoments(fields);
+
+  const int nn[3] = {grid.getNXN(), grid.getNYN(), grid.getNZN()};
+  const int nc[3] = {grid.getNXC(), grid.getNYC(), grid.getNZC()};
+  const size_t nodes = (size_t)nn[0] * nn[1] * nn[2];
+  const size_t cells = (size_t)nc[0] * nc[1] * nc[2];
+  auto N = [&](int i, int j, int k) {
+    return ((size_t)i * nn[1] + j) * nn[2] + k;
+  };
+  auto C = [&](int i, int j, int k) {
+    return ((size_t)i * nc[1] + j) * nc[2] + k;
+  };
+  const VirtualTopology3D& vct = fields.get_vct();
+  const bool lo = vct.getXleft_neighbor() == MPI_PROC_NULL;
+  const bool hi = vct.getXright_neighbor() == MPI_PROC_NULL;
+  GPUFieldArray3 div(nc[0], nc[1], nc[2]);
+  cudaErrChk(cudaDeviceSynchronize());
+
+  double energy0 = -1.0, wallMax = 0.0, divMax = 0.0, energyDev = 0.0;
+  const int steps = (int)std::lround(2.0 * 2.0 * M_PI / w / input.dt);
+  for (int cycle = 0; cycle <= steps; cycle++) {
+    if (cycle > 0) {
+      fields.gpuCalculateE(cycle);
+      fields.gpuCalculateB(cycle);
+    }
+    std::array<std::vector<cudaSolverType>, 3> e, b;
+    GPUFieldArray3* const E[3] = {&fields.gpuEx(), &fields.gpuEy(),
+                                  &fields.gpuEz()};
+    GPUFieldArray3* const B[3] = {&fields.gpuBxc(), &fields.gpuByc(),
+                                  &fields.gpuBzc()};
+    for (int a = 0; a < 3; a++) {
+      e[a] = toHost(E[a]->devPtr(), nodes, stream);
+      b[a] = toHost(B[a]->devPtr(), cells, stream);
+    }
+    gpuDivN2C(div.devPtr(), E[0]->devPtr(), E[1]->devPtr(), E[2]->devPtr(),
+              nc[0], nc[1], nc[2], grid.get_invdx(), grid.get_invdy(),
+              grid.get_invdz(), stream);
+    const std::vector<cudaSolverType> d = toHost(div.devPtr(), cells, stream);
+    // [0] max |E_x| on the walls, [1] max |div E|, [2] max |E|; energy:
+    // the cells' B^2 and the owned nodes' E^2 (trapezoidal on the walls)
+    double mx[3] = {0.0, 0.0, 0.0}, sum = 0.0;
+    for (int j = 1; j < nn[1] - 1; j++)
+      for (int k = 1; k < nn[2] - 1; k++) {
+        if (lo)
+          mx[0] = std::max(mx[0], (double)std::fabs(e[0][N(1, j, k)]));
+        if (hi)
+          mx[0] = std::max(mx[0], (double)std::fabs(e[0][N(nn[0] - 2, j, k)]));
+      }
+    for (int i = 1; i < nc[0] - 1; i++)
+      for (int j = 1; j < nc[1] - 1; j++)
+        for (int k = 1; k < nc[2] - 1; k++) {
+          mx[1] = std::max(mx[1], (double)std::fabs(d[C(i, j, k)]));
+          for (int a = 0; a < 3; a++)
+            sum += b[a][C(i, j, k)] * b[a][C(i, j, k)];
+        }
+    for (int i = 1; i <= (hi ? nn[0] - 2 : nn[0] - 3); i++)
+      for (int j = 1; j <= nn[1] - 3; j++)
+        for (int k = 1; k <= nn[2] - 3; k++) {
+          const double wgt =
+              ((lo && i == 1) || (hi && i == nn[0] - 2)) ? 0.5 : 1.0;
+          for (int a = 0; a < 3; a++) {
+            sum += wgt * e[a][N(i, j, k)] * e[a][N(i, j, k)];
+            mx[2] = std::max(mx[2], (double)std::fabs(e[a][N(i, j, k)]));
+          }
+        }
+    double gmx[3], gsum;
+    MPI_Allreduce(mx, gmx, 3, MPI_DOUBLE, MPI_MAX,
+                  MPIdata::get_PicGlobalComm());
+    MPI_Allreduce(&sum, &gsum, 1, MPI_DOUBLE, MPI_SUM,
+                  MPIdata::get_PicGlobalComm());
+    if (energy0 < 0.0)
+      energy0 = gsum;
+    if (tm)
+      wallMax = std::max(wallMax, gmx[0] / (c * ky / w));
+    if (gmx[2] > 0.0)
+      divMax = std::max(divMax, gmx[1] / (gmx[2] * grid.get_invdx()));
+    energyDev = std::max(energyDev, std::fabs(gsum / energy0 - 1.0));
+  }
+  if (rank == 0)
+    std::cout << "conductor-modes " << (tm ? "TM" : "TE")
+              << ": max wall E_n / exact amplitude = " << wallMax
+              << ", max |div E| / (max |E| / dx) = " << divMax
+              << ", max |energy / initial - 1| = " << energyDev << "\n";
+  return {wallMax, divMax, energyDev};
+}
+
+void runConductorModesCase(EMfields3D& fields, Grid3DCU& grid,
+                           const TestInput& input, int rank, Check& check) {
+  const std::array<double, 3> tm =
+      runConductorMode(fields, grid, input, rank, true);
+  const std::array<double, 3> te =
+      runConductorMode(fields, grid, input, rank, false);
+  if (rank == 0) {
+    if (tm[0] < kModeWallMin || tm[0] > kModeWallMax)
+      check.fail("TM: the wall E_n does not follow the mode");
+    if (tm[1] > kModeDivMax || te[1] > kModeDivMax)
+      check.fail("div E left the solver's tolerance");
+    if (tm[2] > kModeEnergyDev || te[2] > kModeEnergyDev)
+      check.fail("the vacuum energy is not conserved");
+  }
+}
+
+/** The Maxwell operator is linear, boundary rows included: for the full and
+ *  the local image, A 0 = 0 bitwise and A(a u + b v) = a A u + b A v to
+ *  round-off.  Each image follows one of different data, so a value the
+ *  image read before writing it (a stale ghost of its scratch arrays, shared
+ *  with the cleaning solves) would make it affine and show here.  Prints
+ *  the global maxima and fails the check above round-off. */
+void checkImageLinearity(EMfields3D& fields, const Grid3DCU& grid, int rank,
+                         const char* label, Check& check) {
+  const cudaStream_t stream = fields.gpuSolverStream();
+  const int n = maxwellVectorSize(grid);
+  const double a = 0.7, b = -1.3;
+  const std::vector<cudaSolverType> hu = randomValues(n, 5151 + rank);
+  const std::vector<cudaSolverType> hv = randomValues(n, 6262 + rank);
+  std::vector<cudaSolverType> hw(n);
+  for (int q = 0; q < n; q++)
+    hw[q] = a * hu[q] + b * hv[q];
+  GPUKrylovVector u(n), v(n), w(n), zero(n), image(n);
+  // the allocations zero the vectors outside the solver stream
+  cudaErrChk(cudaDeviceSynchronize());
+  u.copyFromHost(hu.data(), stream);
+  v.copyFromHost(hv.data(), stream);
+  w.copyFromHost(hw.data(), stream);
+  zero.setZero(stream);
+  // [image][0]: max |A 0|, [image][1]: max |A w - (a A u + b A v)| relative
+  // to max |a A u + b A v|; image 0 the full, 1 the local operator
+  double local[4] = {0.0, 0.0, 0.0, 0.0};
+  for (int op = 0; op < 2; op++) {
+    auto apply = [&](GPUKrylovVector& x) {
+      if (op == 0)
+        fields.gpuMaxwellImage(image.devPtr(), x.devPtr());
+      else
+        fields.gpuMaxwellImageLocal(image.devPtr(), x.devPtr());
+      return toHost(image.devPtr(), n, stream);
+    };
+    const std::vector<cudaSolverType> Au = apply(u), A0 = apply(zero),
+                                      Av = apply(v), Aw = apply(w);
+    double err = 0.0, scale = 0.0;
+    for (int q = 0; q < n; q++) {
+      const double expected = a * Au[q] + b * Av[q];
+      scale = std::max(scale, std::fabs(expected));
+      err = std::max(err, std::fabs(Aw[q] - expected));
+      local[2 * op] = std::max(local[2 * op], (double)std::fabs(A0[q]));
+    }
+    local[2 * op + 1] = scale > 0.0 ? err / scale : 0.0;
+  }
+  double global[4];
+  MPI_Allreduce(local, global, 4, MPI_DOUBLE, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
+  if (rank == 0) {
+    std::cout << label << " linearity: max |A 0| = " << global[0] << " (full), "
+              << global[2]
+              << " (local); max |A(au+bv) - (aAu+bAv)| / max |aAu+bAv| = "
+              << global[1] << " (full), " << global[3] << " (local)\n";
+    if (global[0] != 0.0 || global[2] != 0.0)
+      check.fail("the image of the zero vector is not 0: the operator is "
+                 "affine");
+    if (global[1] > 1.0e-12 || global[3] > 1.0e-12)
+      check.fail("the image is not linear to round-off");
   }
 }
 
@@ -1207,13 +1985,129 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
                iz = grid.get_invdz();
   const double delt = input.c * input.th * input.dt;
   const size_t nodes = (size_t)nxn * nyn * nzn;
+  // The reference is assembled from the stencils, the halo exchange and
+  // the boundary rules of this test, written from the physics here (not
+  // read from the solver's plan).  Faces in Collective's order (XR, XL, YR,
+  // YL, ZR, ZL).
+  const VirtualTopology3D& vct = fields.get_vct();
+  const Collective& col = fields.get_col();
+  const int neighbour[6] = {vct.getXright_neighbor(), vct.getXleft_neighbor(),
+                            vct.getYright_neighbor(), vct.getYleft_neighbor(),
+                            vct.getZright_neighbor(), vct.getZleft_neighbor()};
+  const int bcEM[6] = {col.getBcEMfaceXright(), col.getBcEMfaceXleft(),
+                       col.getBcEMfaceYright(), col.getBcEMfaceYleft(),
+                       col.getBcEMfaceZright(), col.getBcEMfaceZleft()};
+  const int bcP[6] = {col.getBcPfaceXright(), col.getBcPfaceXleft(),
+                      col.getBcPfaceYright(), col.getBcPfaceYleft(),
+                      col.getBcPfaceZright(), col.getBcPfaceZleft()};
+  auto physical = [&](int fc) { return neighbour[fc] == MPI_PROC_NULL; };
+  auto conductor = [&](int fc) { return physical(fc) && bcEM[fc] == 0; };
+  // inflow rows: open, bcPface = 2, not X-right, with ApplyInflowBcsEImage
+  auto inflow = [&](int fc) {
+    return physical(fc) && fc != 0 && bcEM[fc] == 2 && bcP[fc] == 2 &&
+           col.getApplyInflowBcsEImage();
+  };
   // X-right outflow face: the cell stencils fill the ghost cell plane, whose
-  // face BC keeps it
-  const bool outflow = layout.outflowXright &&
-                       fields.get_vct().getXright_neighbor() == MPI_PROC_NULL;
+  // face rule keeps it
+  const bool outflow = layout.outflowXright && physical(0);
   const int iHi = outflow ? nxc - 1 : nxc - 2;
-  const int bcGradXright = outflow ? BC_FACE_KEEP : 1;
-  const int bcDivXright = outflow ? BC_FACE_KEEP : 2;
+  // The face rules of the operator's cell arrays (Collective's codes: 0
+  // odd, 1 zero, 2 even; kKeep leaves the plane): zero gradients and copied
+  // div D on the open faces, the outflow plane kept, and on a conductor the
+  // image in the wall (E_n even, E_t odd about the face node; the image
+  // charge opposite): grad_d E_c odd when (c == n) == (d == n), even
+  // otherwise, and div D odd.
+  constexpr int kKeep = -1;
+  auto opCode = [&](int a, int fc) {
+    if (fc == 0 && outflow)
+      return kKeep;
+    if (a == 9)
+      return bcEM[fc] == 0 ? 0 : 2;
+    if (bcEM[fc] != 0)
+      return 1;
+    const int c = a / 3, d = a % 3, axis = fc / 2;
+    return (c == axis) == (d == axis) ? 0 : 2;
+  };
+  // applied on the host, face by face over the whole ghost planes in the
+  // order XL, XR, YL, YR, ZL, ZR (a later face overwrites the edges)
+  auto faceRules = [&](GPUFieldArray3& a, int array) {
+    const int n[3] = {nxc, nyc, nzc};
+    std::vector<cudaSolverType> h =
+        toHost(a.devPtr(), (size_t)nxc * nyc * nzc, stream);
+    auto at = [&](const int c[3]) {
+      return ((size_t)c[0] * nyc + c[1]) * nzc + c[2];
+    };
+    for (int f = 0; f < 6; f++) {
+      const int fc = 2 * (f / 2) + (f % 2 ? 0 : 1); // Collective's order
+      const int code = opCode(array, fc);
+      if (!physical(fc) || code == kKeep)
+        continue;
+      const int axis = f / 2, u = (axis + 1) % 3, w = (axis + 2) % 3;
+      int c[3], first[3];
+      c[axis] = f % 2 ? n[axis] - 1 : 0;
+      for (c[u] = 0; c[u] < n[u]; c[u]++)
+        for (c[w] = 0; c[w] < n[w]; c[w]++) {
+          for (int e = 0; e < 3; e++)
+            first[e] = c[e];
+          first[axis] += f % 2 ? -1 : 1;
+          h[at(c)] = code == 0 ? -h[at(first)] : code == 1 ? 0.0 : h[at(first)];
+        }
+    }
+    cudaErrChk(cudaMemcpy(a.devPtr(), h.data(),
+                          h.size() * sizeof(cudaSolverType),
+                          cudaMemcpyHostToDevice));
+    // before the solver stream reads it
+    cudaErrChk(cudaDeviceSynchronize());
+  };
+  // the outflow face's ghost node plane: a copy of the face plane
+  auto outflowGhostNodes = [&](std::vector<GPUFieldArray3>& a) {
+    if (!outflow)
+      return;
+    const size_t plane = (size_t)nyn * nzn;
+    for (GPUFieldArray3& f : a)
+      cudaErrChk(cudaMemcpyAsync(
+          f.devPtr() + (nxn - 1) * plane, f.devPtr() + (nxn - 2) * plane,
+          plane * sizeof(cudaSolverType), cudaMemcpyDeviceToDevice, stream));
+  };
+  // the ghost rows of the outflow face's ghost cell plane: a physical face
+  // keeps its rule, a periodic image on this rank gives the partner row, a
+  // neighbour rank's row is stood in for by the adjacent row; y rows first
+  auto outflowGhostRows = [&](cudaSolverType* const* arrays, int count) {
+    if (!outflow)
+      return;
+    const size_t plane = (size_t)nyc * nzc;
+    const int self = vct.getCartesian_rank();
+    const int side[4] = {vct.getYleft_neighbor(), vct.getYright_neighbor(),
+                         vct.getZleft_neighbor(), vct.getZright_neighbor()};
+    auto source = [&](int s, int ghost, int extent) {
+      if (side[s] == self)
+        return ghost == 0 ? extent - 2 : 1;
+      return ghost == 0 ? 1 : extent - 2;
+    };
+    std::vector<cudaSolverType> h(plane);
+    for (int a = 0; a < count; a++) {
+      cudaSolverType* p = arrays[a] + (nxc - 1) * plane;
+      cudaErrChk(cudaStreamSynchronize(stream));
+      cudaErrChk(cudaMemcpy(h.data(), p, plane * sizeof(cudaSolverType),
+                            cudaMemcpyDeviceToHost));
+      for (int s = 0; s < 2; s++)
+        if (side[s] != MPI_PROC_NULL)
+          for (int k = 1; k < nzc - 1; k++) {
+            const int jg = s == 0 ? 0 : nyc - 1;
+            h[(size_t)jg * nzc + k] = h[(size_t)source(s, jg, nyc) * nzc + k];
+          }
+      for (int s = 2; s < 4; s++)
+        if (side[s] != MPI_PROC_NULL)
+          for (int j = 0; j < nyc; j++) {
+            const int kg = s == 2 ? 0 : nzc - 1;
+            h[(size_t)j * nzc + kg] = h[(size_t)j * nzc + source(s, kg, nzc)];
+          }
+      cudaErrChk(cudaMemcpy(p, h.data(), plane * sizeof(cudaSolverType),
+                            cudaMemcpyHostToDevice));
+    }
+    // before the solver stream reads them
+    cudaErrChk(cudaDeviceSynchronize());
+  };
 
   GPUKrylovVector x(n), image(n), ref(n);
   std::vector<GPUFieldArray3> v, D, lap, gd, g;
@@ -1229,11 +2123,26 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
   // the allocations zero the arrays outside the solver stream
   cudaErrChk(cudaDeviceSynchronize());
 
-  std::vector<cudaSolverType> hx(n);
-  std::mt19937_64 gen(4321 + rank);
-  std::uniform_real_distribution<double> uniform(-1.0, 1.0);
-  for (auto& value : hx)
-    value = uniform(gen);
+  // a random vector with E_t = 0 on the conductor walls, as the solution
+  // has: then the image of E in the wall is odd about 0 for E_t, and the
+  // normal row can be checked against the image row (below)
+  auto krylov = [&](int i, int j, int k) {
+    return ((i - 1) * (nyn - 2) + (j - 1)) * (nzn - 2) + (k - 1);
+  };
+  auto onWall = [&](int axis, int i, int j, int k) {
+    const int c[3] = {i, j, k}, nn[3] = {nxn, nyn, nzn};
+    return (c[axis] == 1 && conductor(2 * axis + 1)) ||
+           (c[axis] == nn[axis] - 2 && conductor(2 * axis));
+  };
+  std::vector<cudaSolverType> hx = randomValues(n, 4321 + rank);
+  for (int i = 1; i < nxn - 1; i++)
+    for (int j = 1; j < nyn - 1; j++)
+      for (int k = 1; k < nzn - 1; k++)
+        for (int axis = 0; axis < 3; axis++)
+          if (onWall(axis, i, j, k))
+            for (int c = 0; c < 3; c++)
+              if (c != axis)
+                hx[3 * krylov(i, j, k) + c] = 0.0;
   x.copyFromHost(hx.data(), stream);
   fields.gpuMaxwellImage(image.devPtr(), x.devPtr());
 
@@ -1241,29 +2150,37 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
   // exchanged divergence, then delt² (-lap - grad div D) + D + E
   gpuSolver2Phys3(v[0].devPtr(), v[1].devPtr(), v[2].devPtr(), x.devPtr(), nxn,
                   nyn, nzn, stream);
-  GPUFieldArray3* vn[3] = {&v[0], &v[1], &v[2]};
-  GPUFieldArray3* Dn[3] = {&D[0], &D[1], &D[2]};
-  fields.gpuOutflowGhostNodes(vn);
+  outflowGhostNodes(v);
   for (int c = 0; c < 3; c++)
     gpuGradN2C(g[3 * c].devPtr(), g[3 * c + 1].devPtr(), g[3 * c + 2].devPtr(),
                v[c].devPtr(), nxc, nyc, nzc, ix, iy, iz, stream, 1, iHi);
   fields.gpuMUdot(D[0], D[1], D[2], v[0], v[1], v[2]);
-  fields.gpuOutflowGhostNodes(Dn);
+  // D through the conductor image, independently of the operator's selects
+  // (ImageWalls): its components tangential to a wall written 0 on the face
+  // plane (before the outflow copy, which then carries them), then the plain
+  // divergence
+  {
+    cudaSolverType* const Dp[3] = {D[0].devPtr(), D[1].devPtr(), D[2].devPtr()};
+    fields.gpuBoundary().zeroTangential(Dp, stream);
+  }
+  outflowGhostNodes(D);
   gpuDivN2C(divD.devPtr(), D[0].devPtr(), D[1].devPtr(), D[2].devPtr(), nxc,
             nyc, nzc, ix, iy, iz, stream, 1, iHi);
   cudaSolverType* cellPtr[10];
   for (int a = 0; a < 9; a++)
     cellPtr[a] = g[a].devPtr();
   cellPtr[9] = divD.devPtr();
-  fields.gpuOutflowGhostRows(cellPtr, 10);
-  fields.gpuCommunicateCenterBC_9(nxc, nyc, nzc, g[0], g[1], g[2], g[3], g[4],
-                                  g[5], g[6], g[7], g[8], bcGradXright, 1, 1, 1,
-                                  1, 1);
+  outflowGhostRows(cellPtr, 10);
+  fields.gpuBatchedHaloExchange(cellPtr, 9, nxc, nyc, nzc, true, false, false,
+                                false, stream);
+  for (int a = 0; a < 9; a++)
+    faceRules(g[a], a);
   for (int c = 0; c < 3; c++)
     gpuDivC2N(lap[c].devPtr(), g[3 * c].devPtr(), g[3 * c + 1].devPtr(),
               g[3 * c + 2].devPtr(), nxn, nyn, nzn, ix, iy, iz, stream);
-  fields.gpuCommunicateCenterBC(nxc, nyc, nzc, divD, bcDivXright, 2, 2, 2, 2,
-                                2);
+  fields.gpuBatchedHaloExchange(&cellPtr[9], 1, nxc, nyc, nzc, true, false,
+                                false, false, stream);
+  faceRules(divD, 9);
   gpuGradC2N(gd[0].devPtr(), gd[1].devPtr(), gd[2].devPtr(), divD.devPtr(), nxn,
              nyn, nzn, ix, iy, iz, stream);
   gpuNeg3(lap[0].devPtr(), lap[1].devPtr(), lap[2].devPtr(), nodes, stream);
@@ -1276,14 +2193,141 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
                 v[2].devPtr(), nodes, stream);
   gpuPhys2Solver3(ref.devPtr(), lap[0].devPtr(), lap[1].devPtr(),
                   lap[2].devPtr(), nxn, nyn, nzn, stream);
-  fields.gpuPerfectConductorImages(ref.devPtr(), v[0], v[1], v[2]);
-  fields.gpuOpenBoundaryInflowEImage(ref.devPtr(), v[0].devPtr(), v[1].devPtr(),
-                                     v[2].devPtr(), nxn, nyn, nzn);
 
+  // the operator data on the host, for the face rows
+  std::array<std::vector<cudaSolverType>, 3> hv, hD;
+  for (int c = 0; c < 3; c++) {
+    hv[c] = toHost(v[c].devPtr(), nodes, stream);
+    hD[c] = toHost(D[c].devPtr(), nodes, stream);
+  }
+  auto nodeAt = [&](int i, int j, int k) {
+    return ((size_t)i * nyn + j) * nzn + k;
+  };
+  const double q[3] = {0.25 * ix, 0.25 * iy, 0.25 * iz};
   std::vector<cudaSolverType> hImage(n), hRef(n);
   image.copyToHost(hImage.data(), stream);
   ref.copyToHost(hRef.data(), stream);
   cudaErrChk(cudaStreamSynchronize(stream));
+
+  // The identity rows of the reference, node by node, where an inflow face,
+  // or a conductor tangential to the component, holds the node.  A
+  // conductor's normal row keeps the row assembled above.  Faces as (axis,
+  // side): Collective index 2 axis + (low ? 1 : 0).
+  const int nn[3] = {nxn, nyn, nzn};
+  for (int i = 1; i < nxn - 1; i++)
+    for (int j = 1; j < nyn - 1; j++)
+      for (int k = 1; k < nzn - 1; k++) {
+        const int c3[3] = {i, j, k};
+        bool inflowNode = false;
+        int cond = 0;
+        for (int axis = 0; axis < 3; axis++) {
+          const int fc = c3[axis] == 1              ? 2 * axis + 1
+                         : c3[axis] == nn[axis] - 2 ? 2 * axis
+                                                    : -1;
+          if (fc < 0)
+            continue;
+          inflowNode = inflowNode || inflow(fc);
+          if (conductor(fc))
+            cond |= 1 << axis;
+        }
+        for (int c = 0; c < 3; c++)
+          if (inflowNode || (cond & ~(1 << c)) != 0)
+            hRef[3 * krylov(i, j, k) + c] = hv[c][nodeAt(i, j, k)];
+      }
+
+  // The conductor's normal row against an independent form, the interior
+  // row of the conductor image, E_n + D_n - delt^2 (lap E_n + d_n div D),
+  // with every difference taken on the host from the node values of the
+  // image of E and of D = mu E in the wall (ghost node: the normal component
+  // even, the tangential ones odd; on the wall E_t = 0 and D_t read as 0),
+  // on the wall nodes whose stencils read no other face or rank's ghost
+  // (in-plane coordinates in [2, n-3]).
+  double independent[2] = {0.0, 0.0}; // max |image - image row|, max |row|
+  long wallNodes = 0;
+  for (int axis = 0; axis < 3; axis++)
+    for (int low = 0; low < 2; low++) {
+      const int fc = 2 * axis + low;
+      if (!conductor(fc))
+        continue;
+      const int plane = low ? 1 : nn[axis] - 2;
+      const int out = low ? -1 : 1; // the ghost side
+      // component c of the node field F at (i, j, k) through the image
+      auto img = [&](const std::array<std::vector<cudaSolverType>, 3>& F, int c,
+                     int i, int j, int k) {
+        int p3[3] = {i, j, k};
+        if (p3[axis] == plane && c != axis)
+          return 0.0;
+        double sign = 1.0;
+        if (p3[axis] == plane + out) {
+          p3[axis] = plane - out;
+          sign = c == axis ? 1.0 : -1.0;
+        }
+        return sign * F[c][nodeAt(p3[0], p3[1], p3[2])];
+      };
+      // d/d(e) of component c of F at the cell (ci, cj, ck): nodes ci..ci+1
+      auto dN2C = [&](const std::array<std::vector<cudaSolverType>, 3>& F,
+                      int c, int e, int ci, int cj, int ck) {
+        double sum = 0.0;
+        for (int a = 0; a < 2; a++)
+          for (int b = 0; b < 2; b++) {
+            int lo3[3] = {ci, cj, ck}, hi3[3] = {ci, cj, ck};
+            const int u = (e + 1) % 3, w = (e + 2) % 3;
+            lo3[u] += a;
+            hi3[u] += a;
+            lo3[w] += b;
+            hi3[w] += b;
+            hi3[e] += 1;
+            sum += img(F, c, hi3[0], hi3[1], hi3[2]) -
+                   img(F, c, lo3[0], lo3[1], lo3[2]);
+          }
+        return q[e] * sum;
+      };
+      // d/d(e) at the node (i, j, k) of the cell function f: cells i-1..i
+      auto dC2N = [&](const auto& f, int e, int i, int j, int k) {
+        double sum = 0.0;
+        for (int a = 0; a < 2; a++)
+          for (int b = 0; b < 2; b++) {
+            int hi3[3] = {i, j, k}, lo3[3] = {i, j, k};
+            const int s1 = (e + 1) % 3, s2 = (e + 2) % 3;
+            hi3[s1] -= a;
+            lo3[s1] -= a;
+            hi3[s2] -= b;
+            lo3[s2] -= b;
+            lo3[e] -= 1;
+            sum += f(hi3[0], hi3[1], hi3[2]) - f(lo3[0], lo3[1], lo3[2]);
+          }
+        return q[e] * sum;
+      };
+      const auto divD = [&](int ci, int cj, int ck) {
+        return dN2C(hD, 0, 0, ci, cj, ck) + dN2C(hD, 1, 1, ci, cj, ck) +
+               dN2C(hD, 2, 2, ci, cj, ck);
+      };
+      for (int i = 1; i < nxn - 1; i++)
+        for (int j = 1; j < nyn - 1; j++)
+          for (int k = 1; k < nzn - 1; k++) {
+            const int p3[3] = {i, j, k};
+            bool inside = p3[axis] == plane;
+            for (int e = 0; e < 3; e++)
+              if (e != axis)
+                inside = inside && p3[e] >= 2 && p3[e] <= nn[e] - 3;
+            if (!inside)
+              continue;
+            double lapN = 0.0;
+            for (int e = 0; e < 3; e++)
+              lapN +=
+                  dC2N([&](int ci, int cj,
+                           int ck) { return dN2C(hv, axis, e, ci, cj, ck); },
+                       e, i, j, k);
+            const size_t m = nodeAt(i, j, k);
+            const double row = hv[axis][m] + hD[axis][m] -
+                               delt * delt * (lapN + dC2N(divD, axis, i, j, k));
+            const double got = hImage[3 * krylov(i, j, k) + axis];
+            independent[0] = std::max(independent[0], std::fabs(got - row));
+            independent[1] = std::max(independent[1], std::fabs(row));
+            wallNodes++;
+          }
+    }
+
   // max |image - ref|, max |ref|, max |image - blocking image|, split ranks
   double local[4] = {0.0, 0.0, 0.0, 0.0};
   for (int q = 0; q < n; q++) {
@@ -1304,16 +2348,42 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
                 MPIdata::get_PicGlobalComm());
   MPI_Allreduce(&local[3], &splitRanks, 1, MPI_DOUBLE, MPI_SUM,
                 MPIdata::get_PicGlobalComm());
+  double independentMax[2];
+  MPI_Allreduce(independent, independentMax, 2, MPI_DOUBLE, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
+  long wallNodesAll = 0;
+  MPI_Allreduce(&wallNodes, &wallNodesAll, 1, MPI_LONG, MPI_SUM,
+                MPIdata::get_PicGlobalComm());
+  // a conductor wall with room for the check: 5 nodes or more along both of
+  // its in-plane axes (not a flat axis)
+  int localWalls = 0, walls = 0;
+  for (int fc = 0; fc < 6; fc++) {
+    bool room = conductor(fc);
+    for (int e = 0; e < 3; e++)
+      room = room && (e == fc / 2 || nn[e] >= 5);
+    localWalls = localWalls || room;
+  }
+  MPI_Allreduce(&localWalls, &walls, 1, MPI_INT, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
   if (rank == 0) {
     const double rel = globalMax[0] / globalMax[1];
+    const double relWall =
+        independentMax[1] > 0.0 ? independentMax[0] / independentMax[1] : 0.0;
     std::cout << "image-reference [" << layout.name << ", HaloOverlap "
               << input.haloOverlap
               << "]: max |image - reference| / max |reference| = " << rel
               << "; split on " << splitRanks
               << " ranks, max |image - blocking image| = " << globalMax[2]
-              << "\n";
+              << "; conductor normal rows against the interior row of the "
+                 "conductor image: "
+              << relWall << " on " << wallNodesAll << " nodes\n";
     if (!(rel < 1e-13))
       check.fail("gpuMaxwellImage differs from the step-by-step image");
+    if (walls && wallNodesAll == 0)
+      check.fail("no conductor wall node was checked against the image row");
+    if (!(relWall < 1e-11))
+      check.fail("the conductor's normal row is not the interior row of the "
+                 "conductor image of E and mu E");
     const double expected =
         input.haloOverlap && layout.split ? kImageLayoutRanks : 0.0;
     if (splitRanks != expected)
@@ -1321,6 +2391,433 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
     if (globalMax[2] != 0.0)
       check.fail("the image differs from the blocking image");
   }
+  const std::string label = std::string("image-reference [") + layout.name +
+                            ", HaloOverlap " +
+                            std::to_string(input.haloOverlap) + "]";
+  checkImageLinearity(fields, grid, rank, label.c_str(), check);
+}
+
+// local-image (a closed box on 8 ranks, the manufactured fields and
+// moments): the local operator of the block-Jacobi preconditioner against the
+// full image of a random vector.  The local operator has no exchange: its
+// ghost cells are 0 except on the conductor walls, where they are the image
+// of E as in the full image.  So the two images are equal bitwise on every
+// row whose stencils read no ghost cell of a neighbour rank, the conductor
+// rows (identity and normal) included.
+void runLocalImageCase(EMfields3D& fields, Grid3DCU& grid,
+                       const TestInput& input, int rank, Check& check) {
+  const cudaStream_t stream = fields.gpuSolverStream();
+  initializeManufacturedFields(fields, grid, input);
+  fields.gpuSolverSyncH2D(stream);
+  prepareManufacturedMoments(fields);
+
+  const int n = maxwellVectorSize(grid);
+  const int nn[3] = {grid.getNXN(), grid.getNYN(), grid.getNZN()};
+  const std::vector<cudaSolverType> hx = randomValues(n, 2468 + rank);
+  GPUKrylovVector x(n), full(n), local(n);
+  cudaErrChk(cudaDeviceSynchronize());
+  x.copyFromHost(hx.data(), stream);
+  fields.gpuMaxwellImage(full.devPtr(), x.devPtr());
+  fields.gpuMaxwellImageLocal(local.devPtr(), x.devPtr());
+  std::vector<cudaSolverType> hFull(n), hLocal(n);
+  full.copyToHost(hFull.data(), stream);
+  local.copyToHost(hLocal.data(), stream);
+  cudaErrChk(cudaStreamSynchronize(stream));
+
+  const VirtualTopology3D& vct = fields.get_vct();
+  const bool neighbourLo[3] = {vct.getXleft_neighbor() != MPI_PROC_NULL,
+                               vct.getYleft_neighbor() != MPI_PROC_NULL,
+                               vct.getZleft_neighbor() != MPI_PROC_NULL};
+  const bool neighbourHi[3] = {vct.getXright_neighbor() != MPI_PROC_NULL,
+                               vct.getYright_neighbor() != MPI_PROC_NULL,
+                               vct.getZright_neighbor() != MPI_PROC_NULL};
+  // [0] rows compared, [1] of them on a wall, [2] rows that differ
+  long counts[3] = {0, 0, 0};
+  for (int i = 1; i < nn[0] - 1; i++)
+    for (int j = 1; j < nn[1] - 1; j++)
+      for (int k = 1; k < nn[2] - 1; k++) {
+        const int c3[3] = {i, j, k};
+        bool interface = false, wall = false;
+        for (int a = 0; a < 3; a++) {
+          interface = interface || (neighbourLo[a] && c3[a] == 1) ||
+                      (neighbourHi[a] && c3[a] == nn[a] - 2);
+          wall = wall || (!neighbourLo[a] && c3[a] == 1) ||
+                 (!neighbourHi[a] && c3[a] == nn[a] - 2);
+        }
+        if (interface)
+          continue;
+        const int q =
+            3 * (((i - 1) * (nn[1] - 2) + (j - 1)) * (nn[2] - 2) + (k - 1));
+        counts[0]++;
+        counts[1] += wall;
+        for (int c = 0; c < 3; c++)
+          counts[2] += hFull[q + c] != hLocal[q + c];
+      }
+  long global[3];
+  MPI_Allreduce(counts, global, 3, MPI_LONG, MPI_SUM,
+                MPIdata::get_PicGlobalComm());
+  if (rank == 0) {
+    std::cout << "local-image: " << global[0] << " rows compared (" << global[1]
+              << " on the walls), " << global[2]
+              << " differ from the full image\n";
+    if (global[0] == 0 || global[1] == 0)
+      check.fail("no interior or wall row was compared");
+    if (global[2] != 0)
+      check.fail("the local operator differs from the full image away from "
+                 "the rank interfaces");
+  }
+  checkImageLinearity(fields, grid, rank, "local-image", check);
+}
+
+// ghost-fill: the one-launch ghost fill (FieldBoundary::fill) against the
+// sequence of whole-plane passes it replaces, on random arrays, for every
+// ghost set of several boundary layouts.  The reference applies, pass by
+// pass (the rank of the rules) and face by face (XL ... ZR), each face's
+// rule over its whole ghost plane, with the expressions of the former face
+// kernels; the fill composes the rules of a point's faces in one launch.
+// Also the moment fold against face-by-face doubling.
+struct FillLayout {
+  const char* name;
+  int bcEM[6]; // XR, XL, YR, YL, ZR, ZL (Collective's order)
+  int bcP[6];
+  int sal;
+  const char* simCase;
+  int forceWallB; // the case's B forced on the wall layers (case-wall passes)
+};
+constexpr FillLayout kFillLayouts[] = {
+    {"closed box, GEM", {0, 0, 0, 0, 0, 0}, {1, 1, 1, 1, 1, 1}, 0, "GEM", 1},
+    {"open, no SAL", {2, 2, 2, 2, 2, 2}, {3, 2, 3, 3, 3, 3}, 0, "Default", 0},
+    {"open, SAL, y inflow",
+     {2, 2, 2, 2, 2, 2},
+     {3, 2, 2, 2, 3, 3},
+     1,
+     "Default",
+     0},
+    {"ForceFree, x y walls, z open",
+     {0, 0, 0, 0, 2, 2},
+     {1, 1, 1, 1, 3, 3},
+     0,
+     "ForceFree",
+     1},
+};
+
+/** The rules of the plan against a reference written here from Collective's
+ *  face codes (bcEx ... bcBz, which the solver applied before the plan) and
+ *  the physics of the faces, not from the plan: the codes on the physical
+ *  faces, the image of the fields on a conductor (E_n and B_t even, E_t and
+ *  B_n odd about the face node; the cell B_n odd about the wall value),
+ *  even moments on the particle-physical faces, the charge and Jhat of the
+ *  field solve as the image on a conductor, phi the image (odd) on a
+ *  conductor and 0 beyond the other faces, psi no rule.  The sets whose
+ *  rules also hold open-face and case-wall passes are checked by the decks
+ *  and image-reference (OpCells).  Mismatches of this rank. */
+long checkRuleTable(const EMfields3D& fields, const char* layout, int rank) {
+  const FieldBoundary& bc = fields.gpuBoundary();
+  const Collective& col = fields.get_col();
+  const VirtualTopology3D& vct = fields.get_vct();
+  const int nb[6] = {vct.getXleft_neighbor(), vct.getXright_neighbor(),
+                     vct.getYleft_neighbor(), vct.getYright_neighbor(),
+                     vct.getZleft_neighbor(), vct.getZright_neighbor()};
+  const int nbP[6] = {vct.getXleft_neighbor_P(), vct.getXright_neighbor_P(),
+                      vct.getYleft_neighbor_P(), vct.getYright_neighbor_P(),
+                      vct.getZleft_neighbor_P(), vct.getZright_neighbor_P()};
+  const int bcEM[6] = {col.getBcEMfaceXleft(), col.getBcEMfaceXright(),
+                       col.getBcEMfaceYleft(), col.getBcEMfaceYright(),
+                       col.getBcEMfaceZleft(), col.getBcEMfaceZright()};
+  const int* const codeE[3] = {col.bcEx, col.bcEy, col.bcEz};
+  const int* const codeB[3] = {col.bcBx, col.bcBy, col.bcBz};
+  auto code = [](int c) {
+    return c == 0   ? GHOST_ODD_CELL
+           : c == 1 ? GHOST_ZERO
+           : c == 2 ? GHOST_EVEN_CELL
+                    : -1;
+  };
+  long bad = 0;
+  auto expect = [&](GhostSet set, const char* name, auto rule) {
+    for (int a = 0; a < bc.slots(set); a++)
+      for (int f = 0; f < 6; f++) {
+        // Collective's per-face arrays list XR, XL, YR, YL, ...
+        const int axis = f / 2, cf = 2 * axis + (f % 2 ? 0 : 1);
+        const bool physical = nb[f] == MPI_PROC_NULL;
+        const bool conductor = physical && bcEM[f] == 0;
+        const int want =
+            rule(a, axis, cf, physical, conductor, nbP[f] == MPI_PROC_NULL);
+        const GhostRuleDev& r = bc.rule(set, a, f);
+        const bool ok =
+            r.kind == want && (r.kind != GHOST_WALL || r.wall != nullptr);
+        if (!ok && bad++ < 8)
+          std::cerr << "ghost-fill [" << layout << "] rank " << rank
+                    << " rule table " << name << " slot " << a << " face " << f
+                    << ": " << r.kind << ", expected " << want << "\n";
+      }
+  };
+  const auto eImage = [](int c, int axis) {
+    return c == axis ? GHOST_EVEN_NODE : GHOST_ODD_NODE;
+  };
+  const auto bImage = [](int c, int axis) {
+    return c == axis ? GHOST_ODD_NODE : GHOST_EVEN_NODE;
+  };
+  expect(
+      GhostSet::ENode, "ENode",
+      [&](int c, int axis, int cf, bool phys, bool cond, bool) {
+        return !phys ? GHOST_KEEP : cond ? eImage(c, axis) : code(codeE[c][cf]);
+      });
+  expect(GhostSet::ENodeSmooth, "ENodeSmooth",
+         [&](int, int, int, bool phys, bool, bool) {
+           return phys ? GHOST_EVEN_NODE : GHOST_KEEP;
+         });
+  expect(
+      GhostSet::BNode, "BNode",
+      [&](int c, int axis, int cf, bool phys, bool cond, bool) {
+        return !phys ? GHOST_KEEP : cond ? bImage(c, axis) : code(codeB[c][cf]);
+      });
+  expect(GhostSet::BNodeConductor, "BNodeConductor",
+         [&](int c, int axis, int, bool, bool cond, bool) {
+           return cond ? bImage(c, axis) : GHOST_KEEP;
+         });
+  expect(GhostSet::BCellStart, "BCellStart",
+         [&](int c, int axis, int cf, bool phys, bool cond, bool) {
+           return !phys               ? GHOST_KEEP
+                  : cond && c == axis ? GHOST_WALL
+                                      : code(codeB[c][cf]);
+         });
+  // the charge of the field solve: the image charge is opposite
+  expect(GhostSet::CellChargeP, "CellChargeP",
+         [&](int, int, int, bool, bool cond, bool physP) {
+           return cond ? GHOST_ODD_CELL : physP ? GHOST_EVEN_CELL : GHOST_KEEP;
+         });
+  // div(Pi), a current: the image of E on a conductor, even elsewhere
+  expect(GhostSet::CellCurrentP, "CellCurrentP",
+         [&](int c, int axis, int, bool, bool cond, bool physP) {
+           return cond    ? (c == axis ? GHOST_EVEN_CELL : GHOST_ODD_CELL)
+                  : physP ? GHOST_EVEN_CELL
+                          : GHOST_KEEP;
+         });
+  // Jhat smoothing: the image of E on a conductor, elsewhere the node mirror
+  // of the E smoothing
+  expect(GhostSet::NodeCurrentP, "NodeCurrentP",
+         [&](int c, int axis, int, bool, bool cond, bool physP) {
+           return cond ? eImage(c, axis) : physP ? GHOST_EVEN_NODE : GHOST_KEEP;
+         });
+  // the div(E) cleaning potential: the conductor image (odd), 0 beyond the
+  // other faces; the div(B) one: no rule
+  expect(GhostSet::Phi, "Phi", [&](int, int, int, bool phys, bool cond, bool) {
+    return cond ? GHOST_ODD_CELL : phys ? GHOST_ZERO : GHOST_KEEP;
+  });
+  expect(GhostSet::Psi, "Psi",
+         [&](int, int, int, bool, bool, bool) { return GHOST_KEEP; });
+  return bad;
+}
+
+/** Failures of this rank on one layout. */
+long runGhostFillLayout(const FillLayout& layout, const TestInput& baseInput,
+                        int rank, int nprocs) {
+  TestInput input = baseInput;
+  input.nxc = 36;
+  input.nyc = 32;
+  input.nzc = 28;
+  ConfigFile config = input.config(TestCase::GhostFill);
+  for (const char* key : {"PERIODICX", "PERIODICX_P", "PERIODICY",
+                          "PERIODICY_P", "PERIODICZ", "PERIODICZ_P"})
+    config.add(key, 0);
+  for (int f = 0; f < 6; f++) {
+    config.add(kEmBoundaryKeys[f], layout.bcEM[f]);
+    config.add(kParticleBoundaryKeys[f], layout.bcP[f]);
+  }
+  config.add("yes_sal", layout.sal);
+  config.add("n_layers_sal", 3);
+  config.add("ApplyInflowBcsEImage", 1);
+  config.add("Case", layout.simCase);
+  config.add("ForceWallB", layout.forceWallB);
+  config.add("B0x", 0.3);
+  config.add("B0y", -0.2);
+  config.add("B0z", 0.25);
+
+  Collective col(config, "gpuMaxwellSolverTest");
+  VCtopology3D vct(col);
+  if (nprocs != vct.getNprocs())
+    throw std::runtime_error("MPI size does not match generated topology");
+  vct.setup_vctopology(MPIdata::get_PicGlobalComm());
+  Grid3DCU grid(&col, &vct);
+  EMfields3D fields(&col, &grid, &vct);
+  fields.gpuSolverAllocate();
+  // the conductor wall values from a non-uniform node B
+  initializeManufacturedFields(fields, grid, input);
+  const cudaStream_t stream = fields.gpuSolverStream();
+  fields.gpuSolverSyncH2D(stream);
+  const FieldBoundary& bc = fields.gpuBoundary();
+
+  std::mt19937_64 gen(97 + rank);
+  std::uniform_real_distribution<double> uniform(-1.0, 1.0);
+  long filled = 0;
+  long failures = checkRuleTable(fields, layout.name, rank);
+  for (int id = 0; id < static_cast<int>(GhostSet::Count); id++) {
+    const GhostSet set = static_cast<GhostSet>(id);
+    const FaceSlabs& shell = bc.shell(set);
+    const int* e = shell.n;
+    const size_t size = (size_t)e[0] * e[1] * e[2];
+    const int slots = bc.slots(set);
+    std::vector<GPUFieldArray3> arrays;
+    std::vector<std::vector<cudaSolverType>> host(slots);
+    for (int a = 0; a < slots; a++)
+      arrays.emplace_back(e[0], e[1], e[2]);
+    cudaErrChk(cudaDeviceSynchronize());
+    cudaSolverType* p[kGhostBatchMax];
+    for (int a = 0; a < slots; a++) {
+      host[a].resize(size);
+      for (auto& value : host[a])
+        value = uniform(gen);
+      arrays[a].copyFromHost(host[a].data());
+      p[a] = arrays[a].devPtr();
+    }
+    // the uploads ran on the default stream, which the non-blocking solver
+    // stream does not wait for
+    cudaErrChk(cudaDeviceSynchronize());
+    bc.fill(set, p, slots, stream);
+    cudaErrChk(cudaStreamSynchronize(stream));
+
+    auto at = [&](int i, int j, int k) {
+      return ((size_t)i * e[1] + j) * e[2] + k;
+    };
+    int maxRank = 0;
+    for (int a = 0; a < slots; a++)
+      for (int f = 0; f < 6; f++)
+        maxRank = std::max(maxRank, bc.rule(set, a, f).rank);
+    for (int a = 0; a < slots; a++) {
+      std::vector<cudaSolverType>& h = host[a];
+      for (int pass = 0; pass <= maxRank; pass++)
+        for (int f = 0; f < 6; f++) {
+          const GhostRuleDev& r = bc.rule(set, a, f);
+          if (!shell.active[f] || r.kind == GHOST_KEEP || r.rank != pass)
+            continue;
+          const int axis = f / 2, ghost = f % 2 ? e[axis] - 1 : 0;
+          const int inward = f % 2 ? -1 : 1;
+          const int slow = axis == 0 ? 1 : 0, fast = axis == 2 ? 1 : 2;
+          const std::vector<cudaSolverType> wall =
+              r.kind == GHOST_WALL
+                  ? toHost(r.wall, (size_t)e[slow] * e[fast], stream)
+                  : std::vector<cudaSolverType>();
+          for (int u = 0; u < e[slow]; u++)
+            for (int w = 0; w < e[fast]; w++) {
+              int c3[3];
+              c3[axis] = ghost;
+              c3[slow] = u;
+              c3[fast] = w;
+              auto in = [&](int m) {
+                int d3[3] = {c3[0], c3[1], c3[2]};
+                d3[axis] += inward * m;
+                return h[at(d3[0], d3[1], d3[2])];
+              };
+              double value = 0.0;
+              switch (r.kind) {
+              case GHOST_ZERO:
+                value = 0.0;
+                break;
+              case GHOST_EVEN_CELL:
+                value = in(1);
+                break;
+              case GHOST_ODD_CELL:
+                value = -in(1);
+                break;
+              case GHOST_EVEN_NODE:
+                value = in(2);
+                break;
+              case GHOST_ODD_NODE:
+                value = 2.0 * in(1) - in(2);
+                break;
+              case GHOST_WALL:
+                value = wall[(size_t)u * e[fast] + w] - in(1);
+                break;
+              case GHOST_CONST:
+                value = r.value;
+                break;
+              case GHOST_COPY:
+                value = in(r.copy);
+                break;
+              }
+              h[at(c3[0], c3[1], c3[2])] = value;
+              filled++;
+            }
+        }
+      const std::vector<cudaSolverType> device =
+          toHost(arrays[a].devPtr(), size, stream);
+      long setFailures = 0;
+      for (size_t m = 0; m < size; m++)
+        if (device[m] != h[m] && setFailures++ == 0) {
+          const int i = (int)(m / ((size_t)e[1] * e[2]));
+          const int j = (int)((m / e[2]) % e[1]), k = (int)(m % e[2]);
+          std::cerr << "ghost-fill [" << layout.name << "] rank " << rank
+                    << " set " << id << " array " << a << " at (" << i << ", "
+                    << j << ", " << k << ") of (" << e[0] << ", " << e[1]
+                    << ", " << e[2] << "): fill " << device[m] << ", passes "
+                    << h[m] << "; rules (kind/rank)";
+          for (int f = 0; f < 6; f++)
+            std::cerr << " " << bc.rule(set, a, f).kind << "/"
+                      << bc.rule(set, a, f).rank
+                      << (shell.active[f] ? "" : "(inactive)");
+          std::cerr << "\n";
+        }
+      failures += setFailures;
+    }
+  }
+
+  // the moment fold: 2 per particle-physical face plane holding the node
+  {
+    const FaceSlabs& planes = bc.momentPlanes();
+    const int* e = planes.n;
+    const size_t size = (size_t)e[0] * e[1] * e[2];
+    constexpr int kArrays = 4;
+    std::vector<GPUFieldArray3> arrays;
+    for (int a = 0; a < kArrays; a++)
+      arrays.emplace_back(e[0], e[1], e[2]);
+    cudaErrChk(cudaDeviceSynchronize());
+    std::vector<std::vector<cudaSolverType>> host(kArrays);
+    cudaSolverType* p[kArrays];
+    for (int a = 0; a < kArrays; a++) {
+      host[a].resize(size);
+      for (auto& value : host[a])
+        value = uniform(gen);
+      arrays[a].copyFromHost(host[a].data());
+      p[a] = arrays[a].devPtr();
+    }
+    cudaSolverType** d_p = nullptr;
+    cudaErrChk(cudaMalloc(&d_p, sizeof(p)));
+    cudaErrChk(cudaMemcpy(d_p, p, sizeof(p), cudaMemcpyHostToDevice));
+    cudaErrChk(cudaDeviceSynchronize()); // as above
+    bc.foldMoments(d_p, kArrays, stream);
+    cudaErrChk(cudaStreamSynchronize(stream));
+    cudaErrChk(cudaFree(d_p));
+    for (int a = 0; a < kArrays; a++) {
+      std::vector<cudaSolverType>& h = host[a];
+      for (int f = 0; f < 6; f++) {
+        if (!planes.active[f])
+          continue;
+        const int axis = f / 2, plane = f % 2 ? e[axis] - 2 : 1;
+        for (int i = 1; i < e[0] - 1; i++)
+          for (int j = 1; j < e[1] - 1; j++)
+            for (int k = 1; k < e[2] - 1; k++) {
+              const int c3[3] = {i, j, k};
+              if (c3[axis] == plane)
+                h[((size_t)i * e[1] + j) * e[2] + k] *= 2.0;
+            }
+      }
+      const std::vector<cudaSolverType> device =
+          toHost(arrays[a].devPtr(), size, stream);
+      for (size_t m = 0; m < size; m++)
+        failures += device[m] != h[m];
+    }
+  }
+
+  long global[2], local[2] = {failures, filled};
+  MPI_Allreduce(local, global, 2, MPI_LONG, MPI_SUM,
+                MPIdata::get_PicGlobalComm());
+  if (rank == 0)
+    std::cout << "ghost-fill [" << layout.name << "]: " << global[1]
+              << " ghost points of the passes, " << global[0]
+              << " values differ from the passes\n";
+  if (global[1] == 0)
+    return rank == 0 ? 1 : 0;
+  return rank == 0 ? (global[0] != 0) : 0;
 }
 
 /** The image-reference case on one layout and halo mode; failures of this
@@ -1363,6 +2860,8 @@ int runImageLayout(const ImageLayout& layout, const TestInput& baseInput,
   return check.failures;
 }
 
+bool imageSplitsEverywhere(const EMfields3D& fields);
+
 WaveLevelResult runObliqueWaveLevel(int cells, const TestInput& baseInput,
                                     int nprocs) {
   TestInput input = baseInput;
@@ -1395,6 +2894,9 @@ WaveLevelResult runObliqueWaveLevel(int cells, const TestInput& baseInput,
   Grid3DCU grid(&col, &vct);
   EMfields3D fields(&col, &grid, &vct);
   fields.gpuSolverAllocate();
+  if (input.haloOverlap && !imageSplitsEverywhere(fields))
+    throw std::runtime_error("oblique-wave: HaloOverlap = 1, but the Maxwell "
+                             "image does not split");
 
   const ObliqueWave wave = makeObliqueWave(input);
   initializeObliqueWave(fields, grid, wave);
@@ -1594,6 +3096,23 @@ int runObliqueWaveConvergence(int rank, int nprocs,
          assessWaveStudy(rank, levels, spaceTimeStudy);
 }
 
+/** With HaloOverlap = 1 the Maxwell image has to overlap its exchange on
+ *  every rank (MaxwellImageBoxes::split): an overlap variant that fell back
+ *  to the blocking image would test nothing more than the blocking one. */
+bool imageSplitsEverywhere(const EMfields3D& fields) {
+  int local = fields.gpuMaxwellImageBoxes().split ? 1 : 0, global = 0;
+  MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN,
+                MPIdata::get_PicGlobalComm());
+  return global == 1;
+}
+
+void checkOverlapSplit(const EMfields3D& fields, const TestInput& input,
+                       int rank, Check& check) {
+  if (input.haloOverlap && !imageSplitsEverywhere(fields) && rank == 0)
+    check.fail("HaloOverlap = 1, but the Maxwell image does not split: the "
+               "overlap variant would run the blocking image");
+}
+
 int runOnFields(TestCase testCase, EMfields3D& fields, Grid3DCU& grid,
                 const TestInput& input, int rank) {
   Check check;
@@ -1601,6 +3120,7 @@ int runOnFields(TestCase testCase, EMfields3D& fields, Grid3DCU& grid,
   check.tolerance = input.comparisonTolerance;
 
   fields.gpuSolverAllocate();
+  checkOverlapSplit(fields, input, rank, check);
 
   switch (testCase) {
   case TestCase::Periodic:
@@ -1623,12 +3143,35 @@ int runOnFields(TestCase testCase, EMfields3D& fields, Grid3DCU& grid,
     runSmoothedFacesCase(fields, grid, input, rank, check);
     break;
 
+  case TestCase::InflowLayers:
+    runInflowLayersCase(fields, grid, input, rank, check);
+    break;
+
+  case TestCase::ConductorWall:
+    runConductorWallCase(fields, grid, input, rank, check);
+    break;
+
+  case TestCase::ConductorEdges:
+    runConductorEdgesCase(fields, grid, input, rank, check);
+    break;
+
+  case TestCase::ConductorModes:
+    runConductorModesCase(fields, grid, input, rank, check);
+    break;
+
   case TestCase::ObliqueWave:
     throw std::logic_error(
         "oblique-wave refinement must run through its multi-grid driver");
 
+  case TestCase::LocalImage:
+    runLocalImageCase(fields, grid, input, rank, check);
+    break;
+
   case TestCase::ImageReference:
     throw std::logic_error("image-reference must run through its layouts");
+
+  case TestCase::GhostFill:
+    throw std::logic_error("ghost-fill must run through its layouts");
   }
 
   return check.failures;
@@ -1636,10 +3179,14 @@ int runOnFields(TestCase testCase, EMfields3D& fields, Grid3DCU& grid,
 
 int runCase(TestCase testCase, int rank, int nprocs, const TestInput& input) {
   if (testCase == TestCase::ObliqueWave ||
-      testCase == TestCase::ImageReference) {
+      testCase == TestCase::ImageReference || testCase == TestCase::GhostFill) {
     int localFailures = 0;
     if (testCase == TestCase::ObliqueWave)
       localFailures = runObliqueWaveConvergence(rank, nprocs, input);
+    else if (testCase == TestCase::GhostFill)
+      for (const FillLayout& layout : kFillLayouts)
+        localFailures +=
+            static_cast<int>(runGhostFillLayout(layout, input, rank, nprocs));
     else
       for (int haloOverlap = 0; haloOverlap < 2; haloOverlap++)
         for (const ImageLayout& layout : kImageLayouts)
@@ -1651,7 +3198,19 @@ int runCase(TestCase testCase, int rank, int nprocs, const TestInput& input) {
     return globalFailures;
   }
 
-  ConfigFile config = input.config(testCase);
+  // conductor-modes: a small vacuum box, theta = 1/2
+  TestInput caseInput = input;
+  if (testCase == TestCase::ConductorModes) {
+    caseInput.Lx = 1.0;
+    caseInput.Ly = 1.0;
+    caseInput.Lz = 0.25;
+    caseInput.nxc = 32;
+    caseInput.nyc = 32;
+    caseInput.nzc = 8; // 4 cells per rank: the overlap variant splits
+    caseInput.dt = 0.01;
+    caseInput.th = 0.5;
+  }
+  ConfigFile config = caseInput.config(testCase);
   Collective col(config, "gpuMaxwellSolverTest");
   VCtopology3D vct(col);
   if (nprocs != vct.getNprocs()) {
@@ -1662,7 +3221,8 @@ int runCase(TestCase testCase, int rank, int nprocs, const TestInput& input) {
   Grid3DCU grid(&col, &vct);
   EMfields3D fields(&col, &grid, &vct);
 
-  const int localFailures = runOnFields(testCase, fields, grid, input, rank);
+  const int localFailures =
+      runOnFields(testCase, fields, grid, caseInput, rank);
   int globalFailures = 0;
   MPI_Allreduce(&localFailures, &globalFailures, 1, MPI_INT, MPI_SUM,
                 MPIdata::get_PicGlobalComm());

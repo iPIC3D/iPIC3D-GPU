@@ -161,7 +161,8 @@ Lap27Eig lap27EigBounds(const Lap27Op& op) {
 CleaningNullSpace cleaningNullSpace(const Lap27Op& op, bool nodes,
                                     const int N[3], const int offset[3],
                                     const bool periodic[3],
-                                    const bool sharedRight[3], bool mean) {
+                                    const bool sharedRight[3],
+                                    const bool oddWalls[3], bool mean) {
   CleaningNullSpace ns{};
   const int n[3] = {op.ni, op.nj, op.nk};
   for (int a = 0; a < 3; a++) {
@@ -196,9 +197,9 @@ CleaningNullSpace cleaningNullSpace(const Lap27Op& op, bool nodes,
       unique *= nodes && !periodic[a] ? N[a] - 1 : N[a];
     add(-1, 0, 0, 1, unique);
   }
-  bool even[3];
+  bool even[3]; // the checkerboard axes
   for (int a = 0; a < 3; a++)
-    even[a] = periodic[a] && !op.flat[a] && N[a] % 2 == 0;
+    even[a] = !op.flat[a] && ((periodic[a] && N[a] % 2 == 0) || oddWalls[a]);
   for (int c = 2; c >= 0; c--) { // the families (a, b), lines along c
     const int a = c == 0 ? 1 : 0, b = c == 2 ? 1 : 2;
     if (even[a] && even[b])
@@ -480,8 +481,7 @@ bool lap27ImageBox(const Lap27Op& op, int ny, int nz, const PointList& L,
   face = false;
   for (int a = 0; a < 3; a++) {
     const int lo = op.faceRow[2 * a], hi = op.faceRow[2 * a + 1];
-    face = face || (lo && off[a] <= 0) ||
-           (hi && off[a] + N[a] - 1 >= n[a] - 1);
+    face = face || (lo && off[a] <= 0) || (hi && off[a] + N[a] - 1 >= n[a] - 1);
     // deep: x_a in [1 + lo, n - 2 - hi], the reads in [lo, n - 1 - hi]
     B.deepOff[a] = off[a] - 1 - lo;
     B.deepN[a] = (unsigned)std::max(n[a] - 2 - hi - lo, 0);

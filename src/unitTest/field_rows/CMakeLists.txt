@@ -28,6 +28,7 @@ set(INCLUDE_CODE_DIR ${PROJECT_ROOT}/src/include)
 set(src_files
     ${CMAKE_CURRENT_SOURCE_DIR}/fieldRowsTest.cu
     ${SOURCE_CODE_DIR}/cudaKernel/GPUPhysicsKernels.cu
+    ${SOURCE_CODE_DIR}/cudaKernel/GPUFieldBoundary.cu
     ${SOURCE_CODE_DIR}/cudaKernel/GPUMaxwellLocal.cu)
 if(HIP_ON)
   set_source_files_properties(${src_files} PROPERTIES LANGUAGE HIP)
@@ -53,8 +54,7 @@ endif()
 
 enable_testing()
 
-foreach(test_case pec-linear pec-equivalent open-rows mudot point-list
-                  image-boxes image-kernels)
+foreach(test_case open-rows mudot point-list image-boxes image-kernels)
   string(REPLACE "-" "_" test_name ${test_case})
   add_test(NAME fieldRows_${test_name}
            COMMAND $<TARGET_FILE:fieldRowsTest> --case ${test_case})

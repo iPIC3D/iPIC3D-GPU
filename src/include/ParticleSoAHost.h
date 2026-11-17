@@ -487,6 +487,23 @@ public:
    */
   void fillExitBCFlags(bool* isExitBC) const;
 
+  /**
+   * @brief Fill the reflecting walls of the GPU mover.
+   *
+   * A face of this rank reflects when it has no neighbour in the particle
+   * topology and its bcPface is PERFECT_MIRROR.  Its wall is the rank's own
+   * boundary, the number the departure classification compares with, so
+   * that a particle put on the wall stays on the rank.
+   *
+   * @param doReflect Output: any face reflects.
+   * @param lo Output per axis: the low boundary where it reflects, else
+   *        -infinity.
+   * @param hi Output per axis: the high boundary where it reflects, else
+   *        +infinity.
+   */
+  void reflectingWalls(bool* doReflect, cudaCommonType* lo,
+                       cudaCommonType* hi) const;
+
   // ===== BC face config (read-only) =====
 
   int getBcPfaceXleft() const { return bcPfaceXleft_; }

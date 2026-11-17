@@ -422,9 +422,22 @@ read through the conductor image. Every quantity of the field solve takes the pa
 
 With these, the Gauss term of the interior rows sums by parts up to the wall, which energy consistency needs. A face row without it, or with a copy ghost of the charge, leaves a wall term that drives a growing wall mode at θ = ½. The vacuum standing wave between the walls conserves energy at θ = ½ to round-off (unit test `conductor-modes`).
 
-**Ghost nodes of E and B** (the mover reads them for a particle beyond the wall):
+**Ghost nodes of E and B** (the mover reads them for a push that ends beyond the wall; on a reflecting face that push is only a trial, see below):
 - E_n and B_t: even, ghost = the value of node 2 (the first node inside);
 - E_t and B_n: odd about the face value, ghost = 2·face − node 2. That is −E_t(node 2) for E, and for B the eight-cell mean of the image cells.
+
+### Particles on a reflecting face
+
+On a non-periodic face with `bcPface* = 1` a particle is reflected specularly, on the face and inside its push:
+- a push that would end beyond the face is shortened until it ends on it, to 10⁻⁶ of the smallest cell size;
+- the normal velocity is reversed there; on an edge or a corner, for every reflecting face reached;
+- the rest of the step is pushed from the face, and further bounces in the same step are treated alike.
+
+Every part of the step is the mover's own implicit push, with the fields at its own mid position, so no force acts across the face. This holds for the standard push and for each subcycle of the relativistic one, on any face and in any decomposition.
+
+Mirroring the particle after a free push would not be a reflection. The fields beyond a conductor are its image, not the mirror image of the fields inside, so each bounce would shift the velocity along the wall by −2(q/m)B_t d/c and the energy by −2(q/m)E_n d, with d the distance beyond the face: a current layer and a heating or cooling at the wall.
+
+A step takes at most 10 pushes; after them the rest of the step is one free push, and a particle left beyond the face is mirrored back. Only walls closer than one step's flight, or a gyration the step does not resolve (ΩΔt well above 1), come to that.
 
 ### Boundary injection (reemission faces)
 

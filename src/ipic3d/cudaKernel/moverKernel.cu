@@ -6,12 +6,11 @@
 #include "gridCUDA.cuh"
 #include "hashedSum.cuh"
 #include "moverKernel.cuh"
+#include "moverPush.cuh"
 #include "particleArrayCUDA.cuh"
 #include "particleExchange.cuh"
 
 using commonType = cudaParticleType;
-
-constexpr cudaTypeDouble PC_err_2 = 1E-12; // square of error tolerance
 
 __device__ constexpr bool cap_velocity() { return false; }
 
@@ -82,65 +81,29 @@ capVelocityOrDelete(commonType& ufinal, commonType& vfinal, commonType& wfinal,
 }
 
 /**
- * @brief Interpolate particle fields from the packed node-centered field
- * buffer.
- *
- * Updates the owning cell indices and trilinear weights, then accumulates the
- * first @p nFields components into @p sampled_field.
- *
- * @param x Particle x position.
- * @param y Particle y position.
- * @param z Particle z position.
- * @param grid Device-side grid descriptor.
- * @param fieldForPcls Packed field buffer consumed by the mover.
- * @param weights Output trilinear weights for the enclosing cell.
- * @param cx Output cell index in x.
- * @param cy Output cell index in y.
- * @param cz Output cell index in z.
- * @param sampled_field Output sampled field values.
+ * @brief The field gather of the mover kernels: B and E at a position, from
+ * the packed node-centered field buffer (per cell, its 8 corner nodes with 6
+ * components each).
  */
-template <int nFields>
-__device__ __forceinline__ void sampleFieldsAtPosition(
-    commonType x, commonType y, commonType z, grid3DCUDA* grid,
-    cudaTypeArray1<cudaFieldType> fieldForPcls, commonType weights[8], int& cx,
-    int& cy, int& cz, commonType sampled_field[6]) {
-  grid->get_safe_cell_and_weights(x, y, z, cx, cy, cz, weights);
-  const int previousIndex = (cx * (grid->nyn - 1) + cy) * grid->nzn + cz;
-  assert(previousIndex >= 0 &&
-         previousIndex < (grid->nxn - 1) * (grid->nyn - 1) * grid->nzn);
-  for (int i = 0; i < nFields; i++)
-    sampled_field[i] = 0;
-  for (int c = 0; c < 8; c++)
-    for (int i = 0; i < nFields; i++)
-      sampled_field[i] +=
-          weights[c] * fieldForPcls[previousIndex * 24 + c * 6 + i];
-}
+struct GridFields {
+  grid3DCUDA* grid;
+  cudaTypeArray1<cudaFieldType> buffer;
 
-/**
- * @brief Predictor-corrector convergence test.
- *
- * The relative squared change between two successive average-velocity
- * estimates, |v - v_old|^2 / |v_old|^2, is compared with PC_err_2 without the
- * division.  As with the division, a NaN stops the iteration, and so does a
- * zero change of a zero velocity.
- *
- * @param uavg Current averaged x velocity.
- * @param vavg Current averaged y velocity.
- * @param wavg Current averaged z velocity.
- * @param uavg_old Previous averaged x velocity.
- * @param vavg_old Previous averaged y velocity.
- * @param wavg_old Previous averaged z velocity.
- * @return True while the relative squared change exceeds PC_err_2.
- */
-__device__ __forceinline__ bool
-pcNotConverged(commonType uavg, commonType vavg, commonType wavg,
-               commonType uavg_old, commonType vavg_old, commonType wavg_old) {
-  const commonType change2 = (uavg_old - uavg) * (uavg_old - uavg) +
-                             (vavg_old - vavg) * (vavg_old - vavg) +
-                             (wavg_old - wavg) * (wavg_old - wavg);
-  return change2 > PC_err_2 * (uavg_old * uavg_old + vavg_old * vavg_old +
-                               wavg_old * wavg_old);
-}
+  /** f = {Bx, By, Bz, Ex, Ey, Ez} at (x, y, z). */
+  __device__ __forceinline__ void
+  operator()(commonType x, commonType y, commonType z, commonType f[6]) const {
+    commonType weights[8];
+    int cx, cy, cz;
+    grid->get_safe_cell_and_weights(x, y, z, cx, cy, cz, weights);
+    const int cell = (cx * (grid->nyn - 1) + cy) * grid->nzn + cz;
+    assert(cell >= 0 && cell < (grid->nxn - 1) * (grid->nyn - 1) * grid->nzn);
+    for (int i = 0; i < 6; i++)
+      f[i] = 0;
+    for (int c = 0; c < 8; c++)
+      for (int i = 0; i < 6; i++)
+        f[i] += weights[c] * buffer[cell * 24 + c * 6 + i];
+  }
+};
 
 // ======= End inline mover helpers =======
 
@@ -170,383 +133,323 @@ __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl,
                                       grid3DCUDA* grid,
                                       hashedSum* hashedSumArray);
 
+/** How the pushes of one particle over the step ended. */
+enum class PushEnd : int {
+  Pushed,  ///< the particle is at its end state
+  Deleted, ///< a velocity at or beyond c, or not finite: marked for deletion
+  Wall,    ///< a push ended beyond a reflecting wall: the particle is left
+};
+
 /**
- * @brief Advance one particle over the full solver time step with the standard
- * mover.
+ * @brief One push of duration h from s, in place (a push reads its start
+ * before it writes its end).
  *
- * The kernel performs the predictor-corrector push, clamps or deletes invalid
- * velocities, writes the final SoA state, and classifies the particle for
- * staying, exchange, deletion, or planet handling.
+ * With kWalls the push reflects at the reflecting walls (pushWithWalls).
+ * Without it, a push that ends beyond a reflecting wall is reported
+ * (PushEnd::Wall), for the caller to abandon the particle.
  *
- * @param moverParam Device-side mover parameter bundle for one species.
- * @param fieldForPcls Packed mover field buffer.
- * @param grid Device-side grid descriptor.
+ * @param speed Physical speed per unit of the state's velocity.
+ * @param push push(from, h, to): the push; false when it deleted the
+ *        particle.
  */
-__global__ void MOVER_LAUNCH_BOUNDS
-moverKernel(moverParameter* moverParam,
-            cudaTypeArray1<cudaFieldType> fieldForPcls, grid3DCUDA* grid) {
-  uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
-
-  auto pclsArray = moverParam->pclsArray;
-  if (pidx >= pclsArray->getNOP())
-    return;
-
-  // Gaussian Lorentz force q (E + v x B / c): the half-step E kick is
-  // q dt / (2 m) E, the rotation vector q dt / (2 m c) B
-  const commonType dto2 = .5 * moverParam->dt;
-  const commonType qdto2m = moverParam->qom * dto2;
-  const commonType qdto2mc = qdto2m * moverParam->invc;
-
-  // Early exit for particles already deleted (e.g. during merging)
-  if (moverParam->departureArray->getArray()[pidx].dest != 0) {
-    // not moved: the position is both start and end
-    const commonType x = pclsArray->getX()[pidx];
-    const commonType y = pclsArray->getY()[pidx];
-    const commonType z = pclsArray->getZ()[pidx];
-    prepareDepartureArray(x, y, z, x, y, z, pclsArray, pidx, moverParam,
-                          moverParam->departureArray, grid,
-                          moverParam->hashedSumArray);
-    return;
+template <bool kWalls, typename Push>
+__device__ __forceinline__ PushEnd pushToWalls(moverParameter* moverParam,
+                                               MoverState& s, commonType h,
+                                               commonType speed,
+                                               const Push& push) {
+  if constexpr (kWalls) {
+    if (!pushWithWalls(s, h, moverParam->reflectLo, moverParam->reflectHi,
+                       moverParam->reflectTol, speed, push))
+      return PushEnd::Deleted;
+  } else {
+    if (!push(s, h, s))
+      return PushEnd::Deleted;
+    if (moverParam->doReflect &&
+        beyondWalls(s, moverParam->reflectLo, moverParam->reflectHi))
+      return PushEnd::Wall;
   }
+  return PushEnd::Pushed;
+}
 
-  // Load particle state from SoA into registers
-  const commonType xorig = pclsArray->getX()[pidx];
-  const commonType yorig = pclsArray->getY()[pidx];
-  const commonType zorig = pclsArray->getZ()[pidx];
-  const commonType uorig = pclsArray->getU()[pidx];
-  const commonType vorig = pclsArray->getV()[pidx];
-  const commonType worig = pclsArray->getW()[pidx];
-  commonType xavg = xorig;
-  commonType yavg = yorig;
-  commonType zavg = zorig;
-  commonType uavg, vavg, wavg;
-  commonType uavg_old = uorig;
-  commonType vavg_old = vorig;
-  commonType wavg_old = worig;
-
-  int innter = 0;
-  bool notConverged = true;
-
-  // calculate the average velocity iteratively
-  while (notConverged && innter < moverParam->NiterMover) {
-
-    // sample E and B field components at current average position
-    commonType weights[8];
-    int cx, cy, cz;
-    commonType sampled_field[6];
-    sampleFieldsAtPosition<6>(xavg, yavg, zavg, grid, fieldForPcls, weights, cx,
-                              cy, cz, sampled_field);
-
-    commonType& Bxl = sampled_field[0];
-    commonType& Byl = sampled_field[1];
-    commonType& Bzl = sampled_field[2];
-    commonType& Exl = sampled_field[3];
-    commonType& Eyl = sampled_field[4];
-    commonType& Ezl = sampled_field[5];
-    const commonType Omx = qdto2mc * Bxl;
-    const commonType Omy = qdto2mc * Byl;
-    const commonType Omz = qdto2mc * Bzl;
-
-    // end interpolation
-    const commonType omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
-    const commonType denom = 1.0 / (1.0 + omsq);
-    // solve the position equation
-    const commonType ut = uorig + qdto2m * Exl;
-    const commonType vt = vorig + qdto2m * Eyl;
-    const commonType wt = worig + qdto2m * Ezl;
-    const commonType udotOm = ut * Omx + vt * Omy + wt * Omz;
-    // solve the velocity equation
-    uavg = (ut + (vt * Omz - wt * Omy + udotOm * Omx)) * denom;
-    vavg = (vt + (wt * Omx - ut * Omz + udotOm * Omy)) * denom;
-    wavg = (wt + (ut * Omy - vt * Omx + udotOm * Omz)) * denom;
-    // update average position
-    xavg = xorig + uavg * dto2;
-    yavg = yorig + vavg * dto2;
-    zavg = zorig + wavg * dto2;
-
-    innter++;
-    notConverged =
-        pcNotConverged(uavg, vavg, wavg, uavg_old, vavg_old, wavg_old);
-    // capture the new velocity for the next iteration
-    uavg_old = uavg;
-    vavg_old = vavg;
-    wavg_old = wavg;
-
-  } // end of iteration
-
-  // Compute final position and velocity in registers
-  commonType xfinal = xorig + uavg * moverParam->dt;
-  commonType yfinal = yorig + vavg * moverParam->dt;
-  commonType zfinal = zorig + wavg * moverParam->dt;
-  commonType ufinal = 2.0 * uavg - uorig;
-  commonType vfinal = 2.0 * vavg - vorig;
-  commonType wfinal = 2.0 * wavg - worig;
+/**
+ * @brief The standard push of one particle over the full solver time step:
+ * the predictor-corrector push (implicitPush) from its SoA state, with or
+ * without the walls (pushToWalls).
+ *
+ * @param end Output: the state after the push.
+ */
+template <bool kWalls>
+__device__ __forceinline__ PushEnd pushStandard(moverParameter* moverParam,
+                                                const GridFields& fields,
+                                                uint32_t pidx,
+                                                MoverState& end) {
+  auto pclsArray = moverParam->pclsArray;
+  end = {{pclsArray->getX()[pidx], pclsArray->getY()[pidx],
+          pclsArray->getZ()[pidx]},
+         {pclsArray->getU()[pidx], pclsArray->getV()[pidx],
+          pclsArray->getW()[pidx]}};
+  const auto push = [&](const MoverState& from, commonType h, MoverState& to) {
+    implicitPush(from, h, moverParam->qom, moverParam->invc,
+                 moverParam->NiterMover, fields, to);
+    return true;
+  };
+  const PushEnd how =
+      pushToWalls<kWalls>(moverParam, end, moverParam->dt, 1.0, push);
+  if (how != PushEnd::Pushed)
+    return how;
 
   // Cap velocity to prevent superluminal particles.
   // The non-relativistic implicit mover has no intrinsic speed-of-light limit,
   // so extreme E fields can produce |v| >= c.
   const commonType vmax = kVelocityCapOverC * moverParam->c;
-  if (capVelocityOrDelete(ufinal, vfinal, wfinal, vmax * vmax, moverParam,
-                          pidx))
-    return;
-
-  // Write final state to SoA
-  pclsArray->getX()[pidx] = xfinal;
-  pclsArray->getY()[pidx] = yfinal;
-  pclsArray->getZ()[pidx] = zfinal;
-  pclsArray->getU()[pidx] = ufinal;
-  pclsArray->getV()[pidx] = vfinal;
-  pclsArray->getW()[pidx] = wfinal;
-
-  // prepare the departure array
-  prepareDepartureArray(xfinal, yfinal, zfinal, xorig, yorig, zorig, pclsArray,
-                        pidx, moverParam, moverParam->departureArray, grid,
-                        moverParam->hashedSumArray);
+  return capVelocityOrDelete(end.v[0], end.v[1], end.v[2], vmax * vmax,
+                             moverParam, pidx)
+             ? PushEnd::Deleted
+             : PushEnd::Pushed;
 }
 
 /**
- * @brief Advance one particle with adaptive subcycling based on local magnetic
- * field strength.
+ * @brief The push of one particle over the step with adaptive subcycling
+ * based on local magnetic field strength.
  *
- * The full step is split into smaller substeps when the local gyrofrequency is
- * large. State is kept in registers across the subcycle loop and written back
- * only once at the end.
+ * The full step is split into smaller substeps when the local gyrofrequency
+ * is large, each a relativistic push (relativisticPush) followed by the
+ * velocity cap, with or without the walls (pushToWalls).
  *
- * @param moverParam Device-side mover parameter bundle for one species.
- * @param fieldForPcls Packed mover field buffer.
- * @param grid Device-side grid descriptor.
+ * @param cur Output: the state after the push.
  */
-__global__ void MOVER_LAUNCH_BOUNDS moverSubcyclesKernel(
-    moverParameter* moverParam, cudaTypeArray1<cudaFieldType> fieldForPcls,
-    grid3DCUDA* grid) {
-  uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
-
-  auto pclsArray = moverParam->pclsArray;
-  if (pidx >= pclsArray->getNOP())
-    return;
-
-  // Early exit for particles already deleted (e.g. during merging)
-  if (moverParam->departureArray->getArray()[pidx].dest != 0) {
-    // not moved: the position is both start and end
-    const commonType x = pclsArray->getX()[pidx];
-    const commonType y = pclsArray->getY()[pidx];
-    const commonType z = pclsArray->getZ()[pidx];
-    prepareDepartureArray(x, y, z, x, y, z, pclsArray, pidx, moverParam,
-                          moverParam->departureArray, grid,
-                          moverParam->hashedSumArray);
-    return;
-  }
-
+template <bool kWalls>
+__device__ __forceinline__ PushEnd pushSubcycled(moverParameter* moverParam,
+                                                 const GridFields& fields,
+                                                 uint32_t pidx,
+                                                 MoverState& cur) {
   // Load particle state from SoA and keep it in registers across all
-  // subcycles.  The push works in units of c: cur_u/v/w hold beta = v / c
+  // subcycles.  The push works in units of c: cur.v holds beta = v / c
   // (gamma = 1 / sqrt(1 - beta^2), momentum u = gamma beta), and positions
   // advance with c beta.
+  auto pclsArray = moverParam->pclsArray;
   const commonType c = moverParam->c;
   const commonType invc = moverParam->invc;
-  commonType cur_x = pclsArray->getX()[pidx];
-  commonType cur_y = pclsArray->getY()[pidx];
-  commonType cur_z = pclsArray->getZ()[pidx];
-  commonType cur_u = pclsArray->getU()[pidx] * invc;
-  commonType cur_v = pclsArray->getV()[pidx] * invc;
-  commonType cur_w = pclsArray->getW()[pidx] * invc;
+  cur = {{pclsArray->getX()[pidx], pclsArray->getY()[pidx],
+          pclsArray->getZ()[pidx]},
+         {pclsArray->getU()[pidx] * invc, pclsArray->getV()[pidx] * invc,
+          pclsArray->getW()[pidx] * invc}};
 
   // The fields at the start position: |B| there sets the number of
-  // subcycles, and the first iteration of the first subcycle samples there
-  commonType weights[8];
-  int cx, cy, cz;
-  commonType sampled_field[6];
-  sampleFieldsAtPosition<6>(cur_x, cur_y, cur_z, grid, fieldForPcls, weights,
-                            cx, cy, cz, sampled_field);
-  bool fieldsAtAvg = true; // sampled_field holds the fields at x/y/zavg
+  // subcycles, and the first gather of the first subcycle is there.  Every
+  // gather goes through the one array, so that the start fields occupy no
+  // registers of their own during the later gathers.
+  commonType sampled[6];
+  fields(cur.x[0], cur.x[1], cur.x[2], sampled);
+  bool atStart = true;
+  const auto gather = [&](commonType x, commonType y, commonType z,
+                          commonType f[6]) {
+    if (!atStart)
+      fields(x, y, z, sampled);
+    atStart = false;
+#pragma unroll
+    for (int i = 0; i < 6; i++)
+      f[i] = sampled[i];
+  };
 
   // evaluate local B field magnitude
-  const commonType B_mag = sqrt(sampled_field[0] * sampled_field[0] +
-                                sampled_field[1] * sampled_field[1] +
-                                sampled_field[2] * sampled_field[2]);
+  const commonType B_mag =
+      sqrt(sampled[0] * sampled[0] + sampled[1] * sampled[1] +
+           sampled[2] * sampled[2]);
 
   // number of sub cycles: at most pi/4 of gyration per subcycle, so
   // nsub = dt |q/m| |B| / (c pi/4).  int() of a NaN or of a value past
   // INT_MAX is undefined: a NaN |B| takes one subcycle (its NaN result
   // deletes the particle after the push), a huge one kMaxSubcycles.
+  const commonType qom = moverParam->qom;
   const commonType nsub =
-      (4 / M_PI) * fabs(moverParam->qom) * moverParam->dt * invc * B_mag;
+      (4 / M_PI) * fabs(qom) * moverParam->dt * invc * B_mag;
   const int sub_cycles = !(nsub >= 0)               ? 1
                          : nsub < kMaxSubcycles - 1 ? (int)nsub + 1
                                                     : kMaxSubcycles;
   const commonType dt_sub = moverParam->dt / (commonType)(sub_cycles);
 
-  const commonType dto2_sub = .5 * dt_sub;
-  const commonType qdto2mc_sub = moverParam->qom * dto2_sub * invc;
-  // position steps for a velocity in units of c
-  const commonType cdto2_sub = c * dto2_sub;
-  const commonType cdt_sub = c * dt_sub;
-
   // Safety: check initial velocity before entering subcycle loop.
   // If beta² >= 1 or NaN (e.g. from MPI injection or previous-cycle noise),
   // gamma0 = 1/sqrt(1-beta²) would produce NaN, cascading through the mover.
-  // After subcycle 0, the velocity cap at the end of each subcycle keeps
-  // beta² at kVelocityCapOverC² or below (to round-off), well below 1, so
-  // this check is only needed once.
+  // After subcycle 0, the velocity cap at the end of each push keeps beta²
+  // at kVelocityCapOverC² or below (to round-off), well below 1, so this
+  // check is only needed once.
   {
-    const commonType v2_init = cur_u * cur_u + cur_v * cur_v + cur_w * cur_w;
+    const commonType v2_init =
+        cur.v[0] * cur.v[0] + cur.v[1] * cur.v[1] + cur.v[2] * cur.v[2];
     if (!(v2_init < 1.0)) {
       markForDeletion(moverParam, pidx);
+      return PushEnd::Deleted;
+    }
+  }
+
+  // One push, with the cap that keeps beta^2 < 1 for the next push's
+  // gamma = 1 / sqrt(1 - beta^2); false when the particle was deleted
+  const auto push = [&](const MoverState& from, commonType h, MoverState& to) {
+    relativisticPush(from, h, qom, c, invc, moverParam->NiterMover, gather, to);
+    return !capVelocityOrDelete(to.v[0], to.v[1], to.v[2],
+                                kVelocityCapOverC * kVelocityCapOverC,
+                                moverParam, pidx);
+  };
+
+  for (int cyc_cnt = 0; cyc_cnt < sub_cycles; cyc_cnt++) {
+    const PushEnd how = pushToWalls<kWalls>(moverParam, cur, dt_sub, c, push);
+    if (how != PushEnd::Pushed)
+      return how;
+  }
+
+  // back to physical velocities
+#pragma unroll
+  for (int i = 0; i < 3; i++)
+    cur.v[i] *= c;
+  return PushEnd::Pushed;
+}
+
+/** What pushAgainWithWalls returns: the end state and how the push ended. */
+struct WallPush {
+  MoverState end;
+  PushEnd how;
+};
+
+/**
+ * @brief The push of a particle whose push ended beyond a reflecting wall and
+ * that the wall list has no room for: the whole push again, from its SoA
+ * state, with the walls.
+ *
+ * Not inlined and without particle state in its arguments: a mover kernel is
+ * at its register bound, and the particles that reach a wall must keep
+ * nothing alive, in registers or on the stack, during the push of all the
+ * others.  Internal linkage: the function is compiled with each kernel that
+ * calls it, under that kernel's register bound.
+ */
+template <bool kRelativistic>
+static __device__ __noinline__ WallPush pushAgainWithWalls(
+    moverParameter* moverParam, GridFields fields, uint32_t pidx) {
+  WallPush w;
+  if constexpr (kRelativistic)
+    w.how = pushSubcycled<true>(moverParam, fields, pidx, w.end);
+  else
+    w.how = pushStandard<true>(moverParam, fields, pidx, w.end);
+  return w;
+}
+
+/**
+ * @brief One particle of a mover kernel: the push over the step, standard or
+ * subcycled relativistic, then the final state to the SoA and the departure
+ * classification.
+ *
+ * A particle whose push ends beyond a reflecting wall is left untouched to
+ * the wall pass (kWallPass), which pushes the particles of
+ * moverParameter::wallList with the walls.  Few particles reach a wall in a
+ * step: gathered, they fill warps of their own instead of holding the warps
+ * of their neighbours through the wall loop.  A particle the list has no
+ * room for is pushed again here.
+ */
+template <bool kRelativistic, bool kWallPass>
+__device__ __forceinline__ void
+moveParticle(moverParameter* moverParam,
+             cudaTypeArray1<cudaFieldType> fieldForPcls, grid3DCUDA* grid) {
+  const uint32_t thread = blockIdx.x * blockDim.x + threadIdx.x;
+  auto pclsArray = moverParam->pclsArray;
+  uint32_t pidx = thread;
+  if constexpr (kWallPass) {
+    // the thread's entry of the wall list
+    const auto wallList = moverParam->wallList;
+    if (thread >= moverParam->wallCount || thread >= wallList->getSize())
+      return;
+    pidx = wallList->getArray()[thread];
+  } else {
+    if (pidx >= pclsArray->getNOP())
+      return;
+
+    // Particles already deleted (e.g. during merging) are not moved: the
+    // position is both start and end
+    if (moverParam->departureArray->getArray()[pidx].dest != 0) {
+      const commonType x = pclsArray->getX()[pidx];
+      const commonType y = pclsArray->getY()[pidx];
+      const commonType z = pclsArray->getZ()[pidx];
+      prepareDepartureArray(x, y, z, x, y, z, pclsArray, pidx, moverParam,
+                            moverParam->departureArray, grid,
+                            moverParam->hashedSumArray);
       return;
     }
   }
 
-  // Start subcycling; keep the state in registers across the loop.
-  for (int cyc_cnt = 0; cyc_cnt < sub_cycles; cyc_cnt++) {
-    const commonType xorig = cur_x;
-    const commonType yorig = cur_y;
-    const commonType zorig = cur_z;
-    const commonType uorig = cur_u;
-    const commonType vorig = cur_v;
-    const commonType worig = cur_w;
-    commonType xavg = xorig;
-    commonType yavg = yorig;
-    commonType zavg = zorig;
-    commonType uavg, vavg, wavg;
-    commonType uavg_old = uorig;
-    commonType vavg_old = vorig;
-    commonType wavg_old = worig;
-
-    const commonType vorig_sq = uorig * uorig + vorig * vorig + worig * worig;
-    const commonType gamma0 = rsqrt(1.0 - vorig_sq);
-    commonType invGamma1; // 1 / gamma~
-
-    int innter = 0;
-    bool notConverged = true;
-
-    // calculate the average velocity iteratively - predictor corrector
-    // uses dt_subcycle
-    while (notConverged && innter < moverParam->NiterMover) {
-
-      // sample E and B field components at current average position
-      if (!fieldsAtAvg)
-        sampleFieldsAtPosition<6>(xavg, yavg, zavg, grid, fieldForPcls, weights,
-                                  cx, cy, cz, sampled_field);
-      fieldsAtAvg = false;
-
-      const commonType Bxl = sampled_field[0];
-      const commonType Byl = sampled_field[1];
-      const commonType Bzl = sampled_field[2];
-      const commonType Exl = sampled_field[3];
-      const commonType Eyl = sampled_field[4];
-      const commonType Ezl = sampled_field[5];
-
-      // half electric kick: u~ = gamma(m) beta(m) + (q h / 2 m c) E
-      const commonType ut = uorig * gamma0 + qdto2mc_sub * Exl;
-      const commonType vt = vorig * gamma0 + qdto2mc_sub * Eyl;
-      const commonType wt = worig * gamma0 + qdto2mc_sub * Ezl;
-      invGamma1 = rsqrt(1.0 + ut * ut + vt * vt + wt * wt);
-
-      // rotation vector w / gamma~ with w = (q h / 2 m c) B (Peng et al.
-      // 2015, Eq. 2.8): the relativistic gyrofrequency is Omega / gamma
-      const commonType qdto2mcg = qdto2mc_sub * invGamma1;
-      const commonType Omx = qdto2mcg * Bxl;
-      const commonType Omy = qdto2mcg * Byl;
-      const commonType Omz = qdto2mcg * Bzl;
-      const commonType omsq = (Omx * Omx + Omy * Omy + Omz * Omz);
-      // beta_bar = alpha(w / gamma~) u~ / gamma~
-      const commonType denom = invGamma1 / (1.0 + omsq);
-
-      const commonType udotOm = ut * Omx + vt * Omy + wt * Omz;
-      // solve the velocity equation
-      uavg = (ut + (vt * Omz - wt * Omy + udotOm * Omx)) * denom;
-      vavg = (vt + (wt * Omx - ut * Omz + udotOm * Omy)) * denom;
-      wavg = (wt + (ut * Omy - vt * Omx + udotOm * Omz)) * denom;
-      // update average position
-      xavg = xorig + uavg * cdto2_sub;
-      yavg = yorig + vavg * cdto2_sub;
-      zavg = zorig + wavg * cdto2_sub;
-
-      notConverged =
-          pcNotConverged(uavg, vavg, wavg, uavg_old, vavg_old, wavg_old);
-      // capture the new velocity for the next iteration
-      uavg_old = uavg;
-      vavg_old = vavg;
-      wavg_old = wavg;
-
-      innter++;
-
-    } // end of iteration
-
-    // relativistic velocity update
-    const commonType ut = uorig * gamma0;
-    const commonType vt = vorig * gamma0;
-    const commonType wt = worig * gamma0;
-
-    const commonType velt_sq = ut * ut + vt * vt + wt * wt;
-    const commonType velavg_sq = uavg * uavg + vavg * vavg + wavg * wavg;
-    const commonType velt_velavg = ut * uavg + vt * vavg + wt * wavg;
-
-    const commonType cfa = 1.0 - velavg_sq;
-    const commonType cfb = -2.0 * (-velt_velavg + gamma0 * velavg_sq);
-    const commonType cfc = -1.0 - gamma0 * gamma0 * velavg_sq +
-                           2.0 * gamma0 * velt_velavg - velt_sq;
-
-    const commonType delta_rel = cfb * cfb - 4.0 * cfa * cfc;
-
-    // update position and velocity in registers
-    cur_x = xorig + uavg * cdt_sub;
-    cur_y = yorig + vavg * cdt_sub;
-    cur_z = zorig + wavg * cdt_sub;
-    if (delta_rel < 0.0) {
-      // Unreachable in exact arithmetic (cfa > 0 because |beta_bar| < 1, and
-      // cfc < 0); only round-off with |beta_bar| -> 1 lands here.  Estimate
-      // the momentum u(m+1) = 2 gamma~ beta_bar - u(m) and store it as a
-      // velocity, beta = u / sqrt(1 + u^2), which keeps |beta| < 1.
-      const commonType twoGamma1 = 2.0 / invGamma1;
-      const commonType un = twoGamma1 * uavg - ut;
-      const commonType vn = twoGamma1 * vavg - vt;
-      const commonType wn = twoGamma1 * wavg - wt;
-      const commonType invGammaNew = rsqrt(1.0 + un * un + vn * vn + wn * wn);
-      cur_u = un * invGammaNew;
-      cur_v = vn * invGammaNew;
-      cur_w = wn * invGammaNew;
-    } else {
-      // 1 / gamma(m+1), gamma(m+1) = (-cfb + sqrt(delta_rel)) / (2 cfa) the
-      // positive root of cfa g^2 + cfb g + cfc = 0.  Then beta(m+1) =
-      // u(m+1) / gamma(m+1) with u(m+1) = (gamma(m) + gamma(m+1)) beta_bar -
-      // u(m).
-      const commonType invGammaNew = (2.0 * cfa) / (sqrt(delta_rel) - cfb);
-      const commonType coef = 1.0 + gamma0 * invGammaNew;
-      cur_u = coef * uavg - ut * invGammaNew;
-      cur_v = coef * vavg - vt * invGammaNew;
-      cur_w = coef * wavg - wt * invGammaNew;
+  const GridFields fields = {grid, fieldForPcls};
+  MoverState end;
+  PushEnd how;
+  if constexpr (kRelativistic)
+    how = pushSubcycled<kWallPass>(moverParam, fields, pidx, end);
+  else
+    how = pushStandard<kWallPass>(moverParam, fields, pidx, end);
+  if constexpr (!kWallPass) {
+    if (how == PushEnd::Wall) {
+      const auto wallList = moverParam->wallList;
+      const uint32_t slot = atomicAdd(&moverParam->wallCount, 1u);
+      if (slot < wallList->getSize()) {
+        wallList->getArray()[slot] = pidx;
+        return;
+      }
+      const WallPush w =
+          pushAgainWithWalls<kRelativistic>(moverParam, fields, pidx);
+      end = w.end;
+      how = w.how;
     }
+  }
+  if (how == PushEnd::Deleted)
+    return;
 
-    // Cap velocity to prevent superluminal particles.
-    // If beta^2 >= 1, the next subcycle's gamma = 1/sqrt(1-beta^2) -> NaN.
-    if (capVelocityOrDelete(cur_u, cur_v, cur_w,
-                            kVelocityCapOverC * kVelocityCapOverC, moverParam,
-                            pidx))
-      return;
-
-  } // end iteration over subcycles
-
-  // The open outflow faces need the position before the push, which the
-  // subcycles overwrote in registers; the SoA holds it until the write below.
-  commonType xstart = cur_x, ystart = cur_y, zstart = cur_z;
+  // The open outflow faces need the position before the push: the SoA holds
+  // it until the write below.
+  commonType xstart = end.x[0], ystart = end.x[1], zstart = end.x[2];
   if (moverParam->doOpenBC) {
     xstart = pclsArray->getX()[pidx];
     ystart = pclsArray->getY()[pidx];
     zstart = pclsArray->getZ()[pidx];
   }
 
-  // Write final state to SoA once (velocities back from units of c)
-  pclsArray->getX()[pidx] = cur_x;
-  pclsArray->getY()[pidx] = cur_y;
-  pclsArray->getZ()[pidx] = cur_z;
-  pclsArray->getU()[pidx] = cur_u * c;
-  pclsArray->getV()[pidx] = cur_v * c;
-  pclsArray->getW()[pidx] = cur_w * c;
+  // Write final state to SoA once
+  pclsArray->getX()[pidx] = end.x[0];
+  pclsArray->getY()[pidx] = end.x[1];
+  pclsArray->getZ()[pidx] = end.x[2];
+  pclsArray->getU()[pidx] = end.v[0];
+  pclsArray->getV()[pidx] = end.v[1];
+  pclsArray->getW()[pidx] = end.v[2];
 
   // prepare the departure array
-  prepareDepartureArray(cur_x, cur_y, cur_z, xstart, ystart, zstart, pclsArray,
-                        pidx, moverParam, moverParam->departureArray, grid,
-                        moverParam->hashedSumArray);
+  prepareDepartureArray(end.x[0], end.x[1], end.x[2], xstart, ystart, zstart,
+                        pclsArray, pidx, moverParam, moverParam->departureArray,
+                        grid, moverParam->hashedSumArray);
+}
+
+/** The standard mover (see moverKernel.cuh). */
+__global__ void MOVER_LAUNCH_BOUNDS
+moverKernel(moverParameter* moverParam,
+            cudaTypeArray1<cudaFieldType> fieldForPcls, grid3DCUDA* grid) {
+  moveParticle<false, false>(moverParam, fieldForPcls, grid);
+}
+
+/** The subcycled relativistic mover (see moverKernel.cuh). */
+__global__ void MOVER_LAUNCH_BOUNDS moverSubcyclesKernel(
+    moverParameter* moverParam, cudaTypeArray1<cudaFieldType> fieldForPcls,
+    grid3DCUDA* grid) {
+  moveParticle<true, false>(moverParam, fieldForPcls, grid);
+}
+
+/** The wall pass of moverKernel. */
+__global__ void moverWallsKernel(moverParameter* moverParam,
+                                 cudaTypeArray1<cudaFieldType> fieldForPcls,
+                                 grid3DCUDA* grid) {
+  moveParticle<false, true>(moverParam, fieldForPcls, grid);
+}
+
+/** The wall pass of moverSubcyclesKernel. */
+__global__ void
+moverSubcyclesWallsKernel(moverParameter* moverParam,
+                          cudaTypeArray1<cudaFieldType> fieldForPcls,
+                          grid3DCUDA* grid) {
+  moveParticle<true, true>(moverParam, fieldForPcls, grid);
 }
 
 // ======= Boundary classification helpers =======

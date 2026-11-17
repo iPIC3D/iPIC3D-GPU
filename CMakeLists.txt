@@ -512,6 +512,7 @@ if(BUILD_UTESTS)
   add_subdirectory(src/unitTest/halo_communication)
   add_subdirectory(src/unitTest/divb_cleaning)
   add_subdirectory(src/unitTest/field_rows)
+  add_subdirectory(src/unitTest/mover_walls)
 endif()
 
 add_subdirectory(share/inputfiles)

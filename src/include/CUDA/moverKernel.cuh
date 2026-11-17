@@ -10,6 +10,9 @@
 #include "particleArrayCUDA.cuh"
 #include "particleExchange.cuh"
 
+/** Threads per block of the mover kernels. */
+constexpr int kMoverBlockSize = 256;
+
 /** Per-cycle OpenBC append accounting shared by the mover and host pipeline. */
 struct OpenBCAppendCounters {
   uint32_t accepted = 0; ///< Dense initialized prefix at mover completion.
@@ -71,6 +74,18 @@ public: // common parameter
   // Order: XLeft, XRight, YLeft, YRight, ZLeft, ZRight
   bool isExitBC[6];
 
+  // Reflecting walls (bcPface = 1) of this rank: per axis its low and high
+  // boundary where the face reflects, -/+ infinity where it does not, and
+  // the landing tolerance of a push on a wall (pushWithWalls)
+  bool doReflect = false; // any wall
+  cudaCommonType reflectLo[3], reflectHi[3];
+  cudaCommonType reflectTol;
+  // The particles a mover kernel left to its wall pass: their number in this
+  // cycle and their indices, held in the filler buffer of the compaction,
+  // which is idle during the mover
+  uint32_t wallCount = 0;
+  fillerBuffer* wallList = nullptr;
+
 public:
   __host__ moverParameter(ParticleSoAHost* pclHost, VirtualTopology3D* vct)
       : dt(pclHost->timeStep_), qom(pclHost->chargeOverMass_),
@@ -114,9 +129,6 @@ public:
   }
 };
 
-/** Threads per block of the mover kernels. */
-constexpr int kMoverBlockSize = 256;
-
 // CUDA: at least 3 blocks of kMoverBlockSize threads per SM, which bounds the
 // registers to 80 per thread (65536 per SM); without it
 // moverSubcyclesKernel takes 88 and runs 2 blocks.  The block size alone
@@ -154,6 +166,31 @@ moverKernel(moverParameter* moverParam,
 __global__ void MOVER_LAUNCH_BOUNDS moverSubcyclesKernel(
     moverParameter* moverParam, cudaTypeArray1<cudaFieldType> fieldForPcls,
     grid3DCUDA* grid);
+
+/**
+ * @brief The wall pass of moverKernel: the particles it left at a reflecting
+ * wall (moverParameter::wallList), pushed with the walls.  Launched over the
+ * capacity of the list, after moverKernel on its stream.
+ *
+ * @param moverParam Device-side mover parameter bundle for one species.
+ * @param fieldForPcls Packed mover field buffer sampled from the grid.
+ * @param grid Device-side grid descriptor.
+ */
+__global__ void moverWallsKernel(moverParameter* moverParam,
+                                 cudaTypeArray1<cudaFieldType> fieldForPcls,
+                                 grid3DCUDA* grid);
+
+/**
+ * @brief The wall pass of moverSubcyclesKernel (see moverWallsKernel).
+ *
+ * @param moverParam Device-side mover parameter bundle for one species.
+ * @param fieldForPcls Packed mover field buffer sampled from the grid.
+ * @param grid Device-side grid descriptor.
+ */
+__global__ void
+moverSubcyclesWallsKernel(moverParameter* moverParam,
+                          cudaTypeArray1<cudaFieldType> fieldForPcls,
+                          grid3DCUDA* grid);
 
 // __global__ void castingField(grid3DCUDA *grid, cudaTypeArray1<cudaCommonType>
 // fieldForPcls);

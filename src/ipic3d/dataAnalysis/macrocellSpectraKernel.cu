@@ -109,8 +109,7 @@ __global__ void macrocellSpectraKernel(
         const int s = cellStartOffsets[c];
 
         // Preload 8 corners x 3 B components from fieldForPcls.
-        // previousIndex layout matches sampleFieldsAtPosition() in
-        // moverKernel.cu:
+        // previousIndex layout matches GridFields in moverKernel.cu:
         //   previousIndex = (cx*(nyn-1) + cy)*nzn + cz
         //   field[previousIndex*24 + corner*6 + comp]
         const int previousIndex = (cx * (nyn - 1) + cy) * nzn + cz;

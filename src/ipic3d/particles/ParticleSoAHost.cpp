@@ -1063,6 +1063,34 @@ void ParticleSoAHost::fillExitBCFlags(bool* isExitBC) const {
                  bcPfaceZright_ == EXIT);
 }
 
+void ParticleSoAHost::reflectingWalls(bool* doReflect, cudaCommonType* lo,
+                                      cudaCommonType* hi) const {
+  using namespace BCparticles;
+  // Infinities where a face does not reflect, not the largest finite
+  // number: a position that is not finite must not count as beyond a face
+  // that does not reflect.
+  const cudaCommonType inf = std::numeric_limits<cudaCommonType>::infinity();
+  const bool periodic[3] = {vct_->getPERIODICX_P(), vct_->getPERIODICY_P(),
+                            vct_->getPERIODICZ_P()};
+  const bool noLow[3] = {vct_->noXleftNeighbor_P(), vct_->noYleftNeighbor_P(),
+                         vct_->noZleftNeighbor_P()};
+  const bool noHigh[3] = {vct_->noXrghtNeighbor_P(), vct_->noYrghtNeighbor_P(),
+                          vct_->noZrghtNeighbor_P()};
+  const int bcLow[3] = {bcPfaceXleft_, bcPfaceYleft_, bcPfaceZleft_};
+  const int bcHigh[3] = {bcPfaceXright_, bcPfaceYright_, bcPfaceZright_};
+  const double start[3] = {grid_->getXstart(), grid_->getYstart(),
+                           grid_->getZstart()};
+  const double end[3] = {grid_->getXend(), grid_->getYend(), grid_->getZend()};
+  *doReflect = false;
+  for (int a = 0; a < 3; a++) {
+    const bool low = !periodic[a] && noLow[a] && bcLow[a] == PERFECT_MIRROR;
+    const bool high = !periodic[a] && noHigh[a] && bcHigh[a] == PERFECT_MIRROR;
+    lo[a] = low ? start[a] : -inf;
+    hi[a] = high ? end[a] : inf;
+    *doReflect = *doReflect || low || high;
+  }
+}
+
 // ======= AoS append path =======
 
 /**

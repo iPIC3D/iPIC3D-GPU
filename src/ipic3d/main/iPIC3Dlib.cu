@@ -69,6 +69,7 @@
 #include "injectionKernel.cuh"
 #include "momentKernel.cuh"
 #include "moverKernel.cuh"
+#include "moverPush.cuh"
 #include "particleArrayCUDA.cuh"
 #include "particleControlKernel.cuh"
 #include "particleExchange.cuh"
@@ -786,6 +787,15 @@ int c_Solver::initCUDA() {
     // on the GPU to avoid sending them through MPI exchange at all.
     // Only applies on boundary ranks (where the neighbor is MPI_PROC_NULL).
     particlesHost[i]->fillExitBCFlags(moverParamHostPtr[i]->isExitBC);
+
+    // Reflecting walls: the mover reflects at them inside the push
+    particlesHost[i]->reflectingWalls(&moverParamHostPtr[i]->doReflect,
+                                      moverParamHostPtr[i]->reflectLo,
+                                      moverParamHostPtr[i]->reflectHi);
+    moverParamHostPtr[i]->reflectTol =
+        kWallTolerance *
+        std::min({grid->getDX(), grid->getDY(), grid->getDZ()});
+    moverParamHostPtr[i]->wallList = fillerBufferArrayCUDAPtr[i];
 
     // every species, also those not re-injected (deleteRepopulateInjection)
     particlesHost[i]->repopulate_particlesInfo(
@@ -1762,6 +1772,26 @@ int c_Solver::cudaLauncherAsync(const int species,
       moverKernel<<<getGridSize((int)nop, kMoverBlockSize), kMoverBlockSize, 0,
                     streams[species]>>>(moverParamCUDAPtr[species],
                                         fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+
+    // The wall pass: the particles the mover left at a reflecting wall, then
+    // the list is emptied for the next cycle.
+    if (moverParamHostPtr[species]->doReflect) {
+      const int wallCapacity = fillerBufferArrayHostPtr[species]->getSize();
+      if (wallCapacity > 0) {
+        const int wallGrid = getGridSize(wallCapacity, kMoverBlockSize);
+        if (doPlanet_)
+          moverSubcyclesWallsKernel<<<wallGrid, kMoverBlockSize, 0,
+                                      streams[species]>>>(
+              moverParamCUDAPtr[species], fieldForPclCUDAPtr,
+              grid3DCUDACUDAPtr);
+        else
+          moverWallsKernel<<<wallGrid, kMoverBlockSize, 0, streams[species]>>>(
+              moverParamCUDAPtr[species], fieldForPclCUDAPtr,
+              grid3DCUDACUDAPtr);
+      }
+      cudaErrChk(cudaMemsetAsync(&moverParamCUDAPtr[species]->wallCount, 0,
+                                 sizeof(uint32_t), streams[species]));
+    }
   }
 
   cudaErrChk(cudaEventRecord(event1, streams[species]));
@@ -1866,10 +1896,16 @@ int c_Solver::cudaLauncherAsync(const int species,
         sizeof(exitingArray), cudaMemcpyDefault, streams[species + ns]));
   }
 
-  if (hole > fillerBufferArrayHostPtr[species]->getSize()) {
-    // Expand the filler buffer used by the compaction/sorting kernels.
-    fillerBufferArrayHostPtr[species]->expand(hole * EXPAND_GROWTH_FACTOR,
-                                              streams[species + ns]);
+  // The filler buffer of the compaction/sorting kernels.  On a rank with
+  // reflecting walls it also holds the wall list of the mover, which keeps
+  // its initial share of the particles when the species grows.
+  const int fillerNeeded =
+      moverParamHostPtr[species]->doReflect
+          ? std::max(hole, static_cast<int>(AUX_BUFFER_FRACTION * nop))
+          : hole;
+  if (fillerNeeded > fillerBufferArrayHostPtr[species]->getSize()) {
+    fillerBufferArrayHostPtr[species]->expand(
+        fillerNeeded * EXPAND_GROWTH_FACTOR, streams[species + ns]);
     cudaErrChk(cudaMemcpyAsync(
         fillerBufferArrayCUDAPtr[species], fillerBufferArrayHostPtr[species],
         sizeof(fillerBuffer), cudaMemcpyDefault, streams[species + ns]));

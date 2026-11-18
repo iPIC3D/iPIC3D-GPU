@@ -1027,6 +1027,10 @@ int c_Solver::initCUDA() {
                             planetBufCapacity * sizeof(cudaParticleType)));
       cudaErrChk(cudaMalloc(&planetGlobalIdxBuf,
                             planetBufCapacity * sizeof(uint32_t)));
+      cudaErrChk(cudaMalloc(
+          &planetWarpChargeBuf,
+          planetWarpChargeCount(planetBufCapacity, planetElecSpeciesCount) *
+              sizeof(cudaParticleType)));
       cudaErrChk(cudaMalloc(&planetBCStateDevice, sizeof(PlanetBCState)));
       cudaErrChk(cudaMemset(planetBCStateDevice, 0, sizeof(PlanetBCState)));
       cudaErrChk(
@@ -1049,6 +1053,7 @@ int c_Solver::initCUDA() {
     } else {
       planetEnergyBuf = nullptr;
       planetGlobalIdxBuf = nullptr;
+      planetWarpChargeBuf = nullptr;
       planetBCStateDevice = nullptr;
       planetCutoffDevice = nullptr;
       planetArrayCUDAPtrDevice = nullptr;
@@ -1059,8 +1064,6 @@ int c_Solver::initCUDA() {
     const int elecCount =
         planetElecSpeciesCount > 0 ? planetElecSpeciesCount : 1;
     cudaErrChk(cudaHostAlloc(&planetElecOffsets, elecCount * sizeof(int),
-                             cudaHostAllocDefault));
-    cudaErrChk(cudaHostAlloc(&planetTmpPtrs, elecCount * sizeof(planetArray*),
                              cudaHostAllocDefault));
     cudaErrChk(cudaHostAlloc(&planetSurvivorCount, elecCount * sizeof(int),
                              cudaHostAllocDefault));
@@ -1256,6 +1259,8 @@ int c_Solver::deInitCUDA() {
     cudaFree(planetEnergyBuf);
   if (planetGlobalIdxBuf)
     cudaFree(planetGlobalIdxBuf);
+  if (planetWarpChargeBuf)
+    cudaFree(planetWarpChargeBuf);
   if (planetBCStateDevice)
     cudaFree(planetBCStateDevice);
   if (doPlanet_)
@@ -1273,7 +1278,6 @@ int c_Solver::deInitCUDA() {
   if (planetElecOffsetsDevice)
     cudaFree(planetElecOffsetsDevice);
   cudaFreeHost(planetElecOffsets);
-  cudaFreeHost(planetTmpPtrs);
   cudaFreeHost(planetSurvivorCount);
   if (planetSurvivorCountDevice)
     cudaFree(planetSurvivorCountDevice);
@@ -2174,12 +2178,55 @@ void c_Solver::processPlanetParticles() {
   // No host sync is needed here: later kernels consume ionChargeCycle
   // directly.
 
+  // ======= Step 3: Resize shared work buffers as needed =======
+  // Before the electrons are described to the kernels: the buffer behind
+  // sortedGlobalIdx can move here. Nothing grows when no electron hit.
+  // Round up to the next power of 2 for bitonic sort.
+  int nPad = 1;
+  while (nPad < totalElecPlanet)
+    nPad <<= 1;
+
+  if (nPad > planetBufCapacity) {
+    if (planetEnergyBuf)
+      cudaFree(planetEnergyBuf);
+    if (planetGlobalIdxBuf)
+      cudaFree(planetGlobalIdxBuf);
+    if (planetWarpChargeBuf)
+      cudaFree(planetWarpChargeBuf);
+    planetBufCapacity = nPad;
+    cudaErrChk(cudaMalloc(&planetEnergyBuf,
+                          planetBufCapacity * sizeof(cudaParticleType)));
+    cudaErrChk(
+        cudaMalloc(&planetGlobalIdxBuf, planetBufCapacity * sizeof(uint32_t)));
+    cudaErrChk(cudaMalloc(
+        &planetWarpChargeBuf,
+        planetWarpChargeCount(planetBufCapacity, planetElecSpeciesCount) *
+            sizeof(cudaParticleType)));
+  }
+
+  // Expand the reflected-particle output buffer if needed.
+  if (totalElecPlanet > planetReflectedBufCapacity) {
+    if (planetReflectedBuf)
+      cudaFree(planetReflectedBuf);
+    planetReflectedBufCapacity = totalElecPlanet * 2;
+    cudaErrChk(cudaMalloc(&planetReflectedBuf, planetReflectedBufCapacity *
+                                                   sizeof(SpeciesParticle)));
+  }
+
+  // The electrons that hit, merged over the electron species, as the kernels
+  // take them.
+  PlanetElectrons electrons;
+  electrons.planetArrs = planetArrayCUDAPtrDevice;
+  electrons.speciesOffsets = planetElecOffsetsDevice;
+  electrons.sortedGlobalIdx = planetGlobalIdxBuf;
+  electrons.nSpecies = planetElecSpeciesCount;
+  electrons.total = totalElecPlanet;
+
   if (totalElecPlanet == 0) {
     // No electron to balance against: carry the absorbed ion charge over.
     chargeCutoffKernel<<<1, 1, 0, planetStream>>>(
-        planetArrayCUDAPtrDevice, planetElecSpeciesCount,
-        planetElecOffsetsDevice, planetGlobalIdxBuf, planetEnergyBuf, 0,
-        planetBCStateDevice, diagAbsorbedElecChargeDevice, planetCutoffDevice);
+        electrons, planetEnergyBuf, planetWarpChargeBuf, planetBCStateDevice,
+        diagAbsorbedElecChargeDevice, planetCutoffDevice);
     // No host sync on this path: the next cycle's planet extraction waits on
     // this event before overwriting the planet buffers.
     cudaErrChk(cudaEventRecord(planetDoneEvent, planetStream));
@@ -2192,33 +2239,6 @@ void c_Solver::processPlanetParticles() {
              totalIonPlanet);
 #endif
     return;
-  }
-
-  // ======= Step 3: Resize shared work buffers as needed =======
-  // Round up to the next power of 2 for bitonic sort.
-  int nPad = 1;
-  while (nPad < totalElecPlanet)
-    nPad <<= 1;
-
-  if (nPad > planetBufCapacity) {
-    if (planetEnergyBuf)
-      cudaFree(planetEnergyBuf);
-    if (planetGlobalIdxBuf)
-      cudaFree(planetGlobalIdxBuf);
-    planetBufCapacity = nPad;
-    cudaErrChk(cudaMalloc(&planetEnergyBuf,
-                          planetBufCapacity * sizeof(cudaParticleType)));
-    cudaErrChk(
-        cudaMalloc(&planetGlobalIdxBuf, planetBufCapacity * sizeof(uint32_t)));
-  }
-
-  // Expand the reflected-particle output buffer if needed.
-  if (totalElecPlanet > planetReflectedBufCapacity) {
-    if (planetReflectedBuf)
-      cudaFree(planetReflectedBuf);
-    planetReflectedBufCapacity = totalElecPlanet * 2;
-    cudaErrChk(cudaMalloc(&planetReflectedBuf, planetReflectedBufCapacity *
-                                                   sizeof(SpeciesParticle)));
   }
 
   // ======= Step 4: Compute per-electron energy and build species offsets
@@ -2239,22 +2259,12 @@ void c_Solver::processPlanetParticles() {
     offset += planetPclCount[specIdx];
   }
 
-  // Copy offsets to device for the cutoff and reflection kernels.
-  if (planetElecSpeciesCount > 0) {
-    cudaErrChk(cudaMemcpyAsync(planetElecOffsetsDevice, planetElecOffsets,
-                               planetElecSpeciesCount * sizeof(int),
-                               cudaMemcpyHostToDevice, planetStream));
-  }
-
-  // Refresh the device pointer array in case any per-species planet buffer
-  // expanded.
-  {
-    for (int e = 0; e < planetElecSpeciesCount; e++)
-      planetTmpPtrs[e] = planetArrayCUDAPtr[planetElecSpeciesMap[e]];
-    cudaErrChk(cudaMemcpyAsync(planetArrayCUDAPtrDevice, planetTmpPtrs,
-                               planetElecSpeciesCount * sizeof(planetArray*),
-                               cudaMemcpyHostToDevice, planetStream));
-  }
+  // Copy offsets to device for the cutoff and reflection kernels. The device
+  // pointer array planetArrayCUDAPtrDevice needs no refresh: a planet buffer
+  // that grows keeps its device object.
+  cudaErrChk(cudaMemcpyAsync(planetElecOffsetsDevice, planetElecOffsets,
+                             planetElecSpeciesCount * sizeof(int),
+                             cudaMemcpyHostToDevice, planetStream));
 
   // ======= Step 5: Sort electron planet particles by descending energy =======
   if (nPad > totalElecPlanet) {
@@ -2262,9 +2272,10 @@ void c_Solver::processPlanetParticles() {
                        DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
         planetEnergyBuf, planetGlobalIdxBuf, totalElecPlanet, nPad);
   }
+  // One thread per compare-and-swap pair.
   for (int k = 2; k <= nPad; k <<= 1) {
     for (int j = k >> 1; j > 0; j >>= 1) {
-      bitonicSortStepKernel<<<getGridSize(nPad, DEFAULT_BLOCK_SIZE),
+      bitonicSortStepKernel<<<getGridSize(nPad / 2, DEFAULT_BLOCK_SIZE),
                               DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
           planetEnergyBuf, planetGlobalIdxBuf, j, k, nPad);
     }
@@ -2272,20 +2283,29 @@ void c_Solver::processPlanetParticles() {
 
   // ======= Step 6: Find the energy cutoff that balances the absorbed charge
   // =======
-  // The kernel always writes planetCutoffDevice and updates the carried charge.
+  // All threads gather the charges into sums per warp of the sorted order;
+  // the single-thread cutoff kernel then steps over whole warps. It always
+  // writes planetCutoffDevice and updates the carried charge.
+  planetWarpChargeKernel<<<getGridSize(totalElecPlanet, DEFAULT_BLOCK_SIZE),
+                           DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
+      electrons, planetWarpChargeBuf);
   chargeCutoffKernel<<<1, 1, 0, planetStream>>>(
-      planetArrayCUDAPtrDevice, planetElecSpeciesCount, planetElecOffsetsDevice,
-      planetGlobalIdxBuf, planetEnergyBuf, totalElecPlanet, planetBCStateDevice,
+      electrons, planetEnergyBuf, planetWarpChargeBuf, planetBCStateDevice,
       diagAbsorbedElecChargeDevice, planetCutoffDevice);
   // No host sync is needed here: the reflection kernel reads planetCutoffDevice
   // directly.
 
   // ======= Step 7: Reflect and compact surviving electrons =======
-  const int doSphere = moverParamHostPtr[0]->doSphere;
-  const cudaCommonType originX = moverParamHostPtr[0]->sphereOrigin[0];
-  const cudaCommonType originY = moverParamHostPtr[0]->sphereOrigin[1];
-  const cudaCommonType originZ = moverParamHostPtr[0]->sphereOrigin[2];
-  const cudaCommonType radius = moverParamHostPtr[0]->sphereRadius;
+  // Specular by default; diffuse: Lambert (cosine-law) direction on the
+  // outward hemisphere, speed kept.
+  PlanetReflection reflection;
+  reflection.originX = moverParamHostPtr[0]->sphereOrigin[0];
+  reflection.originY = moverParamHostPtr[0]->sphereOrigin[1];
+  reflection.originZ = moverParamHostPtr[0]->sphereOrigin[2];
+  reflection.radius = moverParamHostPtr[0]->sphereRadius;
+  reflection.doSphere = moverParamHostPtr[0]->doSphere;
+  reflection.diffuse = col->getPlanetReflectionType() == 1;
+  reflection.rngSeed = planetRngCycleCounter++;
 
   // Zero the per-species atomic survivor counters.
   cudaErrChk(cudaMemsetAsync(planetSurvivorCountDevice, 0,
@@ -2294,28 +2314,10 @@ void c_Solver::processPlanetParticles() {
 
   // Launch one thread per electron candidate; each checks the device-side
   // cutoff.
-  const int reflectionType = col->getPlanetReflectionType();
-  if (reflectionType == 1) {
-    // Diffuse reflection: Lambert (cosine-law) direction on the outward
-    // hemisphere, speed kept.
-    planetDiffuseCompactKernel<<<getGridSize(totalElecPlanet,
-                                             DEFAULT_BLOCK_SIZE),
-                                 DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
-        planetArrayCUDAPtrDevice, planetElecSpeciesCount,
-        planetElecOffsetsDevice, planetGlobalIdxBuf, planetCutoffDevice,
-        totalElecPlanet, planetReflectedBuf, planetSurvivorCountDevice, originX,
-        originY, originZ, radius, doSphere, planetRngCycleCounter);
-  } else {
-    // Specular reflection is the default path.
-    planetReflectCompactKernel<<<getGridSize(totalElecPlanet,
-                                             DEFAULT_BLOCK_SIZE),
-                                 DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
-        planetArrayCUDAPtrDevice, planetElecSpeciesCount,
-        planetElecOffsetsDevice, planetGlobalIdxBuf, planetCutoffDevice,
-        totalElecPlanet, planetReflectedBuf, planetSurvivorCountDevice, originX,
-        originY, originZ, radius, doSphere);
-  }
-  planetRngCycleCounter++;
+  planetReflectCompactKernel<<<getGridSize(totalElecPlanet, DEFAULT_BLOCK_SIZE),
+                               DEFAULT_BLOCK_SIZE, 0, planetStream>>>(
+      electrons, planetCutoffDevice, reflection, planetReflectedBuf,
+      planetSurvivorCountDevice);
 
   // ======= Step 8: Copy survivor counts back to the host =======
   cudaErrChk(cudaMemcpyAsync(planetSurvivorCount, planetSurvivorCountDevice,
@@ -2337,6 +2339,13 @@ void c_Solver::processPlanetParticles() {
 
   // ======= Step 9: Copy reflected particles into the per-species comm buffers
   // =======
+  // A reflected electron can lie outside the local subdomain (the planet can
+  // straddle ranks, and the electron is placed up to 2R from the centre): the
+  // exchange in MoverAwaitAndPclExchange() forwards it to its owner rank like
+  // any exiting particle. One placed beyond a domain face gets that face's
+  // particle boundary condition: an exit face deletes it; an open face leaves
+  // it outside, and the exchange then removes it as unrecoverable, with a
+  // warning.
   for (int e = 0; e < planetElecSpeciesCount; e++) {
     if (planetSurvivorCount[e] == 0)
       continue;
@@ -2860,15 +2869,8 @@ void c_Solver::MomentsAwait(int cycle) {
   EMf->gpuSetZeroDerivedMoments();
   // Enforce constant charge inside planet BEFORE summing over species,
   // so that rhon (and downstream rhoc, rhoh) includes the planet fix.
-  if (caseType_ == CaseType::Dipole) {
-    EMf->gpuConstantChargePlanet(
-        col->getPlanet_radius(), col->getx_center_planet(),
-        col->gety_center_planet(), col->getz_center_planet());
-  } else if (caseType_ == CaseType::Dipole2D) {
-    EMf->gpuConstantChargePlanet2DPlaneXZ(col->getPlanet_radius(),
-                                          col->getx_center_planet(),
-                                          col->getz_center_planet());
-  }
+  if (doPlanet_)
+    EMf->gpuConstantChargePlanet();
   // Neutral charge, and the reference plane's current and second moments, on
   // the X-right outflow layer: the field solve sees a neutral layer, whether
   // its field is then copied from the reference plane or kept as solved

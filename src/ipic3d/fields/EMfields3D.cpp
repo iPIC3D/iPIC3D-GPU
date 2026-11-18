@@ -490,76 +490,45 @@ void EMfields3D::ConstantChargeOpenBC() {
   }
 }
 
-/**
- * @brief Impose the constant-charge planet model inside the 3D spherical mask.
- *
- * @param R Planet radius.
- * @param x_center Planet-center x coordinate.
- * @param y_center Planet-center y coordinate.
- * @param z_center Planet-center z coordinate.
- */
-void EMfields3D::ConstantChargePlanet(double R, double x_center,
-                                      double y_center, double z_center) {
-  const Grid* grid = &get_grid();
-
-  double xd;
-  double yd;
-  double zd;
-  double ff;
-
-  for (int is = 0; is < ns; is++) {
-
-    ff = qom[is] / fabs(qom[is]);
-
-#pragma omp parallel for collapse(3) private(xd, yd, zd)
-    for (int i = 1; i < nxn; i++) {
-      for (int j = 1; j < nyn; j++) {
-        for (int k = 1; k < nzn; k++) {
-
-          xd = grid->getXN(i, j, k) - x_center;
-          yd = grid->getYN(i, j, k) - y_center;
-          zd = grid->getZN(i, j, k) - z_center;
-
-          if ((xd * xd + yd * yd + zd * zd) <= R * R) {
-            rhons[is][i][j][k] = ff * rhoINIT[is] / FourPI;
-          }
-        }
-      }
-    }
-  }
+bool EMfields3D::hasPlanet() const {
+  const std::string simCase = get_col().getCase();
+  return simCase == "Dipole" || simCase == "Dipole2D";
 }
 
-/**
- * @brief Impose the constant-charge planet model inside the 2D XZ-plane mask.
- *
- * @param R Planet radius.
- * @param x_center Planet-center x coordinate.
- * @param z_center Planet-center z coordinate.
- */
-void EMfields3D::ConstantChargePlanet2DPlaneXZ(double R, double x_center,
-                                               double z_center) {
+bool EMfields3D::isPlanetNode(int i, int j, int k, bool planeXZ) const {
   const Grid* grid = &get_grid();
-  // if (get_vct().getCartesian_rank() == 0)
-  // cout << "*** Constant Charge 2D Planet ***" << endl;
+  const double xd = grid->getGlobalXN(i) - x_center_planet;
+  const double yd = planeXZ ? 0.0 : grid->getGlobalYN(j) - y_center_planet;
+  const double zd = grid->getGlobalZN(k) - z_center_planet;
+  return xd * xd + yd * yd + zd * zd <= Planet_radius * Planet_radius;
+}
 
-  assert_eq(nyn, 4);
-  double xd;
-  double zd;
+std::vector<int> EMfields3D::planetNodes() const {
+  const bool planeXZ = get_col().getCase() == "Dipole2D";
+  if (planeXZ)
+    assert_eq(nyn, 4);
+  std::vector<int> nodes;
+  // every local node, the ghosts too: a ghost is a copy of a node of the
+  // neighbour, which holds the planet charge there as well
+  for (int i = 0; i < nxn; i++)
+    for (int j = 0; j < nyn; j++)
+      for (int k = 0; k < nzn; k++)
+        if (isPlanetNode(i, j, k, planeXZ))
+          nodes.push_back((i * nyn + j) * nzn + k);
+  return nodes;
+}
 
+double EMfields3D::planetChargeDensity(int is) const {
+  return qom[is] / fabs(qom[is]) * rhoINIT[is] / FourPI;
+}
+
+void EMfields3D::ConstantChargePlanet() {
+  const std::vector<int> nodes = planetNodes();
   for (int is = 0; is < ns; is++) {
-    const double sign_q = qom[is] / (fabs(qom[is]));
-#pragma omp parallel for collapse(2) private(xd, zd)
-    for (int i = 1; i < nxn; i++)
-      for (int k = 1; k < nzn; k++) {
-
-        xd = grid->getXN(i, 1, k) - x_center;
-        zd = grid->getZN(i, 1, k) - z_center;
-
-        if ((xd * xd + zd * zd) <= R * R) {
-          rhons[is][i][1][k] = sign_q * rhoINIT[is] / FourPI;
-          rhons[is][i][2][k] = sign_q * rhoINIT[is] / FourPI;
-        }
-      }
+    const double val = planetChargeDensity(is);
+    double* rho = &rhons[is][0][0][0];
+    for (int n : nodes)
+      rho[n] = val;
   }
 }
 
@@ -839,14 +808,8 @@ void EMfields3D::init() {
       communicateNode_P(nxn, nyn, nzn, moment0, vct, this);
     }
 
-    if (col->getCase() == "Dipole") {
-      ConstantChargePlanet(col->getPlanet_radius(), col->getx_center_planet(),
-                           col->gety_center_planet(),
-                           col->getz_center_planet());
-    } else if (col->getCase() == "Dipole2D") {
-      ConstantChargePlanet2DPlaneXZ(col->getPlanet_radius(),
-                                    col->getx_center_planet(),
-                                    col->getz_center_planet());
+    if (hasPlanet()) {
+      ConstantChargePlanet();
     }
     // TaylorGreen: reset the species densities on the node planes of each
     // open face (bcEMface = 2) to sign(q) rhoINIT / 4pi
@@ -2389,14 +2352,12 @@ void EMfields3D::initDipole() {
         // radius of the planet
         double a = Planet_radius;
 
-        double x = grid->getXN(i, j, k);
-        double y = grid->getYN(i, j, k);
-        double z = grid->getZN(i, j, k);
+        // node coordinates from global indices: the same bits in every
+        // decomposition
+        double x = grid->getGlobalXN(i);
+        double y = grid->getGlobalYN(j);
+        double z = grid->getGlobalZN(k);
 
-        // Distance from planet center
-        double r2 = ((x - x_center_planet) * (x - x_center_planet)) +
-                    ((y - y_center_planet) * (y - y_center_planet)) +
-                    ((z - z_center_planet) * (z - z_center_planet));
         // Distance from dipole center
         double r2d = ((x - x_center_dipole) * (x - x_center_dipole)) +
                      ((y - y_center_dipole) * (y - y_center_dipole)) +
@@ -2404,7 +2365,7 @@ void EMfields3D::initDipole() {
 
         // Compute dipolar field B_ext
 
-        if (r2 > a * a) {
+        if (!isPlanetNode(i, j, k, false)) {
           // position from the dipole center
           const double x_displ = x - x_center_dipole;
           const double y_displ = y - y_center_dipole;
@@ -2491,18 +2452,17 @@ void EMfields3D::initDipole2D() {
         double xc = x_center_dipole;
         double zc = z_center_dipole;
 
-        double x = grid->getXN(i, j, k);
-        double z = grid->getZN(i, j, k);
+        // node coordinates from global indices: the same bits in every
+        // decomposition
+        double x = grid->getGlobalXN(i);
+        double z = grid->getGlobalZN(k);
 
-        // Distance from planet center (for interior mask)
-        double r2 = ((x - x_center_planet) * (x - x_center_planet)) +
-                    ((z - z_center_planet) * (z - z_center_planet));
         // Distance from dipole center (for field formula)
         double r2d = ((x - xc) * (x - xc)) + ((z - zc) * (z - zc));
 
         // Compute dipolar field B_ext
 
-        if (r2 > a * a) {
+        if (!isPlanetNode(i, j, k, true)) {
           const double x_displ = x - xc;
           const double z_displ = z - zc;
 

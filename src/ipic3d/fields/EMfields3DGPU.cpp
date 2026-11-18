@@ -183,6 +183,18 @@ void EMfields3D::gpuSolverAllocate() {
   cudaErrChk(cudaMemcpy(d_qom, qom, ns * sizeof(cudaSolverType),
                         cudaMemcpyHostToDevice));
 
+  // ---- Planet nodes of the constant-charge model ----
+  if (hasPlanet()) {
+    const std::vector<int> nodes = planetNodes();
+    planetNodeCount_ = (int)nodes.size();
+    if (planetNodeCount_ > 0) {
+      cudaErrChk(cudaMalloc(&d_planetNodes_, nodes.size() * sizeof(int)));
+      cudaErrChk(cudaMemcpy(d_planetNodes_, nodes.data(),
+                            nodes.size() * sizeof(int),
+                            cudaMemcpyHostToDevice));
+    }
+  }
+
   // ---- BLAS reduction scratch ----
   // k + 2 <= KRYLOV_M_MAX + 1 values for gpuBatchedDotNorm in an Arnoldi
   // step, 1 + the fields of cleaningAtRoundOff, 1 for gpuDot_async /
@@ -431,6 +443,11 @@ void EMfields3D::gpuSolverFree() {
     cudaFree(d_qom);
     d_qom = nullptr;
   }
+  if (d_planetNodes_) {
+    cudaFree(d_planetNodes_);
+    d_planetNodes_ = nullptr;
+  }
+  planetNodeCount_ = 0;
   if (d_blasScratch) {
     cudaFree(d_blasScratch);
     d_blasScratch = nullptr;
@@ -2828,31 +2845,14 @@ void EMfields3D::gpuInterpDensitiesN2C() {
 }
 
 // =========================================================================
-//  gpuConstantChargePlanet / gpuConstantChargePlanet2DPlaneXZ
+//  gpuConstantChargePlanet
 // =========================================================================
 
-void EMfields3D::gpuConstantChargePlanet(double R, double x_center,
-                                         double y_center, double z_center) {
-  for (int is = 0; is < ns; is++) {
-    double ff = qom[is] / fabs(qom[is]);
-    double val = ff * rhoINIT[is] / FourPI;
-    gpuConstantChargePlanetKernel(d_rhons.speciesPtr(is), val, R, x_center,
-                                  y_center, z_center, xStart, yStart, zStart,
-                                  dx, dy, dz, nxn, nyn, nzn, solverStream_);
-  }
-}
-
-void EMfields3D::gpuConstantChargePlanet2DPlaneXZ(double R, double x_center,
-                                                  double z_center) {
-  // x-z plane: one cell in y, the kernel writes the node planes j = 1, 2
-  assert_eq(nyn, 4);
-  for (int is = 0; is < ns; is++) {
-    double sign_q = qom[is] / fabs(qom[is]);
-    double val = sign_q * rhoINIT[is] / FourPI;
-    gpuConstantChargePlanet2DKernel(d_rhons.speciesPtr(is), val, R, x_center,
-                                    z_center, xStart, zStart, dx, dz, nxn, nyn,
-                                    nzn, solverStream_);
-  }
+void EMfields3D::gpuConstantChargePlanet() {
+  // the nodes and values of the host ConstantChargePlanet
+  for (int is = 0; is < ns; is++)
+    gpuSetNodesKernel(d_rhons.speciesPtr(is), d_planetNodes_, planetNodeCount_,
+                      planetChargeDensity(is), solverStream_);
 }
 
 // =========================================================================

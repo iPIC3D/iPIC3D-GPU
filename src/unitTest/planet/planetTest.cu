@@ -14,16 +14,25 @@
  *  3. Bitonic sort         (bitonicPadKernel + bitonicSortStepKernel)
  *     → descending energy order; a light fast electron outranks a heavy slow
  *       one
- *  4. Charge cutoff        (chargeCutoffKernel) over four cycles
+ *  4. Charge cutoff        (planetWarpChargeKernel + chargeCutoffKernel) over
+ *     four cycles
  *     → nearest-match cutoff, charge carried across cycles (both signs),
  *       ions-only cycle, conservation ∑|q_ion| - ∑|q_absorbed| == residual,
- *       diagnostics
- *  5. Reflect + compact    (planetReflectCompactKernel)
- *     → surviving particles are outside the planet sphere after reflection
- *  6. Diffuse reflection   (planetDiffuseCompactKernel), 3D sphere and 2D
- *     circle → speed (all three components) kept, on the surface, outward,
- *     Lambert law: <cos θ> = 2/3, cos²θ uniform (Kolmogorov-Smirnov),
- *     isotropic tangential directions
+ *       diagnostics; then 5077 electrons of two species against the rule
+ *       applied one electron at a time on the host
+ *  5. Reflect + compact    (planetReflectCompactKernel, specular)
+ *     → the survivors, compacted per species, are moved out to 2R - r and
+ *       keep their outward velocity
+ *  6. Diffuse reflection   (planetReflectCompactKernel, diffuse), 3D sphere
+ *     and 2D circle
+ *     → speed (all three components) kept, placed at max(1.05 R, 2R - r),
+ *       outward, Lambert law: <cos θ> = 2/3, cos²θ uniform
+ *       (Kolmogorov-Smirnov), isotropic tangential directions
+ *  7. Specular geometry    (planetReflectCompactKernel, specular), 3D sphere
+ *     and 2D circle
+ *     → placement at max(1.05 R, 2R - r), only an inward normal velocity
+ *       component reversed; an electron at the exact centre leaves along +x
+ *       with a finite velocity (specular and diffuse)
  *
  * Test data (c = 1)
  * ─────────────────
@@ -79,6 +88,59 @@ static int nextPow2(int n) {
   while (p < n)
     p <<= 1;
   return p;
+}
+
+/** Device buffer of n values, not initialised; release with cudaFree. */
+template <typename T> static T* deviceBuffer(size_t n) {
+  T* device;
+  cudaErrChk(cudaMalloc(&device, n * sizeof(T)));
+  return device;
+}
+
+/** Device copy of n host values; release with cudaFree. */
+template <typename T> static T* toDevice(const T* host, size_t n) {
+  T* device = deviceBuffer<T>(n);
+  cudaErrChk(cudaMemcpy(device, host, n * sizeof(T), cudaMemcpyHostToDevice));
+  return device;
+}
+
+/** Host copy of n device values. */
+template <typename T>
+static std::vector<T> fromDevice(const T* device, size_t n) {
+  std::vector<T> host(n);
+  cudaErrChk(
+      cudaMemcpy(host.data(), device, n * sizeof(T), cudaMemcpyDeviceToHost));
+  return host;
+}
+
+/** Sort the n staged (energy, merged index) pairs by descending energy; the
+ *  buffers hold nextPow2(n) entries. */
+static void sortByEnergy(cudaParticleType* d_energy, uint32_t* d_idx, int n) {
+  const int paddedN = nextPow2(n);
+  if (paddedN > n)
+    bitonicPadKernel<<<(paddedN - n + BLOCK - 1) / BLOCK, BLOCK>>>(
+        d_energy, d_idx, n, paddedN);
+  // one thread per compare-and-swap pair
+  for (int k = 2; k <= paddedN; k <<= 1)
+    for (int j = k >> 1; j > 0; j >>= 1)
+      bitonicSortStepKernel<<<(paddedN / 2 + BLOCK - 1) / BLOCK, BLOCK>>>(
+          d_energy, d_idx, j, k, paddedN);
+  cudaErrChk(cudaDeviceSynchronize());
+}
+
+/** The cutoff of one cycle: the warp sums of the sorted electrons, then
+ *  chargeCutoffKernel.  d_warpCharge holds
+ *  planetWarpChargeCount(e.total, e.nSpecies) values. */
+static void runCutoff(const PlanetElectrons& e,
+                      const cudaParticleType* d_energy,
+                      cudaParticleType* d_warpCharge, PlanetBCState* d_state,
+                      cudaParticleType* d_absorbedCharge, int* d_cutoff) {
+  if (e.total > 0)
+    planetWarpChargeKernel<<<(e.total + BLOCK - 1) / BLOCK, BLOCK>>>(
+        e, d_warpCharge);
+  chargeCutoffKernel<<<1, 1>>>(e, d_energy, d_warpCharge, d_state,
+                               d_absorbedCharge, d_cutoff);
+  cudaErrChk(cudaDeviceSynchronize());
 }
 
 /** Reference per-electron kinetic energy (gamma - 1) c^2 / |qom|, computed
@@ -141,13 +203,84 @@ static void setIonChargeCycle(PlanetBCState* d_state, cudaParticleType q) {
                         cudaMemcpyHostToDevice));
 }
 
-/** Diffuse reflection of n electrons placed inside the planet with random
- *  velocities, all survivors (cutoff 0): the speed and, for the 2D circle in
- *  the x-z plane, y are kept; the particles sit on the surface (radius
- *  1.05 R) moving outward; mu = cos θ about the outward normal follows the
- *  Lambert law, <mu> = 2/3 and mu² uniform; the two tangential direction
- *  cosines have mean 0 and mean square 1/4.  The bounds are 5 standard
- *  deviations, and 1.95 / sqrt(n) (0.1 %) for the KS distance. */
+/** Radius at which a reflected particle that ended its push at distance r from
+ *  the centre is placed: max(1.05 R, 2R - r). */
+static double expectedReflectedRadius(double r, double R) {
+  return std::max(1.05 * R, 2.0 * R - r);
+}
+
+/** Distance from the planet centre and outward unit normal at a position; for
+ *  the 2D circle (doSphere == 2) both in the x-z plane. */
+static double planetNormalAt(const SpeciesParticle& p, int doSphere, double ox,
+                             double oy, double oz, double nv[3]) {
+  const double d[3] = {p.get_x() - ox, doSphere == 1 ? p.get_y() - oy : 0.0,
+                       p.get_z() - oz};
+  const double r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+  for (int k = 0; k < 3; k++)
+    nv[k] = d[k] / r;
+  return r;
+}
+
+/** Orthonormal tangent basis (t1, t2) of the unit normal nv, built as in the
+ *  diffuse kernel; for an x-z plane normal t1 or t2 is the y axis. */
+static void tangentBasis(const double nv[3], double t1[3], double t2[3]) {
+  if (std::fabs(nv[0]) < 0.9) {
+    const double l = std::sqrt(nv[1] * nv[1] + nv[2] * nv[2]);
+    t1[0] = 0, t1[1] = nv[2] / l, t1[2] = -nv[1] / l;
+  } else {
+    const double l = std::sqrt(nv[0] * nv[0] + nv[2] * nv[2]);
+    t1[0] = -nv[2] / l, t1[1] = 0, t1[2] = nv[0] / l;
+  }
+  t2[0] = nv[1] * t1[2] - nv[2] * t1[1];
+  t2[1] = nv[2] * t1[0] - nv[0] * t1[2];
+  t2[2] = nv[0] * t1[1] - nv[1] * t1[0];
+}
+
+/** Run the reflection kernel, specular or diffuse, on one electron species
+ *  with every particle surviving (cutoff 0).  Returns the compacted output,
+ *  in the kernel's order. */
+static std::vector<SpeciesParticle>
+reflectAll(const std::vector<SpeciesParticle>& in, bool diffuse, int doSphere,
+           cudaCommonType ox, cudaCommonType oy, cudaCommonType oz,
+           cudaCommonType R) {
+  const int n = (int)in.size();
+  planetArray pa(in.data(), n);
+  planetArray* d_pa = pa.copyToDevice();
+  std::vector<uint32_t> idx(n);
+  std::iota(idx.begin(), idx.end(), 0u);
+  const int zero = 0;
+  planetArray** d_ptrs = toDevice(&d_pa, 1);
+  int* d_offsets = toDevice(&zero, 1);
+  int* d_cutoff = toDevice(&zero, 1);
+  int* d_count = toDevice(&zero, 1);
+  uint32_t* d_idx = toDevice(idx.data(), n);
+  SpeciesParticle* d_out = deviceBuffer<SpeciesParticle>(n);
+  const PlanetElectrons electrons = {d_ptrs, d_offsets, d_idx, 1, n};
+  const PlanetReflection reflection = {ox,       oy,      oz,    R,
+                                       doSphere, diffuse, 12345u};
+  planetReflectCompactKernel<<<(n + BLOCK - 1) / BLOCK, BLOCK>>>(
+      electrons, d_cutoff, reflection, d_out, d_count);
+  cudaErrChk(cudaDeviceSynchronize());
+  std::vector<SpeciesParticle> out = fromDevice(d_out, n);
+  out.resize(fromDevice(d_count, 1)[0]);
+  cudaFree(d_ptrs);
+  cudaFree(d_offsets);
+  cudaFree(d_cutoff);
+  cudaFree(d_count);
+  cudaFree(d_idx);
+  cudaFree(d_out);
+  cudaFree(d_pa);
+  return out;
+}
+
+/** Diffuse reflection of n electrons that ended their push inside the planet
+ *  at distances uniform in [0, R) from the centre, with random velocities,
+ *  all survivors (cutoff 0): the speed and, for the 2D circle in the x-z
+ *  plane, y are kept; the particles sit at max(1.05 R, 2R - r) moving
+ *  outward; mu = cos θ about the outward normal follows the Lambert law,
+ *  <mu> = 2/3 and mu² uniform; the two tangential direction cosines have mean
+ *  0 and mean square 1/4.  The bounds are 5 standard deviations, and
+ *  1.95 / sqrt(n) (0.1 %) for the KS distance. */
 static bool diffuseReflectionCase(int doSphere, cudaCommonType ox,
                                   cudaCommonType oy, cudaCommonType oz,
                                   cudaCommonType R) {
@@ -158,83 +291,39 @@ static bool diffuseReflectionCase(int doSphere, cudaCommonType ox,
   for (int i = 0; i < n; i++) {
     double d[3] = {normal(gen), doSphere == 1 ? normal(gen) : 0.0, normal(gen)};
     const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-    const double depth =
-        0.9 * R * std::uniform_real_distribution<double>()(gen);
+    const double r0 = R * std::uniform_real_distribution<double>()(gen);
     in[i].set(0.1 * normal(gen), 0.1 * normal(gen), 0.1 * normal(gen), -1.0,
-              ox + depth * d[0] / len,
-              doSphere == 1 ? oy + depth * d[1] / len : oy + 0.3,
-              oz + depth * d[2] / len, (cudaPclType_ID)i);
+              ox + r0 * d[0] / len,
+              doSphere == 1 ? oy + r0 * d[1] / len : oy + 0.3,
+              oz + r0 * d[2] / len, (cudaPclType_ID)i);
   }
-  planetArray pa(in.data(), n);
-  planetArray* d_pa = pa.copyToDevice();
-  planetArray** d_ptrs;
-  cudaErrChk(cudaMalloc(&d_ptrs, sizeof(planetArray*)));
-  cudaErrChk(
-      cudaMemcpy(d_ptrs, &d_pa, sizeof(planetArray*), cudaMemcpyHostToDevice));
-  std::vector<uint32_t> idx(n);
-  std::iota(idx.begin(), idx.end(), 0u);
-  const int zero = 0;
-  int *d_offsets, *d_cutoff, *d_count;
-  uint32_t* d_idx;
-  SpeciesParticle* d_out;
-  cudaErrChk(cudaMalloc(&d_offsets, sizeof(int)));
-  cudaErrChk(cudaMalloc(&d_cutoff, sizeof(int)));
-  cudaErrChk(cudaMalloc(&d_count, sizeof(int)));
-  cudaErrChk(cudaMalloc(&d_idx, n * sizeof(uint32_t)));
-  cudaErrChk(cudaMalloc(&d_out, n * sizeof(SpeciesParticle)));
-  cudaErrChk(cudaMemcpy(d_offsets, &zero, sizeof(int), cudaMemcpyHostToDevice));
-  cudaErrChk(cudaMemcpy(d_cutoff, &zero, sizeof(int), cudaMemcpyHostToDevice));
-  cudaErrChk(cudaMemcpy(d_count, &zero, sizeof(int), cudaMemcpyHostToDevice));
-  cudaErrChk(cudaMemcpy(d_idx, idx.data(), n * sizeof(uint32_t),
-                        cudaMemcpyHostToDevice));
-  planetDiffuseCompactKernel<<<(n + BLOCK - 1) / BLOCK, BLOCK>>>(
-      d_ptrs, 1, d_offsets, d_idx, d_cutoff, n, d_out, d_count, ox, oy, oz, R,
-      doSphere, 12345u);
-  cudaErrChk(cudaDeviceSynchronize());
-  int count = 0;
-  std::vector<SpeciesParticle> out(n);
-  cudaErrChk(cudaMemcpy(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost));
-  cudaErrChk(cudaMemcpy(out.data(), d_out, n * sizeof(SpeciesParticle),
-                        cudaMemcpyDeviceToHost));
-  cudaFree(d_ptrs);
-  cudaFree(d_offsets);
-  cudaFree(d_cutoff);
-  cudaFree(d_count);
-  cudaFree(d_idx);
-  cudaFree(d_out);
-  cudaFree(d_pa);
+  const std::vector<SpeciesParticle> out =
+      reflectAll(in, true, doSphere, ox, oy, oz, R);
+  const int count = (int)out.size();
 
-  double errSpeed = 0, errRadius = 0, errY = 0, minMu = 1;
+  double errSpeed = 0, errRadius = 0, errRay = 0, errY = 0, minMu = 1;
   double sMu = 0, sT1 = 0, sT2 = 0, sT1q = 0, sT2q = 0;
   std::vector<double> mu2;
   mu2.reserve(n);
   for (int i = 0; i < count; i++) {
     const SpeciesParticle& p = out[i];
     const SpeciesParticle& q = in[p.get_id()];
-    double d[3] = {p.get_x() - ox, doSphere == 1 ? p.get_y() - oy : 0.0,
-                   p.get_z() - oz};
-    const double r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-    const double nv[3] = {d[0] / r, d[1] / r, d[2] / r};
+    double nv[3], nq[3];
+    const double r = planetNormalAt(p, doSphere, ox, oy, oz, nv);
+    const double rq = planetNormalAt(q, doSphere, ox, oy, oz, nq);
     const double v[3] = {p.get_u(), p.get_v(), p.get_w()};
     const double s = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     const double s0 = std::sqrt(q.get_u() * q.get_u() + q.get_v() * q.get_v() +
                                 q.get_w() * q.get_w());
     errSpeed = std::max(errSpeed, std::fabs(s - s0) / s0);
-    errRadius = std::max(errRadius, std::fabs(r - 1.05 * R) / R);
+    errRadius =
+        std::max(errRadius, std::fabs(r - expectedReflectedRadius(rq, R)) / R);
+    for (int k = 0; k < 3; k++)
+      errRay = std::max(errRay, std::fabs(nv[k] - nq[k]));
     if (doSphere == 2)
       errY = std::max(errY, std::fabs(p.get_y() - q.get_y()));
-    // tangent basis (t1, t2) of the normal
-    double t1[3];
-    if (std::fabs(nv[0]) < 0.9) {
-      const double l = std::sqrt(nv[1] * nv[1] + nv[2] * nv[2]);
-      t1[0] = 0, t1[1] = nv[2] / l, t1[2] = -nv[1] / l;
-    } else {
-      const double l = std::sqrt(nv[0] * nv[0] + nv[2] * nv[2]);
-      t1[0] = -nv[2] / l, t1[1] = 0, t1[2] = nv[0] / l;
-    }
-    const double t2[3] = {nv[1] * t1[2] - nv[2] * t1[1],
-                          nv[2] * t1[0] - nv[0] * t1[2],
-                          nv[0] * t1[1] - nv[1] * t1[0]};
+    double t1[3], t2[3];
+    tangentBasis(nv, t1, t2);
     const double mu = (v[0] * nv[0] + v[1] * nv[1] + v[2] * nv[2]) / s;
     const double e1 = (v[0] * t1[0] + v[1] * t1[1] + v[2] * t1[2]) / s;
     const double e2 = (v[0] * t2[0] + v[1] * t2[1] + v[2] * t2[2]) / s;
@@ -258,14 +347,247 @@ static bool diffuseReflectionCase(int doSphere, cudaCommonType ox,
   std::cout << "  " << geom << ": <mu> = " << meanMu << " (2/3), KS " << ks
             << ", tangential means " << sT1 / N << " " << sT2 / N
             << ", mean squares " << sT1q / N << " " << sT2q / N
-            << " (1/4), speed error " << errSpeed << "\n";
+            << " (1/4), speed error " << errSpeed << ", radius error "
+            << errRadius << ", ray error " << errRay << ", min mu " << minMu
+            << "\n";
   bool ok = count == n;
-  ok &= errSpeed < 1e-12 && errRadius < 1e-12 && errY == 0.0 && minMu >= 0.0;
+  ok &= errSpeed < 1e-12 && errRadius < 1e-12 && errRay < 1e-12 &&
+        errY == 0.0 && minMu > 0.0;
   ok &= std::fabs(meanMu - 2.0 / 3.0) < 5 * sigMu;
   ok &= ks < 1.95 / std::sqrt(N);
   ok &= std::fabs(sT1 / N) < 5 * sigT && std::fabs(sT2 / N) < 5 * sigT;
   ok &= std::fabs(sT1q / N - 0.25) < 5 * sigTq &&
         std::fabs(sT2q / N - 0.25) < 5 * sigTq;
+  return ok;
+}
+
+/** Specular reflection geometry for one geometry.  Electrons end their push
+ *  on five rays (in 2D in the x-z plane, y offsets kept) at r = 0.999, 0.97 R
+ *  (placed at 1.05 R) and 0.9, 0.5, 0.05 R (placed at 2R - r), each with an
+ *  inward, an outward and a tangential velocity.  Checks: the particle is on
+ *  the ray of its end point at max(1.05 R, 2R - r), 2D keeps y, |v| and the
+ *  tangential component are kept, v'·n = |v·n|, and an outward velocity is
+ *  unchanged bit for bit. */
+static bool specularGeometryCase(int doSphere, cudaCommonType ox,
+                                 cudaCommonType oy, cudaCommonType oz,
+                                 cudaCommonType R) {
+  const double rays3D[][3] = {
+      {1, 0, 0}, {0, 0, -1}, {0.6, -0.8, 0}, {1, 2, -2}, {-2, 3, 6}};
+  const double rays2D[][3] = {
+      {1, 0, 0}, {0, 0, -1}, {0.6, 0, 0.8}, {-0.8, 0, -0.6}, {-1, 0, 3}};
+  const double radii[] = {0.999, 0.97, 0.9, 0.5, 0.05}; // r / R
+  // velocity components along (n, t1, t2)
+  enum { INWARD, OUTWARD, TANGENTIAL, NUM_KINDS };
+  const double velNT[NUM_KINDS][3] = {
+      {-0.3, 0.2, -0.1}, {0.25, -0.15, 0.05}, {0, 0.3, 0.1}};
+
+  std::vector<SpeciesParticle> in;
+  std::vector<int> kind;
+  for (int a = 0; a < 5; a++) {
+    const double* ray = doSphere == 1 ? rays3D[a] : rays2D[a];
+    const double len =
+        std::sqrt(ray[0] * ray[0] + ray[1] * ray[1] + ray[2] * ray[2]);
+    const double nv[3] = {ray[0] / len, ray[1] / len, ray[2] / len};
+    double t1[3], t2[3];
+    tangentBasis(nv, t1, t2);
+    for (double rr : radii) {
+      for (int k = 0; k < NUM_KINDS; k++) {
+        double v[3];
+        for (int c = 0; c < 3; c++)
+          v[c] =
+              velNT[k][0] * nv[c] + velNT[k][1] * t1[c] + velNT[k][2] * t2[c];
+        const int id = (int)in.size();
+        const double y =
+            doSphere == 1 ? oy + rr * R * nv[1] : oy + 0.3 + 0.01 * id;
+        SpeciesParticle p;
+        p.set(v[0], v[1], v[2], -1.0, ox + rr * R * nv[0], y,
+              oz + rr * R * nv[2], (cudaPclType_ID)id);
+        in.push_back(p);
+        kind.push_back(k);
+      }
+    }
+  }
+  const std::vector<SpeciesParticle> out =
+      reflectAll(in, false, doSphere, ox, oy, oz, R);
+
+  int nOutwardChanged = 0;
+  double errRadius = 0, errRay = 0, errY = 0, errSpeed = 0;
+  double errTangential = 0, errNormal = 0;
+  for (const SpeciesParticle& p : out) {
+    const SpeciesParticle& q = in[p.get_id()];
+    double nv[3], nq[3];
+    const double r = planetNormalAt(p, doSphere, ox, oy, oz, nv);
+    const double rq = planetNormalAt(q, doSphere, ox, oy, oz, nq);
+    errRadius =
+        std::max(errRadius, std::fabs(r - expectedReflectedRadius(rq, R)) / R);
+    for (int c = 0; c < 3; c++)
+      errRay = std::max(errRay, std::fabs(nv[c] - nq[c]));
+    if (doSphere == 2)
+      errY = std::max(errY, std::fabs(p.get_y() - q.get_y()));
+    const double v[3] = {p.get_u(), p.get_v(), p.get_w()};
+    const double v0[3] = {q.get_u(), q.get_v(), q.get_w()};
+    const double s = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    const double s0 = std::sqrt(v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2]);
+    errSpeed = std::max(errSpeed, std::fabs(s - s0) / s0);
+    const double vn = v[0] * nq[0] + v[1] * nq[1] + v[2] * nq[2];
+    const double vn0 = v0[0] * nq[0] + v0[1] * nq[1] + v0[2] * nq[2];
+    errNormal = std::max(errNormal, std::fabs(vn - std::fabs(vn0)) / s0);
+    for (int c = 0; c < 3; c++)
+      errTangential =
+          std::max(errTangential,
+                   std::fabs((v[c] - vn * nq[c]) - (v0[c] - vn0 * nq[c])) / s0);
+    if (kind[p.get_id()] == OUTWARD &&
+        !(v[0] == v0[0] && v[1] == v0[1] && v[2] == v0[2]))
+      nOutwardChanged++;
+  }
+
+  std::cout << "  " << (doSphere == 1 ? "3D sphere" : "2D circle") << ": "
+            << out.size() << " of " << in.size() << " reflected, radius error "
+            << errRadius << ", ray error " << errRay << ", speed error "
+            << errSpeed << ", normal error " << errNormal
+            << ", tangential error " << errTangential
+            << ", outward velocities changed " << nOutwardChanged << "\n";
+  return out.size() == in.size() && errRadius < 1e-12 && errRay < 1e-12 &&
+         errY == 0.0 && errSpeed < 1e-12 && errNormal < 1e-12 &&
+         errTangential < 1e-12 && nOutwardChanged == 0;
+}
+
+/** An electron exactly at the planet centre: either rule places it at
+ *  origin + 2R along +x (y kept in 2D) with a finite velocity of the same
+ *  speed. */
+static bool centreCase(bool diffuse, int doSphere, cudaCommonType ox,
+                       cudaCommonType oy, cudaCommonType oz, cudaCommonType R) {
+  SpeciesParticle p;
+  p.set(0.1, -0.2, 0.3, -1.0, ox, oy, oz, (cudaPclType_ID)0);
+  const std::vector<SpeciesParticle> out =
+      reflectAll({p}, diffuse, doSphere, ox, oy, oz, R);
+  if (out.size() != 1)
+    return false;
+  const SpeciesParticle& q = out[0];
+  const double s = std::sqrt(q.get_u() * q.get_u() + q.get_v() * q.get_v() +
+                             q.get_w() * q.get_w());
+  return q.get_x() == ox + 2 * R && q.get_y() == oy && q.get_z() == oz &&
+         std::isfinite(s) && std::fabs(s - std::sqrt(0.14)) < 1e-12;
+}
+
+/** The sort and the cutoff over many electrons: 5077 electrons of two
+ *  species behind an empty leading one, with random energies and weights, so
+ *  the sort spans several blocks and the cutoff steps over many warps and
+ *  ends in a partial one.  The sorted energies must be descending and hold
+ *  every electron once.  For targets from below the first electron to beyond
+ *  all of them, and a negative one, the cutoff index must equal that of the
+ *  rule applied one electron at a time on the host, and the carried charge
+ *  and the absorbed charge per species must match it to round-off. */
+static bool manyElectronCutoffCase() {
+  const int nSpecies = 3; // species 0 has no hits
+  const int counts[nSpecies] = {0, 3000, 2077};
+  const int offsets[nSpecies] = {0, 0, 3000};
+  const int n = counts[1] + counts[2];
+  std::mt19937_64 gen(41);
+  std::uniform_real_distribution<double> uniform;
+  std::normal_distribution<double> normal;
+
+  std::vector<SpeciesParticle> pcls[nSpecies];
+  planetArray* h_ptrs[nSpecies];
+  std::vector<planetArray> arrays;
+  arrays.reserve(nSpecies);
+  for (int s = 0; s < nSpecies; s++) {
+    pcls[s].resize(std::max(counts[s], 1));
+    for (int i = 0; i < counts[s]; i++)
+      pcls[s][i].set(0.1 * normal(gen), 0.1 * normal(gen), 0.1 * normal(gen),
+                     -s * (0.5 + uniform(gen)), 5.3, 5.0, 5.0,
+                     (cudaPclType_ID)i);
+    arrays.emplace_back(pcls[s].data(), counts[s]);
+    h_ptrs[s] = arrays.back().copyToDevice();
+  }
+  planetArray** d_ptrs = toDevice(h_ptrs, nSpecies);
+  int* d_offsets = toDevice(offsets, nSpecies);
+  int* d_cutoff = deviceBuffer<int>(1);
+  cudaParticleType* d_energy = deviceBuffer<cudaParticleType>(nextPow2(n));
+  uint32_t* d_idx = deviceBuffer<uint32_t>(nextPow2(n));
+  cudaParticleType* d_absorbed = deviceBuffer<cudaParticleType>(nSpecies);
+  PlanetBCState* d_state = deviceBuffer<PlanetBCState>(1);
+  const PlanetElectrons electrons = {d_ptrs, d_offsets, d_idx, nSpecies, n};
+  cudaParticleType* d_warpCharge = deviceBuffer<cudaParticleType>(
+      planetWarpChargeCount(electrons.total, electrons.nSpecies));
+
+  for (int s = 1; s < nSpecies; s++)
+    planetEnergyKernel<<<(counts[s] + BLOCK - 1) / BLOCK, BLOCK>>>(
+        h_ptrs[s], counts[s], -1.0, 1.0, d_energy, d_idx, offsets[s], nullptr);
+  sortByEnergy(d_energy, d_idx, n);
+  const std::vector<uint32_t> sorted = fromDevice(d_idx, n);
+  const std::vector<cudaParticleType> sortedEnergy = fromDevice(d_energy, n);
+  // the sort over several blocks: descending energies, every electron once
+  std::vector<uint32_t> seen(sorted);
+  std::sort(seen.begin(), seen.end());
+  bool ok = true;
+  for (int i = 0; i < n; i++)
+    ok &= seen[i] == (uint32_t)i &&
+          (i == 0 || sortedEnergy[i] <= sortedEnergy[i - 1]);
+  std::cout << "  sorted order of " << n << " electrons "
+            << (ok ? "is" : "is NOT")
+            << " descending and holds every electron once\n";
+  auto chargeOf = [&](uint32_t gidx, int& species) {
+    species = gidx < (uint32_t)offsets[2] ? 1 : 2;
+    return std::fabs(pcls[species][gidx - offsets[species]].get_q());
+  };
+  double total = 0;
+  int species;
+  for (int i = 0; i < n; i++)
+    total += chargeOf(sorted[i], species);
+
+  const double first = chargeOf(sorted[0], species);
+  const double targets[] = {-1.0,        0.0,           0.4 * first,
+                            0.6 * first, 0.01 * total,  0.37 * total,
+                            0.5 * total, 0.999 * total, 2.0 * total};
+  for (const double target : targets) {
+    PlanetBCState st = {};
+    st.ionChargeCycle = target;
+    cudaErrChk(cudaMemcpy(d_state, &st, sizeof(st), cudaMemcpyHostToDevice));
+    cudaErrChk(cudaMemset(d_absorbed, 0, nSpecies * sizeof(cudaParticleType)));
+    runCutoff(electrons, d_energy, d_warpCharge, d_state, d_absorbed, d_cutoff);
+
+    // the rule, one electron at a time
+    int expectedCutoff = 0;
+    double absorbed = 0, absorbedSpecies[nSpecies] = {0, 0, 0};
+    for (; expectedCutoff < n; expectedCutoff++) {
+      const double absq = chargeOf(sorted[expectedCutoff], species);
+      if (absorbed + 0.5 * absq >= target)
+        break;
+      absorbed += absq;
+      absorbedSpecies[species] += absq;
+    }
+
+    const int cutoff = fromDevice(d_cutoff, 1)[0];
+    const std::vector<cudaParticleType> h_absorbed =
+        fromDevice(d_absorbed, nSpecies);
+    st = readState(d_state);
+    // the sums differ from the host's by their order: round-off of the total
+    const double tol = 1e-12 * total;
+    const bool pass =
+        cutoff == expectedCutoff &&
+        std::fabs(st.residualCharge - (target - absorbed)) <= tol &&
+        h_absorbed[0] == 0 &&
+        std::fabs(h_absorbed[1] - absorbedSpecies[1]) <= tol &&
+        std::fabs(h_absorbed[2] - absorbedSpecies[2]) <= tol &&
+        st.electronLimitedCycles == (target > total ? 1u : 0u);
+    std::cout << "  target " << std::setw(12) << target << " → cutoff "
+              << std::setw(4) << cutoff << " (expected " << expectedCutoff
+              << "), residual " << st.residualCharge << (pass ? "" : "  ***")
+              << "\n";
+    ok &= pass;
+  }
+
+  cudaFree(d_ptrs);
+  cudaFree(d_offsets);
+  cudaFree(d_cutoff);
+  cudaFree(d_energy);
+  cudaFree(d_idx);
+  cudaFree(d_warpCharge);
+  cudaFree(d_absorbed);
+  cudaFree(d_state);
+  for (int s = 0; s < nSpecies; s++)
+    cudaFree(h_ptrs[s]);
   return ok;
 }
 
@@ -493,16 +815,7 @@ static int runTest() {
   //  TEST 3: Bitonic sort (descending by energy)
   // ════════════════════════════════════════════════════════════
   printSeparator("TEST 3 — Bitonic sort (descending energy)");
-  if (paddedN > totalElecPlanet) {
-    bitonicPadKernel<<<(paddedN - totalElecPlanet + BLOCK - 1) / BLOCK,
-                       BLOCK>>>(d_energyBuf, d_globalIdxBuf, totalElecPlanet,
-                                paddedN);
-  }
-  for (int k = 2; k <= paddedN; k <<= 1)
-    for (int j = k >> 1; j > 0; j >>= 1)
-      bitonicSortStepKernel<<<(paddedN + BLOCK - 1) / BLOCK, BLOCK>>>(
-          d_energyBuf, d_globalIdxBuf, j, k, paddedN);
-  cudaErrChk(cudaDeviceSynchronize());
+  sortByEnergy(d_energyBuf, d_globalIdxBuf, totalElecPlanet);
 
   cudaErrChk(cudaMemcpy(h_energy.data(), d_energyBuf,
                         totalElecPlanet * sizeof(cudaParticleType),
@@ -532,6 +845,13 @@ static int runTest() {
 
   int* d_cutoff;
   cudaErrChk(cudaMalloc(&d_cutoff, sizeof(int)));
+  PlanetElectrons electrons = {d_elecPtrs, d_speciesOffsets, d_globalIdxBuf,
+                               nElecSpecies, totalElecPlanet};
+  cudaParticleType* d_warpCharge;
+  cudaErrChk(
+      cudaMalloc(&d_warpCharge,
+                 planetWarpChargeCount(electrons.total, electrons.nSpecies) *
+                     sizeof(cudaParticleType)));
 
   struct CycleCase {
     const char* label;
@@ -554,10 +874,9 @@ static int runTest() {
       setIonChargeCycle(d_state, cc.ionCharge);
     totalIon += readState(d_state).ionChargeCycle;
 
-    chargeCutoffKernel<<<1, 1>>>(d_elecPtrs, nElecSpecies, d_speciesOffsets,
-                                 d_globalIdxBuf, d_energyBuf, cc.nElec, d_state,
-                                 d_diag + ns, d_cutoff);
-    cudaErrChk(cudaDeviceSynchronize());
+    electrons.total = cc.nElec;
+    runCutoff(electrons, d_energyBuf, d_warpCharge, d_state, d_diag + ns,
+              d_cutoff);
     cudaErrChk(
         cudaMemcpy(&h_cutoff, d_cutoff, sizeof(int), cudaMemcpyDeviceToHost));
     const PlanetBCState st = readState(d_state);
@@ -612,6 +931,13 @@ static int runTest() {
           "cutoff-energy and electron-limited diagnostics", allPassed);
   }
 
+  std::cout << "  5077 electrons of two species, " << WARP_SIZE
+            << " per warp:\n";
+  check(manyElectronCutoffCase(),
+        "many electrons: sorted by descending energy; cutoff, carried and "
+        "absorbed charge match the rule applied one electron at a time",
+        allPassed);
+
   // ════════════════════════════════════════════════════════════
   //  TEST 5: Reflect + compact (cutoff from cycle 4: 2)
   // ════════════════════════════════════════════════════════════
@@ -627,10 +953,11 @@ static int runTest() {
   cudaErrChk(cudaMalloc(&d_survivorCounters, nElecSpecies * sizeof(int)));
   cudaErrChk(cudaMemset(d_survivorCounters, 0, nElecSpecies * sizeof(int)));
 
+  electrons.total = totalElecPlanet;
+  const PlanetReflection specular = {originX,  originY, originZ, sphereRadius,
+                                     doSphere, false,   0u};
   planetReflectCompactKernel<<<(totalElecPlanet + BLOCK - 1) / BLOCK, BLOCK>>>(
-      d_elecPtrs, nElecSpecies, d_speciesOffsets, d_globalIdxBuf, d_cutoff,
-      totalElecPlanet, d_outputBuf, d_survivorCounters, originX, originY,
-      originZ, sphereRadius, doSphere);
+      electrons, d_cutoff, specular, d_outputBuf, d_survivorCounters);
   cudaErrChk(cudaDeviceSynchronize());
 
   int h_survivorCounters[2] = {0, 0};
@@ -655,22 +982,49 @@ static int runTest() {
       const cudaCommonType dz = p.get_z() - originZ;
       const cudaCommonType r = sqrt(dx * dx + dy * dy + dz * dz);
       printParticle(s == 0 ? "reflected A" : "reflected B", i, p);
-      // Outside the sphere, and u reversed along the (1,0,0) normal.
-      reflectPass &= r >= sphereRadius && p.get_u() < 0.0;
+      // Ended at r = 0.3 R moving along the outward normal (1,0,0): placed at
+      // 2R - r = 1.7 R on that ray, velocity unchanged.
+      const SpeciesParticle& q =
+          s == 0 ? elec0Pcls[p.get_id()] : elec1Pcls[p.get_id()];
+      reflectPass &= std::fabs(r - 1.7 * sphereRadius) < 1e-12 && dx > 0.0 &&
+                     p.get_u() == q.get_u() && p.get_v() == 0.0 &&
+                     p.get_w() == 0.0;
     }
   }
-  check(reflectPass, "survivors outside the sphere with u reversed", allPassed);
+  check(reflectPass,
+        "survivors at 2R - r on their ray, outward velocity unchanged",
+        allPassed);
 
   // ════════════════════════════════════════════════════════════
   //  TEST 6: Diffuse reflection (Lambert law), 3D sphere and 2D circle
   // ════════════════════════════════════════════════════════════
   printSeparator("TEST 6 — Diffuse reflection");
   check(diffuseReflectionCase(1, originX, originY, originZ, sphereRadius),
-        "3D sphere: speed kept, on the surface, outward, Lambert law",
+        "3D sphere: speed kept, at max(1.05 R, 2R - r), outward, Lambert law",
         allPassed);
   check(diffuseReflectionCase(2, originX, originY, originZ, sphereRadius),
-        "2D circle: speed and y kept, on the surface, outward, Lambert law",
+        "2D circle: speed and y kept, at max(1.05 R, 2R - r), outward, "
+        "Lambert law",
         allPassed);
+
+  // ════════════════════════════════════════════════════════════
+  //  TEST 7: Specular reflection geometry; an electron at the centre
+  // ════════════════════════════════════════════════════════════
+  printSeparator("TEST 7 — Specular geometry, electron at the centre");
+  for (int geometry = 1; geometry <= 2; geometry++) {
+    const std::string geom = geometry == 1 ? "3D sphere" : "2D circle";
+    check(
+        specularGeometryCase(geometry, originX, originY, originZ, sphereRadius),
+        geom + ": at max(1.05 R, 2R - r), v'.n = |v.n|, |v| and tangential "
+               "kept, outward velocity unchanged",
+        allPassed);
+    for (const bool diffuse : {false, true})
+      check(centreCase(diffuse, geometry, originX, originY, originZ,
+                       sphereRadius),
+            geom + (diffuse ? ", diffuse" : ", specular") +
+                ": an electron at the centre leaves along +x, finite velocity",
+            allPassed);
+  }
 
   // ════════════════════════════════════════════════════════════
   //  Summary
@@ -685,6 +1039,7 @@ static int runTest() {
   cudaFree(d_energyBuf);
   cudaFree(d_globalIdxBuf);
   cudaFree(d_cutoff);
+  cudaFree(d_warpCharge);
   cudaFree(d_outputBuf);
   cudaFree(d_survivorCounters);
   cudaFree(d_speciesOffsets);

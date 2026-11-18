@@ -114,26 +114,13 @@ void gpuPIdotSpecies(cudaSolverType* PIX, cudaSolverType* PIY,
                      cudaStream_t stream = 0);
 
 // =========================================================================
-//  ConstantChargePlanet kernels
+//  ConstantChargePlanet kernel
 // =========================================================================
 
-/** Set rhons = val inside sphere of radius R. */
-void gpuConstantChargePlanetKernel(cudaSolverType* rhons, cudaSolverType val,
-                                   cudaSolverType R, cudaSolverType xc,
-                                   cudaSolverType yc, cudaSolverType zc,
-                                   cudaSolverType xStart, cudaSolverType yStart,
-                                   cudaSolverType zStart, cudaSolverType dx,
-                                   cudaSolverType dy, cudaSolverType dz,
-                                   int nxn, int nyn, int nzn,
-                                   cudaStream_t stream = 0);
-
-/** 2D version: set rhons inside circle in XZ plane. */
-void gpuConstantChargePlanet2DKernel(cudaSolverType* rhons, cudaSolverType val,
-                                     cudaSolverType R, cudaSolverType xc,
-                                     cudaSolverType zc, cudaSolverType xStart,
-                                     cudaSolverType zStart, cudaSolverType dx,
-                                     cudaSolverType dz, int nxn, int nyn,
-                                     int nzn, cudaStream_t stream = 0);
+/** field[nodes[n]] = val for n < count (flat node indices).  Sets the planet
+ *  charge density on the host-built planet node list. */
+void gpuSetNodesKernel(cudaSolverType* field, const int* nodes, int count,
+                       cudaSolverType val, cudaStream_t stream = 0);
 
 // =========================================================================
 //  Center-to-center 7-point Laplacian (not used currently: the cleaning

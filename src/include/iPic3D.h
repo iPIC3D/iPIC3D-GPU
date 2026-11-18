@@ -458,15 +458,17 @@ private:
   int* planetPclCount; // per species, planet particle count this cycle
 
   // Cross-species planet processing buffers (device)
-  cudaParticleType* planetEnergyBuf;  // merged electron energies
-  uint32_t* planetGlobalIdxBuf;       // encodes species + local index
-  PlanetBCState* planetBCStateDevice; // carried charge + scalar diagnostics
+  cudaParticleType* planetEnergyBuf;     // merged electron energies
+  uint32_t* planetGlobalIdxBuf;          // encodes species + local index
+  cudaParticleType* planetWarpChargeBuf; // |q| sums per warp of the sorted
+                                         // electrons and electron species
+  PlanetBCState* planetBCStateDevice;    // carried charge + scalar diagnostics
   cudaEvent_t planetDoneEvent; // recorded on planetStream when its work is not
                                // followed by a host sync
   int* planetCutoffDevice;     // single-element device buffer for cutoff index
                                // output
-  planetArray** planetArrayCUDAPtrDevice; // device array of device pointers
-                                          // (for chargeCutoffKernel)
+  planetArray** planetArrayCUDAPtrDevice; // device array of the electron
+                                          // species' device pointers, set once
   int* planetElecOffsetsDevice; // device array of per-electron-species offsets
   int planetBufCapacity;        // current allocation size of merged buffers
   int planetElecSpeciesCount;   // number of electron species
@@ -474,11 +476,10 @@ private:
 
   // Persistent host buffers for processPlanetParticles (avoid per-call
   // allocation)
-  int* planetElecOffsets;      // [planetElecSpeciesCount] species offsets into
-                               // merged buffers
-  planetArray** planetTmpPtrs; // [planetElecSpeciesCount] temp pointer array
-  int* planetSurvivorCount;    // [planetElecSpeciesCount] survivor counts per
-                               // electron species (host)
+  int* planetElecOffsets;   // [planetElecSpeciesCount] species offsets into
+                            // merged buffers
+  int* planetSurvivorCount; // [planetElecSpeciesCount] survivor counts per
+                            // electron species (host)
   int* planetSurvivorCountDevice; // [planetElecSpeciesCount] per-species atomic
                                   // counters (device)
   SpeciesParticle*

@@ -288,8 +288,11 @@ template <typename T> __device__ __forceinline__ T lap27StepSign(T v, int neg) {
 
 // The intrinsics fix the roundings on every compiler: step 1 fuses coeffB b
 // and rounds the operator term, step N rounds fB b, then fuses fY y, the
-// operator term and fZ z.  coeffL = -coeffAb and fL = -fAy are the
-// coefficients of L y.
+// operator term and fZ z.  On HIP __dmul_rn and __dadd_rn are a plain * and
+// +, which the compiler may contract with an adjacent + or * into an FMA;
+// here every __dmul_rn feeds an __fma_rn or a store and every __dadd_rn adds
+// a loaded value to a class sum, so each stays rounded on its own.
+// coeffL = -coeffAb and fL = -fAy are the coefficients of L y.
 template <int FLAT, int FACES, typename T>
 __global__ void k_chebyshevLap27Step1(T* __restrict__ out, T* __restrict__ z,
                                       const T* __restrict__ b, Lap27Step s,

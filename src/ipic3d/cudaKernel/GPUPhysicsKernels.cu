@@ -269,78 +269,25 @@ void gpuPIdotSpecies(cudaSolverType* PIX, cudaSolverType* PIY,
 }
 
 // =========================================================================
-//  ConstantChargePlanet kernels
+//  ConstantChargePlanet kernel
 // =========================================================================
 
-/** Set rhons = val inside sphere of radius R centred at (xc,yc,zc). */
+/** field[nodes[n]] = val for n < count (flat node indices). */
 template <typename T>
-__global__ void k_constantChargePlanet(T* rhons, T val, T R2, T xc, T yc, T zc,
-                                       T xStart, T yStart, T zStart, T dx, T dy,
-                                       T dz, int nxn, int nyn, int nzn) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int ni = nxn - 1, nj = nyn - 1, nk = nzn - 1;
-  if (tid >= ni * nj * nk)
-    return;
-  int i = tid / (nj * nk) + 1;
-  int rem = tid % (nj * nk);
-  int j = rem / nk + 1;
-  int k = rem % nk + 1;
-  T xd = xStart + (T)(i - 1) * dx - xc;
-  T yd = yStart + (T)(j - 1) * dy - yc;
-  T zd = zStart + (T)(k - 1) * dz - zc;
-  if (xd * xd + yd * yd + zd * zd <= R2)
-    rhons[(i * nyn + j) * nzn + k] = val;
+__global__ void k_setNodes(T* field, const int* __restrict__ nodes, int count,
+                           T val) {
+  const int n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n < count)
+    field[nodes[n]] = val;
 }
 
-void gpuConstantChargePlanetKernel(cudaSolverType* rhons, cudaSolverType val,
-                                   cudaSolverType R, cudaSolverType xc,
-                                   cudaSolverType yc, cudaSolverType zc,
-                                   cudaSolverType xStart, cudaSolverType yStart,
-                                   cudaSolverType zStart, cudaSolverType dx,
-                                   cudaSolverType dy, cudaSolverType dz,
-                                   int nxn, int nyn, int nzn,
-                                   cudaStream_t stream) {
-  int total = (nxn - 1) * (nyn - 1) * (nzn - 1);
-  if (total <= 0)
+void gpuSetNodesKernel(cudaSolverType* field, const int* nodes, int count,
+                       cudaSolverType val, cudaStream_t stream) {
+  if (count <= 0)
     return;
   int blk = 256;
-  k_constantChargePlanet<<<(total + blk - 1) / blk, blk, 0, stream>>>(
-      rhons, val, R * R, xc, yc, zc, xStart, yStart, zStart, dx, dy, dz, nxn,
-      nyn, nzn);
-  cudaErrChk(cudaGetLastError());
-}
-
-/** 2D version: set rhons inside circle in XZ plane (nyn==4). */
-template <typename T>
-__global__ void k_constantChargePlanet2D(T* rhons, T val, T R2, T xc, T zc,
-                                         T xStart, T zStart, T dx, T dz,
-                                         int nxn, int nyn, int nzn) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int ni = nxn - 1, nk = nzn - 1;
-  if (tid >= ni * nk)
-    return;
-  int i = tid / nk + 1;
-  int k = tid % nk + 1;
-  T xd = xStart + (T)(i - 1) * dx - xc;
-  T zd = zStart + (T)(k - 1) * dz - zc;
-  if (xd * xd + zd * zd <= R2) {
-    rhons[(i * nyn + 1) * nzn + k] = val;
-    rhons[(i * nyn + 2) * nzn + k] = val;
-  }
-}
-
-void gpuConstantChargePlanet2DKernel(cudaSolverType* rhons, cudaSolverType val,
-                                     cudaSolverType R, cudaSolverType xc,
-                                     cudaSolverType zc, cudaSolverType xStart,
-                                     cudaSolverType zStart, cudaSolverType dx,
-                                     cudaSolverType dz, int nxn, int nyn,
-                                     int nzn, cudaStream_t stream) {
-  int total = (nxn - 1) * (nzn - 1);
-  if (total <= 0)
-    return;
-  int blk = 256;
-  k_constantChargePlanet2D<<<(total + blk - 1) / blk, blk, 0, stream>>>(
-      rhons, val, R * R, xc, zc, xStart, zStart, dx, dz, nxn, nyn, nzn);
+  k_setNodes<<<(count + blk - 1) / blk, blk, 0, stream>>>(field, nodes, count,
+                                                          val);
   cudaErrChk(cudaGetLastError());
 }
 

@@ -203,24 +203,10 @@ public:
   // ======= Host-side moment helpers (initialization, restart, output) =======
 
   /**
-   * @brief Impose a constant charge inside the 3D planet sphere.
-   *
-   * @param R Planet radius.
-   * @param x_center Planet-center x coordinate.
-   * @param y_center Planet-center y coordinate.
-   * @param z_center Planet-center z coordinate.
+   * @brief Constant-charge planet (Dipole, Dipole2D): the species densities
+   *        set to planetChargeDensity on the nodes of planetNodes.
    */
-  void ConstantChargePlanet(double R, double x_center, double y_center,
-                            double z_center);
-  /**
-   * @brief Impose a constant charge inside the 2D XZ-plane planet mask.
-   *
-   * @param R Planet radius.
-   * @param x_center Planet-center x coordinate.
-   * @param z_center Planet-center z coordinate.
-   */
-  void ConstantChargePlanet2DPlaneXZ(double R, double x_center,
-                                     double z_center);
+  void ConstantChargePlanet();
   /** @brief Impose a constant charge in the open-boundary layers. */
   void ConstantChargeOpenBC();
   /** @brief Zero all density-related fields (used by the unit tests only). */
@@ -768,12 +754,9 @@ public:
   void gpuInterpDensitiesN2C();
 
   // ---- GPU Solver: ConstantChargePlanet ----
-  /** GPU ConstantChargePlanet: set rhons inside sphere. */
-  void gpuConstantChargePlanet(double R, double x_center, double y_center,
-                               double z_center);
-  /** GPU ConstantChargePlanet 2D: set rhons inside circle in XZ plane. */
-  void gpuConstantChargePlanet2DPlaneXZ(double R, double x_center,
-                                        double z_center);
+  /** GPU ConstantChargePlanet (Dipole, Dipole2D): rhons = planetChargeDensity
+   *  on the planet nodes (d_planetNodes_, the host planetNodes list). */
+  void gpuConstantChargePlanet();
 
   // ---- GPU Solver: div(E) and div(B) cleaning (GPUCleaning.cuh) ----
   /** 7-point Laplacian image on the centres (with communication).  Not used
@@ -922,6 +905,24 @@ public: // accessors
   const VirtualTopology3D& get_vct() const { return _vct; }
 
 private: // initialization helpers
+  /** Whether the case has a planet (Dipole, Dipole2D). */
+  bool hasPlanet() const;
+  /** Whether node (i, j, k) is in the planet: within Planet_radius of the
+   *  planet centre, the surface included; planeXZ (Dipole2D) measures the
+   *  distance in the x-z plane.  The node position comes from its global
+   *  index (Grid3DCU::getGlobalXN), so every decomposition gives the same
+   *  answer.  The one mask of the external dipole field (zero in the planet)
+   *  and of the planet charge (planetNodes). */
+  bool isPlanetNode(int i, int j, int k, bool planeXZ) const;
+  /** Flat indices (i * nyn + j) * nzn + k of the local planet nodes
+   *  (isPlanetNode), ghosts included.  A ghost gets the answer of the
+   *  neighbour's node it copies, except across a periodic face, whose ghost
+   *  coordinates are not wrapped.  The host and the GPU constant-charge
+   *  models both use this list, so they set the same nodes whatever the
+   *  device compiler contracts into multiply-adds. */
+  std::vector<int> planetNodes() const;
+  /** sign(q) rhoINIT / 4 pi of species is: its planet charge density. */
+  double planetChargeDensity(int is) const;
   /** Zero the species currents Jxs/Jys/Jzs and pressures p**sn. With
    *  fromAmpere, set the species currents to shares of J = (c/4pi) curl(B),
    *  B the cell-centred field: J_s,x = f_s,x J_x with
@@ -1266,6 +1267,11 @@ private:
 
   // Device copy of species q/m
   cudaSolverType* d_qom = nullptr;
+
+  // Planet nodes of the constant-charge model (Dipole, Dipole2D): the host
+  // planetNodes list, uploaded once
+  int* d_planetNodes_ = nullptr;
+  int planetNodeCount_ = 0;
 
   // Reduction scratch buffer for GPU BLAS dot/norm operations
   cudaSolverType* d_blasScratch = nullptr;

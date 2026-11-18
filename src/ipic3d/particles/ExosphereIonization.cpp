@@ -226,10 +226,11 @@ ExosphereIonization::sampleIonizedParticles(int speciesIndex,
     for (int iy = 1; iy < numCellsY - 1; iy++) {
       for (int iz = 1; iz < numCellsZ - 1; iz++) {
 
-        // Cell center position relative to planet center
-        const double relativePosX = grid->getXC(ix, iy, iz) - planetCenterX;
-        const double relativePosY = grid->getYC(ix, iy, iz) - planetCenterY;
-        const double relativePosZ = grid->getZC(ix, iy, iz) - planetCenterZ;
+        // Cell center position relative to planet center, from global node
+        // indices: every decomposition selects the same cells
+        const double relativePosX = grid->getGlobalXC(ix) - planetCenterX;
+        const double relativePosY = grid->getGlobalYC(iy) - planetCenterY;
+        const double relativePosZ = grid->getGlobalZC(iz) - planetCenterZ;
 
         const double distanceSquared = relativePosX * relativePosX +
                                        relativePosY * relativePosY +

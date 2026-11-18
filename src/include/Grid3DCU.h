@@ -325,6 +325,24 @@ public: // accessors (inline)
   int getCellOffsetX() const { return cellOffX; }
   int getCellOffsetY() const { return cellOffY; }
   int getCellOffsetZ() const { return cellOffZ; }
+  /** Coordinate of local node X (Y, Z) from its global node index,
+   *  (cellOff + X - 1) * dx.  Every decomposition computes the same bits for
+   *  the same node, while getXN (xStart + (X - 1) * dx) can differ in the last
+   *  bit; the planet masks and the dipole field use these so that they agree
+   *  in every decomposition. */
+  double getGlobalXN(int X) const { return (cellOffX + X - 1) * dx; }
+  double getGlobalYN(int Y) const { return (cellOffY + Y - 1) * dy; }
+  double getGlobalZN(int Z) const { return (cellOffZ + Z - 1) * dz; }
+  /** Centre of local cell X (Y, Z) from the global-index node coordinates. */
+  double getGlobalXC(int X) const {
+    return .5 * (getGlobalXN(X) + getGlobalXN(X + 1));
+  }
+  double getGlobalYC(int Y) const {
+    return .5 * (getGlobalYN(Y) + getGlobalYN(Y + 1));
+  }
+  double getGlobalZC(int Z) const {
+    return .5 * (getGlobalZN(Z) + getGlobalZN(Z + 1));
+  }
   double getXend() const { return (xEnd); }
   double getYstart() const { return (yStart); }
   double getYend() const { return (yEnd); }

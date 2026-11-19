@@ -513,6 +513,7 @@ if(BUILD_UTESTS)
   add_subdirectory(src/unitTest/divb_cleaning)
   add_subdirectory(src/unitTest/field_rows)
   add_subdirectory(src/unitTest/mover_walls)
+  add_subdirectory(src/unitTest/particle_control)
 endif()
 
 add_subdirectory(share/inputfiles)

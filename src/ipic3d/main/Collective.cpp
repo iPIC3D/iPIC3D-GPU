@@ -341,6 +341,12 @@ void Collective::ReadInput(const ConfigFile& config) {
     PlanetDiagnosticsCycle =
         config.read<int>("PlanetDiagnosticsCycle", DiagnosticsOutputCycle);
     SortingCycle = config.read<int>("SortingCycle", 0);
+    ParticleSplitting = config.read<bool>("ParticleSplitting", false);
+    ParticleMerging = config.read<bool>("ParticleMerging", false);
+    ParticleSplittingThreshold =
+        config.read<double>("ParticleSplittingThreshold", 0.95);
+    ParticleMergingThreshold =
+        config.read<double>("ParticleMergingThreshold", 1.05);
     ParaviewScriptPath = config.read<string>("ParaviewScriptPath", "");
     CallFinalize = config.read<bool>("CallFinalize", true);
   }
@@ -1009,6 +1015,28 @@ void Collective::Print() {
   cout << "Solver guard      : ||b|| growth limit " << solverSourceGrowthLimit
        << " per cycle (0 = off), non-converged solve "
        << (solverStopOnNonConvergence ? "stops" : "warns") << endl;
+  cout << "Particle control  : splitting "
+       << (ParticleSplitting ? "on" : "off");
+  if (ParticleSplitting)
+    cout << " (below " << ParticleSplittingThreshold
+         << " of the reference count)";
+  cout << ", merging " << (ParticleMerging ? "on" : "off");
+  if (ParticleMerging)
+    cout << " (above " << ParticleMergingThreshold << ")";
+  cout << endl;
+  if (ParticleSplitting != ParticleMerging)
+    cout << "WARNING: particle "
+         << (ParticleSplitting ? "splitting" : "merging") << " is on without "
+         << (ParticleSplitting ? "merging" : "splitting")
+         << ": the number of particles of a rank is bounded only "
+         << (ParticleSplitting ? "from below" : "from above") << endl;
+  if (ParticleSplitting && ParticleMerging &&
+      ParticleSplittingThreshold >= ParticleMergingThreshold)
+    cout << "WARNING: ParticleSplittingThreshold = "
+         << ParticleSplittingThreshold
+         << " is not below ParticleMergingThreshold = "
+         << ParticleMergingThreshold
+         << ": splitting and merging undo each other" << endl;
   cout << "---------------------" << endl;
   cout << "EM Field Boundary Conditions" << endl;
   cout << "---------------------" << endl;
@@ -1388,7 +1416,7 @@ void Collective::Print() {
         cap_i * 8.0                               // departure
         + AUX_FRAC * nop_i * (64.0 + 4.0 + 64.0); // exiting + filler + staging
 
-    if (SortingCycle > 0)
+    if (SortingCycle > 0 || ParticleMerging) // merging sorts by cell
       devSort += 3.0 * gridC * 4 +
                  cap_i * (4.0 + 8.0); // histograms + indices + scratch
 

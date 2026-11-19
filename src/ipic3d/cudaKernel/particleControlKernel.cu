@@ -1,374 +1,188 @@
-
-
-#include "cudaTypeDef.cuh"
 #include "particleControlKernel.cuh"
 
-#include "gridCUDA.cuh"
-#include "particleArrayCUDA.cuh"
-#include "particleExchange.cuh"
-
-// ======= Merge kernel =======
+// ======= Merging =======
 
 /**
- * @brief Merge close-velocity particle pairs inside a cell-sorted SoA buffer.
- *
- * Each warp owns one cell. The kernel looks for the closest not-yet-deleted
- * partner for each lead particle, merges charges and phase-space coordinates
- * conservatively, and marks the absorbed particle for deletion.
- * @param cellOffsetList Per-cell starting offsets in the sorted particle
- * buffer.
- * @param cellBinCountList Per-cell particle counts.
- * @param grid Device grid metadata used to compute cell statistics.
- * @param pclArray Cell-sorted particle SoA buffer.
- * @param departureArray Per-particle destination metadata used for deletion
- * flags.
+ * Velocity variance of the particles [first, first + count) of the warp's
+ * cell, weighted by charge: the trace, about the mean velocity. Every lane
+ * returns the same value; it is 0 for a cell without charge.
  */
-__global__ void mergingKernel(int* cellOffsetList, int* cellBinCountList,
-                              grid3DCUDA* grid, particleArrayCUDA* pclArray,
-                              departureArrayType* departureArray) {
+__device__ __forceinline__ cudaParticleType cellVelocityVariance(
+    const ParticleSoADevice& pcls, int first, int count, int lane) {
+  cudaParticleType q = 0, qu = 0, qv = 0, qw = 0, qv2 = 0;
+  for (int i = lane; i < count; i += WARP_SIZE) {
+    const int p = first + i;
+    const cudaParticleType qp = pcls.q[p];
+    const cudaParticleType u = pcls.u[p];
+    const cudaParticleType v = pcls.v[p];
+    const cudaParticleType w = pcls.w[p];
+    q += qp;
+    qu += qp * u;
+    qv += qp * v;
+    qw += qp * w;
+    qv2 += qp * (u * u + v * v + w * w);
+  }
+  q = warp_reduce_sum(q);
+  qu = warp_reduce_sum(qu);
+  qv = warp_reduce_sum(qv);
+  qw = warp_reduce_sum(qw);
+  qv2 = warp_reduce_sum(qv2);
+  // the sums of a lane other than 0 are partial: take lane 0's
+  q = __shfl_sync(WARP_FULL_MASK, q, 0);
+  qu = __shfl_sync(WARP_FULL_MASK, qu, 0);
+  qv = __shfl_sync(WARP_FULL_MASK, qv, 0);
+  qw = __shfl_sync(WARP_FULL_MASK, qw, 0);
+  qv2 = __shfl_sync(WARP_FULL_MASK, qv2, 0);
+  const cudaParticleType variance =
+      (qv2 - (qu * qu + qv * qv + qw * qw) / q) / q;
+  // 0 for the round-off of a cold cell and for the NaN of a cell without
+  // charge (fmax returns its other argument)
+  return fmax(variance, (cudaParticleType)0);
+}
 
-  const uint pid = blockIdx.x * blockDim.x + threadIdx.x;
-  const uint warpId = pid / WARP_SIZE;
-  const auto& cellId = warpId;
-  const uint laneId = pid % WARP_SIZE;
+/** Merge particle `from` into particle `into`: total charge, centre of
+ *  charge, mean velocity. */
+__device__ __forceinline__ void mergeInto(const ParticleSoADevice& pcls,
+                                          int into, int from) {
+  const cudaParticleType q1 = pcls.q[into];
+  const cudaParticleType q2 = pcls.q[from];
+  const cudaParticleType q = q1 + q2;
+  // share of each particle; a pair without charge keeps its mid-point
+  const cudaParticleType f1 = q != 0 ? q1 / q : (cudaParticleType)0.5;
+  const cudaParticleType f2 = 1 - f1;
+  pcls.q[into] = q;
+  pcls.x[into] = f1 * pcls.x[into] + f2 * pcls.x[from];
+  pcls.y[into] = f1 * pcls.y[into] + f2 * pcls.y[from];
+  pcls.z[into] = f1 * pcls.z[into] + f2 * pcls.z[from];
+  pcls.u[into] = f1 * pcls.u[into] + f2 * pcls.u[from];
+  pcls.v[into] = f1 * pcls.v[into] + f2 * pcls.v[from];
+  pcls.w[into] = f1 * pcls.w[into] + f2 * pcls.w[from];
+}
 
-  // return if pid > number of particle rounded up to warpsize
-  const int nop = pclArray->getNOP();
-  // SoA field pointers
-  auto soaU = pclArray->getU();
-  auto soaV = pclArray->getV();
-  auto soaW = pclArray->getW();
-  auto soaQ = pclArray->getQ();
-  auto soaX = pclArray->getX();
-  auto soaY = pclArray->getY();
-  auto soaZ = pclArray->getZ();
-  auto dArray = departureArray->getArray();
-  const uint cellNum = ((grid->nxc) * (grid->nyc) * (grid->nzc));
-  if (cellId >= cellNum)
+/**
+ * The lanes share the particles of the cell: particle i of the cell belongs
+ * to lane i % WARP_SIZE. A departure flag is written and read by the lane of
+ * its particle only, and a particle is modified (by lane 0) only after its
+ * last read: the lanes exchange information through shuffles alone.
+ */
+__global__ void particleMergingKernel(const int* cellStart,
+                                      const int* cellCount, int numCells,
+                                      int targetPerCell, ParticleSoADevice pcls,
+                                      departureArrayElementType* departure) {
+  const uint32_t thread = blockIdx.x * blockDim.x + threadIdx.x;
+  const int cell = thread / WARP_SIZE;
+  const int lane = thread % WARP_SIZE;
+  if (cell >= numCells)
     return;
+  const int count = cellCount[cell];
+  if (count <= targetPerCell)
+    return;
+  const int first = cellStart[cell];
 
-  // cell offset for this warp
-  const int cellOffset = cellOffsetList[cellId];
-  // number of particles in this cell
-  const int numPIC = cellBinCountList[cellId];
+  const cudaParticleType maxDv2 =
+      MERGE_VELOCITY_TOLERANCE * cellVelocityVariance(pcls, first, count, lane);
 
-  const int initialPIC = pclArray->getInitialNOP() /
-                         ((grid->nxc - 2) * (grid->nyc - 2) * (grid->nzc - 2));
+  int merged = 0;
+  for (int lead = 0; lead < count - 1; lead++) {
+    const int leadIdx = first + lead;
 
-  if (numPIC <= initialPIC)
-    return; // already at or below the target occupancy
+    // A lead merged away earlier takes no partner: its charge is gone with
+    // it. The lane of the lead knows.
+    const int leadLane = lead % WARP_SIZE;
+    int absorbed = lane == leadLane ? departure[leadIdx].dest != 0 : 0;
+    absorbed = __shfl_sync(WARP_FULL_MASK, absorbed, leadLane);
+    if (absorbed)
+      continue;
 
-  int cellMergeCount = 0; // number of particles merged in this cell
-
-  // main loop for one cell, pushing right
-  for (int p = 0; p < numPIC; p++) {
-    const int mainPId = cellOffset + p;
-
-    constexpr cudaParticleType threshold =
-        0.009;                       // threshold for merging, percentage of
-                                     // the velocity of the main particle
-    cudaParticleType minNorm = 1e10; // minimum norm
-    int minPId = -1;                 // minimum particle id
-
-    // each thread calculate the VV norm between the particles it holds and the
-    // main loop particle keep the smallest one
-    for (int i = laneId; i < numPIC; i += WARP_SIZE) {
-      const int pId = cellOffset + i;
-      if (pId <= mainPId)
-        continue; // ignore self, and the past particles
-
-      // ignore if the particle is marked for deletion
-      if (dArray[pId].dest != 0)
-        continue;
-
-      // calculate the VV norm
-      const auto u1 = soaU[mainPId];
-      const auto v1 = soaV[mainPId];
-      const auto w1 = soaW[mainPId];
-
-      const auto u2 = soaU[pId];
-      const auto v2 = soaV[pId];
-      const auto w2 = soaW[pId];
-
-      const auto norm = (u1 - u2) * (u1 - u2) + (v1 - v2) * (v1 - v2) +
-                        (w1 - w2) * (w1 - w2); // not distance, reduce the sqrt
-
-      if (norm < minNorm) {
-        minNorm = norm;
-        minPId = pId;
+    // The nearest particle in velocity, within the tolerance (inclusive),
+    // among the later particles of this lane that are still there; the first
+    // of equals.
+    const cudaParticleType u1 = pcls.u[leadIdx];
+    const cudaParticleType v1 = pcls.v[leadIdx];
+    const cudaParticleType w1 = pcls.w[leadIdx];
+    cudaParticleType best = maxDv2;
+    int bestIdx = -1;
+    // first particle of this lane after the lead
+    for (int i = lead + 1 + ((lane - lead - 1) & (WARP_SIZE - 1)); i < count;
+         i += WARP_SIZE) {
+      const int p = first + i;
+      const cudaParticleType du = pcls.u[p] - u1;
+      const cudaParticleType dv = pcls.v[p] - v1;
+      const cudaParticleType dw = pcls.w[p] - w1;
+      const cudaParticleType dv2 = du * du + dv * dv + dw * dw;
+      if ((dv2 < best || (bestIdx < 0 && dv2 == best)) &&
+          departure[p].dest == 0) {
+        best = dv2;
+        bestIdx = i;
       }
     }
 
-    // warp reduce
-    auto localNorm = minNorm;
-    auto localPId = minPId;
+    // Most leads have no particle within the tolerance.
+    if (__ballot_sync(WARP_FULL_MASK, bestIdx >= 0) == 0)
+      continue;
+
+    // The nearest over the warp, the first of equals, to every lane.
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-      auto otherVal = __shfl_down_sync(WARP_FULL_MASK, localNorm, offset);
-      auto otherLane = __shfl_down_sync(WARP_FULL_MASK, localPId, offset);
-
-      if (otherVal < localNorm) {
-        localNorm = otherVal;
-        localPId = otherLane;
+      const cudaParticleType otherBest =
+          __shfl_down_sync(WARP_FULL_MASK, best, offset);
+      const int otherIdx = __shfl_down_sync(WARP_FULL_MASK, bestIdx, offset);
+      if (otherIdx >= 0 && (bestIdx < 0 || otherBest < best ||
+                            (otherBest == best && otherIdx < bestIdx))) {
+        best = otherBest;
+        bestIdx = otherIdx;
       }
     }
+    bestIdx = __shfl_sync(WARP_FULL_MASK, bestIdx, 0);
 
-    // lane 0 holds the minimum norm
-    if (laneId == 0) {
-      const auto u1 = soaU[mainPId];
-      const auto v1 = soaV[mainPId];
-      const auto w1 = soaW[mainPId];
-
-      if (localNorm < (threshold * (u1 * u1 + v1 * v1 + w1 * w1))) { // merge!
-        // if (true) { // merge!
-        dArray[localPId].dest = departureArrayElementType::DELETE;
-
-        const auto q1 = soaQ[mainPId];
-        const auto x1 = soaX[mainPId];
-        const auto y1 = soaY[mainPId];
-        const auto z1 = soaZ[mainPId];
-
-        const auto u2 = soaU[localPId];
-        const auto v2 = soaV[localPId];
-        const auto w2 = soaW[localPId];
-        const auto q2 = soaQ[localPId];
-        const auto x2 = soaX[localPId];
-        const auto y2 = soaY[localPId];
-        const auto z2 = soaZ[localPId];
-
-        const auto newQ = q1 + q2;
-        soaU[mainPId] = (u1 * q1 + u2 * q2) / newQ;
-        soaV[mainPId] = (v1 * q1 + v2 * q2) / newQ;
-        soaW[mainPId] = (w1 * q1 + w2 * q2) / newQ;
-        soaQ[mainPId] = newQ;
-        soaX[mainPId] = (x1 * q1 + x2 * q2) / newQ;
-        soaY[mainPId] = (y1 * q1 + y2 * q2) / newQ;
-        soaZ[mainPId] = (z1 * q1 + z2 * q2) / newQ;
-
-        cellMergeCount++;
-      }
-    }
-    // return this warp if reaches the initial number of particles
-    cellMergeCount = __shfl_sync(WARP_FULL_MASK, cellMergeCount, 0);
-    if ((numPIC - cellMergeCount) <= initialPIC)
+    if (lane == bestIdx % WARP_SIZE)
+      departure[first + bestIdx].dest = departureArrayElementType::DELETE;
+    if (lane == 0)
+      mergeInto(pcls, leadIdx, first + bestIdx);
+    merged++;
+    if (count - merged <= targetPerCell)
       return;
   }
 }
 
-using commonType = cudaParticleType;
+// ======= Splitting =======
 
-// ======= Particle splitting kernels =======
-
-/**
- * @brief Split a subset of particles when fewer new particles are needed than
- * currently exist.
- *
- * The launch uses `deltaPcl` threads. Each thread selects one source particle,
- * halves its charge, offsets the original and clone within the same cell, and
- * writes the new particle at the end of the SoA buffer.
- * @param moverParam Mover context holding the particle buffer to expand.
- * @param grid Device grid metadata used to keep daughter particles in-cell.
- */
-template <>
-__global__ void particleSplittingKernel<false>(moverParameter* moverParam,
-                                               grid3DCUDA* grid) {
-  const uint tidx = blockIdx.x * blockDim.x + threadIdx.x;
-  auto pclsArray = moverParam->pclsArray;
-  const uint deltaPcl = pclsArray->getInitialNOP() - pclsArray->getNOP();
-  if (tidx >= deltaPcl)
+__global__ void particleSplittingKernel(ParticleSoADevice pcls, uint32_t count,
+                                        uint32_t shift, SplitGeometry geometry,
+                                        ParticleIDGenerator idGenerator) {
+  const uint32_t t = blockIdx.x * blockDim.x + threadIdx.x;
+  if (t >= count)
     return;
+  const uint32_t nop = pcls.nop;
+  // count <= nop: the parents of two threads differ
+  const uint32_t parent = (uint32_t)(((uint64_t)t * nop / count + shift) % nop);
+  const uint32_t twin = nop + t;
 
-  // grid properties
-  const commonType& inv_dx = grid->invdx;
-  const commonType& inv_dy = grid->invdy;
-  const commonType& inv_dz = grid->invdz;
-  const commonType& xstart = grid->xStart;
-  const commonType& ystart = grid->yStart;
-  const commonType& zstart = grid->zStart;
+  // Along one axis the weight of a node is linear inside the cell: the pair
+  // at +delta and -delta deposits what the parent did.
+  const int a = geometry.axis[(parent + shift) % (uint32_t)geometry.axisCount];
+  cudaParticleType* const position[3] = {pcls.x, pcls.y, pcls.z};
+  const cudaParticleType xa = position[a][parent];
+  const cudaParticleType lowerFace =
+      geometry.start[a] +
+      floor((xa - geometry.start[a]) * geometry.invd[a]) * geometry.d[a];
+  const cudaParticleType toFace =
+      fmin(xa - lowerFace, lowerFace + geometry.d[a] - xa);
+  // both particles stay in the cell of the parent
+  const cudaParticleType delta =
+      fmax(fmin(geometry.halfSpacing[a], (cudaParticleType)0.5 * toFace),
+           (cudaParticleType)0);
 
-  // batch must be >= 1 --> there is no safety check, it must be checked before
-  // launching the kernel
-  const uint batch = pclsArray->getNOP() / deltaPcl;
-
-  // generate random idx in [0,batch-1] to select the particle to split
-  // based on LCRNG
-  uint idxRNG = 0;
-  if (batch > 1) {
-    const uint seed = (1313492u + tidx);
-    // seed ^= (seed >> 7);
-    idxRNG = (seed * deltaPcl + batch - 1) % batch;
-  }
-  // select particle to split
-  const uint pidx = tidx * batch + idxRNG;
-
-  // copy the particle from SoA
-  auto soaU = pclsArray->getU();
-  auto soaV = pclsArray->getV();
-  auto soaW = pclsArray->getW();
-  auto soaQ = pclsArray->getQ();
-  auto soaX = pclsArray->getX();
-  auto soaY = pclsArray->getY();
-  auto soaZ = pclsArray->getZ();
-  auto soaID = pclsArray->getID();
-  const bool trackParticleID = pclsArray->tracksParticleID();
-
-  const auto x0 = soaX[pidx];
-  const auto y0 = soaY[pidx];
-  const auto z0 = soaZ[pidx];
-
-  // index of the grid point to the right of the particle
-  const int ix = 2 + int(floor((x0 - xstart) * inv_dx));
-  const int iy = 2 + int(floor((y0 - ystart) * inv_dy));
-  const int iz = 2 + int(floor((z0 - zstart) * inv_dz));
-  // distance particle - grid point to the left
-  const commonType xi0 = x0 - grid->getXN(ix - 1);
-  const commonType yi0 = y0 - grid->getYN(iy - 1);
-  const commonType zi0 = z0 - grid->getZN(iz - 1);
-  // distance particle - grid point to the right
-  const commonType xi1 = grid->getXN(ix) - x0;
-  const commonType yi1 = grid->getYN(iy) - y0;
-  const commonType zi1 = grid->getZN(iz) - z0;
-
-  // select the lowest distance to ensure keeping the particles in the cell
-  cudaTypeDouble delta = xi0;
-  if (yi0 < delta)
-    delta = yi0;
-  if (zi0 < delta)
-    delta = zi0;
-  if (xi1 < delta)
-    delta = xi1;
-  if (yi1 < delta)
-    delta = yi1;
-  if (zi1 < delta)
-    delta = zi1;
-
-  delta /= 20;
-  // Update original particle position in SoA
-  soaX[pidx] = x0 - delta;
-  soaY[pidx] = y0 - delta;
-  soaZ[pidx] = z0 - delta;
-
-  // Update charge consistently for both daughter particles.
-  const auto q = soaQ[pidx];
-  soaQ[pidx] = 0.5 * q;
-
-  // Write new split particle to SoA at the end of the array
-  const auto index = pclsArray->getNOP() + tidx;
-  // check memory overflow
-  if (index >= moverParam->pclsArray->getSize()) {
-    printf("Memory overflow in open boundary outflow\n");
-    //__trap();
-    return;
-  }
-  soaU[index] = soaU[pidx];
-  soaV[index] = soaV[pidx];
-  soaW[index] = soaW[pidx];
-  soaQ[index] = 0.5 * q;
-  soaX[index] = x0 + delta;
-  soaY[index] = y0 + delta;
-  soaZ[index] = z0 + delta;
-  if (trackParticleID)
-    soaID[index] = moverParam->particleIDGenerator.generateID();
-}
-/**
- * @brief Split every existing particle multiple times when the deficit exceeds
- * the current population.
- *
- * Each thread repeatedly clones the particle it owns until the requested
- * particle deficit has been filled.
- * @param moverParam Mover context holding the particle buffer to expand.
- * @param grid Device grid metadata used to keep daughter particles in-cell.
- */
-template <>
-__global__ void particleSplittingKernel<true>(moverParameter* moverParam,
-                                              grid3DCUDA* grid) {
-  const uint tidx = blockIdx.x * blockDim.x + threadIdx.x;
-  auto pclsArray = moverParam->pclsArray;
-  if (tidx >= pclsArray->getNOP())
-    return;
-
-  const uint deltaPcl = pclsArray->getInitialNOP() - pclsArray->getNOP();
-
-  // it is assumed deltaPcl >= pclsArray->getNOP() - no safety check
-  const uint splittingTimes = deltaPcl / pclsArray->getNOP();
-
-  // grid properties
-  const commonType& inv_dx = grid->invdx;
-  const commonType& inv_dy = grid->invdy;
-  const commonType& inv_dz = grid->invdz;
-  const commonType& xstart = grid->xStart;
-  const commonType& ystart = grid->yStart;
-  const commonType& zstart = grid->zStart;
-
-  // SoA field pointers
-  auto soaU = pclsArray->getU();
-  auto soaV = pclsArray->getV();
-  auto soaW = pclsArray->getW();
-  auto soaQ = pclsArray->getQ();
-  auto soaX = pclsArray->getX();
-  auto soaY = pclsArray->getY();
-  auto soaZ = pclsArray->getZ();
-  auto soaID = pclsArray->getID();
-  const bool trackParticleID = pclsArray->tracksParticleID();
-
-  for (int i = 0; i < splittingTimes; i++) {
-    const uint pidx = i * pclsArray->getNOP() + tidx;
-
-    const auto x0 = soaX[pidx];
-    const auto y0 = soaY[pidx];
-    const auto z0 = soaZ[pidx];
-
-    // index of the grid point to the right of the particle
-    const int ix = 2 + int(floor((x0 - xstart) * inv_dx));
-    const int iy = 2 + int(floor((y0 - ystart) * inv_dy));
-    const int iz = 2 + int(floor((z0 - zstart) * inv_dz));
-    // distance particle - grid point to the left
-    const commonType xi0 = x0 - grid->getXN(ix - 1);
-    const commonType yi0 = y0 - grid->getYN(iy - 1);
-    const commonType zi0 = z0 - grid->getZN(iz - 1);
-    // distance particle - grid point to the right
-    const commonType xi1 = grid->getXN(ix) - x0;
-    const commonType yi1 = grid->getYN(iy) - y0;
-    const commonType zi1 = grid->getZN(iz) - z0;
-
-    // select the lowest distance to ensure keeping the particles in the cell
-    cudaTypeDouble delta = xi0;
-    if (yi0 < delta)
-      delta = yi0;
-    if (zi0 < delta)
-      delta = zi0;
-    if (xi1 < delta)
-      delta = xi1;
-    if (yi1 < delta)
-      delta = yi1;
-    if (zi1 < delta)
-      delta = zi1;
-
-    delta /= 20;
-    // Update original particle position in SoA
-    soaX[pidx] = x0 - delta;
-    soaY[pidx] = y0 - delta;
-    soaZ[pidx] = z0 - delta;
-
-    // Update charge consistently for both daughter particles.
-    const auto q = soaQ[pidx];
-    soaQ[pidx] = 0.5 * q;
-
-    // Write new split particle to SoA at the end of the array
-    const auto index = pclsArray->getNOP() + pidx;
-    // check memory overflow
-    if (index >= moverParam->pclsArray->getSize()) {
-      printf("Memory overflow in open boundary outflow\n");
-      //__trap();
-      return;
-    }
-    soaU[index] = soaU[pidx];
-    soaV[index] = soaV[pidx];
-    soaW[index] = soaW[pidx];
-    soaQ[index] = 0.5 * q;
-    soaX[index] = x0 + delta;
-    soaY[index] = y0 + delta;
-    soaZ[index] = z0 + delta;
-    if (trackParticleID)
-      soaID[index] = moverParam->particleIDGenerator.generateID();
-  }
+  const cudaParticleType halfCharge = (cudaParticleType)0.5 * pcls.q[parent];
+  pcls.q[parent] = halfCharge;
+  pcls.q[twin] = halfCharge;
+  pcls.x[twin] = pcls.x[parent];
+  pcls.y[twin] = pcls.y[parent];
+  pcls.z[twin] = pcls.z[parent];
+  pcls.u[twin] = pcls.u[parent];
+  pcls.v[twin] = pcls.v[parent];
+  pcls.w[twin] = pcls.w[parent];
+  position[a][parent] = xa - delta;
+  position[a][twin] = xa + delta;
+  if (pcls.trackParticleID)
+    pcls.id[twin] = idGenerator.generateID();
 }

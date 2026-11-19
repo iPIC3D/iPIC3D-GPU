@@ -313,6 +313,14 @@ public:
   int getDiagnosticsOutputCycle() const { return (DiagnosticsOutputCycle); }
   int getPlanetDiagnosticsCycle() const { return (PlanetDiagnosticsCycle); }
   int getSortingCycle() const { return (SortingCycle); }
+  bool getParticleSplitting() const { return (ParticleSplitting); }
+  bool getParticleMerging() const { return (ParticleMerging); }
+  double getParticleSplittingThreshold() const {
+    return (ParticleSplittingThreshold);
+  }
+  double getParticleMergingThreshold() const {
+    return (ParticleMergingThreshold);
+  }
   bool getCallFinalize() const { return (CallFinalize); }
   bool particle_output_is_off() const;
   bool testparticle_output_is_off() const;
@@ -504,6 +512,14 @@ private:
   int divBCorrectionCycle;
   /*! Sort particles every SortingCycle cycles (0=disabled) */
   int SortingCycle;
+  /*! Split particles on a rank that lost particles of a species */
+  bool ParticleSplitting;
+  /*! Merge particles on a rank that gained particles of a species */
+  bool ParticleMerging;
+  /*! Split a species on a rank below this fraction of its reference count */
+  double ParticleSplittingThreshold;
+  /*! Merge a species on a rank above this fraction of its reference count */
+  double ParticleMergingThreshold;
   /*! SaveDirName */
   string SaveDirName;
   /*! RestartDirName */

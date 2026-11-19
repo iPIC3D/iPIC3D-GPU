@@ -4,6 +4,7 @@
 #include "arrayCUDA.cuh"
 #include "cudaTypeDef.cuh"
 #include "hashedSum.cuh"
+#include "particleArrayCUDA.cuh"
 
 typedef struct departureArrayElement_s {
   enum departureDestination {

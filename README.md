@@ -527,6 +527,28 @@ Particles that enter the planet (`Planet_radius`) are processed on the GPU every
 
 Every `PlanetDiagnosticsCycle` cycles (default `DiagnosticsOutputCycle`; `<= 0` disables), rank 0 appends the surface balance to `PlanetBC.txt` in `SaveDirName`: per species, the macroparticles and charge that hit the planet and that were absorbed; the carried charge, summed over ranks and its extremes; the mean energy separating absorbed from reflected electrons; and the rank-cycles with hits and with too few electrons to balance the ions. A row labelled N covers the hits since the previous row, up to cycle N-1; a last row at the end of the run, labelled with the resume cycle like the final restart checkpoint, covers the rest.
 
+### Particle count control (splitting and merging)
+
+Flows move particles between MPI ranks, and open boundaries and the planet remove them, so the number of macroparticles of a rank drifts away from the number it was loaded with. Two options, both off by default, keep it in a band, after Lapenta and Brackbill, J. Comput. Phys. 115, 213 (1994):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ParticleSplitting` | `0` | Split particles of a species on a rank that holds fewer than `ParticleSplittingThreshold` times its reference count. |
+| `ParticleMerging` | `0` | Merge particles of a species on a rank that holds more than `ParticleMergingThreshold` times its reference count. |
+| `ParticleSplittingThreshold` | `0.95` | Lower edge of the band, as a fraction of the reference count. |
+| `ParticleMergingThreshold` | `1.05` | Upper edge of the band, as a fraction of the reference count. |
+
+The reference count of a species on a rank is the number of particles the input file loads there and the planet leaves: `npcelx * npcely * npcelz` times the cells of the rank whose centre is outside `Planet_radius`. It does not depend on the state of the run, so a restart continues with the same reference. A rank that loads another number of particles prints a warning at start. Planetary species (`ns_planetary`), which start empty, are not controlled. With only one of the two options on, the count is bounded on one side only; the run prints a warning and continues.
+
+- **Splitting.** Before the mover, a rank below the band splits as many particles as it misses, each once per cycle at most, so a rank below half its reference at most doubles per cycle. A split also leaves the particle arrays the spare room the mover needs; they grow in the exchange that follows. A rank that has lost all particles of a species is not refilled. The parents are spread evenly over the particles of the rank, wherever they are, and change from cycle to cycle. A parent is replaced by two particles of half its charge and the same velocity, displaced by +δ and −δ along one grid axis (never an axis with a single cell in the domain), inside the cell of the parent. δ is half the loading interval of that axis (cell size / particles per cell), less for a parent near a cell face. Along one axis the weight of a node is linear, so the pair deposits exactly the charge, current and pressure of the parent on every node: the fields do not see the split. A species is not split in a cycle in which it is merged (possible only with `ParticleSplittingThreshold` above `ParticleMergingThreshold`).
+- **Merging.** After the moments, the species above the band that was merged longest ago is chosen; one species is merged per cycle and rank. Before the next mover it is sorted by cell, and in every cell that holds more than `npcelx * npcely * npcelz` particles, each particle in turn looks for the nearest later particle in velocity. The two are merged if |v₁ − v₂|² is at most 0.9 % of the velocity variance of the cell (about the mean velocity of the cell, so the test does not depend on the frame). The merged particle has the total charge, the centre of charge and the mean velocity of the pair. A particle takes part in one merge at most, and a cell stops at `npcelx * npcely * npcelz` particles.
+  - A merge keeps the charge, the momentum and the centre of charge of the pair exactly.
+  - It loses the kinetic energy of the relative motion, m₁m₂|v₁ − v₂|² / (2(m₁ + m₂)): at most 0.23 % of the mean thermal energy of a pair of equal particles.
+  - It keeps the ten moments on the nodes only for a pair along a grid axis with equal velocities. Otherwise it moves charge, current and pressure between the eight nodes of the cell; their total charge is kept.
+  - The search compares all pairs of a cell: its cost grows with the square of the particles per cell.
+
+The control acts on the particle count of a rank, not of a cell: it does not refill the cells of a depleted region of a rank whose total count is inside the band.
+
 ### Setting the case
 
 In the input file, add or modify:

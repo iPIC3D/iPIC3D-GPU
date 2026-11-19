@@ -78,13 +78,6 @@
 #include "Adaptor.h"
 #endif
 
-// ======= Particle Count Control =======
-// Set to true to enable particle merging.
-// The current implementation is functional but not fully optimized.
-constexpr bool PARTICLE_MERGING = false;
-// Set to true to enable particle splitting.
-constexpr bool PARTICLE_SPLITTING = false;
-
 // ======= Solver Constants =======
 constexpr double INITIAL_CAPACITY_FACTOR =
     1.4; // SoA array initial over-allocation
@@ -96,9 +89,10 @@ constexpr double EXPAND_GROWTH_FACTOR =
     1.5; // growth factor when expanding arrays
 constexpr double EXPAND_THRESHOLD_FACTOR =
     1.2; // trigger expand when NOP * this >= capacity
-constexpr double SPLIT_THRESHOLD = 0.95; // split when NOP < this * initialNOP
-constexpr double MERGE_THRESHOLD = 1.05; // merge when NOP > this * initialNOP
-constexpr int DEFAULT_BLOCK_SIZE = 256;  // default CUDA block size
+// Shift per cycle of the parents the particle splitting takes: 2^32 over the
+// golden ratio, so that the shifts of successive cycles are far apart.
+constexpr uint32_t SPLIT_PARENT_STRIDE = 2654435761u;
+constexpr int DEFAULT_BLOCK_SIZE = 256; // default CUDA block size
 constexpr int SMALL_BLOCK_SIZE =
     128; // smaller CUDA block size (sorting kernels)
 constexpr int INITIAL_PLANET_BUF_CAP =
@@ -724,7 +718,6 @@ int c_Solver::initCUDA() {
       // particleArrayCUDA performs the initial SoA H2D copy in its constructor
       pclsArrayHostPtr[i] = newHostPinnedObject<particleArrayCUDA>(
           particlesHost[i], INITIAL_CAPACITY_FACTOR, streams[i]);
-      pclsArrayHostPtr[i]->setInitialNOP(pclsArrayHostPtr[i]->getNOP());
       pclsArrayCUDAPtr[i] = pclsArrayHostPtr[i]->copyToDevice();
 
       departureArrayHostPtr[i] = newHostPinnedObject<departureArrayType>(
@@ -965,12 +958,7 @@ int c_Solver::initCUDA() {
   // cycle copy later when configured outputs need host particle data.
   cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
 
-  // ======= Allocate merge bookkeeping =======
-  toBeMerged = new int[2 * ns];
-  for (int i = 0; i < 2 * ns; i++) {
-    toBeMerged[i] = 0;
-  }
-  // memset(toBeMerged, 0, 2 * ns * sizeof(int));
+  initParticleControl();
 
   // ======= Initialize per-species cell sorters =======
   sortingCycle_ = col->getSortingCycle();
@@ -1242,7 +1230,6 @@ int c_Solver::deInitCUDA() {
   delete[] momentsCUDAPtr;
   delete[] heatFluxCUDAPtr;
   delete[] heatFluxBulkCUDAPtr;
-  delete[] toBeMerged;
 
   // ======= Release planet quasi-neutral boundary-condition buffers =======
   for (int i = 0; i < ns; i++) {
@@ -1648,6 +1635,173 @@ void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronize) {
 }
 
 /**
+ * Cells of the rank whose centre is outside the planet of the mover
+ * (doSphere 1: a sphere, 2: a circle in the x-z plane, 0: no planet). The
+ * first mover removes the particles the input file loads in the other cells.
+ */
+static int cellsOutsidePlanet(const Grid3DCU& grid,
+                              const moverParameter& mover) {
+  const int nxc = grid.getNXC(), nyc = grid.getNYC(), nzc = grid.getNZC();
+  if (mover.doSphere == 0)
+    return (nxc - 2) * (nyc - 2) * (nzc - 2);
+  const double r2 = mover.sphereRadius * mover.sphereRadius;
+  int count = 0;
+  for (int i = 1; i < nxc - 1; i++)
+    for (int j = 1; j < nyc - 1; j++)
+      for (int k = 1; k < nzc - 1; k++) {
+        const double dx = grid.getXC(i) - mover.sphereOrigin[0];
+        const double dy =
+            mover.doSphere == 1 ? grid.getYC(j) - mover.sphereOrigin[1] : 0.0;
+        const double dz = grid.getZC(k) - mover.sphereOrigin[2];
+        count += dx * dx + dy * dy + dz * dz >= r2;
+      }
+  return count;
+}
+
+/**
+ * @brief Set up the control of the particle count (ParticleSplitting,
+ * ParticleMerging).
+ *
+ * The control keeps the particle count of a species on this rank close to its
+ * reference count: the particles per cell of the species times the cells of
+ * the rank outside the planet, which is what the input file loads there and
+ * the planet leaves. A species the input file does not load (a planetary
+ * species) is not controlled.
+ */
+void c_Solver::initParticleControl() {
+  pclControlReference_.assign(ns, 0);
+  splitGeometry_.assign(ns, SplitGeometry{});
+  cyclesSinceMerge_.assign(ns, 0);
+  mergeSpecies_ = -1;
+  if (!col->getParticleSplitting() && !col->getParticleMerging())
+    return;
+
+  const grid3DCUDA& g = *grid3DCUDAHostPtr;
+  const uint32_t cells = (g.nxc - 2) * (g.nyc - 2) * (g.nzc - 2);
+  const uint32_t keptCells = cellsOutsidePlanet(*grid, *moverParamHostPtr[0]);
+  const int domainCells[3] = {col->getNxc(), col->getNyc(), col->getNzc()};
+  const cudaParticleType start[3] = {g.xStart, g.yStart, g.zStart};
+  const cudaParticleType d[3] = {g.dx, g.dy, g.dz};
+  for (int i = 0; i < col->getNumSolarWindSpecies(); i++) {
+    const uint32_t npcel = col->getNpcel(i);
+    pclControlReference_[i] = npcel * keptCells;
+    // The two particles of a split are one loading interval apart.
+    const int perCell[3] = {col->getNpcelx(i), col->getNpcely(i),
+                            col->getNpcelz(i)};
+    SplitGeometry& split = splitGeometry_[i];
+    for (int a = 0; a < 3; a++) {
+      split.start[a] = start[a];
+      split.d[a] = d[a];
+      split.invd[a] = 1.0 / d[a];
+      split.halfSpacing[a] = 0.5 * d[a] / std::max(perCell[a], 1);
+      if (domainCells[a] > 1)
+        split.axis[split.axisCount++] = a;
+    }
+
+    const uint32_t loaded = pclsArrayHostPtr[i]->getNOP();
+    if (restart_status == 0 && loaded != npcel * cells)
+      std::cout << "WARNING: particle control: rank " << MPIdata::get_rank()
+                << " species " << i << " loads " << loaded
+                << " particles, not the particles per cell times the cells ("
+                << npcel * cells << ") that its reference count assumes"
+                << std::endl;
+  }
+}
+
+/**
+ * @brief Split particles of a species that fell below
+ * ParticleSplittingThreshold times its reference count on this rank, up to
+ * that count.
+ *
+ * A particle is split once per cycle at most, so a species below half its
+ * reference count doubles every cycle at most. The particle arrays keep the
+ * room the mover's open-boundary copies need: a split stops at capacity /
+ * EXPAND_THRESHOLD_FACTOR, the count at which the exchange grows them.
+ *
+ * Runs on the species' stream, before the mover. The species merged in this
+ * cycle is not split: the merge has flagged particles for deletion, and the
+ * twin of one of them would keep half its charge.
+ */
+void c_Solver::splitParticles(int species, int cycle) {
+  particleArrayCUDA* pcls = pclsArrayHostPtr[species];
+  const uint32_t reference = pclControlReference_[species];
+  const uint32_t nop = pcls->getNOP();
+  // nop >= reference also stops a species that is not controlled, and a
+  // threshold above 1
+  if (nop == 0 || nop >= reference ||
+      nop >= col->getParticleSplittingThreshold() * reference ||
+      splitGeometry_[species].axisCount == 0 || species == mergeSpecies_)
+    return;
+  const uint32_t room =
+      static_cast<uint32_t>(pcls->getCapacity() / EXPAND_THRESHOLD_FACTOR);
+  if (room <= nop)
+    return;
+  const uint32_t count = std::min({reference - nop, nop, room - nop});
+
+  std::cout << "Particle splitting: rank " << MPIdata::get_rank() << " species "
+            << species << " particles " << nop << " + " << count << std::endl;
+  particleSplittingKernel<<<getGridSize((int)count, DEFAULT_BLOCK_SIZE),
+                            DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
+      *pcls->getSoA(), count, (uint32_t)cycle * SPLIT_PARENT_STRIDE,
+      splitGeometry_[species],
+      particlesHost[species]->getParticleIDGenerator());
+  pcls->setNOE(nop + count);
+  cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[species], pcls,
+                             sizeof(particleArrayCUDA), cudaMemcpyDefault,
+                             streams[species]));
+}
+
+/**
+ * @brief Choose the species to merge in the next mover: among the species
+ * above ParticleMergingThreshold times their reference count on this rank,
+ * the one merged longest ago. One species is merged per cycle.
+ */
+void c_Solver::scheduleMerging() {
+  mergeSpecies_ = -1;
+  for (int i = 0; i < ns; i++) {
+    cyclesSinceMerge_[i]++;
+    const uint32_t reference = pclControlReference_[i];
+    if (reference > 0 &&
+        pclsArrayHostPtr[i]->getNOP() >
+            col->getParticleMergingThreshold() * reference &&
+        (mergeSpecies_ < 0 ||
+         cyclesSinceMerge_[i] > cyclesSinceMerge_[mergeSpecies_]))
+      mergeSpecies_ = i;
+  }
+}
+
+/**
+ * @brief Sort a species by cell and merge particles in its cells that hold
+ * more than the particles per cell of the input file.
+ *
+ * The merged-away particles are flagged in the departure array; the mover
+ * that follows skips them and its compaction removes them.
+ */
+void c_Solver::mergeParticles(int species, bool waitForHeatFlux) {
+  particleArrayCUDA* pcls = pclsArrayHostPtr[species];
+  cudaStream_t stream = streams[species];
+  std::cout << "Particle merging: rank " << MPIdata::get_rank() << " species "
+            << species << " particles " << pcls->getNOP() << std::endl;
+
+  cudaErrChk(cudaStreamSynchronize(stream));
+  // The previous cycle's output copy and the heat flux read the particles on
+  // other streams.
+  cudaErrChk(cudaStreamWaitEvent(stream, eventOutputCopy, 0));
+  if (waitForHeatFlux)
+    cudaErrChk(cudaStreamWaitEvent(stream, heatFluxReadDoneEvt[species], 0));
+  sortSpeciesByCell(species);
+
+  const CellSorter& sorter = cellSorters[species];
+  const int numCells = sorter.getNumCells();
+  particleMergingKernel<<<getGridSize(numCells * WARP_SIZE, DEFAULT_BLOCK_SIZE),
+                          DEFAULT_BLOCK_SIZE, 0, stream>>>(
+      sorter.getCellStartOffsets(), sorter.getCellCounts(), numCells,
+      col->getNpcel(species), *pcls->getSoA(),
+      departureArrayHostPtr[species]->getArray());
+  cyclesSinceMerge_[species] = 0;
+}
+
+/**
  * @brief Launch the asynchronous GPU mover pipeline for one species.
  *
  * The method advances particles, extracts exit/planet populations, compacts the
@@ -1655,6 +1809,7 @@ void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronize) {
  * accumulates moments for the stayed particles in the unsorted pipeline.
  *
  * @param species Species index to advance.
+ * @param cycle Simulation cycle being advanced.
  * @param doMomentsInLauncher Whether the stayed-prefix moments are accumulated
  * here.
  * @param waitForHeatFlux Wait until the heat-flux kernel has read this
@@ -1662,7 +1817,7 @@ void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronize) {
  * @return Number of particles removed from the stayed prefix
  *         (MPI exiting + deleted + planet-removed).
  */
-int c_Solver::cudaLauncherAsync(const int species,
+int c_Solver::cudaLauncherAsync(const int species, const int cycle,
                                 const bool doMomentsInLauncher,
                                 const bool waitForHeatFlux) {
   cudaSetDevice(
@@ -1695,65 +1850,8 @@ int c_Solver::cudaLauncherAsync(const int species,
   cudaEvent_t& event1 = moverHashedReadyEvt[species];
   cudaEvent_t& event2 = auxHashedReadyEvt[species];
 
-  // ======= Particle count control: optional splitting =======
-  // std::cout << "myrank: "<<MPIdata::get_rank() <<"
-  // pclsArrayHostPtr[species]->getInitialNOP(): " <<
-  // pclsArrayHostPtr[species]->getInitialNOP() <<
-  //          " pclsArrayHostPtr[species]->getNOP() " <<
-  //          pclsArrayHostPtr[species]->getNOP() << std::endl;
-  if constexpr (PARTICLE_SPLITTING) {
-    // Guard: splitting requires at least one source particle to duplicate.
-    // The `multiple times` branch below divides by getNOP(), so an empty
-    // species (e.g. catastrophic depletion) would otherwise trigger a
-    // divide-by-zero and a zero-block kernel launch.
-    if (pclsArrayHostPtr[species]->getNOP() > 0 &&
-        pclsArrayHostPtr[species]->getNOP() <
-            SPLIT_THRESHOLD * pclsArrayHostPtr[species]->getInitialNOP()) {
-      const uint32_t deltaPcl = pclsArrayHostPtr[species]->getInitialNOP() -
-                                pclsArrayHostPtr[species]->getNOP();
-      if (deltaPcl < pclsArrayHostPtr[species]->getNOP()) {
-        std::cout << "Particle splitting basic myrank: " << MPIdata::get_rank()
-                  << " species " << species << " number particles: "
-                  << pclsArrayHostPtr[species]->getNOP()
-                  << " delta: " << deltaPcl << std::endl;
-        particleSplittingKernel<false>
-            <<<getGridSize((int)deltaPcl, DEFAULT_BLOCK_SIZE),
-               DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
-                moverParamCUDAPtr[species], grid3DCUDACUDAPtr);
-        pclsArrayHostPtr[species]->setNOE(
-            pclsArrayHostPtr[species]->getInitialNOP());
-        cudaErrChk(cudaMemcpyAsync(
-            pclsArrayCUDAPtr[species], pclsArrayHostPtr[species],
-            sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[species]));
-        // cudaErrChk(cudaStreamSynchronize(streams[species+ns]));
-      } else {
-        // in this case the final number of particles will be <
-        // pclsArrayHostPtr[species]->getInitialNOP() worst case scenario will
-        // be pclsArrayHostPtr[species]->getInitialNOP() -
-        // (pclsArrayHostPtr[species]->getNOP() - 1)
-        const int splittingTimes =
-            deltaPcl / pclsArrayHostPtr[species]->getNOP();
-        std::cout << "Particle splitting multipleTimesKernel myrank: "
-                  << MPIdata::get_rank() << " species " << species
-                  << " number particles: "
-                  << pclsArrayHostPtr[species]->getNOP()
-                  << " delta: " << deltaPcl << std::endl;
-        particleSplittingKernel<true>
-            <<<getGridSize((int)pclsArrayHostPtr[species]->getNOP(),
-                           DEFAULT_BLOCK_SIZE),
-               DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
-                moverParamCUDAPtr[species], grid3DCUDACUDAPtr);
-        pclsArrayHostPtr[species]->setNOE((splittingTimes + 1) *
-                                          pclsArrayHostPtr[species]->getNOP());
-        cudaErrChk(cudaMemcpyAsync(
-            pclsArrayCUDAPtr[species], pclsArrayHostPtr[species],
-            sizeof(particleArrayCUDA), cudaMemcpyDefault, streams[species]));
-
-        // std::cerr << "Particle control multiple time splitting not yet
-        // implemented "<<std::endl;
-      }
-    }
-  }
+  if (col->getParticleSplitting())
+    splitParticles(species, cycle);
 
   // ======= Launch mover kernels after field data is available =======
 #if ENABLE_SOA_TIMING
@@ -2036,62 +2134,18 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle) {
   const bool waitForHeatFlux =
       heatFluxCalculationEnabled_ && (heatFluxScheduledCycle_ == cycle);
 
-  for (int i = 0; i < ns; i++) {
-    if (i != mergeIdx) {
+  // The movers of the other species start while this thread sorts and merges
+  // the species to merge; its mover follows the merge.
+  for (int i = 0; i < ns; i++)
+    if (i != mergeSpecies_)
       exitingResults[i] =
-          threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i,
+          threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync, this, i, cycle,
                                  doMomentsInLauncher, waitForHeatFlux);
-      toBeMerged[2 * i + 1] += 1;
-    }
-  }
-
-  if (mergeIdx >= 0 && mergeIdx < ns) {
-    const auto& i = mergeIdx;
-    std::cout << " Particle merging myrank: " << MPIdata::get_rank()
-              << " species: " << i << std::endl;
-
-    // GPU cell sort — all NOP particles (merge requires cell ordering)
-    const uint32_t mergeNop = pclsArrayHostPtr[i]->getNOP();
-    cudaErrChk(
-        cudaStreamSynchronize(streams[i])); // ensure no kernels in flight
-    // Explicit edge: also wait for the previous cycle's output D->H drain
-    // before mutating SoA via sort/merge. The host sync above only waits for
-    // streams[i]; outputStream is independent.
-    cudaErrChk(cudaStreamWaitEvent(streams[i], eventOutputCopy, 0));
-    if (waitForHeatFlux)
-      cudaErrChk(cudaStreamWaitEvent(streams[i], heatFluxReadDoneEvt[i], 0));
-    // Lazy-init: cellSorters[i] is initialised in initCUDA() only when
-    // sortingCycle_ > 0. The merging path however needs the sorter even when
-    // periodic sorting is disabled (sortingCycle_ == 0); initialize on first
-    // use to avoid undefined behavior in prepareBuffers/enqueueSortAsync.
-    if (!cellSorters[i].initialized) {
-      cellSorters[i].init(*grid3DCUDAHostPtr,
-                          pclsArrayHostPtr[i]->getCapacity(), streams[i]);
-    }
-    cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
-    cellSorters[i].enqueueSortAsync(pclsArrayHostPtr[i], grid3DCUDACUDAPtr,
-                                    mergeNop, streams[i]);
-    cellSorters[i].finishSort(streams[i]);
-    // Re-sync SoA pointers to device (sort did a pointer swap on host)
-    cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
-                               sizeof(particleArrayCUDA), cudaMemcpyDefault,
-                               streams[i]));
-
-    // Merging kernel using CellSorter's device buffers
-    const int totalCells = cellSorters[i].getNumCells();
-    mergingKernel<<<getGridSize(totalCells * WARP_SIZE, DEFAULT_BLOCK_SIZE),
-                    DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
-        const_cast<int*>(cellSorters[i].getCellStartOffsets()),
-        cellSorters[i].getCellCounts(), grid3DCUDACUDAPtr, pclsArrayCUDAPtr[i],
-        departureArrayCUDAPtr[i]);
-
-    // Treat merge species as unsorted cycle: momentKernelStayed runs in
-    // launcher
-    exitingResults[i] = threadPoolPtr->enqueue(&c_Solver::cudaLauncherAsync,
-                                               this, i, true, waitForHeatFlux);
-
-    toBeMerged[2 * i + 1] = 0;
-    mergeIdx = -1; // merged
+  if (mergeSpecies_ >= 0) {
+    mergeParticles(mergeSpecies_, waitForHeatFlux);
+    exitingResults[mergeSpecies_] = threadPoolPtr->enqueue(
+        &c_Solver::cudaLauncherAsync, this, mergeSpecies_, cycle,
+        doMomentsInLauncher, waitForHeatFlux);
   }
 
   return (false);
@@ -2813,9 +2867,9 @@ void c_Solver::CalculateB(int cycle) {
  * quantities.
  *
  * After the per-species moment kernels and scatters complete, this method
- * optionally schedules particle merging, communicates ghost moments, applies
- * special boundary charge sources, and computes the field-solver derived
- * moment quantities.
+ * schedules particle merging if it is on (after a mover only), communicates
+ * ghost moments, applies special boundary charge sources, and computes the
+ * field-solver derived moment quantities.
  */
 void c_Solver::MomentsAwait(int cycle) {
 
@@ -2831,34 +2885,10 @@ void c_Solver::MomentsAwait(int cycle) {
   for (int i = 0; i < ns; ++i)
     cudaErrChk(cudaEventSynchronize(cycleEndEvent[i]));
 
-  if constexpr (PARTICLE_MERGING) {
-    // Mark species whose particle count exceeds the merge threshold.
-    for (int i = 0; i < ns; i++) {
-      if (pclsArrayHostPtr[i]->getNOP() >
-          MERGE_THRESHOLD * pclsArrayHostPtr[i]->getInitialNOP()) {
-        toBeMerged[2 * i] = 1;
-      } else {
-        toBeMerged[2 * i] = 0;
-      }
-    }
-    // Select the species that has gone the longest without merging.
-    mergeIdx = -1;
-    int mergeCountFromLast = -1;
-    for (int i = 0; i < ns; i++) {
-      if ((toBeMerged[2 * i] == 1) &&
-          (toBeMerged[2 * i + 1] > mergeCountFromLast)) {
-        mergeIdx = i;
-        mergeCountFromLast = toBeMerged[2 * i + 1];
-      }
-    }
-
-    if (mergeIdx >= 0 && mergeIdx < ns) {
-      // GPU sort + merge happens in ParticlesMoverMomentAsync — no D→H needed
-      // here. Just record that this species is scheduled for merging.
-    }
-  } else {
-    mergeIdx = -1;
-  }
+  // Not in the pre-loop call (cycle -1): before the first mover a planet rank
+  // still holds the particles loaded inside the planet.
+  if (col->getParticleMerging() && cycle >= 0)
+    scheduleMerging();
 
   // Phase 1: ghost exchange of the species in batches of HALO_MAX_BATCH / 10
   // (2 halo exchanges per batch instead of 2 per species)
@@ -3129,20 +3159,8 @@ void c_Solver::outputCopyAsync(int cycle) {
         cudaErrChk(cudaStreamWaitEvent(streams[s], cycleEndEvent[s], 0));
         cudaErrChk(cudaStreamWaitEvent(streams[s], eventOutputCopy, 0));
 
-        const uint32_t nop = pclsArrayHostPtr[s]->getNOP();
-        if (nop > 0) {
-          if (!cellSorters[s].initialized) {
-            cellSorters[s].init(*grid3DCUDAHostPtr,
-                                pclsArrayHostPtr[s]->getCapacity(), streams[s]);
-          }
-          cellSorters[s].prepareBuffers(pclsArrayHostPtr[s], streams[s]);
-          cellSorters[s].enqueueSortAsync(pclsArrayHostPtr[s],
-                                          grid3DCUDACUDAPtr, nop, streams[s]);
-          cellSorters[s].finishSort(streams[s]);
-          cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[s], pclsArrayHostPtr[s],
-                                     sizeof(particleArrayCUDA),
-                                     cudaMemcpyDefault, streams[s]));
-        }
+        if (pclsArrayHostPtr[s]->getNOP() > 0)
+          sortSpeciesByCell(s);
 
         copyRestartParticleCellMetadataFromDevice(s, streams[s]);
         cudaErrChk(cudaEventRecord(cycleEndEvent[s], streams[s]));
@@ -3566,6 +3584,25 @@ void c_Solver::sortParticles() {
 }
 
 /**
+ * @brief Sort the particles of a species by cell on its stream.
+ *
+ * The sorters are created in initCUDA() only with periodic sorting
+ * (SortingCycle > 0); the other callers (analysis cycles, restart output,
+ * particle merging) create theirs here on first use.
+ */
+void c_Solver::sortSpeciesByCell(int species) {
+  particleArrayCUDA* pcls = pclsArrayHostPtr[species];
+  CellSorter& sorter = cellSorters[species];
+  if (!sorter.initialized)
+    sorter.init(*grid3DCUDAHostPtr, pcls->getCapacity(), streams[species]);
+  sorter.sort(pcls, grid3DCUDACUDAPtr, pcls->getNOP(), streams[species]);
+  // the sort swapped the SoA pointers on the host
+  cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[species], pcls,
+                             sizeof(particleArrayCUDA), cudaMemcpyDefault,
+                             streams[species]));
+}
+
+/**
  * @brief Perform a full GPU cell sort for every species.
  *
  * This is used by the analysis path when cell-sorted order is required
@@ -3579,27 +3616,7 @@ void c_Solver::sortAllSpecies() {
     // before sort kernels mutate the SoA. The host sync above only waits for
     // streams[i]; outputStream is independent.
     cudaErrChk(cudaStreamWaitEvent(streams[i], eventOutputCopy, 0));
-
-    // Lazy-init: cellSorters[i] is initialised in initCUDA() only when
-    // sortingCycle_ > 0. Analysis cycles can however call sortAllSpecies()
-    // even with periodic sorting disabled (sortingCycle_ == 0), in which
-    // case the sorter buffers are still null. Initialize on first use here
-    // to avoid undefined behavior in prepareBuffers/enqueueSortAsync.
-    if (!cellSorters[i].initialized) {
-      cellSorters[i].init(*grid3DCUDAHostPtr,
-                          pclsArrayHostPtr[i]->getCapacity(), streams[i]);
-    }
-
-    const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
-    cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
-    cellSorters[i].enqueueSortAsync(pclsArrayHostPtr[i], grid3DCUDACUDAPtr, nop,
-                                    streams[i]);
-    cellSorters[i].finishSort(streams[i]);
-
-    // Re-sync host struct to device (SoA pointers were swapped on host)
-    cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
-                               sizeof(particleArrayCUDA), cudaMemcpyDefault,
-                               streams[i]));
+    sortSpeciesByCell(i);
   }
 
   // Wait until every species has completed its full sort pipeline.

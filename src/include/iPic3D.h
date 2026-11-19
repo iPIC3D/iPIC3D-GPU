@@ -48,6 +48,7 @@ using std::string;
 #include "momentKernel.cuh"
 #include "moverKernel.cuh"
 #include "particleArrayCUDA.cuh"
+#include "particleControlKernel.cuh"
 #include "particleExchange.cuh"
 #include "planetKernel.cuh"
 #include "threadPool.hpp"
@@ -148,6 +149,7 @@ public:
    * @brief Launch the GPU mover pipeline for one species.
    *
    * @param species Species index.
+   * @param cycle Current simulation cycle.
    * @param doMomentsInLauncher True when moments are deposited in the same
    * async path.
    * @param waitForHeatFlux Wait until the heat-flux kernel has read this
@@ -155,7 +157,7 @@ public:
    * @return Number of particles removed from the stayed prefix (MPI exiting
    * + deleted + planet).
    */
-  int cudaLauncherAsync(int species, bool doMomentsInLauncher,
+  int cudaLauncherAsync(int species, int cycle, bool doMomentsInLauncher,
                         bool waitForHeatFlux);
   /**
    * @brief Launch mover and moment work for all species asynchronously.
@@ -253,6 +255,21 @@ private:
    * @param synchronize Wait for the packing kernel before returning.
    */
   void refreshFieldForPclsDeviceBuffer(bool synchronize);
+  /**
+   * @brief Sort a species by cell on its stream, creating its sorter on first
+   * use. No kernel of the species may be in flight (the sorter may
+   * reallocate), and readers on other streams must be done.
+   */
+  void sortSpeciesByCell(int species);
+  // Particle count control (inputs ParticleSplitting, ParticleMerging)
+  /** @brief Reference counts and split geometry of the species. */
+  void initParticleControl();
+  /** @brief Split particles of a species below the band (before its mover). */
+  void splitParticles(int species, int cycle);
+  /** @brief Choose the species to merge before the next mover. */
+  void scheduleMerging();
+  /** @brief Sort a species by cell and merge particles in its full cells. */
+  void mergeParticles(int species, bool waitForHeatFlux);
   /** @brief Copy one species' rho/J bulk moments device→device from the
    * field solver's arrays. */
   void copyHeatFluxBulkD2D(int species, cudaStream_t stream);
@@ -449,8 +466,16 @@ private:
   double Benergy;
   double TOTenergy;
   double TOTmomentum; // |total momentum vector|
-  int mergeIdx = -1;
-  int* toBeMerged;
+
+  // ======= Particle count control (splitting and merging) =======
+  // Per species: the reference count of this rank (particles per cell times
+  // the cells outside the planet); 0 for a species that is not controlled.
+  std::vector<uint32_t> pclControlReference_;
+  std::vector<SplitGeometry> splitGeometry_; // per species
+  std::vector<int> cyclesSinceMerge_;        // per species
+  // The species merged at the start of the next mover, or -1. Chosen in
+  // MomentsAwait, it stays set through that mover, whose launchers read it.
+  int mergeSpecies_ = -1;
 
   // ======= Planet quasi-neutral boundary-condition state =======
   planetArray** planetArrayHostPtr; // per species, host-pinned metadata

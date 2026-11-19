@@ -23,7 +23,6 @@
  */
 class particleArrayCUDA {
 private:
-  uint32_t initialNOP;
   ParticleSoADevice soa; // device field pointers + metadata
   cudaStream_t stream;
 
@@ -69,7 +68,7 @@ public:
    */
   __host__ particleArrayCUDA(ParticleSoAHost* pSoA, cudaTypeSingle expand = 1.2,
                              cudaStream_t deviceStream = 0)
-      : initialNOP(0), soa{}, stream(deviceStream) {
+      : soa{}, stream(deviceStream) {
     const uint32_t nop = pSoA->getNOP();
     const uint32_t cap = roundUpSoA(static_cast<uint32_t>(nop * expand));
     allocateSoA(cap, pSoA->tracksParticleID());
@@ -132,11 +131,6 @@ public:
   }
 
   __host__ void setNOE(uint32_t val) { soa.nop = val; }
-
-  __host__ __device__ void setInitialNOP(uint32_t n) { initialNOP = n; }
-  __host__ __device__ __forceinline__ uint32_t getInitialNOP() const {
-    return initialNOP;
-  }
 
   // ── Capacity ──
 

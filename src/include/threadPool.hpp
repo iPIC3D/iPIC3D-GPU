@@ -7,6 +7,8 @@
 #include <future>
 #include <mutex>
 #include <queue>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -69,5 +71,19 @@ private:
   std::condition_variable condition;
   std::atomic<bool> stop;
 };
+
+/**
+ * Wait for a task of a ThreadPool and return its result. An exception of the
+ * task is thrown again on the calling thread, its message prefixed with
+ * `task` (what failed); uncaught, it ends every rank (MPIdata).
+ */
+template <typename T>
+T awaitTask(std::future<T>& future, const std::string& task) {
+  try {
+    return future.get();
+  } catch (const std::exception& error) {
+    throw std::runtime_error(task + ": " + error.what());
+  }
+}
 
 #endif // THREAD_POOL_HPP

@@ -176,7 +176,9 @@ public:
   bool MoverAwaitAndPclExchange(int cycle);
   void processPlanetParticles();
   void injectExosphereParticles();
-  void sortAllSpecies();
+  /** Sort by cell, on the GPU, the species with a nonzero entry in mask
+   *  (synchronous). */
+  void sortSpecies(const std::vector<int>& mask);
   /**
    * @brief Advance the magnetic field for one cycle.
    *

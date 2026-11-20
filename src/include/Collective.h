@@ -33,6 +33,7 @@
 #ifdef BATSRUS
 #include "InterfaceFluid.h"
 #endif
+#include "DataAnalysisInput.h"
 #include "Grid3DCU.h"
 #include "OutputTagConfig.h"
 #include "VCtopology3D.h"
@@ -65,6 +66,9 @@ private:
   /** Stops the run on every rank unless ok; rank 0 prints "ERROR: in input
    *  file <name> <fmt...>". */
   void requireInput(bool ok, const char* fmt, ...) const;
+  /** Reads and checks the data-analysis options (after ns, qom, the cells
+   *  and XLEN, YLEN, ZLEN). */
+  void readDataAnalysisInput(const ConfigFile& config);
 
 public:
   static const char* get_name_of_enum(int in);
@@ -142,21 +146,8 @@ public:
   int getYLEN() const { return (YLEN); }
   int getZLEN() const { return (ZLEN); }
 
-  // ── Macrocell (v_par, v_perp) spectra ──
-  // Macrocell size in cells along each axis (interior cells only).
-  // 0 disables the feature at runtime.
-  int getMacrocellNx() const { return (MacrocellNx); }
-  int getMacrocellNy() const { return (MacrocellNy); }
-  int getMacrocellNz() const { return (MacrocellNz); }
-  /*! Top-level runtime on/off switch for the (v_par,v_perp) spectra pipeline.
-   *  Read from VelocitySpectra in the input file; default 0 = disabled. */
-  bool getVelocitySpectra() const { return (velocitySpectra != 0); }
-  /*! Per-species enable mask for the (v_par,v_perp) macrocell spectra.
-   *  Returns false (off) if the input file did not list the species. */
-  bool getVelocitySpectraSpecies(int s) const {
-    return (s >= 0 && s < (int)VelocitySpectraSpecies.size()) &&
-           (VelocitySpectraSpecies[s] != 0);
-  }
+  /*! Data-analysis options (histograms, GMM, macrocell spectra) */
+  const DataAnalysisInput& getDataAnalysis() const { return dataAnalysis_; }
   bool getPERIODICX() const { return (PERIODICX); }
   bool getPERIODICY() const { return (PERIODICY); }
   bool getPERIODICZ() const { return (PERIODICZ); }
@@ -376,17 +367,8 @@ private:
   bool solverStopOnNonConvergence;
   /*! number of time cycles */
   int ncycles;
-  /*! macrocell size (interior cells) for the (v_par,v_perp) spectra
-   *  data-analysis module.  0 on any axis disables the feature. */
-  int MacrocellNx;
-  int MacrocellNy;
-  int MacrocellNz;
-  /*! Top-level on/off switch for the spectra pipeline (VelocitySpectra in
-   * input). */
-  int velocitySpectra;
-  /*! Per-species on/off mask for the (v_par,v_perp) macrocell spectra.
-   *  Empty / unset means off for all species. */
-  std::vector<int> VelocitySpectraSpecies;
+  /*! data-analysis options */
+  DataAnalysisInput dataAnalysis_;
   /*! physical space dimensions */
   int dim;
   /*! simulation box length - X direction */

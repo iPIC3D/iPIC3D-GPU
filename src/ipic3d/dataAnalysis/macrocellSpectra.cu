@@ -8,14 +8,19 @@
 #include "particleArrayCUDA.cuh"
 
 #include <algorithm>
-#include <cstdlib> // std::strtol
+#include <cmath>
+#include <cstdlib> // std::strtol, std::strtod
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 namespace macrocellSpectra {
+
+/** Threads per block of the spectra kernel. */
+inline constexpr int kSpectraThreads = 128;
 
 // ======= MacrocellPartition =======
 
@@ -60,11 +65,6 @@ bool MacrocellPartition::build(int Nx_int_, int Ny_int_, int Nz_int_, int Cx_,
 
 // ======= macrocellSpectra2D =======
 
-cudaCommonType macrocellSpectra2D::vmaxForSpecies(int species) {
-  return (species == 0 || species == 2) ? MAX_VELOCITY_HIST_E
-                                        : MAX_VELOCITY_HIST_I;
-}
-
 namespace {
 
 bool isRecordSeparator(char c) {
@@ -73,8 +73,9 @@ bool isRecordSeparator(char c) {
 
 } // namespace
 
-macrocellSpectra2D::macrocellSpectra2D(const MacrocellPartition& part)
-    : part_(part) {
+macrocellSpectra2D::macrocellSpectra2D(const MacrocellPartition& part,
+                                       std::vector<cudaCommonType> vmax)
+    : part_(part), vmax_(std::move(vmax)) {
   if (part_.M <= 0) {
     throw std::runtime_error("macrocellSpectra2D: empty partition");
   }
@@ -114,21 +115,17 @@ void macrocellSpectra2D::launch(particleArrayCUDA* pclsHostPtr,
   if (pclsHostPtr->getNOP() == 0)
     return;
 
-  const cudaCommonType vmax = vmaxForSpecies(species);
-
   dim3 grid(part_.Mx, part_.My, part_.Mz);
-  constexpr int BLOCK_SIZE = 128;
   // Dynamic shared memory is only the per-block mini-histogram; B corners use
   // a small statically aligned shared array in the kernel.
   const size_t shmemBytes = Nb * sizeof(macrocellHistType);
 
-  macrocellSpectraKernel<<<grid, BLOCK_SIZE, shmemBytes, stream>>>(
+  macrocellSpectraKernel<<<grid, kSpectraThreads, shmemBytes, stream>>>(
       pclsHostPtr->getX(), pclsHostPtr->getY(), pclsHostPtr->getZ(),
       pclsHostPtr->getU(), pclsHostPtr->getV(), pclsHostPtr->getW(),
       pclsHostPtr->getQ(), cellStartOffsetsCUDA, cellCountsCUDA, part_.Nx_int,
-      part_.Ny_int, part_.Nz_int, part_.Cx, part_.Cy, part_.Cz, part_.Mx,
-      part_.My, part_.Mz, fieldForPclsCUDA, gridDevicePtr, dHist_, vmax,
-      MACROCELL_BMIN);
+      part_.Ny_int, part_.Nz_int, part_.Cx, part_.Cy, part_.Cz,
+      fieldForPclsCUDA, gridDevicePtr, dHist_, vmax_[species]);
   cudaErrChk(cudaGetLastError());
 }
 
@@ -138,16 +135,8 @@ void macrocellSpectra2D::launch(particleArrayCUDA* pclsHostPtr,
 // parseRecordsFromJson_
 // -----------------------------------------------------------------------
 std::vector<int>
-macrocellSpectra2D::parseRecordsFromJson_(const std::string& jsonPath) {
+macrocellSpectra2D::parseRecordsFromJson_(const std::string& content) {
   std::vector<int> result;
-
-  std::ifstream f(jsonPath);
-  if (!f.is_open())
-    return result;
-
-  // Read the whole file into a string (JSON files are small, < 10 KB).
-  std::string content((std::istreambuf_iterator<char>(f)),
-                      std::istreambuf_iterator<char>());
 
   // Locate the "records" key and the following array.
   const std::string key = "\"records\"";
@@ -216,7 +205,7 @@ void macrocellSpectra2D::writeJson_(const SpeciesFileContext& ctx) const {
     << "  \"species\": " << ctx.species << ",\n"
     << "  \"ipic3d_version\": \"" << iPic3D::build::version() << "\",\n"
     << "  \"ipic3d_build\": \"" << iPic3D::build::signature() << "\",\n"
-    << "  \"vmax\": " << ctx.vmax << ",\n"
+    << "  \"vmax\": " << vmax_[ctx.species] << ",\n"
     << "  \"subdomain_interior_cells\": [" << part_.Nx_int << ","
     << part_.Ny_int << "," << part_.Nz_int << "],\n"
     << "  \"subdomain_global_offset_cells\": [" << part_.globalOffsetX << ","
@@ -233,11 +222,12 @@ void macrocellSpectra2D::writeJson_(const SpeciesFileContext& ctx) const {
   f << ",\n";
   writeAxisTiling("z", part_.rangeZ);
   f << "\n  },\n"
-    << "  \"bins\": {\"vpar\": " << MACROCELL_BINS_VPAR
-    << ", \"vperp\": " << MACROCELL_BINS_VPERP << "},\n"
+    << "  \"bins\": {\"vpar\": " << DAConfig::MACROCELL_BINS_VPAR
+    << ", \"vperp\": " << DAConfig::MACROCELL_BINS_VPERP << "},\n"
     << "  \"ranges\": {\n"
-    << "    \"vpar\":  [" << -ctx.vmax << "," << ctx.vmax << "],\n"
-    << "    \"vperp\": [0," << ctx.vmax << "]\n"
+    << "    \"vpar\":  [" << -vmax_[ctx.species] << "," << vmax_[ctx.species]
+    << "],\n"
+    << "    \"vperp\": [0," << vmax_[ctx.species] << "]\n"
     << "  },\n"
     << "  \"dtype\": \"float32\",\n"
     << "  \"endian\": \"little\",\n"
@@ -275,7 +265,6 @@ macrocellSpectra2D::makeSpeciesContext_(const std::string& subdomainDir,
   SpeciesFileContext ctx;
   ctx.species = species;
   ctx.rank = rank;
-  ctx.vmax = vmaxForSpecies(species);
   ctx.binPath = subdomainDir + "species_" + std::to_string(species) + ".bin";
   ctx.jsonPath = subdomainDir + "species_" + std::to_string(species) + ".json";
 
@@ -299,9 +288,49 @@ void macrocellSpectra2D::createEmptyBinary_(const std::string& path) const {
   }
 }
 
-void macrocellSpectra2D::reconcileRestart_(SpeciesFileContext& ctx) const {
+bool macrocellSpectra2D::reconcileRestart_(SpeciesFileContext& ctx,
+                                           int firstCycle) const {
   if (std::filesystem::exists(ctx.jsonPath)) {
-    ctx.records = parseRecordsFromJson_(ctx.jsonPath);
+    std::ifstream f(ctx.jsonPath);
+    if (!f.is_open())
+      throw std::runtime_error("macrocellSpectra: cannot read " + ctx.jsonPath);
+    const std::string content((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+    f.close();
+    // the value of a number of the JSON, NaN if absent
+    auto number = [&](const std::string& key) {
+      const size_t pos = content.find("\"" + key + "\":");
+      return pos == std::string::npos
+                 ? NAN
+                 : std::strtod(content.c_str() + pos + key.size() + 3, nullptr);
+    };
+    // the tiling as writeJson_ writes it
+    auto has = [&](const std::string& key, int a, int b, int c) {
+      return content.find("\"" + key + "\": [" + std::to_string(a) + "," +
+                          std::to_string(b) + "," + std::to_string(c) + "]") !=
+             std::string::npos;
+    };
+    const std::string bins =
+        "\"bins\": {\"vpar\": " +
+        std::to_string(DAConfig::MACROCELL_BINS_VPAR) +
+        ", \"vperp\": " + std::to_string(DAConfig::MACROCELL_BINS_VPERP) + "}";
+    if (number("record_size_bytes") != (double)recordSizeBytes_() ||
+        number("vmax") != (double)vmax_[ctx.species] ||
+        content.find(bins) == std::string::npos ||
+        !has("subdomain_interior_cells", part_.Nx_int, part_.Ny_int,
+             part_.Nz_int) ||
+        !has("macrocell_size_request", part_.Cx, part_.Cy, part_.Cz)) {
+      // records of another layout cannot continue: kept aside, start again
+      keepAside({ctx.jsonPath, ctx.binPath}, firstCycle);
+      createEmptyBinary_(ctx.binPath);
+      return true;
+    }
+    ctx.records = parseRecordsFromJson_(content);
+    // the restart writes again the cycles from firstCycle on
+    const auto again =
+        std::find_if(ctx.records.begin(), ctx.records.end(),
+                     [&](int cycle) { return cycle >= firstCycle; });
+    ctx.records.erase(again, ctx.records.end());
   } else {
     std::cerr << "[macrocellSpectra] rank=" << ctx.rank
               << " species=" << ctx.species
@@ -314,35 +343,30 @@ void macrocellSpectra2D::reconcileRestart_(SpeciesFileContext& ctx) const {
               << ": binary not found on restart; creating new file.\n";
     ctx.records.clear();
     createEmptyBinary_(ctx.binPath);
-    return;
+    return false;
   }
 
+  // JSON is authoritative: keep the binary records it lists, which drops
+  // the later cycles and incomplete trailing writes
   const size_t actualBytes = std::filesystem::file_size(ctx.binPath);
-  const size_t expectedBytes = ctx.records.size() * recordSizeBytes_();
-  if (actualBytes == expectedBytes)
-    return;
-
-  // JSON is authoritative. Keep only complete binary records also listed
-  // there; this drops orphaned appends and incomplete trailing writes.
   const size_t completeInBin = actualBytes / recordSizeBytes_();
-  const size_t consistentRecords = std::min(completeInBin, ctx.records.size());
-  const size_t consistentBytes = consistentRecords * recordSizeBytes_();
-
-  std::cerr << "[macrocellSpectra] rank=" << ctx.rank
-            << " species=" << ctx.species
-            << ": size mismatch (binary=" << actualBytes
-            << " expected=" << expectedBytes << "). Truncating to "
-            << consistentRecords << " records (" << consistentBytes
-            << " bytes).\n";
-
+  if (completeInBin < ctx.records.size()) {
+    std::cerr << "[macrocellSpectra] rank=" << ctx.rank
+              << " species=" << ctx.species << ": the binary holds "
+              << completeInBin << " records of the " << ctx.records.size()
+              << " listed; keeping those.\n";
+    ctx.records.resize(completeInBin);
+  }
+  const size_t keptBytes = ctx.records.size() * recordSizeBytes_();
+  if (actualBytes == keptBytes)
+    return false;
   std::error_code ec;
-  std::filesystem::resize_file(ctx.binPath, consistentBytes, ec);
+  std::filesystem::resize_file(ctx.binPath, keptBytes, ec);
   if (ec) {
     throw std::runtime_error("macrocellSpectra: cannot resize " + ctx.binPath +
                              " (" + ec.message() + ")");
   }
-
-  ctx.records.resize(consistentRecords);
+  return false;
 }
 
 void macrocellSpectra2D::appendBinaryRecord_(
@@ -367,8 +391,9 @@ void macrocellSpectra2D::appendBinaryRecord_(
 // -----------------------------------------------------------------------
 // initSpeciesFile
 // -----------------------------------------------------------------------
-void macrocellSpectra2D::initSpeciesFile(const std::string& subdomainDir,
+bool macrocellSpectra2D::initSpeciesFile(const std::string& subdomainDir,
                                          int species, int rank, bool isRestart,
+                                         int firstCycle,
                                          const VCtopology3D* vct) {
   if (species < 0) {
     throw std::runtime_error("macrocellSpectra: invalid species " +
@@ -377,8 +402,9 @@ void macrocellSpectra2D::initSpeciesFile(const std::string& subdomainDir,
 
   SpeciesFileContext ctx =
       makeSpeciesContext_(subdomainDir, species, rank, vct);
+  bool keptAside = false;
   if (isRestart) {
-    reconcileRestart_(ctx);
+    keptAside = reconcileRestart_(ctx, firstCycle);
   } else {
     createEmptyBinary_(ctx.binPath);
   }
@@ -389,6 +415,7 @@ void macrocellSpectra2D::initSpeciesFile(const std::string& subdomainDir,
   ctx.initialized = true;
   speciesCtx_[static_cast<size_t>(species)] = std::move(ctx);
   writeJson_(speciesCtx_[static_cast<size_t>(species)]);
+  return keptAside;
 }
 
 // -----------------------------------------------------------------------

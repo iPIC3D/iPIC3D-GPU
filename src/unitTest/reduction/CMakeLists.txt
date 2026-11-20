@@ -11,6 +11,8 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 option(CUDA_ON "Enable CUDA" ON) # It should always be ON, even for HIP AMD
 option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA
+set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for")
+set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture")
 
 if(NOT HIP_ON) # CUDA
     enable_language(CUDA)
@@ -69,7 +71,7 @@ target_include_directories(
 if(NOT HIP_ON) # CUDA
 
   set_target_properties(reductionTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-  set_property(TARGET reductionTest PROPERTY CUDA_ARCHITECTURES 75) # required for double atomicadd
+  set_property(TARGET reductionTest PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
   set_property(TARGET reductionTest PROPERTY CUDA_STANDARD 17)
   set_property(TARGET reductionTest PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
   set_property(TARGET reductionTest PROPERTY LINK_OPTIONS -fno-lto)
@@ -82,7 +84,7 @@ elseif(HIP_ON AND CUDA_ON) # HIP
   target_compile_options(reductionTest PUBLIC -fgpu-rdc)
   target_link_options(reductionTest PUBLIC  -fgpu-rdc --hip-link)
 
-  set_property(TARGET reductionTest PROPERTY HIP_ARCHITECTURES gfx90a)
+  set_property(TARGET reductionTest PROPERTY HIP_ARCHITECTURES ${HIP_ARCH})
 
 endif()
 

@@ -66,10 +66,8 @@ static int runSimulation(int argc, char** argv) {
 #endif
 
 #if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
-    // Sort all species on GPU before data-analysis cycles
-    if (dataAnalysis::dataAnalysisPipeline::isAnalysisCycle(i)) {
-      KCode.sortAllSpecies();
-    }
+    // The macrocell spectra need the particles sorted by cell and B packed
+    DA.prepareAnalysis(i);
 #endif
     auto t_sort = std::chrono::high_resolution_clock::now();
 
@@ -77,9 +75,10 @@ static int runSimulation(int argc, char** argv) {
     KCode.ScheduleHeatFlux(i);
 #endif
 
-    // DA analysis runs on its own host thread, on the per-species particle
-    // streams, while CalculateField runs the field solve on the solver
-    // stream.
+    // DA analysis runs on its own host thread and GPU stream, of the lowest
+    // priority, while CalculateField runs the field solve on the solver
+    // stream, of high priority. The mover, which changes the particles the
+    // analysis reads, starts after DA.waitForAnalysis().
     // t_field is sampled *before* DA.waitForAnalysis() so that field=
     // reflects only the field solver and not particle-count-dependent
     // analysis wait time.

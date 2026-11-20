@@ -105,13 +105,15 @@ energy      = 0.00020                   # [required if nsTestPart > 0]
 
 SortingCycle = 1                        # GPU cell-sort interval; 0 disables [default: 0]
 
-# %%%%%%%%%%%%%%%%%%%% VELOCITY SPECTRA %%%%%%%%%%%%%%%%%%%%
-# Generates 2D (v_par, v_perp with respect to B field) velocity spectra
-# Spectra are generated per macrocell
-# Requires compile-time MACROCELL_SPECTRA_ENABLE switch = True in /src/include/dataAnalysis/dataAnalysisConfig.cuh
-# Default MACROCELL_SPECTRA_ENABLE = True
-# Runs only when VelocitySpectra = 1 and all three macrocell sizes are > 0.
-VelocitySpectra        = 0              # Runtime master switch; 0 disables [default: 0]
+# %%%%%%%%%%%%%%%%%%%% DATA ANALYSIS %%%%%%%%%%%%%%%%%%%%
+# Velocity histograms, their GMM fit and the macrocell (v_par, v_perp) spectra,
+# every DataAnalysisCycle cycles. Ranges and GMM settings: README, "Data analysis".
+DataAnalysisCycle      = 50             # Analysis interval; 0 disables [default: 50]
+DataAnalysisOutputDir  = ./             # Parent folder of the outputs [default: ./]
+VelocityHistogram      = 0              # 3D velocity histograms [default: 0]
+VelocityGMM            = 0              # GMM fit of the histograms [default: 0]
+# The spectra need the macrocell sizes (at most the cells of a rank) and a species.
+VelocitySpectra        = 0              # Macrocell (v_par, v_perp) spectra [default: 0]
 MacrocellNx            = 0              # Macrocell x size in local cells [default: 0]
 MacrocellNy            = 0              # Macrocell y size in local cells [default: 0]
 MacrocellNz            = 0              # Macrocell z size in local cells [default: 0]

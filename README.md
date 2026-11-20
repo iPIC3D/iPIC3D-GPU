@@ -245,7 +245,7 @@ The restart reader can load a checkpoint onto a different MPI topology when all 
 - The destination topology refines the source topology by powers of two in each direction; coarsening and arbitrary factors are not supported.
 - The checkpoint contains active-node fields and active-cell particle metadata, as every checkpoint written by this code does.
 
-`RestartRemapPlan` maps each destination rank to overlapping source active boxes. Fields are copied into guarded arrays at `[1][1][1]`; particles are read as the sorted spans belonging to the destination rank.
+`RestartRemapPlan` maps each destination rank to overlapping source active boxes. Fields are copied into guarded arrays at `[1][1][1]`; particles are read as the sorted spans belonging to the destination rank. The data-analysis records are per rank: a remapped restart keeps the GMM and spectra records and the rank mappings of the old decomposition as `*_before_cycle<N>.*` and starts them again; the histogram files of the earlier cycles keep their names (see Data analysis).
 
 ### Particle restart loading
 
@@ -665,6 +665,34 @@ Additional ADIOS2-only tokens used for restart data: `proc_topology`, `E`, `B`, 
 | `RestartDirName` | `data` | Restart root containing `latest_restart.json` and `restart_A` / `restart_B` |
 | `CallFinalize` | `1` | Write a final restart checkpoint when the simulation ends (requires `RestartOutputCycle > 0`) |
 | `ParaviewScriptPath` | `""` | Path to ParaView Catalyst Python script (requires `USE_CATALYST`) |
+
+### Data analysis
+
+Every `DataAnalysisCycle` cycles a host thread analyses the particles of every species while the field solver runs, on a GPU stream of the lowest priority: the field solver, of higher priority, gets the GPU first. It computes the 3D velocity histogram, its fit by a Gaussian mixture (GMM), which compresses the velocity distribution into ten Gaussians, and the (v∥, v⊥) spectra relative to the local B in macrocells of cells. The spectra sort the particles of their species by cell first. All analyses are off by default; with none on, no cycle analyses. `BENCHMARK_MODE = 1` runs them without writing, `2` leaves them out of the build. Per-species options take one value for every species or one per species; on/off options take `0` or `1`. On a planet run the first analysis also sees the particles loaded inside the planet, which the first mover removes.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `DataAnalysisCycle` | `50` | Analyse every N cycles; `0` disables all analyses |
+| `DataAnalysisOutputDir` | `./` | Folder of the subfolders `velocityHistogram/`, `velocityGMM/`, `macrocellSpectra/`; a fresh start empties those of the analyses that are on, a restart removes the histogram files and the records of the analyses it runs from its first cycle on, which it writes again, and appends. The records are per rank: a restart onto another decomposition (restart remapping) warns and, in each folder written on another decomposition, keeps the GMM and spectra records and the rank mappings as `*_before_cycle<N>.*` (`_2`, `_3`, ... added when such a file exists), then starts them again; the histogram files of the earlier cycles keep their names, and the kept mappings give their ranks. Spectra of other macrocells, bins or range are kept aside the same way |
+| `VelocityHistogram` | `0` | 3D (u, v, w) histogram of every species, 100 bins per axis, weighted by \|q\| and summed exactly (fixed point), so the same in every run and for any order of the particles: `velocityHistogram/subDomain<rank>_species<s>_3D_<cycle>.vtk`, a point per bin at its centre |
+| `VelocityHistogramFixedRange` | `1` | Bin [`VelocityHistogramMin`, `VelocityHistogramMax`] on the three axes; `0`: the range of the finite velocities of the species at that cycle (on an axis where they have no spread, the width max − min about their value; the fixed range on an axis without finite velocities) |
+| `VelocityHistogramMax` | `0.2` if `qom < 0`, else `0.09` | Per species, positive, above `VelocityHistogramMin` by a finite width. The spectra bin v_par in [-max, max] and v_perp in [0, max] |
+| `VelocityHistogramMin` | `-VelocityHistogramMax` | Per species |
+| `VelocityGMM` | `0` | Fit every histogram (needs `VelocityHistogram = 1`) on its non-empty bins, weighted by their content: `velocityGMM/subDomain<rank>_species<s>.json`, one record per cycle with a non-empty histogram. The log-likelihood, in the units of the velocities, is that of the parameters before the last EM step; pruned components stay in the record with weight 1e-15 |
+| `GMMMaxIterations` | `100` | Expectation-maximisation iterations at most, plus one when the last one prunes a component or resets a non-finite mean |
+| `GMMConvergenceThreshold` | `1e-5` | Stop when the log-likelihood per unit weight of the histogram gains less, or decreases (from the 7th iteration on) |
+| `GMMWarmStart` | `1` | Start from the previous fit of the species (of this run: not after a restart), drawing again the components that were pruned or are close to it; otherwise from equal weights, random means within the largest velocity of the bins and the diagonal covariance `uth²`, `vth²`, `wth²` |
+| `GMMNormalize` | `1` | Fit the velocities divided by the largest velocity of the bins (`VelocityHistogramMax` with the default range) |
+| `GMMCheckCovariance` | `1` | Reset the non-finite elements of each covariance and raise its variances to `GMMMinVariance` |
+| `GMMCovarianceTolerance` | `1e-9` | Smallest pivot of the Cholesky factorisation of a covariance, in the units of the fit: a nearly singular covariance is raised on its diagonal to stay invertible, and is written so |
+| `GMMMinVariance` | `1e-4` | With `GMMCheckCovariance`, in the units of the fit: the smallest variance of each velocity given the previous ones (the Cholesky pivot, raised as with `GMMCovarianceTolerance`), so also on the diagonal, which bounds the density of a component by that of a round one of this variance; the default suits `GMMNormalize = 1` |
+| `GMMPruneComponents` | `1` | Drop the components of weight below `GMMPruneThreshold`, the smallest first, one at a time |
+| `GMMPruneThreshold` | `0.005` | Weight below which a component is pruned |
+| `VelocitySpectra` | `0` | Spectra of the species in `VelocitySpectraSpecies`, 64 × 64 bins per macrocell: `macrocellSpectra/subDomain_<rank>/species_<s>.bin`, described by `species_<s>.json`; a particle where \|B\| < 1e-12 is left out |
+| `MacrocellNx`, `MacrocellNy`, `MacrocellNz` | `0` | Macrocell size in cells; the spectra need all three, at most the cells of a rank along that axis (1 on the flat axis of a 2D run). A last rank with fewer cells than a macrocell (`nxc` not a multiple of `XLEN`) writes no spectra |
+| `VelocitySpectraSpecies` | all `0` | Per-species mask of the spectra |
+
+The bins and the number of GMM components are compile-time constants in `src/include/dataAnalysis/dataAnalysisConfig.cuh`.
 
 ## I/O Backends
 

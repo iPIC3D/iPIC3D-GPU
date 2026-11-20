@@ -15,8 +15,6 @@ class VCtopology3D;
 
 namespace macrocellSpectra {
 
-using namespace DAConfig;
-
 // Histogram element type for per-macrocell (v_par, v_perp) bins.
 // Kept as `cudaTypeSingle` for parity with
 // `velocityHistogram::histogramTypeOut`.
@@ -44,7 +42,10 @@ struct MacrocellRange {
  * macrocell size, the last macrocell along that axis carries the remainder
  * (its `size` is then `< Cx`).
  *
- * Halo cells are never included.
+ * The tiles cover the interior cells; the kernel adds to the first and the
+ * last macrocell of each axis the ghost cell next to it: a particle exactly
+ * on the upper boundary of the rank has its index, one on the lower boundary
+ * can round into it.
  *
  * The class is host-side. The JSON writer uses the full per-axis tiling, while
  * the CUDA kernel receives the scalar extents and requested macrocell sizes.
@@ -68,11 +69,13 @@ struct MacrocellPartition {
   bool build(int Nx_int_, int Ny_int_, int Nz_int_, int Cx_, int Cy_, int Cz_,
              int globalOffX, int globalOffY, int globalOffZ);
 
-  /// Linear macrocell id used everywhere (x fastest).
+  /// Linear macrocell id (x fastest), the layout of the kernel and of the
+  /// files. Not used currently.
   int linearId(int mx, int my, int mz) const {
     return (mz * My + my) * Mx + mx;
   }
 
+  /// The inverse of linearId. Not used currently.
   void unflatten(int m, int& mx, int& my, int& mz) const {
     mx = m % Mx;
     my = (m / Mx) % My;
@@ -91,12 +94,10 @@ struct MacrocellPartition {
  * macrocell slice. Bin metadata (range and resolution) is uniform across
  * macrocells for the active species.
  *
- * The ranges follow the existing fixed-range convention used by
- * `velocityHistogram3D`:
+ * The ranges of species s are
  *   - vpar  in [-vmax_s, +vmax_s]
  *   - vperp in [0,       +vmax_s]
- * with vmax_s = MAX_VELOCITY_HIST_E for species 0/2 and
- *      vmax_s = MAX_VELOCITY_HIST_I otherwise.
+ * with vmax_s its VelocityHistogramMax.
  *
  * Output files (one per enabled species per MPI rank):
  *   <subdomainDir>/species_<S>.bin   — flat binary, one record per analysis
@@ -115,9 +116,17 @@ struct MacrocellPartition {
 class macrocellSpectra2D {
 public:
   /// Number of bins per macrocell.
-  static constexpr int Nb = MACROCELL_BINS_VPAR * MACROCELL_BINS_VPERP;
+  static constexpr int Nb =
+      DAConfig::MACROCELL_BINS_VPAR * DAConfig::MACROCELL_BINS_VPERP;
+  static_assert(Nb * sizeof(macrocellHistType) <= 48 * 1024,
+                "the bins of a macrocell fit the default shared memory");
 
-  explicit macrocellSpectra2D(const MacrocellPartition& part);
+  /**
+   * @param part The macrocells of this rank.
+   * @param vmax Velocity range of each species.
+   */
+  macrocellSpectra2D(const MacrocellPartition& part,
+                     std::vector<cudaCommonType> vmax);
 
   /// Async memset of the device histogram buffer to zero.
   void reset(cudaStream_t stream);
@@ -126,7 +135,7 @@ public:
    * @brief Launch the fused interpolate-and-bin kernel for one species.
    *
    * The borrowed pointers must come from `c_Solver`:
-   *   - `pclsHostPtr->getX()/Y()/Z()/U()/V()/W()` device pointers
+   *   - `pclsHostPtr->getX()/Y()/Z()/U()/V()/W()/Q()` device pointers
    *   - `fieldForPclsCUDA`: packed mover field buffer (B in components 0..2)
    *   - `gridDevicePtr`:    device-resident `grid3DCUDA`
    *   - `cellStartOffsetsCUDA`, `cellCountsCUDA`: from the per-species
@@ -146,21 +155,26 @@ public:
    *   - The JSON is written with an empty "records" array.
    *
    * Restart (isRestart == true):
-   *   - The existing JSON is read to restore the "records" list.
-   *   - The binary file size is validated against records.size().
-   *   - Any size mismatch (orphaned or missing records) is resolved by
-   *     truncating the binary to records.size() * record_size_bytes, so
-   *     the JSON always remains the authoritative source of truth.
+   *   - The existing JSON is read to restore the "records" list, without the
+   *     cycles from firstCycle on, which the restart writes again. Files of
+   *     other macrocells, bins or velocity range are kept as
+   *     *_before_cycle<firstCycle>.*, and start again (the caller warns).
+   *   - The binary file is truncated to the records kept (fewer if it is
+   *     shorter), so the JSON always remains the authoritative source of
+   *     truth.
    *
    * @param subdomainDir  Path to the per-rank subdomain directory (trailing /).
    * @param species       Species index (used as the file name suffix).
    * @param rank          MPI rank stored in the JSON metadata.
    * @param isRestart     true when continuing a previous simulation.
+   * @param firstCycle    the first cycle of this run.
    * @param vct           VCT topology pointer; its coordinates are snapshotted
    *                      into the JSON and are not accessed after this call.
+   * @return true when the records of a restart were kept aside (another
+   *         layout or velocity range)
    */
-  void initSpeciesFile(const std::string& subdomainDir, int species, int rank,
-                       bool isRestart, const VCtopology3D* vct);
+  bool initSpeciesFile(const std::string& subdomainDir, int species, int rank,
+                       bool isRestart, int firstCycle, const VCtopology3D* vct);
 
   /**
    * @brief D->H copy + append one record to the species binary file.
@@ -178,6 +192,7 @@ public:
    */
   void writeToFile(int species, int cycle, cudaStream_t stream);
 
+  /// Not used currently.
   const MacrocellPartition& partition() const { return part_; }
 
   ~macrocellSpectra2D();
@@ -187,6 +202,7 @@ public:
 
 private:
   MacrocellPartition part_;
+  std::vector<cudaCommonType> vmax_; ///< velocity range of each species
 
   // Flat histogram buffer (device + pinned host mirror).
   // Sized M * Nb elements; shared and reused across species sequentially.
@@ -202,10 +218,9 @@ private:
    * Populated by initSpeciesFile() and updated by writeToFile().
    */
   struct SpeciesFileContext {
-    std::string binPath;      ///< absolute path to the .bin file
-    std::string jsonPath;     ///< absolute path to the .json file
+    std::string binPath;      ///< path of the .bin file
+    std::string jsonPath;     ///< path of the .json file
     std::vector<int> records; ///< simulation cycles written so far
-    cudaCommonType vmax = 0;  ///< velocity range bound for this species
     int species = -1;         ///< species index
     int rank = 0;             ///< MPI rank
     bool initialized = false;
@@ -217,9 +232,6 @@ private:
 
   /// Indexed by species id; disabled species keep initialized=false.
   std::vector<SpeciesFileContext> speciesCtx_;
-
-  /// Returns vmax for the given species using the fixed-range convention.
-  static cudaCommonType vmaxForSpecies(int species);
 
   /**
    * @brief Atomically rewrite the JSON for ctx (temp-file + rename).
@@ -237,16 +249,16 @@ private:
                                          const VCtopology3D* vct) const;
 
   void createEmptyBinary_(const std::string& path) const;
-  void reconcileRestart_(SpeciesFileContext& ctx) const;
+  bool reconcileRestart_(SpeciesFileContext& ctx, int firstCycle) const;
   void appendBinaryRecord_(const SpeciesFileContext& ctx) const;
 
   /**
-   * @brief Parse the "records" array from an existing JSON written by
+   * @brief Parse the "records" array from the content of a JSON written by
    * writeJson_.
    *
-   * Returns an empty vector if the file is absent, unreadable, or malformed.
+   * Returns an empty vector if the array is absent or malformed.
    */
-  static std::vector<int> parseRecordsFromJson_(const std::string& jsonPath);
+  static std::vector<int> parseRecordsFromJson_(const std::string& content);
 };
 
 } // namespace macrocellSpectra
@@ -263,13 +275,12 @@ __global__ void macrocellSpectraKernel(
     const int* __restrict__ cellStartOffsets,
     const int* __restrict__ cellCounts,
     // Interior cell extents and requested macrocell sizes
-    int Nx_int, int Ny_int, int Nz_int, int Cx, int Cy, int Cz, int Mx, int My,
-    int Mz,
+    int Nx_int, int Ny_int, int Nz_int, int Cx, int Cy, int Cz,
     // Field & grid
     const cudaFieldType* __restrict__ fieldForPcls,
     const grid3DCUDA* __restrict__ grid,
     // Histogram parameters
     macrocellSpectra::macrocellHistType* __restrict__ histOut, // [M * Nb]
-    cudaCommonType vmax, cudaCommonType bMin);
+    cudaCommonType vmax);
 
 #endif // MACROCELL_SPECTRA_CUH

@@ -237,8 +237,9 @@ void EMfields3D::gpuSolverAllocate() {
   d_chebTmp = nullptr;
   chebAlloc = 0;
 
-  // ---- Dedicated non-blocking solver stream ----
-  cudaErrChk(cudaStreamCreateWithFlags(&solverStream_, cudaStreamNonBlocking));
+  // ---- Dedicated non-blocking solver stream, above the particle and
+  // analysis streams ----
+  solverStream_ = createPriorityStream(StreamPriority::FieldSolver);
 
   // ---- Persistent batched halo-exchange buffers ----
   gpuAllocateHaloBuffers();
@@ -592,12 +593,7 @@ void EMfields3D::gpuAllocateHaloBuffers() {
     // Split exchange resources (HaloOverlap) belong to the halo subsystem, so
     // tests and communication-only users do not need the full field solver.
     if (haloOverlap_) {
-      int leastPriority = 0;
-      int greatestPriority = 0;
-      cudaErrChk(
-          cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
-      cudaErrChk(cudaStreamCreateWithPriority(
-          &haloStream_, cudaStreamNonBlocking, greatestPriority));
+      haloStream_ = createPriorityStream(StreamPriority::Halo);
       cudaErrChk(
           cudaEventCreateWithFlags(&haloInputReady_, cudaEventDisableTiming));
       cudaErrChk(

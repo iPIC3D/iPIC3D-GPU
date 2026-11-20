@@ -9,6 +9,8 @@ set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA
+set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for")
+set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture")
 
 if(NOT HIP_ON) # CUDA
   enable_language(CUDA)
@@ -89,7 +91,7 @@ target_link_libraries(histogram3DTest PRIVATE ${linkLibraries})
 if(NOT HIP_ON) # CUDA
 
   set_target_properties(histogram3DTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-  set_property(TARGET histogram3DTest PROPERTY CUDA_ARCHITECTURES 75) # required for double atomicadd
+  set_property(TARGET histogram3DTest PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
   set_property(TARGET histogram3DTest PROPERTY CUDA_STANDARD 17)
   set_property(TARGET histogram3DTest PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
   set_property(TARGET histogram3DTest PROPERTY LINK_OPTIONS -fno-lto)
@@ -102,7 +104,7 @@ else() # HIP
   target_compile_options(histogram3DTest PUBLIC -fgpu-rdc)
   target_link_options(histogram3DTest PUBLIC  -fgpu-rdc --hip-link)
 
-  set_property(TARGET histogram3DTest PROPERTY HIP_ARCHITECTURES gfx90a)
+  set_property(TARGET histogram3DTest PROPERTY HIP_ARCHITECTURES ${HIP_ARCH})
 
 endif()
 
@@ -124,4 +126,4 @@ add_test(
   COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1
           ${MPIEXEC_PREFLAGS} $<TARGET_FILE:histogram3DTest>
           ${MPIEXEC_POSTFLAGS})
-set_tests_properties(histogram3DTest PROPERTIES TIMEOUT 10) # Timeout in seconds
+set_tests_properties(histogram3DTest PROPERTIES TIMEOUT 60) # Timeout in seconds

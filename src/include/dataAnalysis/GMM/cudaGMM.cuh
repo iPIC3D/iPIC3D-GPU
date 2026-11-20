@@ -3,331 +3,257 @@
 
 #include "cudaGMMUtility.cuh"
 #include "cudaGMMkernel.cuh"
-#include "cudaReduction.cuh"
 #include "cudaTypeDef.cuh"
 
-#include "dataAnalysisConfig.cuh"
-
-#include <algorithm> // required for std::copy
-#include <fstream>
+#include <algorithm>
+#include <cmath>
 #include <iostream>
-#include <stdio.h>
-#include <string>
+#include <stdexcept>
 
 namespace cudaGMMWeight {
 
-using namespace DAConfig;
+/** Threads per block of the EM kernels: also the most components. */
+inline constexpr int kGMMThreads = 256;
+/** Points per thread of the M-step statistics. */
+inline constexpr int kStatisticsPointsPerThread = 4;
+/** Most blocks of the M-step statistics (a grid stride beyond): enough to
+ *  fill a large GPU on the largest histograms. */
+inline constexpr int kMaxStatisticsBlocks = 256;
+/** EM steps at most between two prunings (and resets of the non-finite
+ *  means); a converged fit is checked at once. */
+inline constexpr int kPruneInterval = 10;
+/** EM steps before the fit may converge: at time step 0, when the
+ *  distributions are exactly Gaussian, the fit otherwise stops after 2-3
+ *  iterations, far from the maximum of the likelihood. */
+inline constexpr int kMinStepsToConverge = 6;
 
+static_assert(kGMMThreads % 64 == 0 &&
+                  kGMMThreads <= cudaGMMWeightKernel::kMaxStatisticsThreads,
+              "whole warps on NVIDIA and AMD, within the statistics kernel");
+
+/**
+ * @brief Gaussian mixture fitted by expectation-maximisation to weighted
+ * points, on the GPU. One EM iteration is three kernels (E step, M-step
+ * statistics, M-step finalize) and one host synchronisation; the buffers are
+ * sized by the points and components and grow only.
+ */
 template <typename T, int dataDim, typename U = int> class GMM {
 
 private:
-  cudaStream_t GMMStream;
+  cudaStream_t GMMStream; // the caller's: all the work of the fit runs on it
 
-  GMMDataMultiDim<T, dataDim, U>* dataHostPtr; // ogject on host, data pointers
-                                               // pointing to the data on device
-  GMMDataMultiDim<T, dataDim, U>* dataDevicePtr =
-      nullptr; // object on device, data pointers pointing to the data on device
+  // object on host, its data pointers to the data on device
+  GMMDataMultiDim<T, dataDim, U>* dataHostPtr = nullptr;
+  // object on device, its data pointers to the data on device
+  GMMDataMultiDim<T, dataDim, U>* dataDevicePtr = nullptr;
 
-  GMMParam_t<T>* paramHostPtr; // object on host, the parameters for the GMM
-  // GMMParam_t<T>* paramDevicePtr; // object on device, the parameters for the
-  // GMM
+  GMMParam_t<T>* paramHostPtr = nullptr; // the parameters of the fit
 
-  int sizeNumComponents =
-      0;                   // the size of the buffers below, for space checking
-  int sizeNumData = 0;     // the size of the buffers below, for space checking,
-                           // numComponents * numData
-  int numActiveComponents; // number of active GMM components
+  int sizeNumComponents = 0; // components the buffers below hold
+  int sizeNumPoints = 0;     // points the point buffers below hold
 
   // the arrays on device
-  bool* flagActiveComponentsCUDA; // array with flags true/false to identify
-                                  // active components, last element is a flag
-                                  // that specify if at that cycle one component
-                                  // has been pruned, numComponents + 1
-  bool* flagResetMeanCUDA;
-  T* meanDataInitCUDA; // initial mean of the data, used to normalize data -
-                       // size dataDim --> right now is unused (=0) but it might
-                       // be useful in the future, dataDim
-  T* weightCUDA; // numComponents, it will be log(weight) during the iteration
-  T* meanCUDA;   // numComponents * dataDim
-  T* coVarianceCUDA;           // numComponents * dataDim * dataDim
-  T* coVarianceDecomposedCUDA; // numComponents * dataDim * dataDim, only the
-                               // lower triangle
-  T* normalizerCUDA;           // numComponents
-  T* PosteriorCUDA; // numComponents, for each component, the sum of the
-                    // posterior of all data points
+  bool* flagActiveComponentsCUDA = nullptr; // numComponents + 2: the active
+                                            // components, then whether one
+                                            // was pruned and whether a mean
+                                            // was reset
+  T* weightCUDA = nullptr;                  // numComponents, log(weight)
+  T* meanCUDA = nullptr;                    // numComponents * dataDim
+  T* coVarianceCUDA = nullptr;              // numComponents * dataDim * dataDim
+  T* coVarianceDecomposedCUDA = nullptr; // numComponents * dataDim * dataDim,
+                                         // Cholesky factor (choleskyFactor)
+  T* normalizerCUDA = nullptr;           // numComponents, log normalisation
+  T* partialCUDA = nullptr; // M-step block sums, kMaxStatisticsBlocks *
+                            // (numComponents * kMStepStatistics + 1)
+  T* resultCUDA = nullptr;  // log-likelihood and total weight of an EM step
 
-  T* posteriorCUDA; // numComponents * numData
-  T* tempArrayCUDA; // numComponents * numData * dataDim * dataDim, for
-                    // temporary storage
-
-  int reductionTempArraySize = 0;
-  T* reductionTempArrayCUDA; // dynamic size, for reduction, between reduction
-                             // and redunctionWarp
+  T* gammaCUDA = nullptr; // responsibilities, numComponents * numData
+  T* weightedLogLikelihoodCUDA = nullptr; // h log p(x), numData
 
   // the arrays on host, results and init values
-  bool* flagActiveComponents; // array with flags true/false to identify active
-                              // components, numComponents
-  bool* flagResetMean;
-  T* meanDataInit;         // dataDim
-  T* weight;               // numComponents
-  T* mean;                 // numComponents * dataDim
-  T* coVariance;           // numComponents * dataDim * dataDim
-  T* coVarianceDecomposed; // numComponents * dataDim * dataDim, only the lower
-                           // triangle
-  T* normalizer;           // numComponents
-
-  T* logResult = nullptr;
+  bool* flagActiveComponents = nullptr; // numComponents + 2, as on device
+  T* weight = nullptr;                  // numComponents
+  T* mean = nullptr;                    // numComponents * dataDim
+  T* coVariance = nullptr;              // numComponents * dataDim * dataDim
+  T* resultHost = nullptr;              // pinned copy of resultCUDA
 
   // runtime variables
-  T* logLikelihoodCUDA = nullptr;
   T logLikelihood = -INFINITY;
   T logLikelihoodOld = -INFINITY;
+  T totalWeight = 0; // sum of the weights of the data
 
 public:
-  // allocate or check if the arrays are allocated adequately, then replace the
-  // param
-  __host__ int config(GMMParam_t<T>* GMMParam,
-                      GMMDataMultiDim<T, dataDim, U>* data) {
-    auto oldSizeComponents = sizeNumComponents;
-    auto oldSizeData = sizeNumData;
+  /** Allocate the buffers if they are too small, then set the parameters
+   *  and the initial components (required, in the units of the points),
+   *  normalised with the points when the parameters ask to. The fit keeps
+   *  the two pointers: both must live until getGMMResult. */
+  __host__ void config(GMMParam_t<T>* GMMParam,
+                       GMMDataMultiDim<T, dataDim, U>* data) {
+    const int numComponents = GMMParam->numComponents;
+    if (numComponents < 1 || numComponents > kGMMThreads)
+      throw std::invalid_argument("GMM: 1 to " + std::to_string(kGMMThreads) +
+                                  " components, not " +
+                                  std::to_string(numComponents));
+    if (data->getNumData() < 1)
+      throw std::invalid_argument("GMM: no point to fit");
+    if (!GMMParam->weightInit || !GMMParam->meanInit ||
+        !GMMParam->coVarianceInit)
+      throw std::invalid_argument("GMM: the initial components are required");
 
-    // check if the arrays are allocated adequately
-    if (GMMParam->numComponents > oldSizeComponents) {
-      // deallocate the old arrays
-      if (oldSizeComponents > 0) {
-        // device
-        cudaErrChk(cudaFree(flagActiveComponentsCUDA));
-        cudaErrChk(cudaFree(flagResetMeanCUDA));
-        cudaErrChk(cudaFree(weightCUDA));
-        cudaErrChk(cudaFree(meanCUDA));
-        cudaErrChk(cudaFree(meanDataInitCUDA));
-        cudaErrChk(cudaFree(coVarianceCUDA));
-        cudaErrChk(cudaFree(coVarianceDecomposedCUDA));
-        cudaErrChk(cudaFree(normalizerCUDA));
-        cudaErrChk(cudaFree(PosteriorCUDA));
-
-        // host
-        cudaErrChk(cudaFreeHost(flagActiveComponents));
-        cudaErrChk(cudaFreeHost(flagResetMean));
-        cudaErrChk(cudaFreeHost(meanDataInit));
-        cudaErrChk(cudaFreeHost(weight));
-        cudaErrChk(cudaFreeHost(mean));
-        cudaErrChk(cudaFreeHost(coVariance));
-        cudaErrChk(cudaFreeHost(coVarianceDecomposed));
-        cudaErrChk(cudaFreeHost(normalizer));
-      }
-
-      sizeNumComponents = GMMParam->numComponents; // the new size
-      auto& numCompo = sizeNumComponents;
-
-      // allocate the new arrays
+    const int oldSizeComponents = sizeNumComponents;
+    if (numComponents > oldSizeComponents) {
+      freeComponentBuffers();
+      const int K = numComponents;
+      cudaErrChk(cudaMalloc(&flagActiveComponentsCUDA, sizeof(bool) * (K + 2)));
+      cudaErrChk(cudaMalloc(&weightCUDA, sizeof(T) * K));
+      cudaErrChk(cudaMalloc(&meanCUDA, sizeof(T) * K * dataDim));
       cudaErrChk(
-          cudaMalloc(&flagActiveComponentsCUDA, sizeof(bool) * (numCompo + 1)));
-      cudaErrChk(cudaMalloc(&flagResetMeanCUDA, sizeof(bool)));
-      cudaErrChk(cudaMalloc(&weightCUDA, sizeof(T) * numCompo));
-      cudaErrChk(cudaMalloc(&meanCUDA, sizeof(T) * numCompo * dataDim));
-      cudaErrChk(cudaMalloc(&meanDataInitCUDA, sizeof(T) * dataDim));
-      cudaErrChk(cudaMalloc(&coVarianceCUDA,
-                            sizeof(T) * numCompo * dataDim * dataDim));
+          cudaMalloc(&coVarianceCUDA, sizeof(T) * K * dataDim * dataDim));
       cudaErrChk(cudaMalloc(&coVarianceDecomposedCUDA,
-                            sizeof(T) * numCompo * dataDim * dataDim));
-      cudaErrChk(cudaMalloc(&normalizerCUDA, sizeof(T) * numCompo));
-      cudaErrChk(cudaMalloc(&PosteriorCUDA, sizeof(T) * numCompo));
+                            sizeof(T) * K * dataDim * dataDim));
+      cudaErrChk(cudaMalloc(&normalizerCUDA, sizeof(T) * K));
+      cudaErrChk(cudaMalloc(
+          &partialCUDA,
+          sizeof(T) * kMaxStatisticsBlocks *
+              (K * cudaGMMWeightKernel::kMStepStatistics<dataDim> + 1)));
 
+      cudaErrChk(cudaMallocHost(&flagActiveComponents, sizeof(bool) * (K + 2)));
+      cudaErrChk(cudaMallocHost(&weight, sizeof(T) * K));
+      cudaErrChk(cudaMallocHost(&mean, sizeof(T) * K * dataDim));
       cudaErrChk(
-          cudaMallocHost(&flagActiveComponents, sizeof(bool) * (numCompo + 1)));
-      cudaErrChk(cudaMallocHost(&flagResetMean, sizeof(bool)));
-      cudaErrChk(cudaMallocHost(&meanDataInit, sizeof(T) * dataDim));
-      cudaErrChk(cudaMallocHost(&weight, sizeof(T) * numCompo));
-      cudaErrChk(cudaMallocHost(&mean, sizeof(T) * numCompo * dataDim));
-      cudaErrChk(cudaMallocHost(&coVariance,
-                                sizeof(T) * numCompo * dataDim * dataDim));
-      cudaErrChk(cudaMallocHost(&coVarianceDecomposed,
-                                sizeof(T) * numCompo * dataDim * dataDim));
-      cudaErrChk(cudaMallocHost(&normalizer, sizeof(T) * numCompo));
+          cudaMallocHost(&coVariance, sizeof(T) * K * dataDim * dataDim));
+      sizeNumComponents = K; // allocated
     }
 
-    // check the numPoint related arrays
-    if (GMMParam->numComponents * data->getNumData() > oldSizeData) {
-      // deallocate the old arrays
-      if (oldSizeData > 0) {
-        // device
-        cudaErrChk(cudaFree(posteriorCUDA));
-        cudaErrChk(cudaFree(tempArrayCUDA));
-      }
-
-      sizeNumData =
-          GMMParam->numComponents * data->getNumData(); // the new size
-
-      // allocate the new arrays
-      cudaErrChk(cudaMalloc(&posteriorCUDA, sizeof(T) * sizeNumData));
-      cudaErrChk(cudaMalloc(&tempArrayCUDA,
-                            sizeof(T) * sizeNumData * dataDim * dataDim));
+    // the arrays sized by the points (and the components), with a margin:
+    // the number of points drifts up between fits
+    if (data->getNumData() > sizeNumPoints ||
+        sizeNumComponents > oldSizeComponents) {
+      const int numPoints =
+          std::max(sizeNumPoints, data->getNumData() + data->getNumData() / 4);
+      freePointBuffers();
+      cudaErrChk(
+          cudaMalloc(&gammaCUDA, sizeof(T) * sizeNumComponents * numPoints));
+      cudaErrChk(cudaMalloc(&weightedLogLikelihoodCUDA, sizeof(T) * numPoints));
+      sizeNumPoints = numPoints; // allocated
     }
 
-    // load the init values, if needed
-    if (GMMParam->weightInit != nullptr && GMMParam->meanInit != nullptr &&
-        GMMParam->coVarianceInit != nullptr) {
-      memcpy(weight, GMMParam->weightInit, sizeof(T) * GMMParam->numComponents);
-      memcpy(mean, GMMParam->meanInit,
-             sizeof(T) * GMMParam->numComponents * dataDim);
-      memcpy(coVariance, GMMParam->coVarianceInit,
-             sizeof(T) * GMMParam->numComponents * dataDim * dataDim);
-    } else { // init with internal initiator
-             // TODO
-    }
-
-    // precompute log of the mean vector
-    // set all component to active
-    for (int i = 0; i < GMMParam->numComponents; i++) {
-      weight[i] = log(weight[i]);
+    // the initial components in the units of the fit, the weights as logs,
+    // all active
+    const T scale = GMMParam->normalize ? GMMParam->scale : T(1);
+    for (int i = 0; i < numComponents * dataDim; i++)
+      mean[i] = GMMParam->meanInit[i] / scale;
+    for (int i = 0; i < numComponents * dataDim * dataDim; i++)
+      coVariance[i] = GMMParam->coVarianceInit[i] / (scale * scale);
+    for (int i = 0; i < numComponents; i++) {
+      weight[i] = log(GMMParam->weightInit[i]);
       flagActiveComponents[i] = true;
     }
-    flagActiveComponents[GMMParam->numComponents] = false;
-    numActiveComponents = GMMParam->numComponents;
-    *flagResetMean = false;
+    flagActiveComponents[numComponents] = false;
+    flagActiveComponents[numComponents + 1] = false;
 
-    // copy to device
     cudaErrChk(cudaMemcpyAsync(flagActiveComponentsCUDA, flagActiveComponents,
-                               sizeof(bool) * (GMMParam->numComponents + 1),
+                               sizeof(bool) * (numComponents + 2),
                                cudaMemcpyHostToDevice, GMMStream));
-    cudaErrChk(cudaMemcpyAsync(flagResetMeanCUDA, flagResetMean, sizeof(bool),
-                               cudaMemcpyHostToDevice, GMMStream));
-    cudaErrChk(cudaMemcpyAsync(weightCUDA, weight,
-                               sizeof(T) * GMMParam->numComponents,
+    cudaErrChk(cudaMemcpyAsync(weightCUDA, weight, sizeof(T) * numComponents,
                                cudaMemcpyHostToDevice, GMMStream));
     cudaErrChk(cudaMemcpyAsync(meanCUDA, mean,
-                               sizeof(T) * GMMParam->numComponents * dataDim,
+                               sizeof(T) * numComponents * dataDim,
                                cudaMemcpyHostToDevice, GMMStream));
-    cudaErrChk(
-        cudaMemcpyAsync(coVarianceCUDA, coVariance,
-                        sizeof(T) * GMMParam->numComponents * dataDim * dataDim,
-                        cudaMemcpyHostToDevice, GMMStream));
-    cudaErrChk(
-        cudaMemcpyAsync(coVarianceDecomposedCUDA, coVariance,
-                        sizeof(T) * GMMParam->numComponents * dataDim * dataDim,
-                        cudaMemcpyHostToDevice, GMMStream));
-    // cudaErrChk(cudaMemcpy(normalizerCUDA, normalizer,
-    // sizeof(T)*GMMParam->numComponents, cudaMemcpyHostToDevice));
+    cudaErrChk(cudaMemcpyAsync(coVarianceCUDA, coVariance,
+                               sizeof(T) * numComponents * dataDim * dataDim,
+                               cudaMemcpyHostToDevice, GMMStream));
 
-    // replace the param
     paramHostPtr = GMMParam;
     dataHostPtr = data;
     cudaErrChk(cudaMemcpyAsync(dataDevicePtr, dataHostPtr,
                                sizeof(GMMDataMultiDim<T, dataDim, U>),
                                cudaMemcpyDefault, GMMStream));
+    if (paramHostPtr->normalize)
+      cudaGMMWeightKernel::normalizePointsKernel<T, dataDim, U, false>
+          <<<getGridSize(data->getNumData(), kGMMThreads), kGMMThreads, 0,
+             GMMStream>>>(dataDevicePtr, paramHostPtr->scale);
 
-    cudaErrChk(cudaStreamSynchronize(GMMStream));
-    { // reset the value for reuse
-      logLikelihood = -INFINITY;
-      logLikelihoodOld = -INFINITY;
-    }
-    return 0; // some cuda async operation are not finished yet, but we are
-              // using the same stream
+    // the first E step needs the factor of the initial coVariance
+    checkAndDecomposeCoVariance();
+    logLikelihood = -INFINITY;
+    logLikelihoodOld = -INFINITY;
+    totalWeight = 0;
   }
 
-  __host__ GMM() {
-    cudaErrChk(cudaStreamCreate(&GMMStream));
-
+  /** @param stream the stream of the fit, ordered after the work that
+   *  produced the points */
+  __host__ explicit GMM(cudaStream_t stream) : GMMStream(stream) {
     cudaErrChk(
         cudaMalloc(&dataDevicePtr, sizeof(GMMDataMultiDim<T, dataDim, U>)));
 
-    reductionTempArraySize = 1024;
-    cudaErrChk(cudaMalloc(&reductionTempArrayCUDA,
-                          sizeof(T) * reductionTempArraySize));
-
-    cudaErrChk(cudaMalloc(&logLikelihoodCUDA, sizeof(T)));
-    cudaErrChk(cudaMallocHost(&logResult, sizeof(T)));
+    cudaErrChk(cudaMalloc(&resultCUDA, 2 * sizeof(T)));
+    cudaErrChk(cudaMallocHost(&resultHost, 2 * sizeof(T)));
   }
 
-  __host__ void preProcessDataGMM(const T* meanArray,
-                                  const T* maxVelocityArray) {
+  GMM(const GMM&) = delete;
+  GMM& operator=(const GMM&) = delete;
 
-    memcpy(meanDataInit, meanArray, sizeof(T) * dataDim);
-    cudaErrChk(cudaMemcpyAsync(meanDataInitCUDA, meanDataInit,
-                               sizeof(T) * dataDim, cudaMemcpyHostToDevice,
-                               GMMStream));
-    cudaErrChk(cudaStreamSynchronize(GMMStream));
-
-    if constexpr (NORMALIZE_DATA_FOR_GMM)
-      normalizePoints(maxVelocityArray);
-  }
-
+  /** Run the EM, then give the fit and the points back in the units of the
+   *  points; returns the number of EM steps, the last one after a pruning
+   *  included. A step that finds no weight (points of no weight, or no
+   *  finite component) ends the EM, unless a pruning or a reset of a
+   *  non-finite mean follows: the EM then starts again. */
   __host__ int initGMM() {
-    // do the GMR
     int step = 0;
     bool pruned = false;
 
     while (step < paramHostPtr->maxIteration) {
       pruned = false;
-      bool thresholdLH = false;
-      int internalStep = 0;
-      while (internalStep < 10) {
-        // E
-        calcPxAtMeanAndCoVariance();
-        calcLogLikelihoodPxAndposterior();
-        logLikelihood = sumLogLikelihood();
-
-        // compare the log likelihood increament with the threshold, if the
-        // increament is smaller than the threshold, or the log likelihood is
-        // smaller than the previous one, output the GMM
-        /*
-        step > 5 is required to reach convergence for simulation at time step 0,
-        when particle distribution functions are exactly gaussians, otherwise
-        GMM exits after 2-3 iterations without reaching correct convergence
-        (probably there's local minimum)
-        */
-        if (std::isnan(logLikelihood) ||
-            ((fabs(logLikelihood - logLikelihoodOld) <
-                  paramHostPtr->threshold ||
-              logLikelihood < logLikelihoodOld) &&
-             step > 5)) {
-          // std::cout << "Converged at step " << step << std::endl;
-          thresholdLH = true;
+      bool converged = false;
+      for (int internalStep = 0;
+           internalStep < kPruneInterval && step < paramHostPtr->maxIteration;
+           internalStep++) {
+        logLikelihood = emStep(); // of the parameters before its M step
+        // converged when the log-likelihood per unit weight gains less than
+        // the threshold, or decreases
+        const bool done = std::isnan(logLikelihood) ||
+                          ((fabs(logLikelihood - logLikelihoodOld) <
+                                paramHostPtr->threshold * totalWeight ||
+                            logLikelihood < logLikelihoodOld) &&
+                           step >= kMinStepsToConverge);
+        logLikelihoodOld = logLikelihood;
+        step++;
+        if (done || !(totalWeight > 0)) {
+          converged = true;
           break;
         }
-        // std::cout << "Step " << step << " log likelihood: " << logLikelihood
-        // << std::endl;
-        logLikelihoodOld = logLikelihood;
-
-        // M
-        calcPosterior();
-        updateMean();
-        updateWeight();
-        updateCoVarianceAndDecomposition();
-        internalStep++;
-        step++;
       }
-      if constexpr (PRUNE_COMPONENTS_GMM) {
-        pruned = pruneOneComponent(step);
-      }
-      if (thresholdLH && !pruned)
+      pruned = pruneAndResetComponents();
+      if (converged && !pruned)
         break;
     }
 
-    // If we exit the EM cycle just after pruning one component, we do one more
-    // EM iteration to ensure conservation of mean value and cov-matrix
+    // one more EM step after a pruning, so that the mean value and the
+    // coVariance are consistent with the remaining components
     if (pruned) {
-      // E
-      calcPxAtMeanAndCoVariance();
-      calcLogLikelihoodPxAndposterior();
-      logLikelihood = sumLogLikelihood();
-      // M
-      calcPosterior();
-      updateMean();
-      updateWeight();
-      updateCoVarianceAndDecomposition();
+      logLikelihood = emStep();
+      step++;
     }
 
+    // back to the units of the points (multiplied back, up to rounding); the
+    // density of the normalised points is scale^dataDim times larger
+    if (paramHostPtr->normalize) {
+      const T scale = paramHostPtr->scale;
+      cudaGMMWeightKernel::normalizePointsKernel<T, dataDim, U, true>
+          <<<getGridSize(dataHostPtr->getNumData(), kGMMThreads), kGMMThreads,
+             0, GMMStream>>>(dataDevicePtr, scale);
+      cudaGMMWeightKernel::normalizeMeanAndCovBack<T, dataDim>
+          <<<1, paramHostPtr->numComponents, 0, GMMStream>>>(
+              meanCUDA, coVarianceCUDA, scale, paramHostPtr->numComponents);
+      logLikelihood -= totalWeight * dataDim * log(scale);
+    }
+    cudaErrChk(cudaGetLastError());
     return step;
   }
 
-  __host__ void postProcessDataGMM(const T* maxVelocityArray) {
-
-    if constexpr (NORMALIZE_DATA_FOR_GMM)
-      normalizeDataBack(maxVelocityArray);
-  }
-
+  /** The fit: its components (weights, not their logs) and the
+   *  log-likelihood of the parameters before the last M step. */
   __host__ GMMResult<T, dataDim> getGMMResult(int simuStep, int convergeStep) {
     GMMResult<T, dataDim> result(simuStep, paramHostPtr->numComponents);
 
@@ -362,318 +288,140 @@ public:
   }
 
   __host__ ~GMM() {
-    // created in constructor
-    cudaErrChk(cudaStreamDestroy(GMMStream));
-
+    // allocated in the constructor
     cudaErrChk(cudaFree(dataDevicePtr));
-    cudaErrChk(cudaFree(reductionTempArrayCUDA));
-    cudaErrChk(cudaFree(logLikelihoodCUDA));
-    cudaErrChk(cudaFreeHost(logResult));
+    cudaErrChk(cudaFree(resultCUDA));
+    cudaErrChk(cudaFreeHost(resultHost));
 
     // allocated in config
-
-    // deallocate the old arrays
-    if (sizeNumComponents > 0) {
-      // device
-      cudaErrChk(cudaFree(flagActiveComponentsCUDA));
-      cudaErrChk(cudaFree(weightCUDA));
-      cudaErrChk(cudaFree(meanCUDA));
-      cudaErrChk(cudaFree(meanDataInitCUDA));
-      cudaErrChk(cudaFree(coVarianceCUDA));
-      cudaErrChk(cudaFree(coVarianceDecomposedCUDA));
-      cudaErrChk(cudaFree(normalizerCUDA));
-      cudaErrChk(cudaFree(PosteriorCUDA));
-
-      if (sizeNumData > 0) {
-        // device
-        cudaErrChk(cudaFree(posteriorCUDA));
-        cudaErrChk(cudaFree(tempArrayCUDA));
-      }
-
-      // host
-      cudaErrChk(cudaFreeHost(flagActiveComponents));
-      cudaErrChk(cudaFreeHost(weight));
-      cudaErrChk(cudaFreeHost(mean));
-      cudaErrChk(cudaFreeHost(meanDataInit));
-      cudaErrChk(cudaFreeHost(coVariance));
-      cudaErrChk(cudaFreeHost(coVarianceDecomposed));
-      cudaErrChk(cudaFreeHost(normalizer));
-    }
+    freeComponentBuffers();
+    freePointBuffers();
   }
 
 private:
-  int reduceBlockNum(int dataSize, int blockSize) {
-    constexpr int elementPerThread =
-        8; // 8 elements per thread, as the input is 10000
-    if (dataSize < elementPerThread)
-      dataSize = elementPerThread;
-    auto blockNum = getGridSize(dataSize / elementPerThread, blockSize);
-    blockNum = blockNum > 1024 ? 1024 : blockNum;
-
-    if (reductionTempArraySize < blockNum) {
-      cudaErrChk(cudaFree(reductionTempArrayCUDA));
-      cudaErrChk(cudaMalloc(&reductionTempArrayCUDA, sizeof(T) * blockNum));
-      reductionTempArraySize = blockNum;
-    }
-
-    return blockNum;
+  /** Free a device or pinned buffer, and null it. */
+  template <typename V> static void freeDevice(V*& buffer) {
+    cudaErrChk(cudaFree(buffer));
+    buffer = nullptr;
+  }
+  template <typename V> static void freePinned(V*& buffer) {
+    cudaErrChk(cudaFreeHost(buffer));
+    buffer = nullptr;
   }
 
-  void normalizePoints(const T* maxVelocityArray) {
-
-    // normalize data such that velocities are in range -1;1
-    // launch kernel
-    cudaGMMWeightKernel::normalizePointsKernel<T, dataDim, U, false>
-        <<<getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>(
-            dataDevicePtr, meanDataInitCUDA, maxVelocityArray);
+  /** Free the buffers sized by the components (allocated in config; null
+   *  when not, also after a failed allocation). */
+  void freeComponentBuffers() {
+    sizeNumComponents = 0;
+    freeDevice(flagActiveComponentsCUDA);
+    freeDevice(weightCUDA);
+    freeDevice(meanCUDA);
+    freeDevice(coVarianceCUDA);
+    freeDevice(coVarianceDecomposedCUDA);
+    freeDevice(normalizerCUDA);
+    freeDevice(partialCUDA);
+    freePinned(flagActiveComponents);
+    freePinned(weight);
+    freePinned(mean);
+    freePinned(coVariance);
   }
 
-  void normalizeDataBack(const T* maxVelocityArray) {
-
-    // normalize data back to the original data range
-    // launch kernel
-    cudaGMMWeightKernel::normalizePointsKernel<T, dataDim, U, true>
-        <<<getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>(
-            dataDevicePtr, meanDataInitCUDA, maxVelocityArray);
-
-    cudaGMMWeightKernel::normalizeMeanAndCovBack<T, dataDim>
-        <<<1, paramHostPtr->numComponents, 0, GMMStream>>>(
-            meanCUDA, coVarianceCUDA, meanDataInitCUDA, maxVelocityArray,
-            paramHostPtr->numComponents, flagActiveComponentsCUDA);
+  /** Free the buffers sized by the points. */
+  void freePointBuffers() {
+    sizeNumPoints = 0;
+    freeDevice(gammaCUDA);
+    freeDevice(weightedLogLikelihoodCUDA);
   }
 
-  void calcPxAtMeanAndCoVariance() {
+  /**
+   * One EM iteration: responsibilities (E step), the moments of the points
+   * per component and the new parameters (M step). Synchronous.
+   * @return the log-likelihood of the parameters before the M step; the total
+   * weight of the data goes to totalWeight
+   */
+  T emStep() {
+    const int numData = dataHostPtr->getNumData();
+    const int numComponents = paramHostPtr->numComponents;
+    cudaGMMWeightKernel::eStepKernel<<<getGridSize(numData, kGMMThreads),
+                                       kGMMThreads, 0, GMMStream>>>(
+        dataDevicePtr, weightCUDA, meanCUDA, coVarianceDecomposedCUDA,
+        normalizerCUDA, numComponents, flagActiveComponentsCUDA, gammaCUDA,
+        weightedLogLikelihoodCUDA);
 
-    // launch kernel
-    cudaGMMWeightKernel::calcLogLikelihoodForPointsKernel<<<
-        getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>(
-        dataDevicePtr, meanCUDA, coVarianceDecomposedCUDA, posteriorCUDA,
-        paramHostPtr->numComponents, flagActiveComponentsCUDA);
+    const int blocks =
+        std::min(getGridSize(numData, kStatisticsPointsPerThread * kGMMThreads),
+                 kMaxStatisticsBlocks);
+    cudaGMMWeightKernel::
+        mStepStatisticsKernel<<<blocks, kGMMThreads, 0, GMMStream>>>(
+            dataDevicePtr, gammaCUDA, weightedLogLikelihoodCUDA, meanCUDA,
+            numComponents, flagActiveComponentsCUDA, partialCUDA);
 
-    // posterior_nk holds log p(x_i|mean,coVariance) for each data point i and
-    // each component k, temporary storage
+    const int width =
+        numComponents * cudaGMMWeightKernel::kMStepStatistics<dataDim> + 1;
+    cudaGMMWeightKernel::mStepFinalizeKernel<T, dataDim>
+        <<<1, kGMMThreads, width * sizeof(T), GMMStream>>>(
+            partialCUDA, blocks, weightCUDA, meanCUDA, coVarianceCUDA,
+            coVarianceDecomposedCUDA, normalizerCUDA, numComponents,
+            flagActiveComponentsCUDA, paramHostPtr->checkCovariance,
+            paramHostPtr->minVariance, paramHostPtr->minPivot(), resultCUDA);
+    cudaErrChk(cudaGetLastError());
+
+    cudaErrChk(cudaMemcpyAsync(resultHost, resultCUDA, 2 * sizeof(T),
+                               cudaMemcpyDeviceToHost, GMMStream));
+    cudaErrChk(cudaStreamSynchronize(GMMStream));
+    totalWeight = resultHost[1];
+    return resultHost[0];
   }
 
-  void calcLogLikelihoodPxAndposterior() {
-    // launch kernel, the first posterior_nk is the log p(x_i|mean,coVariance)
-    cudaGMMWeightKernel::calcLogLikelihoodPxAndposteriorKernel<<<
-        getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>(
-        dataDevicePtr, weightCUDA, posteriorCUDA, tempArrayCUDA, posteriorCUDA,
-        paramHostPtr->numComponents, flagActiveComponentsCUDA);
-
-    // now the posterior_nk is the log posterior_nk
-    // the tempArrayCUDA is the log Px for each data point
-  }
-
-  T sumLogLikelihood() { // its sync now, but can be async with the M step
-    // sum the log likelihood Px with reduction, then return the sum
-    constexpr int blockSize = 256;
-    auto blockNum = reduceBlockNum(dataHostPtr->getNumData(), blockSize);
-
-    cudaReduction::reduceSumPreProcess<
-        T, blockSize, cudaReduction::PreProcessType::none, void, U,
-        true> // weighted sum
-        <<<blockNum, blockSize, blockSize * sizeof(T), GMMStream>>>(
-            tempArrayCUDA, reductionTempArrayCUDA, dataHostPtr->getNumData(),
-            nullptr, dataHostPtr->getWeight());
-    cudaReduction::reduceSumWarp<T><<<1, WARP_SIZE, 0, GMMStream>>>(
-        reductionTempArrayCUDA, logLikelihoodCUDA, blockNum);
-
-    cudaErrChk(cudaMemcpyAsync(logResult, logLikelihoodCUDA, sizeof(T),
-                               cudaMemcpyDefault, GMMStream));
-
-    cudaErrChk(cudaStreamSynchronize(
-        GMMStream)); // The M step can be preLaunched for most of the time
-
-    return *logResult;
-  }
-
-  void calcPosterior() { // the Big Gamma, it can be direct sum then log
-
-    constexpr int blockSize = 256;
-    auto blockNum = reduceBlockNum(dataHostPtr->getNumData(), blockSize);
-
-    auto maxValueArray =
-        tempArrayCUDA; // maxValues of posterior_nk for each component
-    for (int component = 0; component < paramHostPtr->numComponents;
-         component++) {
-
-      if (!flagActiveComponents[component])
-        continue;
-
-      // get the max value of the posterior_nk(little gamma), with reduction
-      auto posteriorComponent =
-          posteriorCUDA + component * dataHostPtr->getNumData();
-
-      cudaReduction::reduceMax<T, blockSize>
-          <<<blockNum, blockSize, blockSize * sizeof(T), GMMStream>>>(
-              posteriorComponent, reductionTempArrayCUDA,
-              dataHostPtr->getNumData());
-
-      cudaReduction::reduceMaxWarp<T><<<1, WARP_SIZE, 0, GMMStream>>>(
-          reductionTempArrayCUDA, maxValueArray + component, blockNum);
-
-      // reduction sum with pre-process and post-process to get the log
-      // Posterior_k
-      cudaReduction::reduceSumPreProcess<
-          T, blockSize, cudaReduction::PreProcessType::minusConstThenEXP, T, U,
-          true><<<blockNum, blockSize, blockSize * sizeof(T), GMMStream>>>(
-          posteriorComponent, reductionTempArrayCUDA, dataHostPtr->getNumData(),
-          maxValueArray + component, dataHostPtr->getWeight());
-
-      cudaReduction::reduceSumWarpPostProcess<
-          T, cudaReduction::PostProcessType::logAdd, T>
-          <<<1, WARP_SIZE, 0, GMMStream>>>(reductionTempArrayCUDA,
-                                           PosteriorCUDA + component, blockNum,
-                                           maxValueArray + component);
-    }
-
-    // now(after kernel execution) we have the log Posterior_k for each
-    // component
-  }
-
-  void updateMean() {
-    constexpr int blockSize = 256;
-    auto blockNum = reduceBlockNum(dataHostPtr->getNumData(), blockSize);
-
-    // for each component, for each dimension
-    for (int component = 0; component < paramHostPtr->numComponents;
-         component++) {
-
-      if (!flagActiveComponents[component])
-        continue;
-
-      for (int dim = 0; dim < dataHostPtr->getDim(); dim++) {
-        // calc x_i * posterior_nk, could be merged with the reduction sum
-        // sum the x_i * posterior_nk with reduction
-        cudaReduction::reduceSumPreProcess<
-            T, blockSize, cudaReduction::PreProcessType::multiplyEXP, T, U,
-            true><<<blockNum, blockSize, blockSize * sizeof(T), GMMStream>>>(
-            dataHostPtr->getDim(dim), reductionTempArrayCUDA,
-            dataHostPtr->getNumData(),
-            posteriorCUDA + component * dataHostPtr->getNumData(),
-            dataHostPtr->getWeight());
-
-        // divide by the Posterior_k, can be post processed with the reduction
-        // sum warp
-        cudaReduction::reduceSumWarpPostProcess<
-            T, cudaReduction::PostProcessType::divideEXP, T>
-            <<<1, WARP_SIZE, 0, GMMStream>>>(
-                reductionTempArrayCUDA,
-                meanCUDA + component * dataHostPtr->getDim() + dim, blockNum,
-                PosteriorCUDA + component);
-      }
-    }
-  }
-
-  void updateWeight() {
-    // calc the new weight for components
-    cudaGMMWeightKernel::updateWeightKernel<<<
-        1, paramHostPtr->numComponents, paramHostPtr->numComponents * sizeof(T),
-        GMMStream>>>(weightCUDA, PosteriorCUDA, paramHostPtr->numComponents,
-                     flagActiveComponentsCUDA);
-  }
-
-  void updateCoVarianceAndDecomposition() {
-    constexpr int blockSize = 256;
-    auto blockNum = reduceBlockNum(dataHostPtr->getNumData(), blockSize);
-
-    // calc the new coVariance for components
-    cudaGMMWeightKernel::updateCoVarianceKernel<<<
-        getGridSize(dataHostPtr->getNumData(), 256), 256, 0, GMMStream>>>(
-        dataDevicePtr, posteriorCUDA, PosteriorCUDA, meanCUDA, tempArrayCUDA,
-        paramHostPtr->numComponents, flagActiveComponentsCUDA);
-
-    // sum the coVariance with reduction, then divide by the Posterior_k
-    for (int component = 0; component < paramHostPtr->numComponents;
-         component++) {
-
-      if (!flagActiveComponents[component])
-        continue;
-
-      auto coVarianceComponent = tempArrayCUDA + component *
-                                                     dataHostPtr->getNumData() *
-                                                     dataDim * dataDim;
-      for (int element = 0; element < dataDim * dataDim; element++) {
-        cudaReduction::reduceSumPreProcess<
-            T, blockSize, cudaReduction::PreProcessType::none, void, U, true>
-            <<<blockNum, blockSize, blockSize * sizeof(T), GMMStream>>>(
-                coVarianceComponent + element * dataHostPtr->getNumData(),
-                reductionTempArrayCUDA, dataHostPtr->getNumData(), nullptr,
-                dataHostPtr->getWeight());
-
-        cudaReduction::reduceSumWarpPostProcess<
-            T, cudaReduction::PostProcessType::divideEXP, T>
-            <<<1, WARP_SIZE, 0, GMMStream>>>(
-                reductionTempArrayCUDA,
-                coVarianceCUDA + component * dataDim * dataDim + element,
-                blockNum, PosteriorCUDA + component);
-      }
-    }
-
-    // check cov-matrix and adjust main diagonal to ensure determinate>0 and
-    // cholesky decomposition
-    if constexpr (CHECK_COVMATRIX_GMM) {
+  /**
+   * Check the coVariance (non-finite elements, smallest variance) if the
+   * parameters ask to, and factor it, A = LL^T, with the log normalisation
+   * of each component; a pivot below minPivot() is raised to it.
+   */
+  void checkAndDecomposeCoVariance() {
+    if (paramHostPtr->checkCovariance)
       cudaGMMWeightKernel::checkAdjustCoVarianceKernel<T, dataDim>
           <<<1, paramHostPtr->numComponents, 0, GMMStream>>>(
               coVarianceCUDA, paramHostPtr->numComponents,
-              flagActiveComponentsCUDA);
-    }
+              flagActiveComponentsCUDA, paramHostPtr->minVariance);
 
-    // decompose the coVariance with cholesky decomposition -> A = LL^T
     cudaGMMWeightKernel::decomposeCoVarianceKernel<T, dataDim>
         <<<1, paramHostPtr->numComponents, 0, GMMStream>>>(
             coVarianceCUDA, coVarianceDecomposedCUDA, normalizerCUDA,
-            paramHostPtr->numComponents, flagActiveComponentsCUDA);
+            paramHostPtr->numComponents, flagActiveComponentsCUDA,
+            paramHostPtr->minPivot());
   }
 
-  // prune 1 GMM component if its weight is below a threshold, reset the other
-  // low weight components
-  bool pruneOneComponent(const int step) {
+  /** Prune the component of smallest weight below the threshold (with the
+   *  parameter prune) and reset the non-finite means; true if the EM
+   *  restarts. */
+  bool pruneAndResetComponents() {
+    const int numComponents = paramHostPtr->numComponents;
+    if (paramHostPtr->prune)
+      cudaGMMWeightKernel::pruneOneComponentKernel<<<
+          1, numComponents,
+          numComponents * (sizeof(T) + sizeof(bool)) + sizeof(bool),
+          GMMStream>>>(weightCUDA, paramHostPtr->pruneThreshold, numComponents,
+                       flagActiveComponentsCUDA);
 
-    bool pruned = false;
-    *flagResetMean = false;
-    // set low weight component to inactive and update the other component
-    // weights launch kernel
-    cudaGMMWeightKernel::pruneOneComponentKernel<<<
-        1, paramHostPtr->numComponents,
-        paramHostPtr->numComponents * (sizeof(T) + sizeof(bool)) + sizeof(bool),
-        GMMStream>>>(weightCUDA, PRUNE_THRESHOLD_GMM,
-                     paramHostPtr->numComponents, flagActiveComponentsCUDA);
+    cudaGMMWeightKernel::checkMeanValueComponents<T, dataDim>
+        <<<1, numComponents, numComponents * sizeof(bool), GMMStream>>>(
+            meanCUDA, numComponents, flagActiveComponentsCUDA,
+            flagActiveComponentsCUDA + numComponents + 1,
+            paramHostPtr->normalize ? T(1) : paramHostPtr->scale);
 
     cudaErrChk(cudaMemcpyAsync(flagActiveComponents, flagActiveComponentsCUDA,
-                               sizeof(bool) * (paramHostPtr->numComponents + 1),
-                               cudaMemcpyDefault, GMMStream));
-
-    // check if any GMM component has NaN mean --> reset mean
-    // launch kernel
-    cudaGMMWeightKernel::checkMeanValueComponents<T, dataDim>
-        <<<1, paramHostPtr->numComponents,
-           paramHostPtr->numComponents * sizeof(bool), GMMStream>>>(
-            meanCUDA, paramHostPtr->numComponents, flagActiveComponentsCUDA,
-            flagResetMeanCUDA);
-
-    cudaErrChk(cudaMemcpyAsync(flagResetMean, flagResetMeanCUDA, sizeof(bool),
+                               sizeof(bool) * (numComponents + 2),
                                cudaMemcpyDefault, GMMStream));
     cudaErrChk(cudaStreamSynchronize(GMMStream));
 
-    pruned = flagActiveComponents[paramHostPtr->numComponents];
-
-    if (pruned) {
-      // reset logLikeLihood to restart GMM
-      this->logLikelihoodOld = -INFINITY;
-      numActiveComponents -= 1;
-      if (numActiveComponents < 1) {
-        std::cerr << "[!]Error PruneComponents " << " numActiveComponents < 1 "
-                  << numActiveComponents << " - " << " GMM step: " << step
-                  << std::endl;
-      }
-    } else if (*flagResetMean) {
-      this->logLikelihoodOld = -INFINITY;
-      pruned = true;
-    }
-
-    return pruned;
+    // the EM restarts: the log-likelihood of the fewer or moved components
+    // is not comparable with the last one
+    const bool restart = flagActiveComponents[numComponents] ||
+                         flagActiveComponents[numComponents + 1];
+    if (restart)
+      logLikelihoodOld = -INFINITY;
+    return restart;
   }
 };
 

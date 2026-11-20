@@ -25,12 +25,28 @@ using warp_mask_t = uint64_t;
 // Only available in device compilation units (.cu files compiled by nvcc/hipcc)
 #if defined(__CUDACC__) || defined(__HIPCC__)
 
-// Portable warp-wide sum reduction (works for any WARP_SIZE)
-template <typename T> __device__ __forceinline__ T warp_reduce_sum(T val) {
+// Portable warp-wide reduction with op (works for any WARP_SIZE): the whole
+// warp calls it, the result is in lane 0
+template <typename T, typename Op>
+__device__ __forceinline__ T warp_reduce(T val, Op op) {
   for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2)
-    val += __shfl_down_sync(WARP_FULL_MASK, val, offset);
+    val = op(val, __shfl_down_sync(WARP_FULL_MASK, val, offset));
   return val;
 }
+
+// Portable warp-wide sum reduction (works for any WARP_SIZE)
+template <typename T> __device__ __forceinline__ T warp_reduce_sum(T val) {
+  return warp_reduce(val, [](T a, T b) { return a + b; });
+}
+
+// isfinite of a double from its high word (the exponent is not all ones):
+// integer operations, while a double compare is slow on consumer GPUs (FP64
+// at 1/64 rate) and the compilers turn a test on the whole 64 bits back into
+// it. A float compare is fast everywhere.
+__device__ __forceinline__ bool isfinite_fast(double x) {
+  return (__double2hiint(x) & 0x7ff00000) != 0x7ff00000;
+}
+__device__ __forceinline__ bool isfinite_fast(float x) { return isfinite(x); }
 
 #endif // __CUDACC__ || __HIPCC__
 
@@ -107,6 +123,36 @@ __host__ inline void cudaCheck(cudaError_t code, const char* file, int line) {
   }
 }
 #undef ERROR_CHECK_C_LIKE
+
+/////////////////////////////////// Stream priorities
+
+/** The GPU work that overlaps, by priority: the halo exchange of the field
+ *  solver, the field solver, and the diagnostics (data analysis, heat flux)
+ *  that run during the field solve. */
+enum class StreamPriority { Halo, FieldSolver, Diagnostic };
+
+/**
+ * A non-blocking stream (no implicit synchronisation with the legacy default
+ * stream) of the priority. The device range is least >= 0 >= greatest (a
+ * lower number is a higher priority), 0 being the priority of
+ * cudaStreamCreate (the particle streams): [0, -5] on recent NVIDIA GPUs,
+ * [1, -1] with HIP. The halo stream gets the greatest priority; the field
+ * solver the next one if that is still higher than 0, else the greatest too;
+ * the diagnostics the least.
+ */
+__host__ inline cudaStream_t createPriorityStream(StreamPriority priority) {
+  int least = 0, greatest = 0;
+  cudaErrChk(cudaDeviceGetStreamPriorityRange(&least, &greatest));
+  int value = least;
+  if (priority == StreamPriority::Halo)
+    value = greatest;
+  else if (priority == StreamPriority::FieldSolver)
+    value = greatest + 1 < 0 ? greatest + 1 : greatest;
+  cudaStream_t stream;
+  cudaErrChk(
+      cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, value));
+  return stream;
+}
 
 /////////////////////////////////// CUDA data alignment
 

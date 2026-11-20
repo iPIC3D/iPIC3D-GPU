@@ -20,6 +20,7 @@
  */
 
 #include "Collective.h"
+#include "BenchmarkMode.h"
 #include "ConfigFile.h"
 #include "HeatFluxComponents.h"
 #include "MPIdata.h"
@@ -31,6 +32,7 @@
 #include "string.h"
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdarg>
 #include <math.h>
 #include <mpi.h>
@@ -83,6 +85,28 @@ std::vector<unsigned char> parseTrackParticleIDMask(const ConfigFile& config,
   const size_t ncopy = std::min(mask.size(), values.size());
   std::copy(values.begin(), values.begin() + ncopy, mask.begin());
   return mask;
+}
+
+/** Per-species values of an optional input list "a b c ...": absent, it
+ *  keeps `values`; one value goes to every species, otherwise one value per
+ *  species. @return false for another number of values or a value that is
+ *  not a number of the type (out of its range too). */
+template <typename T>
+bool readSpeciesList(const ConfigFile& config, const char* key,
+                     std::vector<T>& values) {
+  std::istringstream iss(config.read<std::string>(key, std::string()));
+  std::vector<T> read;
+  while (!(iss >> std::ws).eof()) {
+    T value;
+    if (!(iss >> value))
+      return false;
+    read.push_back(value);
+  }
+  if (read.size() > 1 && read.size() != values.size())
+    return false;
+  for (size_t s = 0; s < values.size() && !read.empty(); s++)
+    values[s] = read[read.size() == 1 ? 0 : s];
+  return true;
 }
 
 } // namespace
@@ -162,15 +186,6 @@ void Collective::ReadInput(const ConfigFile& config) {
     // the theta scheme is unconditionally stable only for th >= 1/2
     requireInput(th >= 0.5, "th must be at least 0.5, not %g", th);
 
-    // Macrocell sizes for (v_par, v_perp) spectra data analysis.
-    // Default 0 disables the feature at runtime.
-    MacrocellNx = config.read<int>("MacrocellNx", 0);
-    MacrocellNy = config.read<int>("MacrocellNy", 0);
-    MacrocellNz = config.read<int>("MacrocellNz", 0);
-    // Top-level on/off switch for the (v_par,v_perp) spectra pipeline.
-    // Default 0 = disabled; set to 1 in the input file to enable.
-    velocitySpectra = config.read<int>("VelocitySpectra", 0);
-
     Smooth = config.read<double>("Smooth", 1.0);
     SmoothNiter = config.read<int>("SmoothNiter", 6);
     haloOverlap = config.read<int>("HaloOverlap", 0) != 0;
@@ -185,22 +200,6 @@ void Collective::ReadInput(const ConfigFile& config) {
     ns = config.read<int>("ns");
     nstestpart = config.read<int>("nsTestPart", 0);
     TrackParticleID = parseTrackParticleIDMask(config, ns + nstestpart);
-
-    // Per-species enable mask for the (v_par,v_perp) macrocell spectra.
-    // Read as a free-form list ("1 0 1 ..."); missing trailing entries
-    // default to 0, extra entries are silently ignored. Default: all off.
-    {
-      VelocitySpectraSpecies.assign(ns, 0);
-      const std::string raw =
-          config.read<std::string>("VelocitySpectraSpecies", std::string());
-      std::istringstream iss(raw);
-      for (int s = 0; s < ns; ++s) {
-        int v = 0;
-        if (!(iss >> v))
-          break; // run out of tokens -> remaining stay 0
-        VelocitySpectraSpecies[s] = v ? 1 : 0;
-      }
-    }
     NpMaxNpRatio = config.read<double>("NpMaxNpRatio", 1.5);
     assert_ge(NpMaxNpRatio, 1.);
     // mode parameters for second order in time
@@ -799,6 +798,8 @@ void Collective::ReadInput(const ConfigFile& config) {
                outflowLayerFields.c_str());
   outflowLayerSolved = outflowLayerFields == "solved";
 
+  readDataAnalysisInput(config);
+
   if (RESTART1) { // you are restarting
     RestartDirName = config.read<string>("RestartDirName", "data");
     RestartReadDirName = RestartDirName;
@@ -812,6 +813,103 @@ void Collective::ReadInput(const ConfigFile& config) {
     RestartReadSlot = checkpoint.slot;
     last_cycle = checkpoint.cycle;
   }
+}
+
+void Collective::readDataAnalysisInput(const ConfigFile& config) {
+  DataAnalysisInput& in = dataAnalysis_;
+  in.cycle = config.read<int>("DataAnalysisCycle", in.cycle);
+  requireInput(in.cycle >= 0, "DataAnalysisCycle must be >= 0, not %d",
+               in.cycle);
+  in.outputDir = config.read<string>("DataAnalysisOutputDir", in.outputDir);
+  if (in.outputDir.empty())
+    in.outputDir = "./";
+  else if (in.outputDir.back() != '/')
+    in.outputDir += '/';
+  auto requireSpeciesList = [&](bool ok, const char* key) {
+    requireInput(ok, "%s needs one number, or one per species (%d)", key, ns);
+  };
+  // an on/off option: 0 or 1 (read<bool> takes any other word for true)
+  auto readSwitch = [&](const char* key, bool& value) {
+    const std::string text = config.read<std::string>(key, value ? "1" : "0");
+    requireInput(text == "0" || text == "1", "%s must be 0 or 1, not \"%s\"",
+                 key, text.c_str());
+    value = text == "1";
+  };
+
+  readSwitch("VelocityHistogram", in.velocityHistogram);
+  readSwitch("VelocityHistogramFixedRange", in.histogramFixedRange);
+  // the default range depends on the sign of the charge; Min defaults to -Max
+  in.histogramMax.resize(ns);
+  for (int s = 0; s < ns; s++)
+    in.histogramMax[s] =
+        qom[s] < 0 ? kHistogramVmaxElectrons : kHistogramVmaxIons;
+  requireSpeciesList(
+      readSpeciesList(config, "VelocityHistogramMax", in.histogramMax),
+      "VelocityHistogramMax");
+  in.histogramMin.resize(ns);
+  for (int s = 0; s < ns; s++)
+    in.histogramMin[s] = -in.histogramMax[s];
+  requireSpeciesList(
+      readSpeciesList(config, "VelocityHistogramMin", in.histogramMin),
+      "VelocityHistogramMin");
+  for (int s = 0; s < ns; s++)
+    requireInput(in.histogramMax[s] > 0 &&
+                     in.histogramMin[s] < in.histogramMax[s] &&
+                     std::isfinite(in.histogramMax[s] - in.histogramMin[s]),
+                 "VelocityHistogramMax of species %d (%g) must be positive "
+                 "and above its VelocityHistogramMin (%g), by a finite width",
+                 s, in.histogramMax[s], in.histogramMin[s]);
+
+  readSwitch("VelocityGMM", in.gmm);
+  requireInput(!in.gmm || in.velocityHistogram,
+               "VelocityGMM = 1 needs VelocityHistogram = 1");
+  in.gmmMaxIterations =
+      config.read<int>("GMMMaxIterations", in.gmmMaxIterations);
+  in.gmmConvergenceThreshold = config.read<double>("GMMConvergenceThreshold",
+                                                   in.gmmConvergenceThreshold);
+  readSwitch("GMMWarmStart", in.gmmWarmStart);
+  readSwitch("GMMNormalize", in.gmmNormalize);
+  readSwitch("GMMCheckCovariance", in.gmmCheckCovariance);
+  in.gmmCovarianceTolerance =
+      config.read<double>("GMMCovarianceTolerance", in.gmmCovarianceTolerance);
+  in.gmmMinVariance = config.read<double>("GMMMinVariance", in.gmmMinVariance);
+  readSwitch("GMMPruneComponents", in.gmmPruneComponents);
+  in.gmmPruneThreshold =
+      config.read<double>("GMMPruneThreshold", in.gmmPruneThreshold);
+  requireInput(in.gmmMaxIterations >= 1,
+               "GMMMaxIterations must be >= 1, not %d", in.gmmMaxIterations);
+  requireInput(in.gmmConvergenceThreshold > 0 &&
+                   in.gmmCovarianceTolerance > 0 && in.gmmMinVariance > 0,
+               "GMMConvergenceThreshold, GMMCovarianceTolerance and "
+               "GMMMinVariance must be positive");
+  requireInput(in.gmmPruneThreshold > 0 && in.gmmPruneThreshold < 1,
+               "GMMPruneThreshold must be in (0, 1), not %g",
+               in.gmmPruneThreshold);
+
+  // the spectra need the macrocell sizes, at most the cells of a rank (the
+  // regular ones; a truncated last rank smaller than a macrocell has none),
+  // and a species
+  readSwitch("VelocitySpectra", in.velocitySpectra);
+  const char* sizeKeys[3] = {"MacrocellNx", "MacrocellNy", "MacrocellNz"};
+  const int cells[3] = {(nxc + XLEN - 1) / XLEN, (nyc + YLEN - 1) / YLEN,
+                        (nzc + ZLEN - 1) / ZLEN};
+  for (int a = 0; a < 3; a++) {
+    in.macrocell[a] = config.read<int>(sizeKeys[a], in.macrocell[a]);
+    requireInput(!in.velocitySpectra ||
+                     (in.macrocell[a] > 0 && in.macrocell[a] <= cells[a]),
+                 "VelocitySpectra = 1 needs %s in [1, %d] (the cells of a "
+                 "rank), not %d",
+                 sizeKeys[a], cells[a], in.macrocell[a]);
+  }
+  in.spectraSpecies.assign(ns, 0);
+  requireSpeciesList(
+      readSpeciesList(config, "VelocitySpectraSpecies", in.spectraSpecies),
+      "VelocitySpectraSpecies");
+  requireInput(!in.velocitySpectra ||
+                   std::any_of(in.spectraSpecies.begin(),
+                               in.spectraSpecies.end(),
+                               [](int on) { return on != 0; }),
+               "VelocitySpectra = 1 needs a species in VelocitySpectraSpecies");
 }
 
 bool Collective::field_output_is_off() const { return (FieldOutputCycle <= 0); }
@@ -1037,6 +1135,21 @@ void Collective::Print() {
          << " is not below ParticleMergingThreshold = "
          << ParticleMergingThreshold
          << ": splitting and merging undo each other" << endl;
+  const DataAnalysisInput& da = dataAnalysis_;
+  cout << "Data analysis     : ";
+  if (!BenchmarkConfig::DIAGNOSTIC_CALCULATIONS_ENABLED)
+    cout << "not in this build (BENCHMARK_MODE = 2)" << endl;
+  else if (da.any())
+    cout << "every " << da.cycle << " cycles in " << da.outputDir
+         << ", histograms " << (da.velocityHistogram ? "on" : "off") << ", GMM "
+         << (da.gmm ? "on" : "off") << ", macrocell spectra "
+         << (da.velocitySpectra ? "on" : "off")
+         << (BenchmarkConfig::DISK_OUTPUT_ENABLED
+                 ? ""
+                 : " (not written, BENCHMARK_MODE = 1)")
+         << endl;
+  else
+    cout << "off" << endl;
   cout << "---------------------" << endl;
   cout << "EM Field Boundary Conditions" << endl;
   cout << "---------------------" << endl;

@@ -63,9 +63,6 @@
 #include "ExosphereIonization.h"
 
 #include "cudaTypeDef.cuh"
-#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
-#include "dataAnalysis.cuh"
-#endif
 #include "injectionKernel.cuh"
 #include "momentKernel.cuh"
 #include "moverKernel.cuh"
@@ -97,6 +94,8 @@ constexpr int SMALL_BLOCK_SIZE =
     128; // smaller CUDA block size (sorting kernels)
 constexpr int INITIAL_PLANET_BUF_CAP =
     1024; // initial planet cross-species buffer capacity
+// smallest density of the heat flux (the bulk velocity J / rho)
+constexpr cudaMomentType HEAT_FLUX_RHO_FLOOR = 1.0e-30;
 
 using namespace iPic3D;
 
@@ -691,8 +690,9 @@ int c_Solver::initCUDA() {
   // and the next cycle's mover/sort kernels, which is re-established
   // explicitly via cycleEndEvent/eventOutputCopy below.
   cudaErrChk(cudaStreamCreate(&outputStream));
+  // The heat flux overlaps the field solve: below it, ordered by events only
   if (heatFluxCalculationEnabled_)
-    cudaErrChk(cudaStreamCreate(&heatFluxStream));
+    heatFluxStream = createPriorityStream(StreamPriority::Diagnostic);
 
   for (int i = 0; i < ns; i++)
     particlesHost[i]->initializeParticleIDDeviceCounter(streams[i]);
@@ -952,7 +952,7 @@ int c_Solver::initCUDA() {
     cudaErrChk(cudaEventRecord(cycleEndEvent[i], streams[i]));
   }
   // Pre-record eventOutputCopy on outputStream once, so that the very first
-  // cycle's cudaStreamWaitEvent on it (in cudaLauncherAsync / sortAllSpecies)
+  // cycle's cudaStreamWaitEvent on it (in cudaLauncherAsync / sortSpecies)
   // is well-defined and resolves immediately. This eliminates the need for a
   // "first-cycle" guard flag; Init() schedules and drains an explicit first-
   // cycle copy later when configured outputs need host particle data.
@@ -970,11 +970,6 @@ int c_Solver::initCUDA() {
                           pclsArrayHostPtr[i]->getCapacity(), streams[i]);
     }
   }
-
-#if IPIC3D_COMPILE_DISK_OUTPUT
-  dataAnalysis::dataAnalysisPipeline::createOutputDirectory(
-      myrank, ns, vct, restart_status != 0, col->getVelocitySpectra());
-#endif
 
   // ======= Allocate planet quasi-neutral boundary-condition buffers =======
   {
@@ -1456,7 +1451,7 @@ void c_Solver::CalculateMoments() {
   // kernel
   const bool useSortedMoments = (sortingCycle_ >= 1);
   if (useSortedMoments)
-    sortAllSpecies();
+    sortSpecies(std::vector<int>(ns, 1));
 
   auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
   for (int i = 0; i < ns; i++) {
@@ -1529,7 +1524,6 @@ void c_Solver::ScheduleHeatFlux(int cycle) {
 
   heatFluxScheduledCycle_ = cycle;
   const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
-  constexpr cudaMomentType rhoFloor = 1.0e-30;
 
   // Gate: heatFluxStream must not start reading d_rhons/d_Jxs/d_Jys/d_Jzs
   // until the full MomentsAwait() GPU pipeline on solverStream_ has completed
@@ -1539,6 +1533,9 @@ void c_Solver::ScheduleHeatFlux(int cycle) {
   cudaErrChk(cudaStreamWaitEvent(heatFluxStream, momentsPipelineDoneEvt, 0));
 
   for (int s = 0; s < ns; ++s) {
+    // the particles too: the sort of a checkpoint (outputCopyAsync) runs on
+    // their stream with no host wait
+    cudaErrChk(cudaStreamWaitEvent(heatFluxStream, cycleEndEvent[s], 0));
     copyHeatFluxBulkD2D(s, heatFluxStream);
     cudaErrChk(cudaMemsetAsync(heatFluxCUDAPtr[s], 0,
                                gridSize * HeatFlux::ComponentCount *
@@ -1549,7 +1546,8 @@ void c_Solver::ScheduleHeatFlux(int cycle) {
       heatFluxKernelUnsorted<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE),
                                DEFAULT_BLOCK_SIZE, 0, heatFluxStream>>>(
           momentParamCUDAPtr[s], grid3DCUDACUDAPtr, heatFluxBulkCUDAPtr[s],
-          heatFluxCUDAPtr[s], (cudaMomentType)col->getQOM(s), rhoFloor);
+          heatFluxCUDAPtr[s], (cudaMomentType)col->getQOM(s),
+          HEAT_FLUX_RHO_FLOOR);
     }
     cudaErrChk(cudaEventRecord(heatFluxReadDoneEvt[s], heatFluxStream));
   }
@@ -1605,12 +1603,12 @@ void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronize) {
   // This is necessary because:
   //   - The mover path calls this after CalculateField(), so only E work is
   //     outstanding — the re-record is a cheap no-op in that case.
-  //   - The analysis path (sortAllSpecies → refreshFieldForPclsDeviceBuffer)
-  //     calls this BEFORE CalculateField(), meaning the previous cycle's
-  //     CalculateB() and MomentsAwait() solver-stream work may still be
-  //     queued. Without a fresh record here the wait below only gates on the
-  //     previous E-solve record, letting gpuPackFieldForPclsToCenter race
-  //     with writes to Bxn/Byn/Bzn from CalculateB(prev cycle).
+  //   - The data analysis (macrocell spectra) calls this BEFORE
+  //     CalculateField(), meaning the previous cycle's CalculateB() and
+  //     MomentsAwait() solver-stream work may still be queued. Without a fresh
+  //     record here the wait below only gates on the previous E-solve record,
+  //     letting gpuPackFieldForPclsToCenter race with writes to Bxn/Byn/Bzn
+  //     from CalculateB(prev cycle).
   //   - On the first cycle the event has never been recorded; recording it
   //     against the current (empty or H2D-initialized) stream makes the
   //     wait formally safe instead of a no-op.
@@ -2453,7 +2451,8 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
 #if ENABLE_SOA_TIMING
     auto _ta = std::chrono::high_resolution_clock::now();
 #endif
-    auto x = exitingResults[i].get(); // holes
+    const int x = awaitTask(exitingResults[i], // holes
+                            "particle mover of species " + std::to_string(i));
     const auto& appendCounters = moverParamHostPtr[i]->openBCAppendCounters;
     if (appendCounters.rejected != 0) {
       openBCAppendRejected = true;
@@ -2824,6 +2823,9 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
     //   - MomentsAwait()    : per-species cudaEventSynchronize (host)
     //   - outputCopyAsync() : cudaStreamWaitEvent on outputStream
     //   - cudaLauncherAsync (next cycle, indirectly via eventOutputCopy)
+    //   - ScheduleHeatFlux() and the data analysis (startAnalysis):
+    //     cudaStreamWaitEvent on their streams, also after the checkpoint
+    //     sort of outputCopyAsync, which records the event again
     cudaErrChk(cudaEventRecord(cycleEndEvent[i], streams[i]));
   }
 
@@ -3603,13 +3605,14 @@ void c_Solver::sortSpeciesByCell(int species) {
 }
 
 /**
- * @brief Perform a full GPU cell sort for every species.
- *
- * This is used by the analysis path when cell-sorted order is required
- * independently of the mover's periodic sorting cadence.
+ * @brief Sort by cell the species with a nonzero entry in mask, on the GPU,
+ * independently of the mover's periodic sorting (CalculateMoments and the
+ * macrocell spectra of the data analysis need it).
  */
-void c_Solver::sortAllSpecies() {
+void c_Solver::sortSpecies(const std::vector<int>& mask) {
   for (int i = 0; i < ns; i++) {
+    if (!mask[i])
+      continue;
     // Ensure no kernels are in flight on this species' stream
     cudaErrChk(cudaStreamSynchronize(streams[i]));
     // Explicit edge: also wait for the previous cycle's output D->H drain
@@ -3620,29 +3623,9 @@ void c_Solver::sortAllSpecies() {
   }
 
   // Wait until every species has completed its full sort pipeline.
-  for (int i = 0; i < ns; i++) {
-    cudaErrChk(cudaStreamSynchronize(streams[i]));
-  }
-
-#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
-  if constexpr (DAConfig::MACROCELL_SPECTRA_ENABLE) {
-    if (col->getVelocitySpectra()) {
-      bool anyMacrocellSpecies = false;
-      for (int s = 0; s < ns && !anyMacrocellSpecies; ++s) {
-        anyMacrocellSpecies = col->getVelocitySpectraSpecies(s);
-      }
-
-      if (col->getMacrocellNx() > 0 && col->getMacrocellNy() > 0 &&
-          col->getMacrocellNz() > 0 && anyMacrocellSpecies) {
-        // Data analysis starts immediately after sortAllSpecies(). Refresh and
-        // drain the packed field buffer here so macrocell spectra sees the
-        // current B field, including on cycle 0 before the mover path has
-        // packed it once.
-        refreshFieldForPclsDeviceBuffer(true);
-      }
-    } // getVelocitySpectra()
-  }
-#endif
+  for (int i = 0; i < ns; i++)
+    if (mask[i])
+      cudaErrChk(cudaStreamSynchronize(streams[i]));
 }
 
 /**
@@ -3760,7 +3743,8 @@ void c_Solver::injectExosphereParticles() {
   }
 
   // Wait for every species task before the subsequent H2D copy loop runs.
-  for (auto& future : exosphereTaskFutures) {
-    future.get();
-  }
+  for (size_t k = 0; k < exosphereTaskFutures.size(); k++)
+    awaitTask(exosphereTaskFutures[k],
+              "exosphere injection of species " +
+                  std::to_string(numSolarWindSpecies + (int)k));
 }

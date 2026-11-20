@@ -2,42 +2,42 @@
 #define DATA_ANALYSIS_CUH
 
 #include <memory>
-#include <thread>
 
-#include "VCtopology3D.h"
-#include "dataAnalysisConfig.cuh"
 #include "iPic3D.h"
 
 namespace dataAnalysis {
 class dataAnalysisPipelineImpl;
 
+/**
+ * @brief The data analyses of the input file (DataAnalysisInput), run every
+ * DataAnalysisCycle cycles during the field solve, on a host thread and a GPU
+ * stream of the lowest priority: velocity histograms, their GMM fit and the
+ * macrocell spectra.
+ */
 class dataAnalysisPipeline {
 
 private:
   std::unique_ptr<dataAnalysisPipelineImpl> impl;
 
 public:
+  /** Creates the output folders of the enabled analyses; collective (MPI),
+   *  every rank constructs it. */
   dataAnalysisPipeline(iPic3D::c_Solver& KCode);
 
-  // returns true if this cycle triggers data analysis
-  static bool isAnalysisCycle(int cycle) {
-    return DAConfig::DATA_ANALYSIS_ENABLED &&
-           DAConfig::DATA_ANALYSIS_EVERY_CYCLE > 0 &&
-           (cycle % DAConfig::DATA_ANALYSIS_EVERY_CYCLE == 0);
-  }
+  /** On an analysis cycle with the macrocell spectra, sort by cell the
+   *  particles of their species and pack B for them (synchronous); called
+   *  before startAnalysis. */
+  void prepareAnalysis(int cycle);
 
-  // create the output directory
-  static void createOutputDirectory(int myrank, int ns, VirtualTopology3D* vct,
-                                    bool isRestart,
-                                    bool velocitySpectraEnabled = false);
-
-  // called in the main loop
+  /** Start the analyses of the cycle, if it is an analysis cycle, on the
+   *  pipeline's thread; the mover must wait for waitForAnalysis. */
   void startAnalysis(int cycle);
 
-  // non-blocking check if the analysis is done
+  /** Non-blocking: 1 while an analysis runs (not used currently). */
   int checkAnalysis();
 
-  // blocking wait for the analysis to finish
+  /** Blocking wait for the analysis: its result, 0 if none. An error of
+   *  the analysis thread is thrown again here, on the calling thread. */
   int waitForAnalysis();
 
   ~dataAnalysisPipeline();

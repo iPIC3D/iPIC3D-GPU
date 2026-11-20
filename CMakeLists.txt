@@ -64,7 +64,7 @@ endif()
 option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA, ON for HIP
 
 set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for (minimum 75)")
-set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture to compile for (e.g. gfx90a, gfx942, gfx1100)")
+set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture to compile for, a wave64 one as WARP_SIZE is 64 on HIP (e.g. gfx90a, gfx942)")
 
 option(TIME_TASKS "Print per-cycle and cumulative task timings" OFF)
 set(BENCHMARK_MODE "0" CACHE STRING
@@ -514,6 +514,9 @@ if(BUILD_UTESTS)
   add_subdirectory(src/unitTest/field_rows)
   add_subdirectory(src/unitTest/mover_walls)
   add_subdirectory(src/unitTest/particle_control)
+  add_subdirectory(src/unitTest/gmm)
+  add_subdirectory(src/unitTest/thread_errors)
+  add_subdirectory(src/unitTest/analysis_records)
 endif()
 
 add_subdirectory(share/inputfiles)

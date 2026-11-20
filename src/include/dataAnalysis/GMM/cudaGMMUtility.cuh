@@ -1,21 +1,20 @@
 #ifndef CUDA_GMM_UTILITY_CUH
 #define CUDA_GMM_UTILITY_CUH
 
+#include <cmath>
 #include <ctime>
 #include <fstream>
-#include <initializer_list>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "dataAnalysisConfig.cuh"
+#include "cudaTypeDef.cuh"
 
 namespace cudaGMMWeight {
-
-using namespace DAConfig;
 
 template <typename T, int dataDim, typename U = int> class GMMDataMultiDim {
 
@@ -26,7 +25,7 @@ private:
   U* weight;
 
 public:
-  // all dim in one array
+  // all dim in one array; not used currently
   __host__ GMMDataMultiDim(int numData, T* data, U* weight) {
     this->numData = numData;
     for (int i = 0; i < dataDim; i++) {
@@ -48,6 +47,7 @@ public:
 
   __device__ __host__ int getNumData() const { return numData; }
 
+  /** Not used currently. */
   __device__ __host__ int getDim() const { return dim; }
 
   __device__ __host__ U* getWeight() const { return weight; }
@@ -56,17 +56,37 @@ public:
 template <typename T> struct GMMParam_s {
   int numComponents;
   int maxIteration;
-  T threshold; // the threshold for the log likelihood
-  // these 3 are optional, if not set, they will be initialized with the
-  // internal init functions
+  T threshold; // the threshold for the log likelihood per unit weight
+  // the initial components (required)
   T* weightInit;
   T* meanInit;
   T* coVarianceInit;
+  // the points lie in [-scale, scale]; with normalize the fit runs on the
+  // points, the means and the coVariances divided by scale (its square) and
+  // gives them back in the units of the points
+  bool normalize;
+  T scale;
+  bool checkCovariance;  // reset non-finite elements, floor the variances
+  T covarianceTolerance; // smallest pivot of the Cholesky factorisation
+  // with checkCovariance, the smallest variance of each axis given the
+  // previous ones (a Cholesky pivot), so on the diagonal too: the density of
+  // a component stays below that of a round one of this variance
+  T minVariance;
+  bool prune; // drop components of weight below pruneThreshold
+  T pruneThreshold;
+
+  /** The smallest pivot of the Cholesky factorisation, in the units of the
+   *  fit. */
+  T minPivot() const {
+    return checkCovariance && minVariance > covarianceTolerance
+               ? minVariance
+               : covarianceTolerance;
+  }
 };
 
 template <typename T> using GMMParam_t = GMMParam_s<T>;
 
-// result class. T is output parameter type, this can not be reused
+// the result of a fit (T: the type of its parameters); move-only
 template <typename T, int dataDim> class GMMResult {
 
 public:
@@ -80,27 +100,34 @@ public:
 
   int convergeStep;
   T logLikelihoodFinal; // the final log likelihood
-  // std::vector<T> logLikelihoodArray; // th elog lilelihood, in each iteration
 
 public:
+  /** The record as JSON: a non-finite value (a failed fit) as null. */
   std::string outputString() const {
     std::ostringstream outputStream;
-    outputStream << std::fixed << std::setprecision(8);
+    outputStream << std::scientific // max_digits10 significant digits
+                 << std::setprecision(std::numeric_limits<T>::max_digits10 - 1);
+    auto number = [&](T value) -> std::ostream& {
+      return std::isfinite(value) ? outputStream << value
+                                  : outputStream << "null";
+    };
 
     outputStream << "{\n";
     outputStream << "\"simulationStep\": " << simulationStep << ",\n";
     outputStream << "\"numComponent\": " << numComponents << ",\n";
     outputStream << "\"dataDim\": " << dataDim << ",\n";
     outputStream << "\"convergeStep\": " << convergeStep << ",\n";
-    outputStream << "\"logLikeliHood\": " << logLikelihoodFinal << ",\n";
+    outputStream << "\"logLikeliHood\": ";
+    number(logLikelihoodFinal) << ",\n";
 
     outputStream << "\"components\": [\n";
     for (int i = 0; i < numComponents; i++) {
       outputStream << "  {\n";
-      outputStream << "    \"weight\": " << weight[i] << ",\n";
+      outputStream << "    \"weight\": ";
+      number(weight[i]) << ",\n";
       outputStream << "    \"mean\": [";
       for (int j = 0; j < dataDim; j++) {
-        outputStream << mean[i * dataDim + j];
+        number(mean[i * dataDim + j]);
         if (j != dataDim - 1) {
           outputStream << ", ";
         }
@@ -108,7 +135,7 @@ public:
       outputStream << "],\n";
       outputStream << "    \"coVariance\": [";
       for (int k = 0; k < dataDim * dataDim; k++) {
-        outputStream << coVariance[i * dataDim * dataDim + k];
+        number(coVariance[i * dataDim * dataDim + k]);
         if (k != dataDim * dataDim - 1) {
           outputStream << ", ";
         }
@@ -134,8 +161,6 @@ public:
     weight = std::make_unique<T[]>(numComponents);
     mean = std::make_unique<T[]>(numComponents * dataDim);
     coVariance = std::make_unique<T[]>(numComponents * dataDim * dataDim);
-
-    // logLikelihoodArray = std::vector<T>();
   }
 
   GMMResult(GMMResult&&) noexcept = default;
@@ -144,6 +169,7 @@ public:
   GMMResult(const GMMResult&) = delete;
   GMMResult& operator=(const GMMResult&) = delete;
 
+  /** Not used currently. */
   static void
   outputResultArray(const std::vector<GMMResult<T, dataDim>>& resultArray,
                     const std::string outputPath,
@@ -187,6 +213,7 @@ public:
     file.close();
   }
 
+  /** Not used currently. */
   T getlogLikelihoodFinal() const { return logLikelihoodFinal; }
 
   ~GMMResult() = default;

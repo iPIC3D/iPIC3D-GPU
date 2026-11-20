@@ -23,7 +23,6 @@ inline constexpr bool DISK_OUTPUT_ENABLED = IPIC3D_COMPILE_DISK_OUTPUT;
 // removed. Level 2 measures the simulation without those calculations.
 inline constexpr bool DIAGNOSTIC_CALCULATIONS_ENABLED =
     IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS;
-inline constexpr bool DATA_ANALYSIS_ENABLED = DIAGNOSTIC_CALCULATIONS_ENABLED;
 
 } // namespace BenchmarkConfig
 

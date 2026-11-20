@@ -283,7 +283,9 @@ if(HIP_ON)
   set(DEVICE_LANGUAGE HIP)
   set(DEVICE_COMPILER hipcc)
   target_link_libraries(iPIC3Dlib PRIVATE hip::device)
-  target_link_libraries(iPIC3Dlib PRIVATE hip::host)
+  # PUBLIC: the headers of the library include the HIP headers, so what links
+  # it (the iPIC3D executable) needs their include path and platform macro.
+  target_link_libraries(iPIC3Dlib PUBLIC hip::host)
 
   # On Cray systems the MPI wrapper (CC) handles MPI includes implicitly,
   # but HIP files are compiled with amdclang++ which needs explicit paths.
@@ -345,7 +347,10 @@ endif()
 #
 # Link external libraries
 #
-set(linkLibraries MPI::MPI_CXX ${HDF5_C_HL_TARGET})
+# The HDF5 C library by name: the code calls it, and the high-level target does
+# not always pass it on. Without it the library has undefined HDF5 symbols,
+# which a linker that checks them (lld) rejects when it links the executable.
+set(linkLibraries MPI::MPI_CXX ${HDF5_C_HL_TARGET} ${HDF5_C_TARGET})
 
 if(USE_OPENMP)
     list(APPEND linkLibraries OpenMP::OpenMP_CXX)

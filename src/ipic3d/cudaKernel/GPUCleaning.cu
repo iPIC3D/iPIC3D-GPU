@@ -505,7 +505,10 @@ __global__ void k_lap27BoxToKrylov(Lap27Op op, Lap27ImageBox B,
       if (!lap27Flat(FLAT, a))
         face = face || (unsigned)(ta[a] + B.faceOff[a]) >= B.faceN[a];
     if (face) {
-      L.im[p] = -op.diag * __ldg(L.vec + p);
+      // ::__ldg, here and below: ROCm 6.4 declares its half-float __ldg in
+      // an unnamed namespace, which hides the global overloads from the
+      // unnamed namespace of this file
+      L.im[p] = -op.diag * ::__ldg(L.vec + p);
       return;
     }
   }
@@ -521,12 +524,12 @@ __global__ void k_lap27BoxToKrylov(Lap27Op op, Lap27ImageBox B,
     const int c = deep ? p : q, sx = deep ? B.vI : B.fI,
               sy = deep ? B.vJ : B.fJ;
     const auto v = [&](int a, int b, int d) {
-      return __ldg(src + (c + a * sx + b * sy + d));
+      return ::__ldg(src + (c + a * sx + b * sy + d));
     };
     L.im[p] = lap27<FLAT, T>(v, op);
   } else {
     const auto v = [&](int a, int b, int c) {
-      return __ldg(L.f[a + 1][b + 1] + (q + c));
+      return ::__ldg(L.f[a + 1][b + 1] + (q + c));
     };
     L.im[p] = lap27<FLAT, T>(v, op);
   }

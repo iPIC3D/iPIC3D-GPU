@@ -145,7 +145,7 @@ void PHDF5fileClass::CreatePHDF5file(double* L, int* dglob, int* dlocl,
   /* -------------------- */
 
   for (int i = 0; i < ngrp; i++) {
-    if (!(grpnames[i].c_str() == "Particles" && !bparticles)) {
+    if (!(grpnames[i] == "Particles" && !bparticles)) {
       hid_t grp;
       grp = H5Gcreate2(file_id, grpnames[i].c_str(), H5P_DEFAULT, H5P_DEFAULT,
                        H5P_DEFAULT);
@@ -191,7 +191,7 @@ int PHDF5fileClass::WritePHDF5dataset(string grpname, string datasetname,
   /* Check that dimensions are correct */
   /* --------------------------------- */
 
-  if (bparticles && grpname.c_str() == "Particles") {
+  if (!bparticles && grpname == "Particles") {
     warning_printf("Particle data is not going to be written,"
                    " because the 'bparticles' flag is currently turn to FALSE");
     return (2);

@@ -1232,7 +1232,8 @@ static void testNullSpace() {
 static void testDivEWalls() {
   std::printf("dive-walls\n");
   std::mt19937_64 gen(31);
-  for (const auto& m : {std::array<int, 3>{8, 6, 4}, {9, 7, 5}}) {
+  for (const auto& m :
+       {std::array<int, 3>{8, 6, 4}, std::array<int, 3>{9, 7, 5}}) {
     const Grid g = makeGrid(m[0], m[1], m[2]);
     const bool odd[3] = {true, true, false}; // the conductor axes
     // the ghosts of GhostSet::Phi on every face, one launch

@@ -21,7 +21,7 @@ RestartDirName = data
 # New flags:
 Case              = GEM       # Select the case
 PoissonCorrection = no       # Poisson correction
-WriteMethod       = pvtk     #parallel VTK
+FieldWriteMethod  = pvtk     #parallel VTK
 SimulationName    = testGEM3D  # Simulation name for the output
 
 #  %%%%%%%%%%%%%%%%%%% Magnetic Reconnection %%%%%%%%%%%%%%%%%%

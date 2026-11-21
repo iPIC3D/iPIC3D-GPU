@@ -2982,8 +2982,7 @@ void c_Solver::WriteOutput(int cycle) {
     needFieldSync = catalystNeedsHostData;
 #endif
     // Diagnostics (energy conservation) need host E, B, rhons, Jxs
-    if (col->getDiagnosticsOutputCycle() > 0 &&
-        cycle % col->getDiagnosticsOutputCycle() == 0)
+    if (col->diagnostics_due(cycle))
       needFieldSync = true;
     // Restart checkpoint needs host fields
     if (restartOutputDue)
@@ -3170,39 +3169,40 @@ void c_Solver::outputCopyAsync(int cycle) {
       cudaErrChk(cudaStreamWaitEvent(outputStream, cycleEndEvent[s], 0));
     }
 
+    // Direct GPU SoA -> host SoA transfers of the arrays that the outputs of
+    // the cycle read (IOManager::hostParticles): the mover waits for them.
+    // The other host arrays stay as they were, read by no output then.
+    const std::vector<ParticleOutputArrays> host =
+        ioManager->hostParticles(cycle + 1);
     for (int i = 0; i < ns; i++) {
+      const ParticleOutputArrays& arrays = host[i];
+      if (!arrays.any())
+        continue;
       const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
       // Resize the host SoA vectors to receive the current particle count.
-      particlesHost[i]->prepareSoAForNOP(nop);
+      ParticleSoAHost& to = *particlesHost[i];
+      particleArrayCUDA& from = *pclsArrayHostPtr[i];
+      to.prepareSoAForNOP(nop);
       if (nop == 0)
         continue;
-      // Direct GPU SoA -> host SoA transfer with no AoS intermediary.
-      cudaErrChk(cudaMemcpyAsync(
-          particlesHost[i]->getUallMut(), pclsArrayHostPtr[i]->getU(),
-          nop * sizeof(cudaPclType_U), cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(
-          particlesHost[i]->getVallMut(), pclsArrayHostPtr[i]->getV(),
-          nop * sizeof(cudaPclType_V), cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(
-          particlesHost[i]->getWallMut(), pclsArrayHostPtr[i]->getW(),
-          nop * sizeof(cudaPclType_W), cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(
-          particlesHost[i]->getQallMut(), pclsArrayHostPtr[i]->getQ(),
-          nop * sizeof(cudaPclType_Q), cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(
-          particlesHost[i]->getXallMut(), pclsArrayHostPtr[i]->getX(),
-          nop * sizeof(cudaPclType_X), cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(
-          particlesHost[i]->getYallMut(), pclsArrayHostPtr[i]->getY(),
-          nop * sizeof(cudaPclType_Y), cudaMemcpyDefault, outputStream));
-      cudaErrChk(cudaMemcpyAsync(
-          particlesHost[i]->getZallMut(), pclsArrayHostPtr[i]->getZ(),
-          nop * sizeof(cudaPclType_Z), cudaMemcpyDefault, outputStream));
-      if (particlesHost[i]->tracksParticleID()) {
-        cudaErrChk(cudaMemcpyAsync(
-            particlesHost[i]->getIDallMut(), pclsArrayHostPtr[i]->getID(),
-            nop * sizeof(cudaPclType_ID), cudaMemcpyDefault, outputStream));
+      auto copy = [&](auto* dst, const auto* src) {
+        cudaErrChk(cudaMemcpyAsync(dst, src, nop * sizeof(*src),
+                                   cudaMemcpyDefault, outputStream));
+      };
+      if (arrays.velocity) {
+        copy(to.getUallMut(), from.getU());
+        copy(to.getVallMut(), from.getV());
+        copy(to.getWallMut(), from.getW());
       }
+      if (arrays.charge)
+        copy(to.getQallMut(), from.getQ());
+      if (arrays.position) {
+        copy(to.getXallMut(), from.getX());
+        copy(to.getYallMut(), from.getY());
+        copy(to.getZallMut(), from.getZ());
+      }
+      if (arrays.id && to.tracksParticleID())
+        copy(to.getIDallMut(), from.getID());
     }
     cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
   }
@@ -3218,8 +3218,7 @@ void c_Solver::outputCopyAsync(int cycle) {
  */
 void c_Solver::WriteConserved(int cycle) {
 #if IPIC3D_COMPILE_DISK_OUTPUT
-  if (col->getDiagnosticsOutputCycle() > 0 &&
-      cycle % col->getDiagnosticsOutputCycle() == 0) {
+  if (col->diagnostics_due(cycle)) {
     // particlesHost[*]->getKinetic/getTotalQ() iterate over the host SoA
     // u/v/w/q arrays, which are populated only by the async D->H copies in
     // outputCopyAsync() on outputStream and signalled by eventOutputCopy.

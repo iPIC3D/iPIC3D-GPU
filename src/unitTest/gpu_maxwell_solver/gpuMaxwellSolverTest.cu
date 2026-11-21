@@ -360,7 +360,7 @@ struct TestInput {
             testCase == TestCase::ConductorWall ? "yes" : "no");
     cfg.add("PoissonCorrectionCycle", 1);
     cfg.add("divBCorrection", "no");
-    cfg.add("WriteMethod", "default");
+    cfg.add("FieldWriteMethod", "default");
     cfg.add("SimulationName", "gpu_maxwell_solver");
 
     cfg.add("B0x", 0.0);

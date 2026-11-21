@@ -138,7 +138,7 @@ srun --nodes=4 --ntasks=32 --ntasks-per-node=8 ./iPIC3D ../share/benchmark/GEM3D
 
 ### Result
 
-This iPIC3D-GPU will create folder (usually named `data`) for the output results if it doesn't exist. On a **fresh start**, existing contents of the output folder, and of `RestartDirName` if it differs, are deleted. On a **restart**, the output folder is left intact and new data is appended.
+This iPIC3D-GPU will create folder (usually named `data`) for the output results if it doesn't exist. On a **fresh start**, existing contents of the output folder, and of `RestartDirName` if it differs, are deleted. On a **restart**, the output folder is left intact and new data is appended. What is written, how often and in which format is set in the input file, see [Output Control](#output-control).
 
 
 ## Build Options
@@ -214,10 +214,12 @@ Each checkpoint goes to the slot not holding the run's previous checkpoint: a fr
 
 A write cut off before step 4 therefore leaves the slot without a manifest. Each checkpoint gets a `generation` one above the highest in the restart root, so the newest checkpoint always has the highest generation.
 
-The rank-file format depends on the compile-time backend:
+The rank-file format depends on the checkpoint backend (`RestartWriteMethod`, see [I/O Backends](#io-backends)):
 
-- **ADIOS2** (`USE_ADIOS2=ON`, default): `restart_A/restart_<rank>.bp` or `restart_B/restart_<rank>.bp`.
-- **Serial HDF5** (`USE_ADIOS2=OFF`, `USE_HDF5=ON`): `restart_A/restart<rank>.hdf` or `restart_B/restart<rank>.hdf`.
+- **ADIOS2** (`adios2`, default when built): `restart_A/restart_<rank>.bp` or `restart_B/restart_<rank>.bp`.
+- **Serial HDF5** (`shdf5`): `restart_A/restart<rank>.hdf` or `restart_B/restart<rank>.hdf`.
+
+A restart reads a checkpoint with the backend that wrote it, which the manifest records, whatever `RestartWriteMethod` the restarted run writes with.
 
 On restart, rank 0 selects the slot and broadcasts the choice, so every rank reads the same checkpoint:
 
@@ -227,7 +229,7 @@ On restart, rank 0 selects the slot and broadcasts the choice, so every rank rea
 A slot is usable when all of these hold:
 
 - its `manifest.json` exists and names that slot;
-- the manifest was written by the restart backend of this build;
+- the manifest names a backend of this build;
 - the manifest has a valid cycle, rank count and mesh;
 - a rank file exists for each of the `nranks` ranks the manifest records.
 
@@ -245,7 +247,7 @@ The restart reader can load a checkpoint onto a different MPI topology when all 
 - The destination topology refines the source topology by powers of two in each direction; coarsening and arbitrary factors are not supported.
 - The checkpoint contains active-node fields and active-cell particle metadata, as every checkpoint written by this code does.
 
-`RestartRemapPlan` maps each destination rank to overlapping source active boxes. Fields are copied into guarded arrays at `[1][1][1]`; particles are read as the sorted spans belonging to the destination rank. The data-analysis records are per rank: a remapped restart keeps the records files of the analyses that run and the rank mappings of the old decomposition as `*_before_cycle<N>.*` and starts them again; those of the analyses switched off stay as they are (see Data analysis).
+`RestartRemapPlan` maps each destination rank to overlapping source active boxes. Fields are copied into guarded arrays at `[1][1][1]`; particles are read as the sorted spans belonging to the destination rank. The data-analysis records are per rank: a remapped restart keeps the records files of the old decomposition of the analyses that run as `*_before_cycle<N>.*` and starts them again; those of the analyses switched off stay as they are (see Data analysis).
 
 ### Particle restart loading
 
@@ -259,6 +261,7 @@ The host restart SoA is sized to the restarted count, padded to `DVECWIDTH`. The
 |-----------|---------|-------------|
 | `RestartDirName` | `data` | Restart root containing `latest_restart.json` and `restart_A` / `restart_B` |
 | `RestartOutputCycle` | `5000` | Write a restart checkpoint every N cycles. Set to `0` to disable periodic checkpoints. |
+| `RestartWriteMethod` | `adios2` if built, else `shdf5` | Backend of the checkpoints this run writes: `adios2` or `shdf5` (see [I/O Backends](#io-backends)). A restart reads its checkpoint with the backend recorded in the manifest. |
 | `CallFinalize` | `1` | If `1`, write a final restart checkpoint when the simulation ends. Requires `RestartOutputCycle > 0` — if `RestartOutputCycle` is `0`, no final restart is written even with `CallFinalize = 1`. |
 | `ncycles` | — | Number of **new** cycles to run from the restart point (not an absolute cycle number). |
 
@@ -301,7 +304,7 @@ For a final checkpoint, the payload is written after the last cycle has complete
 
 ### Requirements
 
-- Restart requires either **ADIOS2** (`USE_ADIOS2=ON`) or **HDF5** (`USE_HDF5=ON`) at compile time. If neither is available, restarting aborts and writing checkpoints is disabled with a warning. The HDF5 restart path is less tested than ADIOS2.
+- Restart requires either **ADIOS2** (`USE_ADIOS2=ON`) or **HDF5** (`USE_HDF5=ON`) at compile time, the one of the checkpoint read. If neither is available, restarting aborts and writing checkpoints is disabled with a warning. The HDF5 restart path is less tested than ADIOS2.
 - Restart requires the same global mesh dimensions and compatible boundary/input parameters. The MPI topology may either match the checkpoint topology or be refined by powers of two in each direction, as described above.
 - A restart may use a different build than the one that wrote the checkpoint; this gives a warning, not an error (see [Build and run record](#build-and-run-record)).
 
@@ -549,6 +552,12 @@ The reference count of a species on a rank is the number of particles the input 
 
 The control acts on the particle count of a rank, not of a cell: it does not refill the cells of a depleted region of a rank whose total count is inside the band.
 
+### Particle sorting
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `SortingCycle` | `0` | Re-sort particles by cell every N cycles for cache efficiency. `0` disables. |
+
 ### Setting the case
 
 In the input file, add or modify:
@@ -578,21 +587,81 @@ Some cases use additional input-file parameters beyond the common ones:
 
 ## Output Control
 
-Output is controlled through **cycle parameters** (how often to write) and **tag strings** (what to write).
+A run writes four kinds of output, each set up by its own keys in the input file:
 
-### Output cycles
+| Output | How often | What | Backend (file format) |
+|--------|-----------|------|-----------------------|
+| Fields and moments | `FieldOutputCycle` | `FieldOutputTag`, `MomentsOutputTag` | `FieldWriteMethod` (required) |
+| Particles | `ParticlesOutputCycle` | `ParticlesOutputTag`, of the species of `ParticlesOutputSpecies` | `ParticlesWriteMethod` |
+| Restart checkpoints | `RestartOutputCycle`, and at the end with `CallFinalize` | fields and every particle of every species | `RestartWriteMethod` |
+| Energy diagnostics | `DiagnosticsOutputCycle` | energies, momentum and charge | text file |
+
+Everything goes to `SaveDirName`, except the checkpoints, which go to `RestartDirName`. Test particles and the planet balance have their own keys ([below](#diagnostics-and-other-output)), the data analysis its own section ([Data analysis](#data-analysis)).
+
+### Setting up the output in the input file
+
+The output block of an input file for a run with four species:
+
+```
+SaveDirName    = data            # output folder, emptied by a fresh run [default: data]
+RestartDirName = data            # checkpoint folder [default: data]
+SimulationName = myrun           # prefix of the VTK and parallel-HDF5 file names [required]
+
+# fields and moments
+FieldWriteMethod = pvtk          # shdf5, phdf5, pvtk or nbcvtk [required]
+FieldOutputCycle = 100           # <= 0: no field output [default: 100]
+FieldOutputTag   = B+E           # fields
+MomentsOutputTag = rho+J+P_tot   # rho and J of every species, the summed pressure tensor
+
+# particles
+ParticlesOutputCycle   = 1000    # <= 0: no particle output [default: 0]
+ParticlesOutputTag     = position+velocity+q
+ParticlesOutputSpecies = 0 1 0 1 # species 1 and 3 only [default: every species]
+ParticlesWriteMethod   = adios2  # adios2 or shdf5 [default: adios2 if built, else shdf5]
+
+# restart checkpoints
+RestartOutputCycle = 5000        # <= 0: no checkpoints [default: 5000]
+RestartWriteMethod = adios2      # adios2 or shdf5 [default: adios2 if built, else shdf5]
+CallFinalize       = 1           # also a checkpoint at the end of the run [default: 1]
+
+# energy diagnostics
+DiagnosticsOutputCycle = 100     # <= 0: none [default: FieldOutputCycle]
+```
+
+How these keys act:
+
+- **When.** An output of cycle `N > 0` is written at the cycles that are multiples of `N`, cycle 0 included; the field output also at the first cycle of a restart. `N <= 0` switches that output off.
+- **What.** A tag joins tokens with `+`; spaces around a token are ignored. An empty tag writes nothing: the field output needs a token in `FieldOutputTag` or `MomentsOutputTag`, the particle output one in `ParticlesOutputTag`. An unknown field or moment token is ignored with a warning; an unknown particle token stops the run.
+- **Where.** `FieldWriteMethod` is required in every input file, also with the field output off. `ParticlesWriteMethod` and `RestartWriteMethod` may be left out, which takes ADIOS2 if the build has it, else serial HDF5. A backend the build lacks is replaced by the other one, with a warning; with neither, those data are not written, a warning is printed and the run goes on (see [I/O Backends](#io-backends)).
+- **Checked at startup.** The run stops before the first cycle, naming the key, for: the old key `WriteMethod`; a missing or unknown `FieldWriteMethod`; a `ParticlesWriteMethod` or `RestartWriteMethod` other than `adios2` or `shdf5`; an unknown particle token; a `ParticlesOutputSpecies` with neither one nor `ns` values, or with no species while particles are written.
+
+### Output files
+
+| Output | Backend | Files |
+|--------|---------|-------|
+| Fields, moments | `pvtk`, `nbcvtk` | `<SimulationName>_<quantity>_<cycle>.vtk`, one per quantity and cycle: `B`, `E`, `J<s>`, `J_tot`, `rho<s>`, `rho_tot`, `PXX<s>`, ..., `Qxxx<s>`, ... |
+| | `phdf5` | `<SimulationName>_<cycle>.h5`, the cycle in five digits: one file per cycle, the datasets in the group `Fields` |
+| | `shdf5` | `proc<rank>.hdf`, with `settings.hdf`: datasets `/fields/...` and `/moments/...`, one per quantity and cycle |
+| Particles | `adios2` | `particle_<rank>.bp`: one step per output cycle, the variables `cycle`, `part<s>PositionX`, ..., `part<s>VelocityU`, ..., `part<s>charge`, `part<s>ID` |
+| | `shdf5` | `proc<rank>.hdf`, with `settings.hdf`: datasets `/particles/species_<s>/{x,y,z,u,v,w,q,ID}/cycle_<N>` |
+| Restart checkpoints | `adios2`, `shdf5` | `RestartDirName/restart_A/`, `restart_B/` and `latest_restart.json`, see [Restart files](#restart-files) |
+| Energy diagnostics | | `ConservedQuantities.txt` |
+| Test particles | `shdf5` | `proc<rank>.hdf`: datasets `/testparticles/species_<s>/...` |
+| Run record | | `SimulationData.txt` (the parameters, at the start), `particleNum<rank>.csv` (the particles of each species, every cycle) |
+
+A species not in `ParticlesOutputSpecies` has no particle variables or datasets; `ID` is written for the species with `TrackParticleID` only. A restart appends to the files of the run it continues.
+
+### Fields and moments
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `FieldOutputCycle` | `100` | Write field/moments data every N cycles. `0` disables field output. |
-| `ParticlesOutputCycle` | `0` | Write particle data every N cycles. `0` disables particle output. |
-| `RestartOutputCycle` | `5000` | Write restart checkpoint every N cycles. `0` disables periodic checkpoints. |
-| `DiagnosticsOutputCycle` | `FieldOutputCycle` | Write scalar diagnostics (energy, etc.) every N cycles. Defaults to `FieldOutputCycle` if not set. |
-| `PlanetDiagnosticsCycle` | `DiagnosticsOutputCycle` | Append the planet surface balance to `PlanetBC.txt` every N cycles and at the end of the run (`Dipole`, `Dipole2D`). `<= 0` disables. |
-| `TestPartOutputCycle` | `0` | Write test-particle trajectory data every N cycles. Test particles are written by the serial-HDF5 writer only (`WriteMethod = shdf5`, or `USE_ADIOS2=OFF`). |
-| `SortingCycle` | `0` | Re-sort particles by cell every N cycles for cache efficiency. `0` disables. |
+| `FieldWriteMethod` | — | Field backend: `shdf5`, `phdf5`, `pvtk` or `nbcvtk` (`adios2` is not implemented), see [I/O Backends](#io-backends); required. `WriteMethod`, its old name, is an input error |
+| `FieldOutputCycle` | `100` | Write the fields and moments every N cycles and at the first cycle of a run. `<= 0` disables field output |
+| `FieldOutputTag` | empty | Fields, tokens below |
+| `MomentsOutputTag` | empty | Moments, tokens below |
+| `SimulationName` | — | Prefix of the VTK and parallel-HDF5 file names; required |
 
-### Field output tags (`FieldOutputTag`)
+#### Field output tags (`FieldOutputTag`)
 
 A `+`-separated string selecting which grid-level fields to write. Example: `FieldOutputTag = B+E+rho`
 
@@ -606,7 +675,7 @@ A `+`-separated string selecting which grid-level fields to write. Example: `Fie
 | `Ji3` | Current density for species 3 |
 | `rho` | Total charge density |
 
-### Moments output tags (`MomentsOutputTag`)
+#### Moments output tags (`MomentsOutputTag`)
 
 A `+`-separated string selecting which per-species or total moments to write. Example: `MomentsOutputTag = rho+J+PXX+PYY+PZZ`
 
@@ -643,27 +712,49 @@ A `+`-separated string selecting which per-species or total moments to write. Ex
 | `Q_tot` | Total heat-flux tensor |
 | `Qxxx_tot` ... `Qzzz_tot` | Individual total heat-flux components |
 
-### Particle output tags (`ParticlesOutputTag`)
+### Particles
 
-A `+`-separated string selecting which particle data to write. Example: `ParticlesOutputTag = position+velocity+q+ID`
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ParticlesOutputCycle` | `0` | Write the particles every N cycles. `<= 0` disables particle output |
+| `ParticlesOutputTag` | empty | Arrays written, tokens below; another token is an input error. Empty: no particle output |
+| `ParticlesOutputSpecies` | all `1` | Per-species mask: one value for every species or one per species, nonzero = written. With particle output on, at least one species. Checkpoints always hold every species |
+| `ParticlesWriteMethod` | `adios2` if built, else `shdf5` | Particle backend: `adios2` or `shdf5`, see [I/O Backends](#io-backends) |
+
+#### Particle output tags (`ParticlesOutputTag`)
+
+A `+`-separated string selecting which arrays of the particles of the species of `ParticlesOutputSpecies` to write. Example: `ParticlesOutputTag = position+velocity+q+ID`
 
 | Token | Data |
 |-------|------|
 | `position` | Particle positions ($x$, $y$, $z$) |
 | `velocity` | Particle velocities ($u$, $v$, $w$) |
 | `q` | Particle charge |
-| `ID` | Particle ID |
+| `ID` | Particle ID (species with `TrackParticleID` only) |
 
-Additional ADIOS2-only tokens used for restart data: `proc_topology`, `E`, `B`, `Js`, `rhos`, `pressure`, `particle_cell_metadata`.
+A cycle copies from the GPU only what its outputs read: these arrays of these species for a particle output, the velocities and charges of every species for the energy diagnostics, everything for a checkpoint. The mover waits for this copy, so a smaller particle output also takes less time.
 
-### Other output parameters
+The ADIOS2 checkpoints use further tokens internally (`proc_topology`, `E`, `B`, `Js`, `rhos`, `pressure`, `particle_cell_metadata`); they are not particle output tokens.
+
+### Restart checkpoints
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `WriteMethod` | — | Field output backend (see [I/O Backends](#io-backends) below) |
-| `SaveDirName` | `data` | Output directory. **Warning:** existing contents are deleted on fresh start. |
+| `RestartOutputCycle` | `5000` | Write a checkpoint every N cycles. `<= 0` disables checkpoints |
+| `RestartWriteMethod` | `adios2` if built, else `shdf5` | Checkpoint backend: `adios2` or `shdf5`, see [I/O Backends](#io-backends). A restart reads a checkpoint with the backend that wrote it |
+| `CallFinalize` | `1` | Also write a checkpoint when the run ends (requires `RestartOutputCycle > 0`) |
 | `RestartDirName` | `data` | Restart root containing `latest_restart.json` and `restart_A` / `restart_B` |
-| `CallFinalize` | `1` | Write a final restart checkpoint when the simulation ends (requires `RestartOutputCycle > 0`) |
+
+The slots, the restart command and what a checkpoint holds are described in [Restart](#restart).
+
+### Diagnostics and other output
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `DiagnosticsOutputCycle` | `FieldOutputCycle` | Append to `ConservedQuantities.txt` every N cycles the total, electric, magnetic and kinetic energies, the momentum and the charge, and per species the kinetic and bulk-flow energies, the momentum and the charge. `<= 0` disables them |
+| `PlanetDiagnosticsCycle` | `DiagnosticsOutputCycle` | Append the planet surface balance to `PlanetBC.txt` every N cycles and at the end of the run (`Dipole`, `Dipole2D`). `<= 0` disables. |
+| `TestPartOutputCycle` | `0` | Write test-particle trajectory data every N cycles. Test particles are written by the serial-HDF5 writer only: one of `FieldWriteMethod`, `ParticlesWriteMethod` and `RestartWriteMethod` must be `shdf5`, or the build must lack ADIOS2 |
+| `SaveDirName` | `data` | Output directory. **Warning:** existing contents are deleted on a fresh start. |
 | `ParaviewScriptPath` | `""` | Path to ParaView Catalyst Python script (requires `USE_CATALYST`) |
 
 ### Data analysis
@@ -701,7 +792,7 @@ The bins are compile-time constants in `src/include/dataAnalysis/dataAnalysisCon
 
 ## I/O Backends
 
-iPIC3D-GPU writes three categories of data: **fields** (E, B, J, rho, moments), **particles** (position, velocity, charge, ID), and **restart checkpoints** (fields + particles). Each category can use a different I/O backend, selected through a combination of CMake options and the `WriteMethod` parameter in the input file.
+iPIC3D-GPU writes three categories of data: **fields** (E, B, J, rho, moments), **particles** (position, velocity, charge, ID), and **restart checkpoints** (fields + particles). Each category can use a different I/O backend, selected through a combination of CMake options and the `FieldWriteMethod` (fields), `ParticlesWriteMethod` (particles) and `RestartWriteMethod` (checkpoints) parameters in the input file.
 
 ### CMake options
 
@@ -711,50 +802,53 @@ iPIC3D-GPU writes three categories of data: **fields** (E, B, J, rho, moments), 
 | `USE_PHDF5` | `ON` | Enable the parallel HDF5 field backend (requires `USE_HDF5=ON` and an MPI-enabled HDF5 library) |
 | `USE_ADIOS2` | `ON` | Compile the ADIOS2 backend for particles and restarts |
 
+`USE_HDF5=ON` also compiles the serial-HDF5 backend for particles and restarts.
+
 Example:
 ```shell
 cmake -DUSE_HDF5=ON -DUSE_PHDF5=ON -DUSE_ADIOS2=ON ..
 ```
 
-### Input file: `WriteMethod`
+### Input file: `FieldWriteMethod`
 
-The `WriteMethod` parameter in the input file controls the **field output** backend:
+The `FieldWriteMethod` parameter in the input file controls the **field output** backend:
 
-| `WriteMethod` | Field backend | Description |
+| `FieldWriteMethod` | Field backend | Description |
 |---------------|---------------|-------------|
 | `shdf5` | Serial HDF5 | One HDF5 file per MPI rank (file-per-process) |
 | `phdf5` | Parallel HDF5 | All ranks write collectively into a single HDF5 file (requires `USE_PHDF5=ON`) |
 | `pvtk` | Blocking VTK | Collective MPI-IO into VTK files |
 | `nbcvtk` | Non-blocking VTK | Non-blocking collective MPI-IO into VTK files; writes overlap with computation of the next cycle |
-| `adios2` | ADIOS2 | **Not implemented yet** — will throw a runtime error |
+| `adios2` | ADIOS2 | **Not implemented yet**: a build with ADIOS2 stops at the first field output, a build without it at startup |
 
 Any other value stops the run at startup with an error.
 
-### Particle and restart backend selection
+### Particle and checkpoint backends
 
-Particle and restart backends are **not** controlled by `WriteMethod`. They are selected at **compile time** based on the CMake flags:
+`ParticlesWriteMethod` chooses the particle backend and `RestartWriteMethod` the checkpoint backend, independently of `FieldWriteMethod` and of each other:
 
-| | `USE_ADIOS2=ON` | `USE_ADIOS2=OFF` |
+| Value | Backend | Needs |
 |---|---|---|
-| **Particles** | ADIOS2 (file-per-process, BP5) | Serial HDF5 (file-per-process) |
-| **Restarts** | ADIOS2 (file-per-process, BP5) | Serial HDF5 (file-per-process) |
+| `adios2` | ADIOS2, BP5 engine, one file per rank | `USE_ADIOS2=ON` |
+| `shdf5` | Serial HDF5, one file per rank | `USE_HDF5=ON` |
+| unset | `adios2` if the build has it, else `shdf5` | |
 
-When `USE_ADIOS2=ON`, ADIOS2 is used for particles and restarts, regardless of `WriteMethod`.
+A value whose backend the build lacks is replaced by the other backend, and rank 0 warns once if such data are to be written. A build with neither backend writes no particles or checkpoints, warns, and runs on. A restart reads its checkpoint with the backend that wrote it, whatever `RestartWriteMethod` says. The files are listed in [Output files](#output-files).
 
 ### Available combinations summary
 
-With the default CMake settings (`USE_HDF5=ON`, `USE_PHDF5=ON`, `USE_ADIOS2=ON`):
+With the default CMake settings (`USE_HDF5=ON`, `USE_PHDF5=ON`, `USE_ADIOS2=ON`) and `ParticlesWriteMethod`, `RestartWriteMethod` unset or `adios2` (with `shdf5` the particles or the checkpoints go to serial-HDF5 files instead):
 
-| `WriteMethod` | Fields | Particles | Restarts |
+| `FieldWriteMethod` | Fields | Particles | Restarts |
 |---------------|--------|-----------|----------|
 | `pvtk` | Blocking VTK (collective) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
 | `nbcvtk` | Non-blocking VTK (collective, overlapped) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
 | `shdf5` | Serial HDF5 (file-per-process) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
 | `phdf5` | Parallel HDF5 (collective, single file) | ADIOS2 (file-per-process) | ADIOS2 (file-per-process) |
 
-With `USE_ADIOS2=OFF` and `USE_HDF5=ON`:
+With `USE_ADIOS2=OFF` and `USE_HDF5=ON` (`ParticlesWriteMethod` or `RestartWriteMethod` = `adios2` falls back to serial HDF5, warned):
 
-| `WriteMethod` | Fields | Particles | Restarts |
+| `FieldWriteMethod` | Fields | Particles | Restarts |
 |---------------|--------|-----------|----------|
 | `pvtk` | Blocking VTK (collective) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |
 | `nbcvtk` | Non-blocking VTK (collective, overlapped) | Serial HDF5 (file-per-process) | Serial HDF5 (file-per-process) |

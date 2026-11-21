@@ -37,6 +37,7 @@
 #include <cstdarg>
 #include <math.h>
 #include <mpi.h>
+#include <numeric>
 #include <sstream>
 #include <stdio.h>
 #include <stdlib.h>
@@ -255,7 +256,15 @@ void Collective::ReadInput(const ConfigFile& config) {
                  "pertGEM needs currentFromAmpere = 0: its current fills the "
                  "box, where the sheet electrons that would carry it have no "
                  "density");
-    wmethod = config.read<string>("WriteMethod");
+    // the field output backend. WriteMethod, the old single key, stops
+    // every rank before anything runs: it names none of the three now.
+    requireInput(!config.keyExists("WriteMethod"),
+                 "WriteMethod is no longer read: remove it and set the three "
+                 "write methods, FieldWriteMethod (fields: shdf5, phdf5, pvtk "
+                 "or nbcvtk; required), ParticlesWriteMethod (particles: "
+                 "adios2 or shdf5) and RestartWriteMethod (checkpoints: adios2 "
+                 "or shdf5)");
+    fieldWriteMethod = config.read<string>("FieldWriteMethod");
     SimName = config.read<string>("SimulationName");
     PoissonCorrection = config.read<string>("PoissonCorrection", "no");
     PoissonCorrectionCycle = config.read<int>("PoissonCorrectionCycle", 10);
@@ -331,6 +340,41 @@ void Collective::ReadInput(const ConfigFile& config) {
     ParticlesOutputCycle = config.read<int>("ParticlesOutputCycle", 0);
     FieldOutputTag = config.read<string>("FieldOutputTag", "");
     ParticlesOutputTag = config.read<string>("ParticlesOutputTag", "");
+    // an unknown token: refused here, as the HDF5 writer would ignore it.
+    // Parsed before the call that prints the token: the arguments of a call
+    // are evaluated in no set order.
+    string unknownToken;
+    const bool particleTagValid = parseParticleTag(
+        ParticlesOutputTag, ParticlesOutputArrays, unknownToken);
+    requireInput(particleTagValid,
+                 "ParticlesOutputTag: %s is not position, velocity, q or ID",
+                 unknownToken.c_str());
+    // the backends of the particle output and of the checkpoints; another
+    // one of the build if it lacks the one asked for (IOManager)
+    auto readFileBackend = [&](const char* key) {
+      const string method = config.read<string>(key, "");
+      requireInput(method.empty() || method == "adios2" || method == "shdf5",
+                   "%s must be adios2 or shdf5, not %s", key, method.c_str());
+      return method;
+    };
+    ParticlesWriteMethod = readFileBackend("ParticlesWriteMethod");
+    RestartWriteMethod = readFileBackend("RestartWriteMethod");
+    // the species whose particles are written, nonzero = on, every species
+    // by default
+    std::vector<int> particleSpecies(ns, 1);
+    requireInput(
+        readSpeciesList(config, "ParticlesOutputSpecies", particleSpecies),
+        "ParticlesOutputSpecies needs one number, or one per species (%d)", ns);
+    AllSpecies.resize(ns);
+    std::iota(AllSpecies.begin(), AllSpecies.end(), 0);
+    ParticlesOutputSpecies.clear();
+    for (int s = 0; s < ns; s++)
+      if (particleSpecies[s] != 0)
+        ParticlesOutputSpecies.push_back(s);
+    requireInput(!particle_output_requested() ||
+                     !ParticlesOutputSpecies.empty(),
+                 "ParticlesOutputSpecies has no species: ParticlesOutputCycle "
+                 "= 0 writes no particles");
     MomentsOutputTag = config.read<string>("MomentsOutputTag", "");
     outputConfig_ = parseOutputTags(FieldOutputTag, MomentsOutputTag, ns);
     TestParticlesOutputCycle = config.read<int>("TestPartOutputCycle", 0);
@@ -970,6 +1014,12 @@ bool Collective::field_output_is_off() const { return (FieldOutputCycle <= 0); }
 bool Collective::particle_output_is_off() const {
   return getParticlesOutputCycle() <= 0;
 }
+bool Collective::particle_output_requested() const {
+  return !particle_output_is_off() && ParticlesOutputArrays.any();
+}
+bool Collective::diagnostics_due(int cycle) const {
+  return DiagnosticsOutputCycle > 0 && cycle % DiagnosticsOutputCycle == 0;
+}
 bool Collective::testparticle_output_is_off() const {
   return getTestParticlesOutputCycle() <= 0;
 }
@@ -1108,8 +1158,7 @@ void Collective::init_derived_parameters() {
     // with zeros...
     // if(error)
     //{
-    //  eprintf("For WriteMethod=default processor dimensions "
-    //          "must divide mesh cell dimensions");
+    //  eprintf("processor dimensions must divide mesh cell dimensions");
     //}
   }
 

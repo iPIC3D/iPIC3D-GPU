@@ -1011,7 +1011,17 @@ public:
     return out;
   }
 
+  /** The particle data of tag of every species (and the test particles
+   *  of tag). */
   void output(const string& tag, int cycle, int sample) {
+    output(tag, cycle, sample, _col->getAllSpecies());
+  }
+
+  /** The particle data of tag (position, velocity, q, ID; x, u, q or ID
+   *  every sample-th particle with sample > 0) of the given species, and
+   *  the test particles of tag. */
+  void output(const string& tag, int cycle, int sample,
+              const std::vector<int>& species) {
     stringstream cc;
     cc << cycle;
     const int ns = _col->getNs();
@@ -1019,7 +1029,7 @@ public:
 
     // Particle position
     if (tag.find("position", 0) != string::npos & sample == 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         stringstream ii;
         ii << i;
         this->output_adaptor.write(
@@ -1049,7 +1059,7 @@ public:
             PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getZall());
       }
     } else if (tag.find("x", 0) != string::npos & sample == 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         stringstream ii;
         ii << i;
         this->output_adaptor.write(
@@ -1057,7 +1067,7 @@ public:
             PSK::Dimens(_part[i]->getNOP()), _part[i]->getXall());
       }
     } else if (tag.find("x", 0) != string::npos & sample != 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         stringstream ii;
         ii << i;
         const std::vector<double> X =
@@ -1067,7 +1077,7 @@ public:
                                    PSK::Dimens(X.size()), X);
       }
     } else if (tag.find("position", 0) != string::npos & sample != 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         stringstream ii;
         ii << i;
         const int nop = _part[i]->getNOP();
@@ -1091,7 +1101,7 @@ public:
 
     // Particle velocity
     if (tag.find("velocity", 0) != string::npos & sample == 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         stringstream ii;
         ii << i;
         this->output_adaptor.write(
@@ -1119,7 +1129,7 @@ public:
             PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getWall());
       }
     } else if (tag.find("u", 0) != string::npos & sample == 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         stringstream ii;
         ii << i;
         this->output_adaptor.write(
@@ -1127,7 +1137,7 @@ public:
             PSK::Dimens(_part[i]->getNOP()), _part[i]->getUall());
       }
     } else if (tag.find("u", 0) != string::npos & sample != 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         stringstream ii;
         ii << i;
         const std::vector<double> U =
@@ -1137,7 +1147,7 @@ public:
                                    PSK::Dimens(U.size()), U);
       }
     } else if (tag.find("velocity", 0) != string::npos & sample != 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         stringstream ii;
         ii << i;
         const int nop = _part[i]->getNOP();
@@ -1161,7 +1171,7 @@ public:
 
     // Particle charge
     if (tag.find("q", 0) != string::npos & sample == 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         stringstream ii;
         ii << i;
         this->output_adaptor.write(
@@ -1179,7 +1189,7 @@ public:
             PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getQall());
       }
     } else if (tag.find("q", 0) != string::npos & sample != 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         stringstream ii;
         ii << i;
         const std::vector<double> Q =
@@ -1192,7 +1202,7 @@ public:
 
     // Particle ID
     if (tag.find("ID", 0) != string::npos & sample == 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         if (!_part[i]->tracksParticleID())
           continue;
         stringstream ii;
@@ -1215,7 +1225,7 @@ public:
                                    _part[i + ns]->getParticleIDall());
       }
     } else if (tag.find("ID", 0) != string::npos & sample != 0) {
-      for (int i = 0; i < ns; ++i) {
+      for (const int i : species) {
         if (!_part[i]->tracksParticleID())
           continue;
         stringstream ii;

@@ -25,7 +25,6 @@ struct RestartWriteTarget {
   std::string dataDir;
   std::string slot;
   std::string backend;
-  std::string rankFilePath;
   int cycle = -1;
   int rank = 0;
   int nranks = 1;
@@ -46,13 +45,16 @@ struct RestartWriteTarget {
  * after every rank has closed its new rank file, rank 0 writes the manifest
  * and latest_restart.json.
  *
- * Reading: a slot is usable when its manifest.json belongs to it, matches the
- * restart backend, has a valid cycle, rank count and mesh, and a rank file
- * exists for each of its nranks ranks.
+ * Reading: a slot is usable when its manifest.json belongs to it, names a
+ * backend of this build (isBuilt; RestartWriteMethod may have written either),
+ * has a valid cycle, rank count and mesh, and a rank file exists for each of
+ * its nranks ranks.
  */
 class RestartSlotManager {
 public:
   /**
+   * @param backend the backend of the checkpoints of this run ("adios2" or
+   *        "hdf5"), of the manifests
    * @param restartSlot slot ("A" or "B") this run was restarted from, or ""
    *        for a fresh run; the first checkpoint goes to the other slot.
    */
@@ -64,7 +66,8 @@ public:
    *  slot's manifest. Call on every rank, then barrier before
    *  prepareRankFile(). */
   RestartWriteTarget beginWrite(int cycle);
-  /** Remove this rank's file from the previous use of the slot. */
+  /** Remove this rank's file, of either backend, from the previous use of
+   *  the slot. */
   void prepareRankFile(const RestartWriteTarget& target) const;
   void publishIfRoot(const RestartWriteTarget& target) const;
   void completeLocal(const RestartWriteTarget& target);
@@ -81,7 +84,6 @@ public:
    * usable.
    */
   static RestartCheckpoint resolve(const std::string& rootDir,
-                                   const std::string& backend,
                                    const std::string& requestedSlot,
                                    std::string& report);
   /**
@@ -90,15 +92,18 @@ public:
    * @return found == false, with `reason` set, if the slot is not usable.
    */
   static RestartCheckpoint loadSlot(const std::string& rootDir,
-                                    const std::string& backend,
                                     const std::string& slot,
                                     bool checkRankFiles, std::string& reason);
-  static RestartCheckpoint readManifest(const std::string& dataDir,
-                                        const std::string& backend);
+  static RestartCheckpoint readManifest(const std::string& dataDir);
 
   /** "A"/"a" -> "A", "B"/"b" -> "B", "latest" or "" -> ""; false otherwise. */
   static bool parseSlotName(const std::string& text, std::string& slot);
-  static std::string backendName();
+  /** Whether this build reads and writes checkpoints of a backend of the
+   *  manifests ("adios2", "hdf5"). */
+  static bool isBuilt(const std::string& backend);
+  /** The backend of a manifest that names none: the first of this build
+   *  (adios2, then hdf5); "" without either. */
+  static std::string defaultBackend();
   static std::string slotDir(const std::string& rootDir,
                              const std::string& slot);
   static std::string rankFileName(const std::string& backend, int rank);

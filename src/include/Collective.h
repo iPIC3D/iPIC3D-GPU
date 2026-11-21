@@ -250,11 +250,28 @@ public:
   string getinputfile() const { return (inputfile); }
   string getCase() const { return (Case); }
   string getSimName() const { return (SimName); }
-  string getWriteMethod() const { return (wmethod); }
+  /** FieldWriteMethod: the field output backend. */
+  string getFieldWriteMethod() const { return fieldWriteMethod; }
   string getFieldOutputTag() const { return FieldOutputTag; }
   string getMomentsOutputTag() const { return MomentsOutputTag; }
   const OutputTagConfig& getOutputConfig() const { return outputConfig_; }
   string getPclOutputTag() const { return ParticlesOutputTag; }
+  /** The arrays that ParticlesOutputTag names. */
+  const ParticleOutputArrays& getParticlesOutputArrays() const {
+    return ParticlesOutputArrays;
+  }
+  /** ParticlesWriteMethod, RestartWriteMethod: the backend of the particle
+   *  output and of the checkpoints, adios2 or shdf5, "" for the first of
+   *  them in the build (IOManager). */
+  string getParticlesWriteMethod() const { return ParticlesWriteMethod; }
+  string getRestartWriteMethod() const { return RestartWriteMethod; }
+  /** ParticlesOutputSpecies: the species whose particles are written,
+   *  increasing. */
+  const std::vector<int>& getParticlesOutputSpecies() const {
+    return ParticlesOutputSpecies;
+  }
+  /** Every species, 0, ..., ns - 1: those of a checkpoint. */
+  const std::vector<int>& getAllSpecies() const { return AllSpecies; }
   bool getTrackParticleID(int species) const {
     return species >= 0 && species < static_cast<int>(TrackParticleID.size())
                ? TrackParticleID[species] != 0
@@ -314,6 +331,11 @@ public:
   }
   bool getCallFinalize() const { return (CallFinalize); }
   bool particle_output_is_off() const;
+  /** Whether the particles are written: an output cycle and an array. */
+  bool particle_output_requested() const;
+  /** Whether the conserved-quantity diagnostics run at a cycle
+   *  (DiagnosticsOutputCycle). */
+  bool diagnostics_due(int cycle) const;
   bool testparticle_output_is_off() const;
   bool field_output_is_off() const;
 
@@ -483,8 +505,8 @@ private:
 
   /*! Case type */
   string Case;
-  /*! Output writing method */
-  string wmethod;
+  /*! Field output backend */
+  string fieldWriteMethod;
   /*! Simulation name */
   string SimName;
   /*! Poisson correction flag */
@@ -663,12 +685,18 @@ private:
   /*! Output for particles */
   int ParticlesOutputCycle;
   string ParticlesOutputTag;
+  ParticleOutputArrays ParticlesOutputArrays;
+  string ParticlesWriteMethod;
+  std::vector<int> ParticlesOutputSpecies;
+  std::vector<int> AllSpecies;
   /*! Output for test particles */
   int TestParticlesOutputCycle;
   /*! test particles are flushed to disk every testPartFlushCycle  */
   int testPartFlushCycle;
   /*! restart cycle */
   int RestartOutputCycle;
+  /*! Checkpoint backend */
+  string RestartWriteMethod;
   /*! Output for diagnostics */
   int DiagnosticsOutputCycle;
   /*! planet boundary diagnostics cycle (0 disables) */

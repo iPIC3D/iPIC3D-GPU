@@ -396,6 +396,42 @@ inline std::vector<std::string> splitTags(const std::string& s) {
   return tokens;
 }
 
+/** The arrays of every particle that the particle output writes: the
+ *  tokens position, velocity, q and ID of ParticlesOutputTag. */
+struct ParticleOutputArrays {
+  bool position = false, velocity = false, charge = false, id = false;
+
+  bool any() const { return position || velocity || charge || id; }
+  ParticleOutputArrays& operator|=(const ParticleOutputArrays& other) {
+    position |= other.position;
+    velocity |= other.velocity;
+    charge |= other.charge;
+    id |= other.id;
+    return *this;
+  }
+};
+
+/** The arrays of a ParticlesOutputTag; false, the first token that names
+ *  none in unknown, for a token other than position, velocity, q or ID. */
+inline bool parseParticleTag(const std::string& tag,
+                             ParticleOutputArrays& arrays,
+                             std::string& unknown) {
+  arrays = {};
+  for (const std::string& tok : splitTags(tag)) {
+    bool* array = tok == "position"   ? &arrays.position
+                  : tok == "velocity" ? &arrays.velocity
+                  : tok == "q"        ? &arrays.charge
+                  : tok == "ID"       ? &arrays.id
+                                      : nullptr;
+    if (!array) {
+      unknown = tok;
+      return false;
+    }
+    *array = true;
+  }
+  return true;
+}
+
 /**
  * @brief Parse both tag strings into a single OutputTagConfig.
  *

@@ -2,7 +2,8 @@
  * RestartReader.cpp - Restart-file reader implementation for iPIC3D
  *
  * Contains all checkpoint-reading logic, extracted from Collective.cpp.
- * Supports ADIOS2 (BP5) and HDF5 backends via compile-time guards.
+ * Reads a checkpoint with the backend that wrote it, ADIOS2 (BP5) or HDF5,
+ * which its manifest names; the build must have that backend.
  */
 
 #include "RestartReader.h"
@@ -713,22 +714,21 @@ private:
 #endif
 
 struct RestartReadContext {
-  RestartReadContext(const std::string& restartDir_,
-                     const std::string& backend_, int lastCycle_,
+  RestartReadContext(const std::string& restartDir_, int lastCycle_,
                      const VCtopology3D* vct, RestartCheckpoint checkpoint_)
       : checkpoint(std::move(checkpoint_)),
         destinationMesh(makeDestinationMeshForRestart(checkpoint.mesh, vct)),
         plan(checkpoint.mesh, destinationMesh, vct->getCartesian_rank()),
-        restartDir(restartDir_), backend(backend_), lastCycle(lastCycle_),
+        restartDir(restartDir_), lastCycle(lastCycle_),
         rank(vct->getCartesian_rank()), xlen(vct->getXLEN()),
         ylen(vct->getYLEN()), zlen(vct->getZLEN()), nranks(vct->getNprocs()) {}
 
-  bool matches(const std::string& restartDir_, const std::string& backend_,
-               int lastCycle_, const VCtopology3D* vct) const {
-    return restartDir == restartDir_ && backend == backend_ &&
-           lastCycle == lastCycle_ && rank == vct->getCartesian_rank() &&
-           xlen == vct->getXLEN() && ylen == vct->getYLEN() &&
-           zlen == vct->getZLEN() && nranks == vct->getNprocs();
+  bool matches(const std::string& restartDir_, int lastCycle_,
+               const VCtopology3D* vct) const {
+    return restartDir == restartDir_ && lastCycle == lastCycle_ &&
+           rank == vct->getCartesian_rank() && xlen == vct->getXLEN() &&
+           ylen == vct->getYLEN() && zlen == vct->getZLEN() &&
+           nranks == vct->getNprocs();
   }
 
   void validateGridOnce(const Grid* grid) {
@@ -742,7 +742,6 @@ struct RestartReadContext {
   RestartMeshMetadata destinationMesh;
   RestartRemapPlan plan;
   std::string restartDir;
-  std::string backend;
   int lastCycle = -1;
   int rank = 0;
   int xlen = 0;
@@ -769,21 +768,14 @@ RestartReadContext& contextForRestartRead(const std::string& restartDir,
                                           int lastCycle,
                                           const VCtopology3D* vct,
                                           const Grid* grid) {
-  const std::string backend = RestartSlotManager::backendName();
-  if (backend.empty()) {
-    eprintf("Restart requires compiling with USE_ADIOS2 or HDF5 (without "
-            "NO_HDF5).");
-  }
-
   if (restartReadContext &&
-      restartReadContext->matches(restartDir, backend, lastCycle, vct)) {
+      restartReadContext->matches(restartDir, lastCycle, vct)) {
     if (grid)
       restartReadContext->validateGridOnce(grid);
     return *restartReadContext;
   }
 
-  RestartCheckpoint checkpoint =
-      RestartSlotManager::readManifest(restartDir, backend);
+  RestartCheckpoint checkpoint = RestartSlotManager::readManifest(restartDir);
   if (!checkpoint.found) {
     eprintf("ERROR: restart directory %s does not contain a restart "
             "manifest",
@@ -799,7 +791,7 @@ RestartReadContext& contextForRestartRead(const std::string& restartDir,
   }
 
   std::unique_ptr<RestartReadContext> newContext(new RestartReadContext(
-      restartDir, backend, lastCycle, vct, std::move(checkpoint)));
+      restartDir, lastCycle, vct, std::move(checkpoint)));
   if (grid)
     newContext->validateGridOnce(grid);
   restartReadContext = std::move(newContext);
@@ -816,7 +808,7 @@ void readAdiosFieldsRemapped(RestartReadContext& context, arr3_double Bxn,
 
   for (const RestartNodeCopy& copy : plan.nodeCopies()) {
     const std::string name_file = restartRankFilePath(
-        context.restartDir, context.backend, copy.sourceRank);
+        context.restartDir, context.checkpoint.backend, copy.sourceRank);
 
     adios2::ADIOS adios;
     adios2::IO ioField =
@@ -861,7 +853,7 @@ void collectAdiosParticleSpans(RestartReadContext& context, int species,
 
   for (const RestartCellCopy& copy : plan.cellCopies()) {
     const std::string name_file = restartRankFilePath(
-        context.restartDir, context.backend, copy.sourceRank);
+        context.restartDir, context.checkpoint.backend, copy.sourceRank);
 
     adios2::ADIOS adios;
     adios2::IO ioParticle = adios.DeclareIO("ParticleRestartMetadata" +
@@ -908,8 +900,8 @@ void readAdiosParticlesRemapped(RestartReadContext& context, int species,
   size_t spanIndex = 0;
   while (spanIndex < spans.size()) {
     const int sourceRank = spans[spanIndex].sourceRank;
-    const std::string name_file =
-        restartRankFilePath(context.restartDir, context.backend, sourceRank);
+    const std::string name_file = restartRankFilePath(
+        context.restartDir, context.checkpoint.backend, sourceRank);
 
     adios2::ADIOS adios;
     adios2::IO ioParticle =
@@ -957,7 +949,7 @@ void readHdf5FieldsRemapped(RestartReadContext& context, arr3_double Bxn,
 
   for (const RestartNodeCopy& copy : plan.nodeCopies()) {
     const std::string name_file = restartRankFilePath(
-        context.restartDir, context.backend, copy.sourceRank);
+        context.restartDir, context.checkpoint.backend, copy.sourceRank);
 
     hid_t file_id = H5Fopen(name_file.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
     if (file_id < 0) {
@@ -996,7 +988,7 @@ void collectHdf5ParticleSpans(RestartReadContext& context, int species,
 
   for (const RestartCellCopy& copy : plan.cellCopies()) {
     const std::string name_file = restartRankFilePath(
-        context.restartDir, context.backend, copy.sourceRank);
+        context.restartDir, context.checkpoint.backend, copy.sourceRank);
 
     hid_t file_id = H5Fopen(name_file.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
     if (file_id < 0) {
@@ -1033,8 +1025,8 @@ void readHdf5ParticlesRemapped(RestartReadContext& context, int species,
   size_t spanIndex = 0;
   while (spanIndex < spans.size()) {
     const int sourceRank = spans[spanIndex].sourceRank;
-    const std::string name_file =
-        restartRankFilePath(context.restartDir, context.backend, sourceRank);
+    const std::string name_file = restartRankFilePath(
+        context.restartDir, context.checkpoint.backend, sourceRank);
 
     hid_t file_id = H5Fopen(name_file.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
     if (file_id < 0) {
@@ -1103,24 +1095,11 @@ RestartCheckpoint
 RestartReader::resolveCheckpoint(const std::string& restartDir,
                                  const std::string& requestedSlot,
                                  std::string& report) {
-  const std::string backend = RestartSlotManager::backendName();
-  if (backend.empty()) {
+  if (RestartSlotManager::defaultBackend().empty()) {
     eprintf("Restart requires compiling with USE_ADIOS2 or HDF5 (without "
             "NO_HDF5).");
   }
   const bool root = MPIdata::get_rank() == 0;
-
-#if !defined(USE_ADIOS2) && !defined(NO_HDF5)
-  if (root) {
-    printf("\n");
-    printf("==================================================================="
-           "======\n");
-    printf("  WARNING: HDF5 restart is a Beta feature. Use with caution!\n");
-    printf("==================================================================="
-           "======\n");
-    printf("\n");
-  }
-#endif
 
   // Rank 0 checks the slots (manifests and every rank file) and chooses;
   // the other ranks load the chosen slot, so a file system that shows the
@@ -1129,8 +1108,7 @@ RestartReader::resolveCheckpoint(const std::string& restartDir,
   RestartCheckpoint checkpoint;
   char chosen = 0;
   if (root) {
-    checkpoint =
-        RestartSlotManager::resolve(restartDir, backend, requestedSlot, report);
+    checkpoint = RestartSlotManager::resolve(restartDir, requestedSlot, report);
     if (checkpoint.found)
       chosen = checkpoint.slot[0];
   }
@@ -1150,7 +1128,7 @@ RestartReader::resolveCheckpoint(const std::string& restartDir,
   if (!root) {
     std::string reason;
     checkpoint = RestartSlotManager::loadSlot(
-        restartDir, backend, std::string(1, chosen), false, reason);
+        restartDir, std::string(1, chosen), false, reason);
     if (!checkpoint.found) {
       eprintf("ERROR: cannot read restart_%c selected by rank 0: %s", chosen,
               reason.c_str());
@@ -1158,6 +1136,15 @@ RestartReader::resolveCheckpoint(const std::string& restartDir,
     return checkpoint;
   }
 
+  if (checkpoint.backend == "hdf5") {
+    printf("\n");
+    printf("==================================================================="
+           "======\n");
+    printf("  WARNING: HDF5 restart is a Beta feature. Use with caution!\n");
+    printf("==================================================================="
+           "======\n");
+    printf("\n");
+  }
   std::cout << "[*] Restart checkpoint ("
             << restartBackendLabel(checkpoint.backend) << ") = restart_"
             << checkpoint.slot << ", cycle label = " << checkpoint.cycle
@@ -1182,38 +1169,31 @@ void RestartReader::readFields(const VCtopology3D* vct, const Grid* grid,
                                arr3_double Bzn, arr3_double Ex, arr3_double Ey,
                                arr3_double Ez, array4_double* rhons_, int ns,
                                const std::string& restartDir, int last_cycle) {
+  RestartReadContext& context =
+      contextForRestartRead(restartDir, last_cycle, vct, grid);
+  if (context.checkpoint.mesh.ns < ns) {
+    eprintf("ERROR: restart manifest has fewer species than this run");
+  }
+
+  if (vct->getCartesian_rank() == 0) {
+    printRestartReadSignature("Fields", context.checkpoint.backend,
+                              "active-node", last_cycle);
+  }
+
+  // the reader of the backend that wrote the checkpoint, one of this build
+  // (RestartSlotManager::isBuilt)
 #ifdef USE_ADIOS2
-  RestartReadContext& context =
-      contextForRestartRead(restartDir, last_cycle, vct, grid);
-  if (context.checkpoint.mesh.ns < ns) {
-    eprintf("ERROR: restart manifest has fewer species than this run");
-  }
-
-  if (vct->getCartesian_rank() == 0) {
-    printRestartReadSignature("Fields", context.backend, "active-node",
-                              last_cycle);
-  }
-
-  readAdiosFieldsRemapped(context, Bxn, Byn, Bzn, Ex, Ey, Ez, rhons_, ns, grid);
-
-#elif !defined(NO_HDF5)
-  RestartReadContext& context =
-      contextForRestartRead(restartDir, last_cycle, vct, grid);
-  if (context.checkpoint.mesh.ns < ns) {
-    eprintf("ERROR: restart manifest has fewer species than this run");
-  }
-
-  if (vct->getCartesian_rank() == 0) {
-    printRestartReadSignature("Fields", context.backend, "active-node",
-                              last_cycle);
-  }
-
-  readHdf5FieldsRemapped(context, Bxn, Byn, Bzn, Ex, Ey, Ez, rhons_, ns, grid);
-
-#else
-  eprintf(
-      "Restart requires compiling with USE_ADIOS2 or HDF5 (without NO_HDF5).");
+  if (context.checkpoint.backend == "adios2")
+    return readAdiosFieldsRemapped(context, Bxn, Byn, Bzn, Ex, Ey, Ez, rhons_,
+                                   ns, grid);
 #endif
+#ifndef NO_HDF5
+  if (context.checkpoint.backend == "hdf5")
+    return readHdf5FieldsRemapped(context, Bxn, Byn, Bzn, Ex, Ey, Ez, rhons_,
+                                  ns, grid);
+#endif
+  eprintf("ERROR: no reader of %s restarts in this build",
+          context.checkpoint.backend.c_str());
 }
 
 // ===========================================================================
@@ -1225,38 +1205,27 @@ void RestartReader::readParticles(
     vector_double& v, vector_double& w, vector_double& q, vector_double& x,
     vector_double& y, vector_double& z, vector_cudaPclType_ID& id,
     bool trackParticleID, const std::string& restartDir, int last_cycle) {
+  RestartReadContext& context =
+      contextForRestartRead(restartDir, last_cycle, vct, nullptr);
+  if (species_number >= context.checkpoint.mesh.ns) {
+    eprintf("ERROR: requested restart species is not present in checkpoint");
+  }
+
+  if (vct->getCartesian_rank() == 0 && species_number == 0) {
+    printRestartReadSignature("Particle", context.checkpoint.backend,
+                              "active-cell", last_cycle);
+  }
+
 #ifdef USE_ADIOS2
-  RestartReadContext& context =
-      contextForRestartRead(restartDir, last_cycle, vct, nullptr);
-  if (species_number >= context.checkpoint.mesh.ns) {
-    eprintf("ERROR: requested restart species is not present in checkpoint");
-  }
-
-  if (vct->getCartesian_rank() == 0 && species_number == 0) {
-    printRestartReadSignature("Particle", context.backend, "active-cell",
-                              last_cycle);
-  }
-
-  readAdiosParticlesRemapped(context, species_number, u, v, w, q, x, y, z, id,
-                             trackParticleID);
-
-#elif !defined(NO_HDF5)
-  RestartReadContext& context =
-      contextForRestartRead(restartDir, last_cycle, vct, nullptr);
-  if (species_number >= context.checkpoint.mesh.ns) {
-    eprintf("ERROR: requested restart species is not present in checkpoint");
-  }
-
-  if (vct->getCartesian_rank() == 0 && species_number == 0) {
-    printRestartReadSignature("Particle", context.backend, "active-cell",
-                              last_cycle);
-  }
-
-  readHdf5ParticlesRemapped(context, species_number, u, v, w, q, x, y, z, id,
-                            trackParticleID);
-
-#else
-  eprintf(
-      "Restart requires compiling with USE_ADIOS2 or HDF5 (without NO_HDF5).");
+  if (context.checkpoint.backend == "adios2")
+    return readAdiosParticlesRemapped(context, species_number, u, v, w, q, x, y,
+                                      z, id, trackParticleID);
 #endif
+#ifndef NO_HDF5
+  if (context.checkpoint.backend == "hdf5")
+    return readHdf5ParticlesRemapped(context, species_number, u, v, w, q, x, y,
+                                     z, id, trackParticleID);
+#endif
+  eprintf("ERROR: no reader of %s restarts in this build",
+          context.checkpoint.backend.c_str());
 }

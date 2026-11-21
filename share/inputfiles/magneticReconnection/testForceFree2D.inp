@@ -27,7 +27,7 @@ RestartDirName = data                   # Checkpoint directory [default: data]
 Case           = ForceFree              # Case-sensitive initialization case [required]
 SimulationName = testForceFree2D        # Output dataset name [required]
 # Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk.
-WriteMethod    = pvtk                   # [required]
+FieldWriteMethod = pvtk                 # [required]
 
 # %%%%%%%%%%%%%%%%%%%% TIME INTEGRATION %%%%%%%%%%%%%%%%%%%%
 dt      = 0.15                          # Time step [required]
@@ -174,12 +174,15 @@ PoissonChebEigRatio      = 300          # eigMin floor eigMax/value, 0: exact bo
 # MomentsOutputTag: rho, J, P (PXX..PZZ), Q (heat flux) or one component
 # (PXX, Qxyz, ...) for all species; append a species index (rho0, J1, P2)
 # for one species or _tot (rho_tot, J_tot, P_tot, Q_tot) for the sum.
-# ParticlesOutputTag: position, velocity, q, ID.
+# ParticlesOutputTag: position, velocity, q, ID; another token stops the run.
 FieldOutputCycle       = 100                  # Field/moment interval; <=0 disables [default: 100]
 FieldOutputTag         = B+E                  # Grid fields [default: empty]
 MomentsOutputTag       = rho+J0+J1+P          # Species moments [default: empty]
 ParticlesOutputCycle   = 45                   # Particle interval; <=0 disables [default: 0]
 ParticlesOutputTag     = position+velocity+q  # Particle fields [default: empty]
+ParticlesOutputSpecies = 1 1                  # Species whose particles are written [default: all 1]
+ParticlesWriteMethod   = adios2               # Particle backend: adios2 or shdf5 [default: adios2 if built, else shdf5]
 DiagnosticsOutputCycle = 100                  # Scalar interval [default: FieldOutputCycle]
 RestartOutputCycle     = 100                  # Checkpoint interval; <=0 disables [default: 5000]
+RestartWriteMethod     = adios2               # Checkpoint backend: adios2 or shdf5 [default: adios2 if built, else shdf5]
 CallFinalize           = 1                    # Final checkpoint if restart output enabled [default: true]

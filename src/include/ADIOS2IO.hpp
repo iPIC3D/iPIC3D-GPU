@@ -24,7 +24,12 @@ using std::string;
 
 namespace ADIOS2IO {
 
-using optionFuncType = std::function<void(adios2::IO&, adios2::Engine&)>;
+/** Writes the data of a tag into a step: of the given species for the
+ *  particle data (the particle output writes those of
+ *  ParticlesOutputSpecies, a restart every species); the other tags write
+ *  every species (std::bind discards the argument). */
+using optionFuncType = std::function<void(adios2::IO&, adios2::Engine&,
+                                          const std::vector<int>& species)>;
 
 class ADIOS2Manager {
 
@@ -95,13 +100,17 @@ public:
     outputTagOptions = {
         // particle
         {"position", std::bind(&ADIOS2Manager::_particlePosition, this,
-                               std::placeholders::_1, std::placeholders::_2)},
+                               std::placeholders::_1, std::placeholders::_2,
+                               std::placeholders::_3)},
         {"velocity", std::bind(&ADIOS2Manager::_particleVelocity, this,
-                               std::placeholders::_1, std::placeholders::_2)},
-        {"q", std::bind(&ADIOS2Manager::_particleCharge, this,
-                        std::placeholders::_1, std::placeholders::_2)},
-        {"ID", std::bind(&ADIOS2Manager::_particleID, this,
-                         std::placeholders::_1, std::placeholders::_2)},
+                               std::placeholders::_1, std::placeholders::_2,
+                               std::placeholders::_3)},
+        {"q",
+         std::bind(&ADIOS2Manager::_particleCharge, this, std::placeholders::_1,
+                   std::placeholders::_2, std::placeholders::_3)},
+        {"ID",
+         std::bind(&ADIOS2Manager::_particleID, this, std::placeholders::_1,
+                   std::placeholders::_2, std::placeholders::_3)},
         {"particle_cell_metadata",
          std::bind(&ADIOS2Manager::_particleCellMetadata, this,
                    std::placeholders::_1, std::placeholders::_2)},
@@ -403,8 +412,9 @@ private:
       q -> particle charge
       ID -> particle ID for tracked species
   */
-  void _particlePosition(adios2::IO& io, adios2::Engine& engine) {
-    for (int i = 0; i < ns; i++) {
+  void _particlePosition(adios2::IO& io, adios2::Engine& engine,
+                         const std::vector<int>& species) {
+    for (const int i : species) {
       const unsigned long sizeNOP =
           static_cast<unsigned long>(part[i]->getNOP());
 
@@ -424,8 +434,9 @@ private:
     }
   }
 
-  void _particleVelocity(adios2::IO& io, adios2::Engine& engine) {
-    for (int i = 0; i < ns; i++) {
+  void _particleVelocity(adios2::IO& io, adios2::Engine& engine,
+                         const std::vector<int>& species) {
+    for (const int i : species) {
       const unsigned long sizeNOP =
           static_cast<unsigned long>(part[i]->getNOP());
 
@@ -445,8 +456,9 @@ private:
     }
   }
 
-  void _particleCharge(adios2::IO& io, adios2::Engine& engine) {
-    for (int i = 0; i < ns; i++) {
+  void _particleCharge(adios2::IO& io, adios2::Engine& engine,
+                       const std::vector<int>& species) {
+    for (const int i : species) {
       const unsigned long sizeNOP =
           static_cast<unsigned long>(part[i]->getNOP());
 
@@ -458,8 +470,9 @@ private:
     }
   }
 
-  void _particleID(adios2::IO& io, adios2::Engine& engine) {
-    for (int i = 0; i < ns; i++) {
+  void _particleID(adios2::IO& io, adios2::Engine& engine,
+                   const std::vector<int>& species) {
+    for (const int i : species) {
       if (!part[i]->tracksParticleID())
         continue;
 

@@ -21,6 +21,7 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
 
 #ifndef NO_HDF5
 #include "OutputWrapperFPP.h"
@@ -31,6 +32,57 @@
 #endif
 
 using std::string;
+
+namespace {
+
+/** The particle and checkpoint backends of this build, by preference, by
+ *  their name in the input file (ParticlesWriteMethod, RestartWriteMethod). */
+std::vector<string> builtFileBackends() {
+  std::vector<string> built;
+#ifdef USE_ADIOS2
+  built.push_back("adios2");
+#endif
+#ifndef NO_HDF5
+  built.push_back("shdf5");
+#endif
+  return built;
+}
+
+/** The backend of the input key, which asked for requested ("": the first
+ *  of the build): requested if the build has it, else the first of the
+ *  build, else none (""). With warn, a backend replaced or none is warned
+ *  of, the data (what) written with another one or not at all; the run goes
+ *  on. */
+string chooseFileBackend(const char* key, const string& requested, bool warn,
+                         const char* what) {
+  const std::vector<string> built = builtFileBackends();
+  if (built.empty()) {
+    if (warn)
+      warning_printf("this build has neither ADIOS2 nor HDF5 (compile with "
+                     "USE_ADIOS2=ON or USE_HDF5=ON): no %s are written",
+                     what);
+    return "";
+  }
+  for (const string& name : built)
+    if (name == requested)
+      return name;
+  if (warn && !requested.empty())
+    warning_printf("%s = %s is not in this build (compile with %s): the %s "
+                   "are written with %s",
+                   key, requested.c_str(),
+                   requested == "adios2" ? "USE_ADIOS2=ON" : "USE_HDF5=ON",
+                   what, built.front().c_str());
+  return built.front();
+}
+
+/** The particle or restart backend of a name of builtFileBackends(). */
+template <typename Backend> Backend fileBackend(const string& name) {
+  return name == "adios2"  ? Backend::ADIOS2
+         : name == "shdf5" ? Backend::SHDF5
+                           : Backend::NONE;
+}
+
+} // namespace
 
 // ======= Construction and destruction =======
 
@@ -84,9 +136,9 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
   first_cycle_ = first_cycle;
   restart_cycle_ = col->getRestartOutputCycle();
 
-  const string writeMethod = col->getWriteMethod();
+  const string writeMethod = col->getFieldWriteMethod();
 
-  // Step 1: determine the field backend from WriteMethod.
+  // Step 1: the field backend, FieldWriteMethod.
   if (writeMethod == "shdf5")
     fieldBackend_ = FieldBackend::SHDF5;
   else if (writeMethod == "pvtk")
@@ -99,43 +151,28 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
     fieldBackend_ = FieldBackend::ADIOS2;
   else {
     // Fatal: carrying on would silently drop all field output.
-    eprintf("Unknown WriteMethod '%s' in the input file. "
+    eprintf("Unknown FieldWriteMethod '%s' in the input file. "
             "Valid options: shdf5, pvtk, nbcvtk, phdf5, adios2",
             writeMethod.c_str());
   }
 
-  // Step 2: determine the particle backend.
-#ifdef USE_ADIOS2
-  particleBackend_ = ParticleBackend::ADIOS2;
-#else
-  particleBackend_ = ParticleBackend::SHDF5;
-#endif
-
-  // Step 3: determine the restart backend.
-#ifdef USE_ADIOS2
-  restartBackend_ = RestartBackend::ADIOS2;
-#else
-  restartBackend_ = RestartBackend::SHDF5;
-#endif
+  // Steps 2 and 3: the particle and checkpoint backends,
+  // ParticlesWriteMethod and RestartWriteMethod (chooseFileBackend); rank 0
+  // warns when it writes such data.
+  const bool rank0 = vct->getCartesian_rank() == 0;
+  particleBackend_ = fileBackend<ParticleBackend>(chooseFileBackend(
+      "ParticlesWriteMethod", col->getParticlesWriteMethod(),
+      rank0 && col->particle_output_requested(), "particles"));
+  restartBackend_ = fileBackend<RestartBackend>(
+      chooseFileBackend("RestartWriteMethod", col->getRestartWriteMethod(),
+                        rank0 && restart_cycle_ > 0, "checkpoints"));
 
   // Step 4: validate backend availability against compile flags.
 #ifdef NO_HDF5
   if (fieldBackend_ == FieldBackend::SHDF5 ||
       fieldBackend_ == FieldBackend::PARALLEL_HDF5) {
-    eprintf("WriteMethod '%s' requires HDF5 (compile with USE_HDF5=ON)",
+    eprintf("FieldWriteMethod '%s' requires HDF5 (compile with USE_HDF5=ON)",
             writeMethod.c_str());
-  }
-  if (particleBackend_ == ParticleBackend::SHDF5) {
-    warning_printf(
-        "Selected particle backend requires HDF5 (compile with USE_HDF5=ON). "
-        "Particle output disabled.");
-    particleBackend_ = ParticleBackend::NONE;
-  }
-  if (restartBackend_ == RestartBackend::SHDF5) {
-    warning_printf(
-        "Selected restart backend requires HDF5 (compile with USE_HDF5=ON). "
-        "Restart output disabled.");
-    restartBackend_ = RestartBackend::NONE;
   }
 #endif
 
@@ -144,23 +181,16 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
     const RestartMeshMetadata restartMesh =
         makeCurrentRestartMeshMetadata(col, vct, grid, ns);
     // Continue from the slot the restart read ("" for a fresh run): the next
-    // checkpoint goes to the other slot.
+    // checkpoint goes to the other slot. The backend by its manifest name.
     restartSlots_.init(col->getRestartDirName(),
-                       RestartSlotManager::backendName(),
+                       restartBackend_ == RestartBackend::ADIOS2 ? "adios2"
+                                                                 : "hdf5",
                        vct->getCartesian_rank(), MPIdata::get_nprocs(),
                        restartMesh, col->getRestartReadSlot());
   }
 #ifndef USE_ADIOS2
   if (fieldBackend_ == FieldBackend::ADIOS2) {
-    eprintf(
-        "WriteMethod 'adios2' requires ADIOS2 (compile with USE_ADIOS2=ON)");
-  }
-  if (particleBackend_ == ParticleBackend::ADIOS2) {
-    eprintf("Selected particle backend requires ADIOS2 (compile with "
-            "USE_ADIOS2=ON)");
-  }
-  if (restartBackend_ == RestartBackend::ADIOS2) {
-    eprintf("Selected restart backend requires ADIOS2 (compile with "
+    eprintf("FieldWriteMethod 'adios2' requires ADIOS2 (compile with "
             "USE_ADIOS2=ON)");
   }
 #endif
@@ -179,8 +209,12 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
 
     if (needHDF5) {
       outputWrapperFPP_ = new OutputWrapperFPP;
-      outputWrapperFPP_->init_output_files(col, vct, grid, EMf, outputPart, ns,
-                                           testpart, nstestpart);
+      outputWrapperFPP_->init_output_files(
+          col, vct, grid, EMf, outputPart, ns, testpart, nstestpart,
+          fieldBackend_ == FieldBackend::SHDF5 ||
+              (particleBackend_ == ParticleBackend::SHDF5 &&
+               col->particle_output_requested()),
+          restartBackend_ == RestartBackend::SHDF5);
     }
   }
 #endif
@@ -191,8 +225,10 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
       restartBackend_ == RestartBackend::ADIOS2 ||
       fieldBackend_ == FieldBackend::ADIOS2) {
     using namespace std::string_literals;
-    string particleTag =
-        col->getParticlesOutputCycle() ? col->getPclOutputTag() : ""s;
+    const string particleTag = particleBackend_ == ParticleBackend::ADIOS2 &&
+                                       col->particle_output_requested()
+                                   ? col->getPclOutputTag()
+                                   : ""s;
 
     adiosManager_ = new ADIOS2IO::ADIOS2Manager();
     adiosManager_->initOutputFiles(""s, particleTag, 0, col, vct, grid, EMf,
@@ -363,8 +399,8 @@ void IOManager::writeParticles(int cycle) {
   case ParticleBackend::SHDF5:
 #ifndef NO_HDF5
     if (outputWrapperFPP_)
-      outputWrapperFPP_->append_output(col_->getPclOutputTag().c_str(), cycle,
-                                       0);
+      outputWrapperFPP_->append_particles(col_->getPclOutputTag(), cycle,
+                                          col_->getParticlesOutputSpecies());
 #endif
     break;
 
@@ -518,17 +554,8 @@ bool IOManager::needsParticleOutput(int cycle) const {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return false;
 
-  // The tag-driven SHDF5 and ADIOS2 paths have no particle consumer when
-  // their tag is empty.
-  const string particleTag = col_->getPclOutputTag();
-  const bool hasParticleTag =
-      particleTag.find_first_not_of(" \t\r\n") != string::npos;
-  const bool backendConsumesData =
-      (particleBackend_ == ParticleBackend::SHDF5 ||
-       particleBackend_ == ParticleBackend::ADIOS2) &&
-      hasParticleTag;
-  return backendConsumesData && Parameters::get_doWriteOutput() &&
-         !col_->particle_output_is_off() &&
+  return particleBackend_ != ParticleBackend::NONE &&
+         col_->particle_output_requested() && Parameters::get_doWriteOutput() &&
          cycle % col_->getParticlesOutputCycle() == 0;
 }
 
@@ -536,15 +563,22 @@ bool IOManager::needsParticleSync(int cycle) const {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return false;
 
+  return needsRestartParticleSync(cycle) || needsParticleOutput(cycle) ||
+         col_->diagnostics_due(cycle);
+}
+
+std::vector<ParticleOutputArrays> IOManager::hostParticles(int cycle) const {
   if (needsRestartParticleSync(cycle))
-    return true;
+    return std::vector<ParticleOutputArrays>(ns_, {true, true, true, true});
+  std::vector<ParticleOutputArrays> arrays(ns_);
+  // the kinetic energy, momentum and charge of every species
+  if (col_->diagnostics_due(cycle))
+    for (ParticleOutputArrays& species : arrays)
+      species.velocity = species.charge = true;
   if (needsParticleOutput(cycle))
-    return true;
-  // Also sync particles when diagnostics (ConservedQuantities) are due
-  if (col_->getDiagnosticsOutputCycle() > 0 &&
-      cycle % col_->getDiagnosticsOutputCycle() == 0)
-    return true;
-  return false;
+    for (const int s : col_->getParticlesOutputSpecies())
+      arrays[s] |= col_->getParticlesOutputArrays();
+  return arrays;
 }
 
 bool IOManager::needsRestartParticleSync(int cycle) const {

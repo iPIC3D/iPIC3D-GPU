@@ -32,7 +32,8 @@ void OutputWrapperFPP::init_output_files(Collective* col, VCtopology3D* vct,
                                          Grid3DCU* grid, EMfields3D* EMf,
                                          ParticleSoAHost** part, int ns,
                                          ParticleSoAHost** testpart,
-                                         int nstestpart) {
+                                         int nstestpart, bool outputFiles,
+                                         bool restartFiles) {
 #ifndef NO_HDF5
   col_ = col;
   cartesian_rank = vct->getCartesian_rank();
@@ -57,8 +58,7 @@ void OutputWrapperFPP::init_output_files(Collective* col, VCtopology3D* vct,
   // Add the HDF5 output agent to the Output Manager's list
   output_mgr.push_back(&hdf5_agent);
 
-  if (col->getWriteMethod() == "shdf5" ||
-      (col->getWriteMethod() == "pvtk" && !col->particle_output_is_off())) {
+  if (outputFiles) {
     if (cartesian_rank == 0 && restart_status < 2) {
       hdf5_agent.open(SaveDirName + "/settings.hdf");
       output_mgr.output("collective + total_topology + proc_topology", 0);
@@ -74,7 +74,8 @@ void OutputWrapperFPP::init_output_files(Collective* col, VCtopology3D* vct,
     hdf5_agent.close();
   }
 
-  if (col->getCallFinalize() || col->getRestartOutputCycle() > 0) {
+  if (restartFiles &&
+      (col->getCallFinalize() || col->getRestartOutputCycle() > 0)) {
 
     if (cartesian_rank == 0 && restart_status < 2) {
       hdf5_agent.open(RestartDirName + "/settings.hdf");
@@ -90,6 +91,15 @@ void OutputWrapperFPP::append_output(const char* tag, int cycle, int sample) {
 #ifndef NO_HDF5
   hdf5_agent.open_append(output_file);
   output_mgr.output(tag, cycle, sample);
+  hdf5_agent.close();
+#endif
+}
+
+void OutputWrapperFPP::append_particles(const string& tag, int cycle,
+                                        const std::vector<int>& species) {
+#ifndef NO_HDF5
+  hdf5_agent.open_append(output_file);
+  hdf5_agent.output(tag, cycle, 0, species);
   hdf5_agent.close();
 #endif
 }

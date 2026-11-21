@@ -240,10 +240,11 @@ sign of the species charge.
 
 ## 6. Output Backends
 
-iPIC3D-GPU supports multiple field output backends, selected by `WriteMethod`
-in the input file:
+iPIC3D-GPU supports multiple field output backends, selected by
+`FieldWriteMethod` in the input file (required; the old key `WriteMethod` stops
+the run at startup):
 
-| WriteMethod  | Format                    | Field output   | Moments output | Total ρ          |
+| FieldWriteMethod | Format                | Field output   | Moments output | Total ρ          |
 |--------------|---------------------------|----------------|----------------|------------------|
 | `pvtk`       | Parallel VTK (MPI-IO)     | ✓             | ✓             | ✓ (× 4π)        |
 | `nbcvtk`     | Non-blocking VTK (MPI-IO) | ✓             | ✓             | ✓ (× 4π)        |
@@ -251,12 +252,19 @@ in the input file:
 | `shdf5`      | Serial HDF5 (per-process) | ✓             | ✓             | ✓ (× 4π)        |
 | `adios2`     | ADIOS2 format             | ✗ (throws)    | ✗             | ✗               |
 
-Output is controlled by two tag strings in the input file:
+The particles and the restart checkpoints have backends of their own,
+`ParticlesWriteMethod` and `RestartWriteMethod`: `adios2` (one `.bp` file per
+rank) or `shdf5` (one HDF5 file per rank), by default ADIOS2 if the build has
+it, else serial HDF5.
+
+Output is controlled by three tag strings in the input file:
 - **`FieldOutputTag`**: grid fields (`B`, `E`), the species currents `Je`/`Ji`/`Je2`/`Ji3` (species 0–3) and `rho` (the total charge density)
 - **`MomentsOutputTag`**: moments (e.g. `"rho+PXX+PXY+PXZ+PYY+PYZ+PZZ"`)
+- **`ParticlesOutputTag`**: particle arrays (`position`, `velocity`, `q`, `ID`; see [Section 7.5](#75-particles))
 
 Tags are separated by `+`, trimmed and matched exactly against the tokens listed
-in the README; an unknown token prints a warning and is ignored.
+in the README. An unknown field or moment token prints a warning and is
+ignored; an unknown particle token stops the run at startup.
 
 ---
 
@@ -340,7 +348,11 @@ from on-disk values.
 ### 7.5 Particles
 
 Particle output (when `ParticlesOutputCycle > 0` and `ParticlesOutputTag` is
-not empty) writes:
+not empty) writes the particles of the species of `ParticlesOutputSpecies`
+(every species by default), with `ParticlesWriteMethod`: `adios2` to
+`particle_<rank>.bp` (variables `part<s>PositionX`, ..., `part<s>charge`,
+`part<s>ID`), `shdf5` to `proc<rank>.hdf` (datasets
+`/particles/species_<s>/{x,y,z,u,v,w,q,ID}/cycle_<n>`). For each species:
 
 | Quantity | Tag | Description | Units |
 |----------|-----|-------------|-------|
@@ -362,7 +374,7 @@ written by another version), it is renamed to
 - **Field energies:**
   - `Eenergy` is the node sum $\sum w\,\tfrac12 \Delta V\,|\mathbf{E}|^2/4\pi$.
   - `Benergy` is the cell sum $\sum \tfrac12 \Delta V\,|\mathbf{B}_c + \mathbf{B}_{\text{ext}}|^2/4\pi$. It uses the cell-centred B that Faraday's law advances, with the node $\mathbf{B}_{\text{ext}}$ averaged over the 8 corners of the cell. E on the nodes and B on the cells are the pair the discrete field-energy balance holds for. The node B is an interpolation that filters out the grid-scale part.
-  - At a restart `Benergy` drops: the checkpoint holds the node B only, and the restart rebuilds the cell B by interpolating it, which removes the grid-scale part (`NUMERICS_BUGS.md` #7).
+  - At a restart `Benergy` drops: the checkpoint holds the node B only, and the restart rebuilds the cell B by interpolating it, which removes the grid-scale part.
 - **Node sums:** each rank sums the nodes it owns (`EMfields3D::ownedNodeEnds`). The node shared with the next rank, or with the periodic image, belongs to that neighbour. On a non-periodic direction the last rank also counts its boundary node, so every node is counted once. The weight w is the trapezoidal one (`ownedNodeWeights`): ½ per non-periodic domain face the node lies on, since such a node holds half a cell of the domain.
 - **Particle sums** (`ParticleSoAHost::getKinetic`), with m = q/(q/m) the particle mass:
   - `Ke[s]` is the kinetic energy of species s: $\sum (\gamma-1)mc^2$ with $\gamma = 1/\sqrt{1-v^2/c^2}$ in the `Dipole` and `Dipole2D` cases, whose mover is relativistic, and $\sum \tfrac12 m v^2$ otherwise. `Kenergy` is their sum. In the relativistic cases a particle with $|v| \ge c$, which only loaded data can hold and the mover deletes, is left out of `Ke[s]` and `Mom[s]`.
@@ -432,8 +444,10 @@ The datasets written are selected by the same tags as in
 
 ## 10. SHDF5 Output Files
 
-Serial HDF5 writes one file per MPI process, `SaveDirName/proc<rank>.hdf`,
-with the rank's local nodes. It uses the same `FieldOutputTag` and
+Serial HDF5 (`FieldWriteMethod = shdf5`) writes one file per MPI process,
+`SaveDirName/proc<rank>.hdf`, with the rank's local nodes; the particles of
+`ParticlesWriteMethod = shdf5` go to the same file
+([Section 7.5](#75-particles)). It uses the same `FieldOutputTag` and
 `MomentsOutputTag` tokens as the other backends:
 
 | Tag | HDF5 path | Scaling |

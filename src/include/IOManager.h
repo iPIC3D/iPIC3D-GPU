@@ -9,6 +9,7 @@
 #ifndef IO_MANAGER_H
 #define IO_MANAGER_H
 
+#include "OutputTagConfig.h"
 #include "RestartSlotManager.h"
 #include "ipicfwd.h"
 #include <vector>
@@ -45,8 +46,8 @@ public:
   IOManager& operator=(const IOManager&) = delete;
 
   /**
-   * @brief Initialise backends based on compile-time options and runtime
-   * config.
+   * @brief Initialise the backends of FieldWriteMethod, ParticlesWriteMethod
+   * and RestartWriteMethod, among those of the build.
    *
    * Must be called once, after Collective/Grid/EMfields/Particles are ready.
    * The pointers are stored but not owned; the caller (`c_Solver`) keeps
@@ -116,6 +117,13 @@ public:
    * @param cycle Simulation cycle to query.
    */
   bool needsParticleSync(int cycle) const;
+
+  /** The arrays of each species that the host outputs of a cycle read
+   *  (needsParticleSync), which outputCopyAsync copies: every array for a
+   *  checkpoint; else the velocities and charges for the diagnostics and
+   *  the arrays of ParticlesOutputTag of the species of
+   *  ParticlesOutputSpecies for the particle output. */
+  std::vector<ParticleOutputArrays> hostParticles(int cycle) const;
 
   /** @brief Will this cycle write at least one configured field or moment
    * quantity through an available backend? */

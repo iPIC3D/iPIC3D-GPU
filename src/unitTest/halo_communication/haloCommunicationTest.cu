@@ -158,7 +158,7 @@ ConfigFile makeConfig(const Scenario& scenario, bool haloOverlap) {
   cfg.add("Case", "Default");
   cfg.add("PoissonCorrection", "no");
   cfg.add("divBCorrection", "no");
-  cfg.add("WriteMethod", "default");
+  cfg.add("FieldWriteMethod", "default");
   cfg.add("SimulationName", "halo_communication");
 
   cfg.add("B0x", 0.0);

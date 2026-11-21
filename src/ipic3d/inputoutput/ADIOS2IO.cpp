@@ -5,6 +5,7 @@
 #include "Collective.h"
 #include "EMfields3D.h"
 #include "Grid3DCU.h"
+#include "OutputTagConfig.h"
 #include "ParticleSoAHost.h"
 #include "VCtopology3D.h"
 
@@ -26,6 +27,27 @@ namespace {
 void defineBuildAttributes(adios2::IO& io) {
   io.DefineAttribute<string>("ipic3d_version", iPic3D::build::version());
   io.DefineAttribute<string>("ipic3d_build", iPic3D::build::signature());
+}
+
+/** The writers of the tokens of a tag, each token once, split as Collective
+ *  splits ParticlesOutputTag (splitTags); a token without a writer throws
+ *  (what: the output of the tag). */
+vector<optionFuncType>
+tagOptions(const string& tag,
+           const unordered_map<string, optionFuncType>& writers,
+           const char* what) {
+  vector<optionFuncType> options;
+  const vector<string> tokens = splitTags(tag);
+  for (auto token = tokens.begin(); token != tokens.end(); ++token) {
+    if (find(tokens.begin(), token, *token) != token)
+      continue; // given twice
+    const auto writer = writers.find(*token);
+    if (writer == writers.end())
+      throw runtime_error(string(what) +
+                          " output tag is not supported: " + *token);
+    options.push_back(writer->second);
+  }
+  return options;
 }
 
 } // namespace
@@ -97,46 +119,10 @@ void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag,
                         col->getRestart_status() == 0 ? adios2::Mode::Write
                                                       : adios2::Mode::Append,
                         MPI_COMM_SELF);
-
-    // parse the tag and prepae the map
-    particleTag.erase(remove(particleTag.begin(), particleTag.end(), ' '),
-                      particleTag.end());
-    vector<string> tags;
-    stringstream ss(particleTag);
-    string tag;
-    while (getline(ss, tag, '+')) {
-      tags.push_back(tag);
-    }
-
-    // find the function in the map and register it to vector
-    for (auto tag : tags) {
-      if (outputTagOptions.find(tag) != outputTagOptions.end()) {
-        particleOptions.push_back(outputTagOptions[tag]);
-      } else {
-        throw runtime_error("Particle output tag is not supported: " + tag);
-      }
-    }
+    particleOptions = tagOptions(particleTag, outputTagOptions, "Particle");
   }
 
-  if (!restartTag.empty()) {
-    // parse the tag and prepae the map
-    restartTag.erase(remove(restartTag.begin(), restartTag.end(), ' '),
-                     restartTag.end());
-    vector<string> tags;
-    stringstream ss(restartTag);
-    string tag;
-    while (getline(ss, tag, '+')) {
-      tags.push_back(tag);
-    }
-    // find the function in the map and register it to vector
-    for (auto tag : tags) {
-      if (outputTagOptions.find(tag) != outputTagOptions.end()) {
-        restartOptions.push_back(outputTagOptions[tag]);
-      } else {
-        throw runtime_error("Restart output tag is not supported: " + tag);
-      }
-    }
-  }
+  restartOptions = tagOptions(restartTag, outputTagOptions, "Restart");
 
   open = true;
 }
@@ -157,8 +143,8 @@ void ADIOS2Manager::appendParticleOutput(int cycle) {
   // auto timeVar = _variableHelper<int>(ioParticle, "IOTimeMS");
   // auto start = chrono::high_resolution_clock::now();
 
-  for (auto option : particleOptions) {
-    option(ioParticle, engineParticle);
+  for (const auto& option : particleOptions) {
+    option(ioParticle, engineParticle, col->getParticlesOutputSpecies());
   }
 
   // engineParticle.PerformPuts(); // do the heavy job here
@@ -188,8 +174,8 @@ void ADIOS2Manager::writeRestartOutput(int cycle, const string& restartDir) {
 
   auto cycleVar = _variableHelper<int>(ioRestart, "cycle");
   engineRestart.Put<int>(cycleVar, cycle);
-  for (auto option : restartOptions) {
-    option(ioRestart, engineRestart);
+  for (const auto& option : restartOptions) {
+    option(ioRestart, engineRestart, col->getAllSpecies());
   }
 
   engineRestart.EndStep();

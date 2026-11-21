@@ -295,7 +295,8 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
   MPI_Type_indexed(4, blocklengthN, displacementsN, MPI_DOUBLE, &cornertypeN);
   MPI_Type_commit(&cornertypeN);
 
-  if (col->getWriteMethod() == "pvtk" || col->getWriteMethod() == "nbcvtk") {
+  if (col->getFieldWriteMethod() == "pvtk" ||
+      col->getFieldWriteMethod() == "nbcvtk") {
     // test Endian
     int TestEndian = 1;
     lEndFlag = *(char*)&TestEndian;
@@ -369,7 +370,8 @@ void EMfields3D::freeDataType() {
   MPI_Type_free(&zEdgetypeN2);
   MPI_Type_free(&cornertypeN);
 
-  if (_col.getWriteMethod() == "pvtk" || _col.getWriteMethod() == "nbcvtk") {
+  if (_col.getFieldWriteMethod() == "pvtk" ||
+      _col.getFieldWriteMethod() == "nbcvtk") {
     MPI_Type_free(&procview);
     MPI_Type_free(&xyzcomp);
     MPI_Type_free(&procviewXYZ);

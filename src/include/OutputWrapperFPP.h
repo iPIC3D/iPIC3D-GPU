@@ -53,10 +53,18 @@ private:
   string restart_file;
 
 public:
+  /** With outputFiles (fields or particles in HDF5), also start the output
+   *  file of the rank and, on rank 0, settings.hdf; with restartFiles (HDF5
+   *  checkpoints), rank 0 writes settings.hdf in the restart root too. */
   void init_output_files(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
                          EMfields3D* EMf, ParticleSoAHost** part, int ns,
-                         ParticleSoAHost** testpart, int nstestpart);
+                         ParticleSoAHost** testpart, int nstestpart,
+                         bool outputFiles, bool restartFiles);
   void append_output(const char* tag, int cycle, int sample);
+  /** The particle data of tag (position, velocity, q, ID) of the given
+   *  species at a cycle, into the output file of the rank. */
+  void append_particles(const string& tag, int cycle,
+                        const std::vector<int>& species);
   void append_field_moment_output(const OutputTagConfig& cfg, int cycle);
   void
   setRestartParticleCellMetadata(const RestartParticleCellMetadata* metadata);

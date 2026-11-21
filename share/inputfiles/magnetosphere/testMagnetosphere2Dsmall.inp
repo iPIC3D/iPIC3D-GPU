@@ -25,8 +25,8 @@ SaveDirName    = data                   # Fresh-run output directory [default: d
 RestartDirName = data                   # Checkpoint directory [default: data]
 Case           = Dipole2D               # Case-sensitive initialization case [required]
 SimulationName = Dipole2DTest           # Output dataset name [required]
-# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk, adios2.
-WriteMethod    = nbcvtk                 # [required]
+# Field backends (build-dependent): shdf5, phdf5, pvtk, nbcvtk.
+FieldWriteMethod = nbcvtk               # [required]
 
 # %%%%%%%%%%%%%%%%%%%% TIME INTEGRATION %%%%%%%%%%%%%%%%%%%%
 dt      = 0.15                          # Time step [required]
@@ -188,16 +188,19 @@ PoissonChebEigRatio      = 300          # eigMin floor eigMax/value, 0: exact bo
 
 # %%%%%%%%%%%%%%%%%%%% OUTPUT AND RESTART %%%%%%%%%%%%%%%%%%%%
 # Tags are joined with +; an empty tag writes nothing.
-# FieldOutputTag: B, E.
+# FieldOutputTag: B, E; Je, Ji, Je2, Ji3 (species 0-3 current), rho (total).
 # MomentsOutputTag: rho, J, P (PXX..PZZ), Q (heat flux) or one component
 # (PXX, Qxyz, ...) for all species; append a species index (rho0, J1, P2)
 # for one species or _tot (rho_tot, J_tot, P_tot, Q_tot) for the sum.
-# ParticlesOutputTag: position, velocity, q, ID.
+# ParticlesOutputTag: position, velocity, q, ID; another token stops the run.
 FieldOutputCycle       = 10                   # Field/moment interval; <=0 disables [default: 100]
 FieldOutputTag         = B+E                  # Grid fields [default: empty]
 MomentsOutputTag       = rho+J+P              # Species moments [default: empty]
 ParticlesOutputCycle   = 15                   # Particle interval; <=0 disables [default: 0]
 ParticlesOutputTag     = position+velocity+q  # Particle fields [default: empty]
+ParticlesOutputSpecies = 1 1                  # Species whose particles are written [default: all 1]
+ParticlesWriteMethod   = adios2               # Particle backend: adios2 or shdf5 [default: adios2 if built, else shdf5]
 DiagnosticsOutputCycle = 10                   # Scalar interval [default: FieldOutputCycle]
 RestartOutputCycle     = 0                    # Checkpoint interval; <=0 disables [default: 5000]
+RestartWriteMethod     = adios2               # Checkpoint backend: adios2 or shdf5 [default: adios2 if built, else shdf5]
 CallFinalize           = 1                    # Final checkpoint if restart output enabled [default: true]

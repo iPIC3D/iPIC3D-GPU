@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.21)
 project(analysisRecordsTest LANGUAGES CXX)
 
 # The files of the data-analysis records on a restart (outputPrepare): the
-# JSON records dropped from the restart cycle on, also after an append cut
-# short, the files kept aside, the histograms dropped. CPU only.
+# binary records of RecordFile cut from the restart cycle on, also after a
+# record cut short, and the files kept aside. CPU only.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

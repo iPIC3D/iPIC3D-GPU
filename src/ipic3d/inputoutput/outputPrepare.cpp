@@ -1,12 +1,12 @@
 #include "outputPrepare.h"
 
 #include <algorithm>
-#include <cctype>
-#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <iterator>
+#include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -14,62 +14,32 @@
 
 namespace fs = std::filesystem;
 
-void remove_all_contents(const fs::path& dir) {
-  for (const auto& entry : fs::directory_iterator(dir)) {
+namespace {
+
+/** The folder at relativePath (from the current directory), created if
+ *  missing; an error if it is something else. */
+fs::path outputFolder(const std::string& relativePath) {
+  const fs::path folder = fs::current_path() / relativePath;
+  if (!fs::exists(folder))
+    fs::create_directories(folder);
+  else if (!fs::is_directory(folder))
+    throw std::runtime_error("Output path " + relativePath +
+                             " is not a directory");
+  return folder;
+}
+
+} // namespace
+
+void checkOutputFolder(const std::string& relativePath) {
+  for (const auto& entry : fs::directory_iterator(outputFolder(relativePath)))
     fs::remove_all(entry);
-  }
 }
 
-/**
- * @brief prepare the output folder, create if needed
- *
- * @details Check if the output folder exists,
- *          if not, create it. Make sure it's there in the end.
- *          Fail with exception.
- *
- * @param relativePath: Output folder path relative to the current directory
- * @returns 0 if succeed
- */
-int checkOutputFolder(std::string relativePath) {
-
-  fs::path current_path = fs::current_path();
-  fs::path subdir = current_path / relativePath;
-
-  if (fs::exists(subdir)) {
-    if (fs::is_directory(subdir)) {
-
-      if (!fs::is_empty(subdir)) {
-        remove_all_contents(subdir);
-      }
-
-    } else
-      throw std::runtime_error("Output path " + relativePath +
-                               " is not a directory");
-  } else {
-    fs::create_directories(subdir);
-  }
-
-  return 0;
+void ensureOutputFolder(const std::string& relativePath) {
+  outputFolder(relativePath);
 }
 
-int ensureOutputFolder(std::string relativePath) {
-
-  fs::path current_path = fs::current_path();
-  fs::path subdir = current_path / relativePath;
-
-  if (fs::exists(subdir)) {
-    if (!fs::is_directory(subdir)) {
-      throw std::runtime_error("Output path " + relativePath +
-                               " is not a directory");
-    }
-  } else {
-    fs::create_directories(subdir);
-  }
-
-  return 0;
-}
-
-void keepAside(const std::vector<std::string>& paths, int cycle) {
+bool keepAside(const std::vector<std::string>& paths, int cycle) {
   auto aside = [cycle](const fs::path& file, int copy) {
     fs::path name = file;
     name.replace_filename(file.stem().string() + "_before_cycle" +
@@ -85,101 +55,171 @@ void keepAside(const std::vector<std::string>& paths, int cycle) {
     return fs::exists(aside(path, copy));
   }))
     copy++;
+  bool kept = false;
   for (const std::string& path : paths)
-    if (fs::exists(path))
+    if (fs::exists(path)) {
       fs::rename(path, aside(path, copy));
+      kept = true;
+    }
+  return kept;
 }
 
-void appendJsonRecord(const std::string& path, int cycle,
-                      const std::string& record) {
-  if (!fs::exists(path))
-    std::ofstream(path).close();
-  std::fstream out(path, std::ios::in | std::ios::out | std::ios::ate);
-  if (!out.is_open())
-    throw std::runtime_error("[!]Error: Can not open the output file " + path);
-  std::ostringstream buffer;
-  if (out.tellg() == 0) {
-    buffer << "{\n";
-  } else {
-    out.seekp(-2, std::ios_base::end); // over the closing "\n}"
-    buffer << ",\n";
+int keepAsideRecords(const std::string& folder, const std::string& name,
+                     int cycle) {
+  std::error_code error;
+  if (!fs::is_directory(folder, error))
+    return 0;
+  const std::regex records("subDomain([0-9]+)_" + name + "\\.(json|bin)"),
+      mapping("vctMapping_subDomain([0-9]+)\\.txt");
+  std::set<std::string> ranks;
+  for (const auto& entry : fs::directory_iterator(folder)) {
+    const std::string file = entry.path().filename().string();
+    std::smatch match;
+    if (std::regex_match(file, match, records) ||
+        std::regex_match(file, match, mapping))
+      ranks.insert(match[1]);
   }
-  buffer << "\"" << cycle << "\": " << record << "\n}";
-  out << buffer.str();
-  out.close();
-  if (!out)
-    throw std::runtime_error("[!]Error: Can not write the output file " + path);
+  int kept = 0;
+  for (const std::string& rank : ranks) {
+    const fs::path dir(folder);
+    const std::string stem = (dir / ("subDomain" + rank + "_" + name)).string();
+    kept +=
+        keepAside({(dir / ("vctMapping_subDomain" + rank + ".txt")).string(),
+                   stem + ".json", stem + ".bin"},
+                  cycle);
+  }
+  return kept;
 }
 
-void dropJsonRecordsFrom(const std::string& path, int firstCycle) {
-  std::ifstream in(path);
-  if (!in.is_open())
-    return;
-  const std::string content((std::istreambuf_iterator<char>(in)),
-                            std::istreambuf_iterator<char>());
-  in.close();
-  // the records, at the lines that start with a quote and a digit
-  std::vector<size_t> start;
-  for (size_t line = 0; line + 1 < content.size();) {
-    if (content[line] == '"' && std::isdigit((unsigned char)content[line + 1]))
-      start.push_back(line);
-    const size_t next = content.find('\n', line);
-    if (next == std::string::npos)
-      break;
-    line = next + 1;
-  }
-  // the end of the records: that of the last one if its braces close, before
-  // it if an append was cut short there (a full disk; its cycle, at or after
-  // firstCycle, is written again too)
-  size_t end = std::string::npos;
-  if (!start.empty()) {
-    int depth = 0;
-    for (size_t i = content.find('{', start.back()); i < content.size(); i++)
-      if (content[i] == '{')
-        depth++;
-      else if (content[i] == '}' && --depth == 0) {
-        end = i + 1;
-        break;
-      }
-    if (end == std::string::npos) {
-      end = start.back() - 2; // before its ",\n"
-      start.pop_back();
+bool RecordFile::open(const std::string& stem, const std::string& json,
+                      const std::vector<std::string>& layout, bool isRestart,
+                      int firstCycle) {
+  binPath = stem + ".bin";
+  const std::string jsonPath = stem + ".json";
+  bool keptAside = false;
+  if (isRestart && fs::exists(binPath)) {
+    std::ifstream in(jsonPath);
+    const std::string old((std::istreambuf_iterator<char>(in)),
+                          std::istreambuf_iterator<char>());
+    // the records need the layout and the same format (the "endian" and
+    // "record_" lines of describeRecords)
+    std::vector<std::string> needed = layout;
+    std::istringstream lines(json);
+    for (std::string line; std::getline(lines, line);)
+      if (line.rfind("  \"record_", 0) == 0 ||
+          line.rfind("  \"endian\"", 0) == 0)
+        needed.push_back(line);
+    if (std::any_of(needed.begin(), needed.end(), [&](const std::string& line) {
+          return old.find(line) == std::string::npos;
+        })) {
+      keepAside({jsonPath, binPath}, firstCycle);
+      keptAside = true;
+    } else {
+      dropRecordsFrom(binPath, magic, firstCycle);
     }
   }
-  // the records kept: before the first from firstCycle on
-  size_t kept = 0;
-  while (kept < start.size() &&
-         std::atoi(content.c_str() + start[kept] + 1) < firstCycle)
-    kept++;
-  if (kept == 0) { // none
-    fs::remove(path);
-    return;
+  if (!isRestart || keptAside || !fs::exists(binPath)) {
+    std::ofstream create(binPath, std::ios::binary | std::ios::trunc);
+    if (!create)
+      throw std::runtime_error("RecordFile: cannot create " + binPath);
   }
-  if (kept < start.size())
-    end = start[kept] - 2; // before its ",\n"
-  if (content.compare(end, std::string::npos, "\n}") == 0)
-    return; // all kept, the file complete
-  // written aside first: a failure leaves the records as they were
-  const std::string temporary = path + ".tmp";
+  // the description replaced at once: never a partial one beside records
+  const std::string temporary = jsonPath + ".tmp";
   std::ofstream out(temporary, std::ios::trunc);
-  out << content.substr(0, end) << "\n}";
+  out << json;
   out.close();
   if (!out)
-    throw std::runtime_error("[!]Error: Can not write the output file " +
-                             temporary);
-  fs::rename(temporary, path);
+    throw std::runtime_error("RecordFile: cannot write " + temporary);
+  fs::rename(temporary, jsonPath);
+  return keptAside;
 }
 
-void dropVtkFrom(const std::string& folder, int firstCycle) {
-  std::vector<fs::path> drop;
-  for (const auto& entry : fs::directory_iterator(folder)) {
-    const std::string name = entry.path().filename().string();
-    const size_t cycle = name.rfind('_') + 1; // 0 without '_'
-    if (entry.path().extension() == ".vtk" && cycle > 0 &&
-        std::isdigit((unsigned char)name[cycle]) &&
-        std::atoi(name.c_str() + cycle) >= firstCycle)
-      drop.push_back(entry.path());
+bool RecordFile::cut(const std::string& stem, int firstCycle) const {
+  const std::string bin = stem + ".bin";
+  std::uint32_t first = magic; // of a missing or empty file
+  std::ifstream(bin, std::ios::binary)
+      .read(reinterpret_cast<char*>(&first), sizeof(first));
+  if (first != magic)
+    return keepAside({stem + ".json", bin}, firstCycle);
+  dropRecordsFrom(bin, magic, firstCycle);
+  return false;
+}
+
+void RecordFile::end() {
+  pending.resize((pending.size() + kRecordAlignment - 1) / kRecordAlignment *
+                     kRecordAlignment,
+                 0);
+  const std::uint64_t bytes = pending.size() - recordStart;
+  std::memcpy(pending.data() + recordStart + kRecordSizeOffset, &bytes,
+              sizeof(bytes));
+}
+
+void RecordFile::flush() {
+  if (pending.empty())
+    return;
+  if (binPath.empty())
+    throw std::logic_error("RecordFile: records added before open()");
+  std::ofstream out(binPath, std::ios::binary | std::ios::app);
+  out.write(pending.data(), (std::streamsize)pending.size());
+  out.close();
+  if (!out)
+    throw std::runtime_error("RecordFile: cannot write " + binPath);
+  pending.clear();
+}
+
+void dropRecordsFrom(const std::string& path, std::uint32_t magic,
+                     int firstCycle) {
+  std::error_code error;
+  const std::uintmax_t size = fs::file_size(path, error);
+  if (error) // no file
+    return;
+  std::ifstream in(path, std::ios::binary);
+  std::uintmax_t keep = 0; // the bytes of the whole records kept
+  char header[kRecordHeaderBytes];
+  while (keep + kRecordHeaderBytes <= size && in.seekg(keep) &&
+         in.read(header, kRecordHeaderBytes)) {
+    std::uint32_t first;
+    std::int32_t cycle;
+    std::uint64_t bytes;
+    std::memcpy(&first, header, sizeof(first));
+    std::memcpy(&cycle, header + sizeof(first), sizeof(cycle));
+    std::memcpy(&bytes, header + kRecordSizeOffset, sizeof(bytes));
+    if (first != magic || bytes < kRecordHeaderBytes || bytes > size - keep ||
+        cycle >= firstCycle)
+      break;
+    keep += bytes;
   }
-  for (const auto& path : drop)
-    fs::remove(path);
+  in.close();
+  if (keep < size) {
+    fs::resize_file(path, keep, error);
+    if (error)
+      throw std::runtime_error("dropRecordsFrom: cannot resize " + path + " (" +
+                               error.message() + ")");
+  }
+}
+
+bool bigEndianHost() {
+  const int test = 1;
+  return *reinterpret_cast<const char*>(&test) != 1;
+}
+
+std::string describeRecords(const std::string& members, std::uint32_t magic,
+                            const std::vector<RecordField>& header,
+                            const std::vector<RecordField>& arrays,
+                            const std::string& content) {
+  auto fields = [](const std::vector<RecordField>& list) {
+    std::string text;
+    for (const RecordField& f : list)
+      text += std::string(text.empty() ? "" : ", ") + "[\"" + f.name +
+              "\", \"" + f.dtype + "\"" +
+              (f.shape.empty() ? "" : ", [" + f.shape + "]") + "]";
+    return "[" + text + "]";
+  };
+  return "{\n" + members + "  \"endian\": \"" +
+         (bigEndianHost() ? "big" : "little") + "\",\n" +
+         "  \"record_magic\": " + std::to_string(magic) + ",\n" +
+         "  \"record_alignment\": " + std::to_string(kRecordAlignment) + ",\n" +
+         "  \"record_header\": " + fields(header) + ",\n" +
+         "  \"record_arrays\": " + fields(arrays) + ",\n" +
+         "  \"content\": \"" + content + "\"\n}\n";
 }

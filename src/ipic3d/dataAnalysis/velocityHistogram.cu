@@ -1,15 +1,28 @@
 #include "velocityHistogram.cuh"
 
-#include "cudaReduction.cuh"
-
 #include <algorithm>
-#include <cmath>
+#include <sstream>
+#include <stdexcept>
 
 namespace velocityHistogram {
 
-__global__ void weightRangeKernel(const histogramTypeIn* q, int n,
-                                  double* partial);
-__global__ void weightScaleKernel(const double* partial, double* scale);
+/** The bins along u, v, w of the histogram of a rank and of a macrocell. */
+inline constexpr int kRankBins[3] = {DAConfig::VELOCITY_HISTOGRAM3D_RES_1,
+                                     DAConfig::VELOCITY_HISTOGRAM3D_RES_2,
+                                     DAConfig::VELOCITY_HISTOGRAM3D_RES_3};
+inline constexpr int kMacrocellBinsPerAxis[3] = {
+    kMacrocellBinsU, kMacrocellBinsV, kMacrocellBinsW};
+
+__global__ void rankRangeKernel(const histogramTypeIn* u,
+                                const histogramTypeIn* v,
+                                const histogramTypeIn* w,
+                                const histogramTypeIn* q, int n,
+                                bool fixedRange, ParticleRange* partial);
+__global__ void regionGridKernel(const ParticleRange* partial, int partials,
+                                 int binsU, int binsV, int binsW,
+                                 histogramTypeIn vmin, histogramTypeIn vmax,
+                                 bool fixedRange, BinGrid* grids,
+                                 double* scale);
 __global__ void binKernel(const histogramTypeIn* u, const histogramTypeIn* v,
                           const histogramTypeIn* w, int n, BinGrid grid,
                           unsigned* key, int* tileCount);
@@ -33,48 +46,156 @@ __global__ void mergeTilesKernel(const int* tileChunkStart,
                                  const unsigned long long* partialTile,
                                  unsigned long long* binSum);
 __global__ void binSumToHistogramKernel(const unsigned long long* binSum,
-                                        const double* scale,
-                                        histogramTypeOut* histogram);
+                                        const double* scale, int regionBins,
+                                        int n, histogramTypeOut* histogram);
 
-__global__ void countNonEmptyKernel(const histogramTypeOut* bins,
-                                    int* blockCount);
-__global__ void scanBinBlocksKernel(int* blockCount);
+__global__ void macrocellRangeKernel(
+    const histogramTypeIn* u, const histogramTypeIn* v,
+    const histogramTypeIn* w, const histogramTypeIn* q, const int* cellStart,
+    const int* cellCount, macrocell::MacrocellGeometry geometry, int slices,
+    histogramTypeIn vmin, histogramTypeIn vmax, bool fixedRange, bool walk,
+    ParticleRange* partial, BinGrid* grids, double* scale);
 __global__ void
-scatterNonEmptyKernel(BinGrid grid, const histogramTypeOut* bins,
-                      const int* blockOffset, histogramTypeIn* centerU,
-                      histogramTypeIn* centerV, histogramTypeIn* centerW,
-                      histogramTypeOut* weight);
+macrocellAccumulateKernel(const histogramTypeIn* u, const histogramTypeIn* v,
+                          const histogramTypeIn* w, const histogramTypeIn* q,
+                          const int* cellStart, const int* cellCount,
+                          macrocell::MacrocellGeometry geometry, int slices,
+                          const BinGrid* grids, const double* scale,
+                          histogramTypeOut* bins, unsigned long long* binSum);
+
+__global__ void binCentersKernel(const BinGrid* grids, const int* index,
+                                 const int* offsets, int blocksPerRegion,
+                                 histogramTypeIn* centerU,
+                                 histogramTypeIn* centerV,
+                                 histogramTypeIn* centerW);
+
+// ======= histogramRegions =======
+
+histogramRegions::histogramRegions(int regions, const int bins[3],
+                                   bool fixedRange,
+                                   const std::string& regionsText)
+    : regions(regions), regionBins(bins[0] * bins[1] * bins[2]),
+      bins{bins[0], bins[1], bins[2]}, fixedRange(fixedRange),
+      gridHost(regions), regionsText(regionsText), sparse(regions, regionBins) {
+  cudaErrChk(cudaMalloc(&weightScaleCUDA, sizeof(double) * 2 * regions));
+  cudaErrChk(cudaMalloc(&binsCUDA, sizeof(histogramTypeOut) * totalBins()));
+  cudaErrChk(cudaMalloc(&gridCUDA, sizeof(BinGrid) * regions));
+}
+
+histogramRegions::~histogramRegions() {
+  for (void* buffer : {(void*)nonEmptyCenter[0], (void*)nonEmptyCenter[1],
+                       (void*)nonEmptyCenter[2], (void*)gridCUDA,
+                       (void*)binsCUDA, (void*)weightScaleCUDA})
+    cudaErrChk(cudaFree(buffer)); // null for the unused ones
+}
+
+int histogramRegions::compactNonEmpty(cudaStream_t stream) {
+  if (!compacted)
+    sparse.compact(binsCUDA, stream);
+  compacted = true;
+  return sparse.count();
+}
+
+histogramTypeIn* const*
+histogramRegions::getNonEmptyCenters(cudaStream_t stream) {
+  const int count = compactNonEmpty(stream);
+  if (count > centerCapacity) { // grow only, with a margin
+    centerCapacity = (int)std::min((size_t)count + count / 4, totalBins());
+    for (auto*& center : nonEmptyCenter) {
+      cudaErrChk(cudaFree(center));
+      center = nullptr;
+      cudaErrChk(cudaMalloc(&center, sizeof(histogramTypeIn) * centerCapacity));
+    }
+  }
+  if (count > 0) {
+    binCentersKernel<<<regions * sparse.blocksPerRegion(), kCenterThreads, 0,
+                       stream>>>(gridCUDA, sparse.indices(),
+                                 sparse.deviceOffsets(),
+                                 sparse.blocksPerRegion(), nonEmptyCenter[0],
+                                 nonEmptyCenter[1], nonEmptyCenter[2]);
+    cudaErrChk(cudaGetLastError());
+    cudaErrChk(cudaStreamSynchronize(stream));
+  }
+  return nonEmptyCenter;
+}
+
+std::string histogramRegions::describe(const std::string& rank,
+                                       std::vector<std::string>& layout) const {
+  std::ostringstream binsText;
+  binsText << "  \"bins\": {\"u\": " << bins[0] << ", \"v\": " << bins[1]
+           << ", \"w\": " << bins[2] << "},\n";
+  return sparse.describe(
+      rank, regionsText, binsText.str(), "ranges", "\"regions\", 6",
+      kHistogramRecordMagic,
+      "one record per analysis cycle and species: ranges[r] = [umin, vmin, "
+      "wmin, umax, vmax, wmax] of region r (the rank, or macrocell m = "
+      "(mz*My + my)*Mx + mx) and counts[r] its non-empty bins; weights and "
+      "bins region after region, increasing bin b = iu + bins_u * (iv + "
+      "bins_v * iw) within one, bin i of an axis centred at min + (i + 0.5) "
+      "* (max - min) / bins; a weight is the sum of |q| weight_scale of the "
+      "particles of its bin; the empty bins are not written",
+      layout);
+}
+
+void histogramRegions::writeRecord(RecordFile& file, int species, int cycle,
+                                   cudaStream_t stream) {
+  compactNonEmpty(stream);
+  std::vector<double> ranges;
+  for (const BinGrid& g : gridHost)
+    ranges.insert(ranges.end(),
+                  {g.min[0], g.min[1], g.min[2], g.max[0], g.max[1], g.max[2]});
+  sparse.writeRecord(file, species, cycle, ranges.data(), ranges.size(),
+                     stream);
+}
+
+// ======= velocityHistogram3D =======
+
+velocityHistogram3D::velocityHistogram3D(bool fixedRange)
+    : histogramRegions(1, kRankBins, fixedRange,
+                       macrocell::regionsDescription(nullptr)) {
+  cudaErrChk(cudaMalloc(&binSumCUDA, sizeof(unsigned long long) * kNumBins));
+  cudaErrChk(
+      cudaMalloc(&rangePartialCUDA, sizeof(ParticleRange) * kHistogramBlocks));
+  cudaErrChk(
+      cudaMalloc(&tileCountCUDA, sizeof(int) * kHistogramBlocks * kAccumTiles));
+  cudaErrChk(cudaMalloc(&tileBlockOffsetCUDA,
+                        sizeof(int) * kHistogramBlocks * kAccumTiles));
+  cudaErrChk(cudaMalloc(&tileTotalCUDA, sizeof(int) * kAccumTiles));
+  cudaErrChk(cudaMalloc(&tileStartCUDA, sizeof(int) * kAccumTiles));
+  cudaErrChk(cudaMalloc(&tileChunkStartCUDA, sizeof(int) * kAccumTiles));
+  cudaErrChk(cudaMalloc(&tileChunkCountCUDA, sizeof(int) * kAccumTiles));
+  cudaErrChk(cudaMalloc(&numChunksCUDA, sizeof(int)));
+}
+
+velocityHistogram3D::~velocityHistogram3D() {
+  for (void* buffer :
+       {(void*)rangePartialCUDA, (void*)binSumCUDA, (void*)tileCountCUDA,
+        (void*)tileBlockOffsetCUDA, (void*)tileTotalCUDA, (void*)tileStartCUDA,
+        (void*)tileChunkStartCUDA, (void*)tileChunkCountCUDA,
+        (void*)numChunksCUDA})
+    cudaErrChk(cudaFree(buffer));
+  freeScratch();
+}
 
 __host__ void velocityHistogram3D::init(velocitySoA* pclArray,
                                         histogramTypeIn vmin,
                                         histogramTypeIn vmax,
                                         cudaStream_t stream) {
-  if (!fixedRange)
-    dataRange(pclArray, stream);
-  // a range that bins: a positive, finite width
-  auto bins = [](histogramTypeIn lo, histogramTypeIn hi) {
-    return hi - lo > 0 && std::isfinite(hi - lo);
-  };
-  const histogramTypeIn half = (vmax - vmin) / 2;
-  for (int d = 0; d < 3; d++) {
-    // without fixedRange: the range of the finite velocities, or the fixed
-    // width about their value if they have no spread
-    histogramTypeIn lo = vmin, hi = vmax;
-    if (!fixedRange) {
-      const histogramTypeIn low = velocityRange[d], high = velocityRange[3 + d];
-      if (bins(low, high)) {
-        lo = low;
-        hi = high;
-      } else if (low == high && bins(low - half, low + half)) {
-        lo = low - half;
-        hi = low + half;
-      }
-    }
-    grid.min[d] = lo;
-    grid.max[d] = hi;
-    grid.resolution[d] = (hi - lo) / binsAlong(d);
-    grid.invResolution[d] = binsAlong(d) / (hi - lo);
-  }
+  binsChanged();
+  // the grid and the weight scale of the rank, the grid on the host too (the
+  // binning, the files, the GMM): one pass over the particles, then the
+  // blocks merged
+  rankRangeKernel<<<kHistogramBlocks, kHistogramThreads, 0, stream>>>(
+      pclArray->getElement(0), pclArray->getElement(1), pclArray->getElement(2),
+      pclArray->getElement(3), pclArray->getNOP(), fixedRange,
+      rangePartialCUDA);
+  regionGridKernel<<<1, kGridThreads, 0, stream>>>(
+      rangePartialCUDA, kHistogramBlocks, kRankBins[0], kRankBins[1],
+      kRankBins[2], vmin, vmax, fixedRange, gridCUDA, weightScaleCUDA);
+  cudaErrChk(cudaGetLastError());
+  cudaErrChk(cudaMemcpyAsync(gridHost.data(), gridCUDA, sizeof(BinGrid),
+                             cudaMemcpyDeviceToHost, stream));
+  cudaErrChk(cudaStreamSynchronize(stream));
   accumulate(pclArray, stream);
 }
 
@@ -119,15 +240,12 @@ __host__ void velocityHistogram3D::accumulate(velocitySoA* pclArray,
 
   cudaErrChk(cudaMemsetAsync(binSumCUDA, 0,
                              sizeof(unsigned long long) * kNumBins, stream));
-  weightRangeKernel<<<kHistogramBlocks, kHistogramThreads, 0, stream>>>(
-      q, n, weightPartialCUDA);
-  weightScaleKernel<<<1, WARP_SIZE, 0, stream>>>(weightPartialCUDA,
-                                                 weightScaleCUDA);
 
   for (int first = 0; first < n; first += kBatchParticles) {
     const int count = std::min(kBatchParticles, n - first);
     binKernel<<<kHistogramBlocks, kHistogramThreads, 0, stream>>>(
-        u + first, v + first, w + first, count, grid, keyCUDA, tileCountCUDA);
+        u + first, v + first, w + first, count, gridHost[0], keyCUDA,
+        tileCountCUDA);
     tileBlockScanKernel<<<kAccumTiles, kHistogramBlocks, 0, stream>>>(
         tileCountCUDA, tileBlockOffsetCUDA, tileTotalCUDA);
     tileScanKernel<<<1, kAccumTiles, 0, stream>>>(
@@ -146,73 +264,82 @@ __host__ void velocityHistogram3D::accumulate(velocitySoA* pclArray,
   }
   binSumToHistogramKernel<<<getGridSize(kNumBins, kHistogramThreads),
                             kHistogramThreads, 0, stream>>>(
-      binSumCUDA, weightScaleCUDA, binsCUDA);
+      binSumCUDA, weightScaleCUDA, kNumBins, kNumBins, binsCUDA);
   cudaErrChk(cudaGetLastError()); // a launch error of the passes above
 }
 
-__host__ int velocityHistogram3D::compactNonEmpty(cudaStream_t stream) {
-  countNonEmptyKernel<<<kCompactBlocks, kCompactThreads, 0, stream>>>(
-      binsCUDA, blockCountCUDA);
-  scanBinBlocksKernel<<<1, kCompactBlocks, 0, stream>>>(blockCountCUDA);
-  cudaErrChk(cudaGetLastError());
-  cudaErrChk(cudaMemcpyAsync(nonEmptyCountHost, blockCountCUDA + kCompactBlocks,
-                             sizeof(int), cudaMemcpyDeviceToHost, stream));
-  cudaErrChk(cudaStreamSynchronize(stream));
-  const int count = *nonEmptyCountHost;
+// ======= macrocellHistogram3D =======
 
-  if (count > nonEmptyCapacity) { // grow only, with a margin
-    const int capacity = std::min(count + count / 4, kNumBins);
-    nonEmptyCapacity = 0; // until the buffers are there
-    for (auto*& center : nonEmptyCenter) {
-      cudaErrChk(cudaFree(center));
-      center = nullptr;
-      cudaErrChk(cudaMalloc(&center, sizeof(histogramTypeIn) * capacity));
-    }
-    cudaErrChk(cudaFree(nonEmptyWeight));
-    nonEmptyWeight = nullptr;
+macrocellHistogram3D::macrocellHistogram3D(
+    const macrocell::MacrocellPartition& part, bool fixedRange)
+    : histogramRegions(part.M, kMacrocellBinsPerAxis, fixedRange,
+                       macrocell::regionsDescription(&part)),
+      geometry(part.geometry()),
+      rangeSlices(macrocell::slicesFor(part.M, 1, part.largestCells())),
+      accumulateSlices(
+          macrocell::slicesFor(part.M, kMacrocellTiles, part.largestCells())) {
+  if (rangeSlices > 1)
+    cudaErrChk(cudaMalloc(&rangePartialCUDA,
+                          sizeof(ParticleRange) * regions * rangeSlices));
+  if (accumulateSlices > 1)
     cudaErrChk(
-        cudaMalloc(&nonEmptyWeight, sizeof(histogramTypeOut) * capacity));
-    nonEmptyCapacity = capacity;
-  }
-  if (count > 0) {
-    scatterNonEmptyKernel<<<kCompactBlocks, kCompactThreads, 0, stream>>>(
-        grid, binsCUDA, blockCountCUDA, nonEmptyCenter[0], nonEmptyCenter[1],
-        nonEmptyCenter[2], nonEmptyWeight);
-    cudaErrChk(cudaGetLastError());
-    cudaErrChk(cudaStreamSynchronize(stream));
-  }
-  return count;
+        cudaMalloc(&binSumCUDA, sizeof(unsigned long long) * totalBins()));
 }
 
-__host__ void velocityHistogram3D::dataRange(velocitySoA* pclArray,
-                                             cudaStream_t stream) {
-  using namespace cudaReduction;
-  const int n = pclArray->getNOP();
-  const int blocks = std::min(
-      getGridSize(std::max(n / kRangeParticlesPerThread, 1), kRangeThreads),
-      kRangeMaxBlocks);
-  histogramTypeIn* minPartial = reductionTempArrayCUDA;
-  histogramTypeIn* maxPartial = reductionTempArrayCUDA + 3 * kRangeMaxBlocks;
-  const size_t shared = kRangeThreads * sizeof(histogramTypeIn);
+macrocellHistogram3D::~macrocellHistogram3D() {
+  cudaErrChk(cudaFree(rangePartialCUDA)); // null with one slice
+  cudaErrChk(cudaFree(binSumCUDA));       // null with one slice
+}
 
-  for (int d = 0; d < 3; d++) { // UVW
-    const histogramTypeIn* velocity = pclArray->getElement(d);
-    reduceMin<histogramTypeIn, kRangeThreads>
-        <<<blocks, kRangeThreads, shared, stream>>>(
-            velocity, minPartial + d * kRangeMaxBlocks, n);
-    reduceMinWarp<histogramTypeIn><<<1, WARP_SIZE, 0, stream>>>(
-        minPartial + d * kRangeMaxBlocks, reductionResultCUDA + d, blocks);
-    reduceMax<histogramTypeIn, kRangeThreads>
-        <<<blocks, kRangeThreads, shared, stream>>>(
-            velocity, maxPartial + d * kRangeMaxBlocks, n);
-    reduceMaxWarp<histogramTypeIn><<<1, WARP_SIZE, 0, stream>>>(
-        maxPartial + d * kRangeMaxBlocks, reductionResultCUDA + 3 + d, blocks);
-  }
+void macrocellHistogram3D::init(velocitySoA* pclArray, const int* cellStart,
+                                const int* cellCount, histogramTypeIn vmin,
+                                histogramTypeIn vmax, cudaStream_t stream) {
+  binsChanged();
+  const int n = pclArray->getNOP();
+  const histogramTypeIn* u = pclArray->getElement(0);
+  const histogramTypeIn* v = pclArray->getElement(1);
+  const histogramTypeIn* w = pclArray->getElement(2);
+  const histogramTypeIn* q = pclArray->getElement(3);
+
+  // the grid and the weight scale of every macrocell, from the ranges of its
+  // slices with several, the grids on the host too (the files, the GMM); the
+  // cell sort of a species without particles leaves its cells as they were:
+  // no walk, no particle to bin
+  macrocellRangeKernel<<<regions * rangeSlices, kMacrocellThreads, 0, stream>>>(
+      u, v, w, q, cellStart, cellCount, geometry, rangeSlices, vmin, vmax,
+      fixedRange, n > 0, rangePartialCUDA, gridCUDA, weightScaleCUDA);
+  if (rangeSlices > 1)
+    regionGridKernel<<<regions, kGridThreads, 0, stream>>>(
+        rangePartialCUDA, rangeSlices, kMacrocellBinsU, kMacrocellBinsV,
+        kMacrocellBinsW, vmin, vmax, fixedRange, gridCUDA, weightScaleCUDA);
   cudaErrChk(cudaGetLastError());
-  cudaErrChk(cudaMemcpyAsync(velocityRange, reductionResultCUDA,
-                             sizeof(velocityRange), cudaMemcpyDeviceToHost,
+  cudaErrChk(cudaMemcpyAsync(gridHost.data(), gridCUDA,
+                             sizeof(BinGrid) * regions, cudaMemcpyDeviceToHost,
                              stream));
   cudaErrChk(cudaStreamSynchronize(stream));
+  if (n == 0) {
+    cudaErrChk(cudaMemsetAsync(binsCUDA, 0,
+                               sizeof(histogramTypeOut) * totalBins(), stream));
+    return;
+  }
+
+  // one block per tile and slice of each macrocell: with one slice it writes
+  // the bins of its tile, with several they add up the integer bins, then
+  // written
+  const bool merge = accumulateSlices > 1;
+  if (merge)
+    cudaErrChk(cudaMemsetAsync(
+        binSumCUDA, 0, sizeof(unsigned long long) * totalBins(), stream));
+  macrocellAccumulateKernel<<<regions * kMacrocellTiles * accumulateSlices,
+                              kMacrocellThreads, 0, stream>>>(
+      u, v, w, q, cellStart, cellCount, geometry, accumulateSlices, gridCUDA,
+      weightScaleCUDA, binsCUDA, merge ? binSumCUDA : nullptr);
+  if (merge)
+    binSumToHistogramKernel<<<getGridSize((int)totalBins(), kMacrocellThreads),
+                              kMacrocellThreads, 0, stream>>>(
+        binSumCUDA, weightScaleCUDA, kMacrocellBins, (int)totalBins(),
+        binsCUDA);
+  cudaErrChk(cudaGetLastError());
 }
 
 } // namespace velocityHistogram

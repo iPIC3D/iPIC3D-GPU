@@ -1,22 +1,21 @@
 /**
  * @file reductionTest.cu
  * @brief Unit test of the block reductions of cudaReduction.cuh against the
- *        CPU: the minimum and maximum of the finite values (float and
- *        double) and an integer sum.
+ *        CPU: blockReduce (sum, minimum, maximum) and blockExclusiveScan.
  *
- * Block sizes: two warps (the smallest), 256 (the velocity histogram's) and
- * 512 (the largest). Sizes: 0, 1, fewer than a block, several strides of the
- * grid with a remainder, and 2^24 (the most blocks). Values: random finite
- * ones; the same with NaN and +-inf among them (left out); all non-finite
- * (the result is then -inf for the maximum, +inf for the minimum). The
- * integer sum checks blockReduce with SumOp, as the charge count of the
- * velocity histogram uses it.
+ * blockReduce, in blocks of two warps (the smallest), 256 (the histograms')
+ * and 512 (the largest): the sums of doubles of integer values and of 32- and
+ * 64-bit integers beyond 32 bits (exact whatever the order, so bit for bit),
+ * the maximum of 64-bit integers (as the largest |q| of the histograms, the
+ * bits of a double), the minimum and the maximum of doubles with +-inf among
+ * them. blockExclusiveScan, in
+ * blocks of two warps, 256, 1000 (not a power of 2) and 1024 (the scans of
+ * the histograms): the exclusive sums and the total of every block.
  */
 
 #include "cudaReduction.cuh"
 #include "cudaTypeDef.cuh"
 
-#include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -27,13 +26,9 @@
 
 namespace {
 
-/** Blocks at most and values per thread, as the data range of the velocity
- *  histogram launches them. */
-constexpr int kMaxBlocks = 1024;
-constexpr int kValuesPerThread = 16;
-/** Sizes of the cases: 0, 1, below a block, a prime (several strides of
- *  the grid of blocksFor and a remainder), the most blocks. */
-const size_t kSizes[] = {0, 1, 100, 1000003, (size_t)1 << 24};
+/** Blocks of every case, and the most threads of a block of the scan. */
+constexpr int kBlocks = 37;
+constexpr int kMaxScanThreads = 1024;
 
 int failures = 0;
 
@@ -42,117 +37,137 @@ void report(bool ok, const std::string& what) {
   failures += !ok;
 }
 
-int blocksFor(size_t n, int blockSize) {
-  const int perBlock = blockSize * kValuesPerThread;
-  return std::min(std::max((int)((n + perBlock - 1) / perBlock), 1),
-                  kMaxBlocks);
+template <unsigned blockSize, typename T, typename Op>
+__global__ void blockReduceKernel(const T* in, T* out, Op op) {
+  __shared__ T sdata[blockSize];
+  const T value = cudaReduction::blockReduce<blockSize>(
+      in[blockIdx.x * blockSize + threadIdx.x], sdata, op);
+  if (threadIdx.x == 0)
+    out[blockIdx.x] = value;
 }
 
-/** GPU minimum and maximum of the finite values of data. */
-template <typename T, unsigned blockSize>
-void gpuMinMax(const std::vector<T>& data, T& minimum, T& maximum) {
-  const size_t n = data.size();
-  const int blocks = blocksFor(n, blockSize);
-  T *input, *partial, *result;
-  cudaErrChk(cudaMalloc(&input, std::max(n, (size_t)1) * sizeof(T)));
-  cudaErrChk(cudaMalloc(&partial, blocks * sizeof(T)));
-  cudaErrChk(cudaMalloc(&result, 2 * sizeof(T)));
-  if (n > 0)
-    cudaErrChk(
-        cudaMemcpy(input, data.data(), n * sizeof(T), cudaMemcpyHostToDevice));
-  cudaReduction::reduceMin<T, blockSize>
-      <<<blocks, blockSize, blockSize * sizeof(T)>>>(input, partial, n);
-  cudaReduction::reduceMinWarp<T><<<1, WARP_SIZE>>>(partial, result, blocks);
-  cudaReduction::reduceMax<T, blockSize>
-      <<<blocks, blockSize, blockSize * sizeof(T)>>>(input, partial, n);
-  cudaReduction::reduceMaxWarp<T>
-      <<<1, WARP_SIZE>>>(partial, result + 1, blocks);
+__global__ void blockScanKernel(const int* in, int* out, int* total) {
+  __shared__ int buffer[kMaxScanThreads];
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  int sum;
+  out[i] = cudaReduction::blockExclusiveScan(in[i], buffer, sum);
+  if (threadIdx.x == 0)
+    total[blockIdx.x] = sum;
+}
+
+/** blockReduce with op of every block of blockSize values of data on the
+ *  GPU, against cpuOp from identity on the CPU, bit for bit. */
+template <unsigned blockSize, typename T, typename Op, typename CpuOp>
+void checkReduce(const std::vector<T>& data, Op op, CpuOp cpuOp, T identity,
+                 const std::string& what) {
+  T *in, *out;
+  cudaErrChk(cudaMalloc(&in, data.size() * sizeof(T)));
+  cudaErrChk(cudaMalloc(&out, kBlocks * sizeof(T)));
+  cudaErrChk(cudaMemcpy(in, data.data(), data.size() * sizeof(T),
+                        cudaMemcpyHostToDevice));
+  blockReduceKernel<blockSize><<<kBlocks, blockSize>>>(in, out, op);
   cudaErrChk(cudaGetLastError());
-  T host[2];
-  cudaErrChk(cudaMemcpy(host, result, 2 * sizeof(T), cudaMemcpyDeviceToHost));
-  minimum = host[0];
-  maximum = host[1];
-  for (T* buffer : {input, partial, result})
+  std::vector<T> gpu(kBlocks);
+  cudaErrChk(
+      cudaMemcpy(gpu.data(), out, kBlocks * sizeof(T), cudaMemcpyDeviceToHost));
+  bool ok = true;
+  for (int b = 0; b < kBlocks; b++) {
+    T cpu = identity;
+    for (unsigned t = 0; t < blockSize; t++)
+      cpu = cpuOp(cpu, data[b * blockSize + t]);
+    ok = ok && gpu[b] == cpu;
+  }
+  report(ok, what + " (" + std::to_string(blockSize) + " threads)");
+  for (T* buffer : {in, out})
     cudaErrChk(cudaFree(buffer));
 }
 
-template <typename T, unsigned blockSize>
-void checkMinMax(const std::vector<T>& data, const std::string& what) {
-  T cpuMin = std::numeric_limits<T>::infinity(), cpuMax = -cpuMin;
-  for (T x : data)
-    if (std::isfinite(x)) {
-      cpuMin = std::min(cpuMin, x);
-      cpuMax = std::max(cpuMax, x);
+template <unsigned blockSize> void testReduce() {
+  using namespace cudaReduction;
+  const size_t n = (size_t)kBlocks * blockSize;
+  std::mt19937_64 gen(12345 + blockSize);
+  std::uniform_int_distribution<int> small(-1000, 1000);
+  std::uniform_int_distribution<unsigned> word(0, 1u << 20);
+  std::uniform_int_distribution<unsigned long long> wide(0, 1ull << 52);
+  std::uniform_real_distribution<double> uniform(-100, 100);
+  const double inf = std::numeric_limits<double>::infinity();
+  auto sum = [](auto a, auto b) { return a + b; };
+
+  std::vector<double> integers(n);
+  for (double& x : integers)
+    x = small(gen);
+  checkReduce<blockSize>(integers, SumOp{}, sum, 0.0,
+                         "sum of doubles of integer values");
+  std::vector<unsigned> words(n);
+  for (unsigned& x : words)
+    x = word(gen);
+  checkReduce<blockSize>(words, SumOp{}, sum, 0u, "sum of 32-bit integers");
+  std::vector<unsigned long long> wides(n);
+  for (unsigned long long& x : wides)
+    x = wide(gen);
+  checkReduce<blockSize>(wides, SumOp{}, sum, 0ull,
+                         "sum of 64-bit integers beyond 32 bits");
+  checkReduce<blockSize>(wides, MaxU64Op{}, MaxU64Op{}, 0ull,
+                         "maximum of 64-bit integers");
+
+  std::vector<double> values(n);
+  for (double& x : values)
+    x = uniform(gen);
+  for (size_t i = 0; i < n; i += 97)
+    values[i] = i % 2 ? inf : -inf;
+  checkReduce<blockSize>(
+      values, MinOp{}, [](double a, double b) { return b < a ? b : a; }, inf,
+      "minimum of doubles with +-inf");
+  checkReduce<blockSize>(
+      values, MaxOp{}, [](double a, double b) { return b > a ? b : a; }, -inf,
+      "maximum of doubles with +-inf");
+}
+
+/** blockExclusiveScan in kBlocks blocks of threads. */
+void testScan(int threads) {
+  const size_t n = (size_t)kBlocks * threads;
+  std::mt19937 gen(54321 + threads);
+  std::uniform_int_distribution<int> count(0, 100);
+  std::vector<int> data(n);
+  for (int& x : data)
+    x = count(gen);
+  int *in, *out, *total;
+  cudaErrChk(cudaMalloc(&in, n * sizeof(int)));
+  cudaErrChk(cudaMalloc(&out, n * sizeof(int)));
+  cudaErrChk(cudaMalloc(&total, kBlocks * sizeof(int)));
+  cudaErrChk(
+      cudaMemcpy(in, data.data(), n * sizeof(int), cudaMemcpyHostToDevice));
+  blockScanKernel<<<kBlocks, threads>>>(in, out, total);
+  cudaErrChk(cudaGetLastError());
+  std::vector<int> gpu(n), gpuTotal(kBlocks);
+  cudaErrChk(
+      cudaMemcpy(gpu.data(), out, n * sizeof(int), cudaMemcpyDeviceToHost));
+  cudaErrChk(cudaMemcpy(gpuTotal.data(), total, kBlocks * sizeof(int),
+                        cudaMemcpyDeviceToHost));
+  bool ok = true;
+  for (int b = 0; b < kBlocks; b++) {
+    int sum = 0;
+    for (int t = 0; t < threads; t++) {
+      ok = ok && gpu[b * threads + t] == sum;
+      sum += data[b * threads + t];
     }
-  T gpuMin, gpuMax;
-  gpuMinMax<T, blockSize>(data, gpuMin, gpuMax);
-  report(gpuMin == cpuMin && gpuMax == cpuMax,
-         what + " (" + std::to_string(data.size()) + " values, " +
-             std::to_string(blockSize) + " threads)");
-}
-
-template <typename T, unsigned blockSize>
-void testType(const std::string& name) {
-  std::mt19937 gen(12345);
-  std::uniform_real_distribution<T> uniform(-100, 100);
-  const T nan = std::numeric_limits<T>::quiet_NaN();
-  const T inf = std::numeric_limits<T>::infinity();
-  for (size_t n : kSizes) {
-    std::vector<T> data(n);
-    for (T& x : data)
-      x = uniform(gen);
-    checkMinMax<T, blockSize>(data, name + " finite");
-    for (size_t i = 0; i < n; i += 7)
-      data[i] = i % 3 == 0 ? nan : i % 3 == 1 ? inf : -inf;
-    checkMinMax<T, blockSize>(data, name + " with NaN and inf");
-    for (size_t i = 0; i < n; i++)
-      data[i] = i % 2 ? nan : inf;
-    checkMinMax<T, blockSize>(data, name + " none finite");
+    ok = ok && gpuTotal[b] == sum;
   }
-}
-
-/** The integer sum of reduceSum (blockReduce with SumOp), exact. */
-template <unsigned blockSize> void testIntegerSum() {
-  for (size_t n : kSizes) {
-    std::vector<int> data(n);
-    long long cpu = 0;
-    for (size_t i = 0; i < n; i++)
-      cpu += data[i] = (int)(i % 5);
-    const int blocks = blocksFor(n, blockSize);
-    int *input, *partial, *result;
-    cudaErrChk(cudaMalloc(&input, std::max(n, (size_t)1) * sizeof(int)));
-    cudaErrChk(cudaMalloc(&partial, blocks * sizeof(int)));
-    cudaErrChk(cudaMalloc(&result, sizeof(int)));
-    if (n > 0)
-      cudaErrChk(cudaMemcpy(input, data.data(), n * sizeof(int),
-                            cudaMemcpyHostToDevice));
-    cudaReduction::reduceSum<int, blockSize>
-        <<<blocks, blockSize, blockSize * sizeof(int)>>>(input, partial, n);
-    cudaReduction::reduceSumWarp<int>
-        <<<1, WARP_SIZE>>>(partial, result, blocks);
-    cudaErrChk(cudaGetLastError());
-    int gpu = 0;
-    cudaErrChk(cudaMemcpy(&gpu, result, sizeof(int), cudaMemcpyDeviceToHost));
-    report(gpu == cpu, "int sum (" + std::to_string(n) + " values, " +
-                           std::to_string(blockSize) + " threads)");
-    for (int* buffer : {input, partial, result})
-      cudaErrChk(cudaFree(buffer));
-  }
-}
-
-template <unsigned blockSize> void testBlockSize() {
-  testType<float, blockSize>("float");
-  testType<double, blockSize>("double");
-  testIntegerSum<blockSize>();
+  report(ok,
+         "exclusive scan and total (" + std::to_string(threads) + " threads)");
+  for (int* buffer : {in, out, total})
+    cudaErrChk(cudaFree(buffer));
 }
 
 } // namespace
 
 int main() {
   try {
-    testBlockSize<2 * WARP_SIZE>();
-    testBlockSize<256>();
-    testBlockSize<512>();
+    testReduce<2 * WARP_SIZE>();
+    testReduce<256>();
+    testReduce<512>();
+    for (int threads : {2 * WARP_SIZE, 256, 1000, kMaxScanThreads})
+      testScan(threads);
   } catch (const std::exception& error) {
     std::cerr << "reductionTest failed: " << error.what() << std::endl;
     return EXIT_FAILURE;

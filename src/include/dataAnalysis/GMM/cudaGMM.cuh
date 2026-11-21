@@ -6,179 +6,291 @@
 #include "cudaTypeDef.cuh"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace cudaGMMWeight {
 
-/** Threads per block of the EM kernels: also the most components. */
-inline constexpr int kGMMThreads = 256;
 /** Points per thread of the M-step statistics. */
 inline constexpr int kStatisticsPointsPerThread = 4;
-/** Most blocks of the M-step statistics (a grid stride beyond): enough to
- *  fill a large GPU on the largest histograms. */
+/** Most blocks of the M-step statistics of a fit (a grid stride beyond):
+ *  enough to fill a large GPU on the largest histograms. */
 inline constexpr int kMaxStatisticsBlocks = 256;
-/** EM steps at most between two prunings (and resets of the non-finite
- *  means); a converged fit is checked at once. */
-inline constexpr int kPruneInterval = 10;
-/** EM steps before the fit may converge: at time step 0, when the
- *  distributions are exactly Gaussian, the fit otherwise stops after 2-3
- *  iterations, far from the maximum of the likelihood. */
-inline constexpr int kMinStepsToConverge = 6;
 
-static_assert(kGMMThreads % 64 == 0 &&
-                  kGMMThreads <= cudaGMMWeightKernel::kMaxStatisticsThreads,
-              "whole warps on NVIDIA and AMD, within the statistics kernel");
+using cudaGMMWeightKernel::kGMMThreads;
+
+/** A device (pinned with `pinned`) array that only grows, by a quarter more
+ *  than asked; its content is lost when it grows. */
+template <typename V, bool pinned = false> class GrowingBuffer {
+public:
+  GrowingBuffer() = default;
+  GrowingBuffer(const GrowingBuffer&) = delete;
+  GrowingBuffer& operator=(const GrowingBuffer&) = delete;
+  ~GrowingBuffer() { release(); }
+
+  void reserve(size_t count) {
+    if (count <= capacity)
+      return;
+    release();
+    const size_t size = count + count / 4;
+    if constexpr (pinned)
+      cudaErrChk(cudaMallocHost(&data, sizeof(V) * size));
+    else
+      cudaErrChk(cudaMalloc(&data, sizeof(V) * size));
+    capacity = size;
+  }
+  V* get() const { return data; }
+  V& operator[](size_t i) const {
+    static_assert(pinned, "host access to a pinned buffer only");
+    return data[i];
+  }
+
+private:
+  void release() {
+    if constexpr (pinned)
+      cudaErrChk(cudaFreeHost(data));
+    else
+      cudaErrChk(cudaFree(data));
+    data = nullptr;
+    capacity = 0;
+  }
+  V* data = nullptr;
+  size_t capacity = 0;
+};
 
 /**
- * @brief Gaussian mixture fitted by expectation-maximisation to weighted
- * points, on the GPU. One EM iteration is three kernels (E step, M-step
- * statistics, M-step finalize) and one host synchronisation; the buffers are
- * sized by the points and components and grow only.
+ * @brief Gaussian mixtures fitted by expectation-maximisation to weighted
+ * points, on the GPU: one or several fits at once, each on its own range of
+ * the points, with the same settings and number of components. One EM
+ * iteration of all the fits is three kernels (E step, M-step statistics,
+ * M-step finalize, which also decides the convergence and the pruning of
+ * each fit) and one host synchronisation; the buffers grow only.
  */
 template <typename T, int dataDim, typename U = int> class GMM {
 
 private:
   cudaStream_t GMMStream; // the caller's: all the work of the fit runs on it
 
-  // object on host, its data pointers to the data on device
-  GMMDataMultiDim<T, dataDim, U>* dataHostPtr = nullptr;
-  // object on device, its data pointers to the data on device
+  // the points: a copy on the device of the caller's object, whose pointers
+  // are to device arrays
   GMMDataMultiDim<T, dataDim, U>* dataDevicePtr = nullptr;
 
-  GMMParam_t<T>* paramHostPtr = nullptr; // the parameters of the fit
+  // the fits of the last config: fit f has the points [fitOffset[f],
+  // fitOffset[f + 1]) and the components [f K, (f + 1) K) of the arrays
+  int numFits = 0, numComponents = 0; // K
+  bool normalize = false; // the points divided by the scale of their fit
+  cudaGMMWeightKernel::GMMControl<T> control{};
+  int numEStepBlocks = 0, numStatisticsBlocks = 0;
 
-  int sizeNumComponents = 0; // components the buffers below hold
-  int sizeNumPoints = 0;     // points the point buffers below hold
+  // on device, per fit and component
+  GrowingBuffer<bool> activeCUDA;            // the active components
+  GrowingBuffer<T> logWeightCUDA;            // log(weight)
+  GrowingBuffer<T> meanCUDA;                 // dataDim per component
+  GrowingBuffer<T> coVarianceCUDA;           // dataDim^2 per component
+  GrowingBuffer<T> coVarianceDecomposedCUDA; // Cholesky factors
+  GrowingBuffer<T> normalizerCUDA;           // log normalisation
+  // on device, per fit: its phase (kFitRunning, ...), its EM state, its
+  // scale, its first point and its first statistics block (both + 1, the
+  // ends)
+  GrowingBuffer<int> phaseCUDA;
+  GrowingBuffer<cudaGMMWeightKernel::GMMFitState<T>> stateCUDA;
+  GrowingBuffer<T> scaleCUDA;
+  GrowingBuffer<int> fitOffsetCUDA;
+  GrowingBuffer<int> fitStatisticsBlockCUDA;
+  // the blocks of the E step (fit and first point) and of the statistics
+  GrowingBuffer<int> eStepBlockFitCUDA, eStepBlockFirstCUDA;
+  GrowingBuffer<int> statisticsBlockFitCUDA;
+  // M-step block sums, (numComponents * kMStepStatistics + 1) per block
+  GrowingBuffer<T> partialCUDA;
+  // per point: responsibilities (numComponents * numData), h log p(x)
+  GrowingBuffer<T> gammaCUDA;
+  GrowingBuffer<T> weightedLogLikelihoodCUDA;
 
-  // the arrays on device
-  bool* flagActiveComponentsCUDA = nullptr; // numComponents + 2: the active
-                                            // components, then whether one
-                                            // was pruned and whether a mean
-                                            // was reset
-  T* weightCUDA = nullptr;                  // numComponents, log(weight)
-  T* meanCUDA = nullptr;                    // numComponents * dataDim
-  T* coVarianceCUDA = nullptr;              // numComponents * dataDim * dataDim
-  T* coVarianceDecomposedCUDA = nullptr; // numComponents * dataDim * dataDim,
-                                         // Cholesky factor (choleskyFactor)
-  T* normalizerCUDA = nullptr;           // numComponents, log normalisation
-  T* partialCUDA = nullptr; // M-step block sums, kMaxStatisticsBlocks *
-                            // (numComponents * kMStepStatistics + 1)
-  T* resultCUDA = nullptr;  // log-likelihood and total weight of an EM step
-
-  T* gammaCUDA = nullptr; // responsibilities, numComponents * numData
-  T* weightedLogLikelihoodCUDA = nullptr; // h log p(x), numData
-
-  // the arrays on host, results and init values
-  bool* flagActiveComponents = nullptr; // numComponents + 2, as on device
-  T* weight = nullptr;                  // numComponents
-  T* mean = nullptr;                    // numComponents * dataDim
-  T* coVariance = nullptr;              // numComponents * dataDim * dataDim
-  T* resultHost = nullptr;              // pinned copy of resultCUDA
-
-  // runtime variables
-  T logLikelihood = -INFINITY;
-  T logLikelihoodOld = -INFINITY;
-  T totalWeight = 0; // sum of the weights of the data
+  // pinned, the initial values and the results of the fits
+  GrowingBuffer<T, true> logWeight;
+  GrowingBuffer<T, true> mean;
+  GrowingBuffer<T, true> coVariance;
+  GrowingBuffer<int, true> phase;
+  GrowingBuffer<cudaGMMWeightKernel::GMMFitState<T>, true> state;
+  GrowingBuffer<T, true> scale;
 
 public:
-  /** Allocate the buffers if they are too small, then set the parameters
-   *  and the initial components (required, in the units of the points),
-   *  normalised with the points when the parameters ask to. The fit keeps
-   *  the two pointers: both must live until getGMMResult. */
-  __host__ void config(GMMParam_t<T>* GMMParam,
-                       GMMDataMultiDim<T, dataDim, U>* data) {
-    const int numComponents = GMMParam->numComponents;
-    if (numComponents < 1 || numComponents > kGMMThreads)
+  /**
+   * @brief Set the parameters, the points and the initial components of
+   * numFits fits, allocating the buffers if they are too small.
+   * @param GMMParam the settings, and the initial components (required, in
+   * the units of the points) and the scale of each fit, fit after fit; the
+   * components are normalised with the points when the settings ask to
+   * @param data the points of all the fits
+   * @param fits the fits
+   * @param offsets the points of fit f are [offsets[f], offsets[f + 1]), from
+   * 0 to all the points (a fit may have none); nullptr for one fit of all
+   * the points
+   * The device arrays of the points must live until initGMM returns; the
+   * fit keeps no pointer to the two objects.
+   */
+  __host__ void config(const GMMParam_t<T>* GMMParam,
+                       const GMMDataMultiDim<T, dataDim, U>* data, int fits = 1,
+                       const int* offsets = nullptr) {
+    const int K = GMMParam->numComponents;
+    const int numData = data->getNumData();
+    if (K < 1 || K > kGMMThreads)
       throw std::invalid_argument("GMM: 1 to " + std::to_string(kGMMThreads) +
-                                  " components, not " +
-                                  std::to_string(numComponents));
-    if (data->getNumData() < 1)
+                                  " components, not " + std::to_string(K));
+    if (numData < 1)
       throw std::invalid_argument("GMM: no point to fit");
+    // the int indices of the responsibilities and of the components
+    if ((size_t)K * numData > INT_MAX ||
+        (size_t)fits * K * dataDim * dataDim > INT_MAX)
+      throw std::invalid_argument("GMM: more than INT_MAX responsibilities or "
+                                  "coVariance elements");
     if (!GMMParam->weightInit || !GMMParam->meanInit ||
-        !GMMParam->coVarianceInit)
-      throw std::invalid_argument("GMM: the initial components are required");
+        !GMMParam->coVarianceInit || !GMMParam->scale)
+      throw std::invalid_argument(
+          "GMM: the initial components and the scales are required");
+    if (fits < 1 || (!offsets && fits != 1))
+      throw std::invalid_argument("GMM: no fit, or several without offsets");
+    const std::vector<int> fitOffset =
+        offsets ? std::vector<int>(offsets, offsets + fits + 1)
+                : std::vector<int>{0, numData};
+    if (fitOffset.front() != 0 || fitOffset.back() != numData ||
+        !std::is_sorted(fitOffset.begin(), fitOffset.end()))
+      throw std::invalid_argument("GMM: the fits must cover the points, in "
+                                  "order");
+    if (GMMParam->maxIteration < 1)
+      throw std::invalid_argument("GMM: 1 EM iteration at least");
+    // finite means stay finite: weighted means of the points
+    auto finite = [](const T* values, size_t count) {
+      return std::all_of(values, values + count,
+                         [](T x) { return std::isfinite(x); });
+    };
+    if (!finite(GMMParam->meanInit, (size_t)fits * K * dataDim) ||
+        !finite(GMMParam->coVarianceInit, (size_t)fits * K * dataDim * dataDim))
+      throw std::invalid_argument("GMM: non-finite initial means or "
+                                  "coVariances");
+    for (int f = 0; f < fits && GMMParam->normalize; f++)
+      if (fitOffset[f + 1] > fitOffset[f] &&
+          !(GMMParam->scale[f] > 0 && GMMParam->scale[f] < INFINITY))
+        throw std::invalid_argument("GMM: a positive finite scale per fit "
+                                    "with points");
+    numFits = fits;
+    numComponents = K;
+    normalize = GMMParam->normalize;
+    control = {.maxIteration = GMMParam->maxIteration,
+               .threshold = GMMParam->threshold,
+               .checkCovariance = GMMParam->checkCovariance,
+               .minVariance = GMMParam->minVariance,
+               .minPivot = GMMParam->minPivot(),
+               .prune = GMMParam->prune,
+               .pruneThreshold = GMMParam->pruneThreshold};
 
-    const int oldSizeComponents = sizeNumComponents;
-    if (numComponents > oldSizeComponents) {
-      freeComponentBuffers();
-      const int K = numComponents;
-      cudaErrChk(cudaMalloc(&flagActiveComponentsCUDA, sizeof(bool) * (K + 2)));
-      cudaErrChk(cudaMalloc(&weightCUDA, sizeof(T) * K));
-      cudaErrChk(cudaMalloc(&meanCUDA, sizeof(T) * K * dataDim));
-      cudaErrChk(
-          cudaMalloc(&coVarianceCUDA, sizeof(T) * K * dataDim * dataDim));
-      cudaErrChk(cudaMalloc(&coVarianceDecomposedCUDA,
-                            sizeof(T) * K * dataDim * dataDim));
-      cudaErrChk(cudaMalloc(&normalizerCUDA, sizeof(T) * K));
-      cudaErrChk(cudaMalloc(
-          &partialCUDA,
-          sizeof(T) * kMaxStatisticsBlocks *
-              (K * cudaGMMWeightKernel::kMStepStatistics<dataDim> + 1)));
+    // the blocks: per fit, of the E step one per kGMMThreads points, of the
+    // statistics those of the launch of a fit alone
+    std::vector<int> eStepFit, eStepFirst, statisticsFit;
+    std::vector<int> fitStatisticsBlock(numFits + 1);
+    for (int f = 0; f < numFits; f++) {
+      for (int n = fitOffset[f]; n < fitOffset[f + 1]; n += kGMMThreads) {
+        eStepFit.push_back(f);
+        eStepFirst.push_back(n);
+      }
+      fitStatisticsBlock[f] = (int)statisticsFit.size();
+      const int points = fitOffset[f + 1] - fitOffset[f];
+      const int blocks =
+          points > 0 ? std::min(getGridSize(points, kStatisticsPointsPerThread *
+                                                        kGMMThreads),
+                                kMaxStatisticsBlocks)
+                     : 0;
+      statisticsFit.insert(statisticsFit.end(), blocks, f);
+    }
+    fitStatisticsBlock[numFits] = (int)statisticsFit.size();
+    numEStepBlocks = (int)eStepFit.size();
+    numStatisticsBlocks = (int)statisticsFit.size();
 
-      cudaErrChk(cudaMallocHost(&flagActiveComponents, sizeof(bool) * (K + 2)));
-      cudaErrChk(cudaMallocHost(&weight, sizeof(T) * K));
-      cudaErrChk(cudaMallocHost(&mean, sizeof(T) * K * dataDim));
-      cudaErrChk(
-          cudaMallocHost(&coVariance, sizeof(T) * K * dataDim * dataDim));
-      sizeNumComponents = K; // allocated
+    const size_t slots = (size_t)numFits * K;
+    activeCUDA.reserve(slots);
+    logWeightCUDA.reserve(slots);
+    normalizerCUDA.reserve(slots);
+    meanCUDA.reserve(slots * dataDim);
+    coVarianceCUDA.reserve(slots * dataDim * dataDim);
+    coVarianceDecomposedCUDA.reserve(slots * dataDim * dataDim);
+    phaseCUDA.reserve(numFits);
+    stateCUDA.reserve(numFits);
+    scaleCUDA.reserve(numFits);
+    fitOffsetCUDA.reserve(numFits + 1);
+    fitStatisticsBlockCUDA.reserve(numFits + 1);
+    eStepBlockFitCUDA.reserve(numEStepBlocks);
+    eStepBlockFirstCUDA.reserve(numEStepBlocks);
+    statisticsBlockFitCUDA.reserve(numStatisticsBlocks);
+    partialCUDA.reserve(
+        (size_t)numStatisticsBlocks *
+        (K * cudaGMMWeightKernel::kMStepStatistics<dataDim> + 1));
+    gammaCUDA.reserve((size_t)K * numData);
+    weightedLogLikelihoodCUDA.reserve(numData);
+    logWeight.reserve(slots);
+    mean.reserve(slots * dataDim);
+    coVariance.reserve(slots * dataDim * dataDim);
+    phase.reserve(numFits);
+    state.reserve(numFits);
+    scale.reserve(numFits);
+
+    // the initial components in the units of the fit, the weights as logs;
+    // the scale 1 without normalize and for a fit without points (done at
+    // once: it gives its initial components back)
+    for (int f = 0; f < numFits; f++) {
+      const bool hasPoints = fitOffset[f + 1] > fitOffset[f];
+      scale[f] = hasPoints && normalize ? GMMParam->scale[f] : T(1);
+      const T s = scale[f];
+      for (int i = f * K * dataDim; i < (f + 1) * K * dataDim; i++)
+        mean[i] = GMMParam->meanInit[i] / s;
+      for (int i = f * K * dataDim * dataDim;
+           i < (f + 1) * K * dataDim * dataDim; i++)
+        coVariance[i] = GMMParam->coVarianceInit[i] / (s * s);
+      for (int i = f * K; i < (f + 1) * K; i++)
+        logWeight[i] = log(GMMParam->weightInit[i]);
+      phase[f] = hasPoints ? cudaGMMWeightKernel::kFitRunning
+                           : cudaGMMWeightKernel::kFitDone;
+      state[f] = {-INFINITY, -INFINITY, 0, 0, 0};
     }
 
-    // the arrays sized by the points (and the components), with a margin:
-    // the number of points drifts up between fits
-    if (data->getNumData() > sizeNumPoints ||
-        sizeNumComponents > oldSizeComponents) {
-      const int numPoints =
-          std::max(sizeNumPoints, data->getNumData() + data->getNumData() / 4);
-      freePointBuffers();
-      cudaErrChk(
-          cudaMalloc(&gammaCUDA, sizeof(T) * sizeNumComponents * numPoints));
-      cudaErrChk(cudaMalloc(&weightedLogLikelihoodCUDA, sizeof(T) * numPoints));
-      sizeNumPoints = numPoints; // allocated
-    }
+    auto upload = [&](auto* device, const auto* host, size_t count) {
+      cudaErrChk(cudaMemcpyAsync(device, host, sizeof(*host) * count,
+                                 cudaMemcpyHostToDevice, GMMStream));
+    };
+    cudaErrChk(cudaMemsetAsync(activeCUDA.get(), true, sizeof(bool) * slots,
+                               GMMStream)); // all active
+    upload(logWeightCUDA.get(), logWeight.get(), slots);
+    upload(meanCUDA.get(), mean.get(), slots * dataDim);
+    upload(coVarianceCUDA.get(), coVariance.get(), slots * dataDim * dataDim);
+    upload(phaseCUDA.get(), phase.get(), numFits);
+    upload(stateCUDA.get(), state.get(), numFits);
+    upload(scaleCUDA.get(), scale.get(), numFits);
+    // from pageable memory: staged before the calls return
+    upload(fitOffsetCUDA.get(), fitOffset.data(), numFits + 1);
+    upload(fitStatisticsBlockCUDA.get(), fitStatisticsBlock.data(),
+           numFits + 1);
+    upload(eStepBlockFitCUDA.get(), eStepFit.data(), numEStepBlocks);
+    upload(eStepBlockFirstCUDA.get(), eStepFirst.data(), numEStepBlocks);
+    upload(statisticsBlockFitCUDA.get(), statisticsFit.data(),
+           numStatisticsBlocks);
 
-    // the initial components in the units of the fit, the weights as logs,
-    // all active
-    const T scale = GMMParam->normalize ? GMMParam->scale : T(1);
-    for (int i = 0; i < numComponents * dataDim; i++)
-      mean[i] = GMMParam->meanInit[i] / scale;
-    for (int i = 0; i < numComponents * dataDim * dataDim; i++)
-      coVariance[i] = GMMParam->coVarianceInit[i] / (scale * scale);
-    for (int i = 0; i < numComponents; i++) {
-      weight[i] = log(GMMParam->weightInit[i]);
-      flagActiveComponents[i] = true;
-    }
-    flagActiveComponents[numComponents] = false;
-    flagActiveComponents[numComponents + 1] = false;
-
-    cudaErrChk(cudaMemcpyAsync(flagActiveComponentsCUDA, flagActiveComponents,
-                               sizeof(bool) * (numComponents + 2),
-                               cudaMemcpyHostToDevice, GMMStream));
-    cudaErrChk(cudaMemcpyAsync(weightCUDA, weight, sizeof(T) * numComponents,
-                               cudaMemcpyHostToDevice, GMMStream));
-    cudaErrChk(cudaMemcpyAsync(meanCUDA, mean,
-                               sizeof(T) * numComponents * dataDim,
-                               cudaMemcpyHostToDevice, GMMStream));
-    cudaErrChk(cudaMemcpyAsync(coVarianceCUDA, coVariance,
-                               sizeof(T) * numComponents * dataDim * dataDim,
-                               cudaMemcpyHostToDevice, GMMStream));
-
-    paramHostPtr = GMMParam;
-    dataHostPtr = data;
-    cudaErrChk(cudaMemcpyAsync(dataDevicePtr, dataHostPtr,
-                               sizeof(GMMDataMultiDim<T, dataDim, U>),
-                               cudaMemcpyDefault, GMMStream));
-    if (paramHostPtr->normalize)
+    upload(dataDevicePtr, data, 1);
+    if (normalize)
       cudaGMMWeightKernel::normalizePointsKernel<T, dataDim, U, false>
-          <<<getGridSize(data->getNumData(), kGMMThreads), kGMMThreads, 0,
-             GMMStream>>>(dataDevicePtr, paramHostPtr->scale);
+          <<<numEStepBlocks, kGMMThreads, 0, GMMStream>>>(
+              dataDevicePtr, fitOffsetCUDA.get(), eStepBlockFitCUDA.get(),
+              eStepBlockFirstCUDA.get(), scaleCUDA.get());
 
     // the first E step needs the factor of the initial coVariance
-    checkAndDecomposeCoVariance();
-    logLikelihood = -INFINITY;
-    logLikelihoodOld = -INFINITY;
-    totalWeight = 0;
+    cudaGMMWeightKernel::factorCoVarianceKernel<T, dataDim>
+        <<<numFits, K, 0, GMMStream>>>(
+            coVarianceCUDA.get(), coVarianceDecomposedCUDA.get(),
+            normalizerCUDA.get(), K, activeCUDA.get(), phaseCUDA.get(),
+            control);
+    cudaErrChk(cudaGetLastError());
   }
 
   /** @param stream the stream of the fit, ordered after the work that
@@ -186,242 +298,110 @@ public:
   __host__ explicit GMM(cudaStream_t stream) : GMMStream(stream) {
     cudaErrChk(
         cudaMalloc(&dataDevicePtr, sizeof(GMMDataMultiDim<T, dataDim, U>)));
-
-    cudaErrChk(cudaMalloc(&resultCUDA, 2 * sizeof(T)));
-    cudaErrChk(cudaMallocHost(&resultHost, 2 * sizeof(T)));
   }
 
   GMM(const GMM&) = delete;
   GMM& operator=(const GMM&) = delete;
 
-  /** Run the EM, then give the fit and the points back in the units of the
-   *  points; returns the number of EM steps, the last one after a pruning
-   *  included. A step that finds no weight (points of no weight, or no
-   *  finite component) ends the EM, unless a pruning or a reset of a
-   *  non-finite mean follows: the EM then starts again. */
-  __host__ int initGMM() {
-    int step = 0;
-    bool pruned = false;
-
-    while (step < paramHostPtr->maxIteration) {
-      pruned = false;
-      bool converged = false;
-      for (int internalStep = 0;
-           internalStep < kPruneInterval && step < paramHostPtr->maxIteration;
-           internalStep++) {
-        logLikelihood = emStep(); // of the parameters before its M step
-        // converged when the log-likelihood per unit weight gains less than
-        // the threshold, or decreases
-        const bool done = std::isnan(logLikelihood) ||
-                          ((fabs(logLikelihood - logLikelihoodOld) <
-                                paramHostPtr->threshold * totalWeight ||
-                            logLikelihood < logLikelihoodOld) &&
-                           step >= kMinStepsToConverge);
-        logLikelihoodOld = logLikelihood;
-        step++;
-        if (done || !(totalWeight > 0)) {
-          converged = true;
-          break;
-        }
-      }
-      pruned = pruneAndResetComponents();
-      if (converged && !pruned)
+  /** Run the EM of all the fits until each is done (mStepFinalizeKernel:
+   *  at most maxIteration + 1 steps), then give the points back in their
+   *  units (getGMMResult gives the fits in them). */
+  __host__ void initGMM() {
+    for (int steps = 0; steps <= control.maxIteration; steps++) {
+      if (std::all_of(phase.get(), phase.get() + numFits,
+                      [](int p) { return p == cudaGMMWeightKernel::kFitDone; }))
         break;
+      emStep();
+      cudaErrChk(cudaMemcpyAsync(phase.get(), phaseCUDA.get(),
+                                 sizeof(int) * numFits, cudaMemcpyDeviceToHost,
+                                 GMMStream));
+      cudaErrChk(cudaStreamSynchronize(GMMStream));
     }
 
-    // one more EM step after a pruning, so that the mean value and the
-    // coVariance are consistent with the remaining components
-    if (pruned) {
-      logLikelihood = emStep();
-      step++;
-    }
-
-    // back to the units of the points (multiplied back, up to rounding); the
-    // density of the normalised points is scale^dataDim times larger
-    if (paramHostPtr->normalize) {
-      const T scale = paramHostPtr->scale;
+    // the points back in their units (multiplied back, up to rounding)
+    if (normalize) {
       cudaGMMWeightKernel::normalizePointsKernel<T, dataDim, U, true>
-          <<<getGridSize(dataHostPtr->getNumData(), kGMMThreads), kGMMThreads,
-             0, GMMStream>>>(dataDevicePtr, scale);
-      cudaGMMWeightKernel::normalizeMeanAndCovBack<T, dataDim>
-          <<<1, paramHostPtr->numComponents, 0, GMMStream>>>(
-              meanCUDA, coVarianceCUDA, scale, paramHostPtr->numComponents);
-      logLikelihood -= totalWeight * dataDim * log(scale);
+          <<<numEStepBlocks, kGMMThreads, 0, GMMStream>>>(
+              dataDevicePtr, fitOffsetCUDA.get(), eStepBlockFitCUDA.get(),
+              eStepBlockFirstCUDA.get(), scaleCUDA.get());
+      cudaErrChk(cudaGetLastError());
     }
-    cudaErrChk(cudaGetLastError());
-    return step;
+
+    // the results of all the fits, in the units of the fits
+    const size_t slots = (size_t)numFits * numComponents;
+    auto download = [&](auto* host, const auto* device, size_t count) {
+      cudaErrChk(cudaMemcpyAsync(host, device, sizeof(*host) * count,
+                                 cudaMemcpyDeviceToHost, GMMStream));
+    };
+    download(logWeight.get(), logWeightCUDA.get(), slots);
+    download(mean.get(), meanCUDA.get(), slots * dataDim);
+    download(coVariance.get(), coVarianceCUDA.get(), slots * dataDim * dataDim);
+    download(state.get(), stateCUDA.get(), numFits);
+    cudaErrChk(cudaStreamSynchronize(GMMStream));
   }
 
-  /** The fit: its components (weights, not their logs) and the
-   *  log-likelihood of the parameters before the last M step. */
-  __host__ GMMResult<T, dataDim> getGMMResult(int simuStep, int convergeStep) {
-    GMMResult<T, dataDim> result(simuStep, paramHostPtr->numComponents);
-
-    result.convergeStep = convergeStep;
-
+  /** A fit of the last initGMM: its components (weights, not their logs),
+   *  its EM steps, and the log-likelihood of the parameters before its last
+   *  M step, in the units of the points (the means and the coVariances of
+   *  the normalised points multiplied by scale and scale^2, their density
+   *  scale^dataDim times larger). */
+  __host__ GMMResult<T, dataDim> getGMMResult(int simuStep, int fit = 0) {
+    const int K = numComponents;
+    const cudaGMMWeightKernel::GMMFitState<T>& fitState = state[fit];
+    GMMResult<T, dataDim> result(simuStep, K);
+    result.convergeStep = fitState.step;
+    const T s = scale[fit];
+    T logLikelihood = fitState.logLikelihood;
+    if (normalize)
+      logLikelihood -= fitState.totalWeight * dataDim * log(s);
     if (std::isnan(logLikelihood))
       std::cerr << "[!]GMM: LogLikelihood is NaN!"
-                << " GMM step: " << convergeStep << std::endl;
-
+                << " GMM step: " << fitState.step << std::endl;
     result.logLikelihoodFinal = logLikelihood;
 
-    // copy from device array
-    cudaErrChk(cudaMemcpyAsync(result.weight.get(), weightCUDA,
-                               sizeof(T) * paramHostPtr->numComponents,
-                               cudaMemcpyDefault, GMMStream));
-    cudaErrChk(
-        cudaMemcpyAsync(result.mean.get(), meanCUDA,
-                        sizeof(T) * paramHostPtr->numComponents * dataDim,
-                        cudaMemcpyDefault, GMMStream));
-    cudaErrChk(cudaMemcpyAsync(result.coVariance.get(), coVarianceCUDA,
-                               sizeof(T) * paramHostPtr->numComponents *
-                                   dataDim * dataDim,
-                               cudaMemcpyDefault, GMMStream));
-
-    cudaErrChk(cudaStreamSynchronize(GMMStream));
-
-    for (int i = 0; i < paramHostPtr->numComponents; i++) {
-      result.weight[i] = exp(result.weight[i]);
-    }
-
+    for (int k = 0; k < K; k++)
+      result.weight[k] = exp(logWeight[fit * K + k]);
+    for (int i = 0; i < K * dataDim; i++)
+      result.mean[i] = mean[fit * K * dataDim + i] * s;
+    for (int i = 0; i < K * dataDim * dataDim; i++)
+      result.coVariance[i] =
+          coVariance[fit * K * dataDim * dataDim + i] * (s * s);
     return result;
   }
 
-  __host__ ~GMM() {
-    // allocated in the constructor
-    cudaErrChk(cudaFree(dataDevicePtr));
-    cudaErrChk(cudaFree(resultCUDA));
-    cudaErrChk(cudaFreeHost(resultHost));
-
-    // allocated in config
-    freeComponentBuffers();
-    freePointBuffers();
-  }
+  __host__ ~GMM() { cudaErrChk(cudaFree(dataDevicePtr)); }
 
 private:
-  /** Free a device or pinned buffer, and null it. */
-  template <typename V> static void freeDevice(V*& buffer) {
-    cudaErrChk(cudaFree(buffer));
-    buffer = nullptr;
-  }
-  template <typename V> static void freePinned(V*& buffer) {
-    cudaErrChk(cudaFreeHost(buffer));
-    buffer = nullptr;
-  }
-
-  /** Free the buffers sized by the components (allocated in config; null
-   *  when not, also after a failed allocation). */
-  void freeComponentBuffers() {
-    sizeNumComponents = 0;
-    freeDevice(flagActiveComponentsCUDA);
-    freeDevice(weightCUDA);
-    freeDevice(meanCUDA);
-    freeDevice(coVarianceCUDA);
-    freeDevice(coVarianceDecomposedCUDA);
-    freeDevice(normalizerCUDA);
-    freeDevice(partialCUDA);
-    freePinned(flagActiveComponents);
-    freePinned(weight);
-    freePinned(mean);
-    freePinned(coVariance);
-  }
-
-  /** Free the buffers sized by the points. */
-  void freePointBuffers() {
-    sizeNumPoints = 0;
-    freeDevice(gammaCUDA);
-    freeDevice(weightedLogLikelihoodCUDA);
-  }
-
   /**
-   * One EM iteration: responsibilities (E step), the moments of the points
-   * per component and the new parameters (M step). Synchronous.
-   * @return the log-likelihood of the parameters before the M step; the total
-   * weight of the data goes to totalWeight
+   * One EM iteration of the fits that run: responsibilities (E step), the
+   * moments of the points per component, the new parameters and the
+   * convergence (M step); asynchronous.
    */
-  T emStep() {
-    const int numData = dataHostPtr->getNumData();
-    const int numComponents = paramHostPtr->numComponents;
-    cudaGMMWeightKernel::eStepKernel<<<getGridSize(numData, kGMMThreads),
-                                       kGMMThreads, 0, GMMStream>>>(
-        dataDevicePtr, weightCUDA, meanCUDA, coVarianceDecomposedCUDA,
-        normalizerCUDA, numComponents, flagActiveComponentsCUDA, gammaCUDA,
-        weightedLogLikelihoodCUDA);
-
-    const int blocks =
-        std::min(getGridSize(numData, kStatisticsPointsPerThread * kGMMThreads),
-                 kMaxStatisticsBlocks);
+  void emStep() {
+    const int K = numComponents;
     cudaGMMWeightKernel::
-        mStepStatisticsKernel<<<blocks, kGMMThreads, 0, GMMStream>>>(
-            dataDevicePtr, gammaCUDA, weightedLogLikelihoodCUDA, meanCUDA,
-            numComponents, flagActiveComponentsCUDA, partialCUDA);
+        eStepKernel<<<numEStepBlocks, kGMMThreads, 0, GMMStream>>>(
+            dataDevicePtr, fitOffsetCUDA.get(), eStepBlockFitCUDA.get(),
+            eStepBlockFirstCUDA.get(), phaseCUDA.get(), logWeightCUDA.get(),
+            meanCUDA.get(), coVarianceDecomposedCUDA.get(),
+            normalizerCUDA.get(), K, activeCUDA.get(), gammaCUDA.get(),
+            weightedLogLikelihoodCUDA.get());
 
-    const int width =
-        numComponents * cudaGMMWeightKernel::kMStepStatistics<dataDim> + 1;
+    cudaGMMWeightKernel::mStepStatisticsKernel<<<numStatisticsBlocks,
+                                                 kGMMThreads, 0, GMMStream>>>(
+        dataDevicePtr, fitOffsetCUDA.get(), statisticsBlockFitCUDA.get(),
+        fitStatisticsBlockCUDA.get(), phaseCUDA.get(), gammaCUDA.get(),
+        weightedLogLikelihoodCUDA.get(), meanCUDA.get(), K, activeCUDA.get(),
+        partialCUDA.get());
+
+    const int width = K * cudaGMMWeightKernel::kMStepStatistics<dataDim> + 1;
     cudaGMMWeightKernel::mStepFinalizeKernel<T, dataDim>
-        <<<1, kGMMThreads, width * sizeof(T), GMMStream>>>(
-            partialCUDA, blocks, weightCUDA, meanCUDA, coVarianceCUDA,
-            coVarianceDecomposedCUDA, normalizerCUDA, numComponents,
-            flagActiveComponentsCUDA, paramHostPtr->checkCovariance,
-            paramHostPtr->minVariance, paramHostPtr->minPivot(), resultCUDA);
+        <<<numFits, kGMMThreads, width * sizeof(T), GMMStream>>>(
+            partialCUDA.get(), fitStatisticsBlockCUDA.get(), phaseCUDA.get(),
+            stateCUDA.get(), logWeightCUDA.get(), meanCUDA.get(),
+            coVarianceCUDA.get(), coVarianceDecomposedCUDA.get(),
+            normalizerCUDA.get(), K, activeCUDA.get(), control);
     cudaErrChk(cudaGetLastError());
-
-    cudaErrChk(cudaMemcpyAsync(resultHost, resultCUDA, 2 * sizeof(T),
-                               cudaMemcpyDeviceToHost, GMMStream));
-    cudaErrChk(cudaStreamSynchronize(GMMStream));
-    totalWeight = resultHost[1];
-    return resultHost[0];
-  }
-
-  /**
-   * Check the coVariance (non-finite elements, smallest variance) if the
-   * parameters ask to, and factor it, A = LL^T, with the log normalisation
-   * of each component; a pivot below minPivot() is raised to it.
-   */
-  void checkAndDecomposeCoVariance() {
-    if (paramHostPtr->checkCovariance)
-      cudaGMMWeightKernel::checkAdjustCoVarianceKernel<T, dataDim>
-          <<<1, paramHostPtr->numComponents, 0, GMMStream>>>(
-              coVarianceCUDA, paramHostPtr->numComponents,
-              flagActiveComponentsCUDA, paramHostPtr->minVariance);
-
-    cudaGMMWeightKernel::decomposeCoVarianceKernel<T, dataDim>
-        <<<1, paramHostPtr->numComponents, 0, GMMStream>>>(
-            coVarianceCUDA, coVarianceDecomposedCUDA, normalizerCUDA,
-            paramHostPtr->numComponents, flagActiveComponentsCUDA,
-            paramHostPtr->minPivot());
-  }
-
-  /** Prune the component of smallest weight below the threshold (with the
-   *  parameter prune) and reset the non-finite means; true if the EM
-   *  restarts. */
-  bool pruneAndResetComponents() {
-    const int numComponents = paramHostPtr->numComponents;
-    if (paramHostPtr->prune)
-      cudaGMMWeightKernel::pruneOneComponentKernel<<<
-          1, numComponents,
-          numComponents * (sizeof(T) + sizeof(bool)) + sizeof(bool),
-          GMMStream>>>(weightCUDA, paramHostPtr->pruneThreshold, numComponents,
-                       flagActiveComponentsCUDA);
-
-    cudaGMMWeightKernel::checkMeanValueComponents<T, dataDim>
-        <<<1, numComponents, numComponents * sizeof(bool), GMMStream>>>(
-            meanCUDA, numComponents, flagActiveComponentsCUDA,
-            flagActiveComponentsCUDA + numComponents + 1,
-            paramHostPtr->normalize ? T(1) : paramHostPtr->scale);
-
-    cudaErrChk(cudaMemcpyAsync(flagActiveComponents, flagActiveComponentsCUDA,
-                               sizeof(bool) * (numComponents + 2),
-                               cudaMemcpyDefault, GMMStream));
-    cudaErrChk(cudaStreamSynchronize(GMMStream));
-
-    // the EM restarts: the log-likelihood of the fewer or moved components
-    // is not comparable with the last one
-    const bool restart = flagActiveComponents[numComponents] ||
-                         flagActiveComponents[numComponents + 1];
-    if (restart)
-      logLikelihoodOld = -INFINITY;
-    return restart;
   }
 };
 

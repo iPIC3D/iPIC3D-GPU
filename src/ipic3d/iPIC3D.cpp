@@ -66,7 +66,8 @@ static int runSimulation(int argc, char** argv) {
 #endif
 
 #if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
-    // The macrocell spectra need the particles sorted by cell and B packed
+    // The macrocell analyses need the particles sorted by cell (the spectra
+    // B packed too)
     DA.prepareAnalysis(i);
 #endif
     auto t_sort = std::chrono::high_resolution_clock::now();

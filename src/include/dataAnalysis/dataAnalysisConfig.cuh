@@ -4,6 +4,8 @@
 #include "BenchmarkMode.h"
 #include "cudaTypeDef.cuh"
 
+#include <climits>
+
 /**
  * @file dataAnalysisConfig.cuh
  * @brief Compile-time constants of the data analysis, which a build includes
@@ -34,21 +36,29 @@ inline constexpr int VELOCITY_HISTOGRAM3D_RES_3 = 100;
 inline constexpr int VELOCITY_HISTOGRAM3D_SIZE = VELOCITY_HISTOGRAM3D_RES_1 *
                                                  VELOCITY_HISTOGRAM3D_RES_2 *
                                                  VELOCITY_HISTOGRAM3D_RES_3;
-/** Bins per axis of the shared-memory tile of histogramKernel3D (not used
- *  currently). */
-inline constexpr int VELOCITY_HISTOGRAM3D_TILE = 20;
+/** Bins of the 3D velocity histogram of a macrocell along u, v, w
+ *  (VelocityHistogramMacrocells): multiples of 16, the tile of the kernel. */
+inline constexpr int MACROCELL_HISTOGRAM3D_RES_1 = 32;
+inline constexpr int MACROCELL_HISTOGRAM3D_RES_2 = 32;
+inline constexpr int MACROCELL_HISTOGRAM3D_RES_3 = 32;
 
 /** Bins of the macrocell spectra along v_par and v_perp. */
 inline constexpr int MACROCELL_BINS_VPAR = 64;
 inline constexpr int MACROCELL_BINS_VPERP = 64;
-/** A particle where |B| is below this is left out of the spectra (v_par
+/** Macrocells of a rank at most, of the macrocell histograms and of the
+ *  spectra: an int indexes the bins of all of them (sparseBins::SparseBins);
+ *  the histograms also take their bins in GPU memory, 4 bytes each. */
+inline constexpr int MAX_HISTOGRAM_MACROCELLS =
+    INT_MAX / (MACROCELL_HISTOGRAM3D_RES_1 * MACROCELL_HISTOGRAM3D_RES_2 *
+               MACROCELL_HISTOGRAM3D_RES_3);
+inline constexpr int MAX_SPECTRA_MACROCELLS =
+    INT_MAX / (MACROCELL_BINS_VPAR * MACROCELL_BINS_VPERP);
+/** A particle where |B| is at most this is left out of the spectra (v_par
  *  divides by |B|). */
 inline constexpr cudaCommonType MACROCELL_BMIN = 1e-12;
 
 /** Dimension of the GMM data (u, v, w); the analysis supports 3 only. */
 inline constexpr int DATA_DIM_GMM = 3;
-/** Components of the Gaussian mixture. */
-inline constexpr int NUM_COMPONENT_GMM = 10;
 
 } // namespace DAConfig
 

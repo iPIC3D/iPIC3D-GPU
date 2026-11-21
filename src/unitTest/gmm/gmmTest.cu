@@ -17,13 +17,15 @@
  *   truth       started at the truth with a large threshold: the fit runs the
  *               least steps before it may converge
  *   normalize   12 EM steps on the velocities and on the velocities divided
- *               by 2: the same components and log-likelihood in physical
+ *               by 1.7: the same components and log-likelihood in physical
  *               units, and the points given back
  *   prune       the same data with a third component started far from the
  *               data, fitted on normalised velocities: the third component is
- *               pruned and the other two are recovered in physical units
+ *               pruned (flagged inactive) and the other two are recovered in
+ *               physical units
  *   steps       the prune case stopped by the iteration limit at the first
- *               pruning: one more step, weights summing to 1
+ *               pruning: one more step, weights summing to 1; at the limit
+ *               the pruning raises no other small component
  *   reproducible  the same fit twice, and with a new GMM object: the same
  *               bits
  *   production  ten components from random means, on normalised velocities,
@@ -37,12 +39,29 @@
  *               covariance has the determinant of the floor, GMMMinVariance^3
  *               in the units of the fit
  *   degenerate  one point for three components; points of no weight (the
- *               weights kept); a NaN mean (reset); a non-positive start
- *               without the covariance check; the JSON of a non-finite fit;
- *               no point and too many components refused
+ *               weights kept); a point of infinite weight (one step, the
+ *               components finite); a non-positive start without the covariance
+ *               check; no point, too many components or responsibilities,
+ *               fits that do not cover the points, several fits without
+ *               offsets, no EM iteration, no initial components, a NaN
+ *               initial mean and, normalised, a scale not positive and
+ *               finite refused
+ *   batch       several fits in one batch (two mixtures, one with more points
+ *               than a pass of the statistics, one point, no point, no
+ *               weight), normalised and not, run to convergence and stopped
+ *               by a pruning at the iteration limit: each fit gives the bits
+ *               of the same fit alone
+ *   manyfits    300 small random fits in one batch (some without points): the
+ *               bits of the fits alone, finite, weights summing to 1
+ *   components  one and the most components (a thread each in the per-fit
+ *               kernels): one EM step against the host; one component run to
+ *               convergence gives the moments of the points; a batch with
+ *               the most components, pruning: the bits of the fits alone,
+ *               finite, weights summing to 1
  */
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -88,6 +107,9 @@ constexpr real kOneStepError = 1e-10;
 constexpr real kNormalizeError = 1e-9;
 /** EM steps of the normalize case. */
 constexpr int kNormalizeSteps = 12;
+/** The scale of the normalize case: not a power of 2, so that the scaling
+ *  of the points and of the components rounds. */
+constexpr real kNormalizeScale = 1.7;
 /** A threshold any step of the truth case meets. */
 constexpr real kLargeThreshold = 1.0;
 /** Accepted error of the sum of the weights (kMinComponentWeight floors). */
@@ -109,6 +131,27 @@ constexpr int kProductionComponents = 10;
 /** The production fit may miss the two-component optimum by this, per unit
  *  weight (local optima). */
 constexpr real kProductionLoss = 1e-2;
+/** The iteration limit of the batch case stopped at its first pruning. */
+constexpr int kPruneLimit = cudaGMMWeightKernel::kPruneInterval;
+/** The steps case: the start weight of a component on the first Gaussian,
+ *  below the threshold after one step. */
+constexpr real kSmallStartWeight = 2e-4;
+/** The manyfits case: its fits, the most points of one, every how many fits
+ *  one has no point and one is fitted alone. */
+constexpr int kManyFits = 300;
+constexpr int kManyFitsMaxPoints = 200;
+constexpr int kManyFitsEmptyEvery = 50;
+constexpr int kManyFitsAloneEvery = 23;
+/** The components case: the most components of a fit (one per thread of a
+ *  block of the per-fit kernels), and the variance of its drawn starts, broad
+ *  enough for every component to take weight. */
+constexpr int kMostComponents = cudaGMMWeight::kGMMThreads;
+constexpr real kDrawnStartVariance = 0.25;
+/** The prune threshold of its pruning batch: below 1 / kMostComponents, as
+ *  the input requires. */
+constexpr real kMostComponentsPruneThreshold = 0.002;
+/** Variance of the drawn starts of the production case. */
+constexpr real kProductionStartVariance = 0.04;
 
 /** The stream of the fits: non-blocking, as in the analysis. */
 cudaStream_t stream;
@@ -123,7 +166,8 @@ void check(bool ok, const char* what, double value) {
 struct Gaussian {
   real weight;
   real mean[3];
-  real cov[9]; // row major
+  real cov[9];        // row major
+  bool active = true; // of a fit: not pruned
 };
 
 /** Determinant of a row-major 3x3 matrix. */
@@ -203,36 +247,49 @@ struct Result {
 };
 
 /**
- * Fit the histogram starting from `start` (in physical units) with the given
- * GMM; with `scale` > 0 the fit runs on the velocities divided by it
- * (GMMNormalize).
+ * Fit each histogram starting from its start (in physical units) with the
+ * given GMM, all in one batch; with scales > 0 (all or none) the fit of each
+ * runs on the velocities divided by its scale (GMMNormalize). The steps of a
+ * result are those of its fit.
  */
-Result fit(GMMModel& gmm, const Histogram& h,
-           const std::vector<Gaussian>& start, real scale, bool prune,
-           int maxIterations = kMaxIterations, bool checkCovariance = true,
-           real threshold = kThreshold) {
-  const int n = (int)h.size(), numComponents = (int)start.size();
+std::vector<Result>
+fitBatch(GMMModel& gmm, const std::vector<const Histogram*>& histograms,
+         const std::vector<std::vector<Gaussian>>& starts,
+         const std::vector<real>& scales, bool prune,
+         int maxIterations = kMaxIterations, bool checkCovariance = true,
+         real threshold = kThreshold, real pruneThreshold = kPruneThreshold) {
+  const int fits = (int)histograms.size();
+  const int numComponents = (int)starts[0].size();
+  std::vector<int> offset(fits + 1, 0);
+  for (int f = 0; f < fits; f++)
+    offset[f + 1] = offset[f] + (int)histograms[f]->size();
+  const int n = offset[fits];
   // the uploads on the stream of the fit, which does not wait for the
   // legacy stream
   real* point[3];
   for (int d = 0; d < 3; d++) {
     cudaErrChk(cudaMalloc(&point[d], n * sizeof(real)));
-    cudaErrChk(cudaMemcpyAsync(point[d], h.point[d].data(), n * sizeof(real),
-                               cudaMemcpyHostToDevice, stream));
+    for (int f = 0; f < fits; f++)
+      cudaErrChk(cudaMemcpyAsync(point[d] + offset[f],
+                                 histograms[f]->point[d].data(),
+                                 histograms[f]->size() * sizeof(real),
+                                 cudaMemcpyHostToDevice, stream));
   }
   weight_t* weight;
   cudaErrChk(cudaMalloc(&weight, n * sizeof(weight_t)));
-  cudaErrChk(cudaMemcpyAsync(weight, h.weight.data(), n * sizeof(weight_t),
-                             cudaMemcpyHostToDevice, stream));
+  for (int f = 0; f < fits; f++)
+    cudaErrChk(cudaMemcpyAsync(weight + offset[f], histograms[f]->weight.data(),
+                               histograms[f]->size() * sizeof(weight_t),
+                               cudaMemcpyHostToDevice, stream));
 
-  std::vector<real> w(numComponents), mean(numComponents * 3),
-      cov(numComponents * 9);
-  for (int c = 0; c < numComponents; c++) {
-    w[c] = start[c].weight;
-    for (int d = 0; d < 3; d++)
-      mean[c * 3 + d] = start[c].mean[d];
-    for (int e = 0; e < 9; e++)
-      cov[c * 9 + e] = start[c].cov[e];
+  std::vector<real> w, mean, cov, fitScale;
+  for (int f = 0; f < fits; f++) {
+    for (const Gaussian& g : starts[f]) {
+      w.push_back(g.weight);
+      mean.insert(mean.end(), g.mean, g.mean + 3);
+      cov.insert(cov.end(), g.cov, g.cov + 9);
+    }
+    fitScale.push_back(scales[f] > 0 ? scales[f] : 1); // in [-1, 1]
   }
   cudaGMMWeight::GMMParam_t<real> param = {.numComponents = numComponents,
                                            .maxIteration = maxIterations,
@@ -240,45 +297,61 @@ Result fit(GMMModel& gmm, const Histogram& h,
                                            .weightInit = w.data(),
                                            .meanInit = mean.data(),
                                            .coVarianceInit = cov.data(),
-                                           .normalize = scale > 0,
-                                           // the points lie in [-1, 1]
-                                           .scale = scale > 0 ? scale : 1,
+                                           .normalize = scales[0] > 0,
+                                           .scale = fitScale.data(),
                                            .checkCovariance = checkCovariance,
                                            .covarianceTolerance =
                                                kCovarianceTolerance,
                                            .minVariance = kMinVariance,
                                            .prune = prune,
-                                           .pruneThreshold = kPruneThreshold};
+                                           .pruneThreshold = pruneThreshold};
 
   GMMPoints data(n, point, weight);
-  Result result;
-  gmm.config(&param, &data);
-  result.steps = gmm.initGMM();
-  auto r = gmm.getGMMResult(0, result.steps);
-  result.logLikelihood = r.logLikelihoodFinal;
-  result.pointsError = 0;
-  std::vector<real> back(n);
+  gmm.config(&param, &data, fits, offset.data());
+  gmm.initGMM();
+  std::vector<real> back[3];
   for (int d = 0; d < 3; d++) {
-    cudaErrChk(cudaMemcpyAsync(back.data(), point[d], n * sizeof(real),
+    back[d].resize(n);
+    cudaErrChk(cudaMemcpyAsync(back[d].data(), point[d], n * sizeof(real),
                                cudaMemcpyDeviceToHost, stream));
-    cudaErrChk(cudaStreamSynchronize(stream));
-    for (int i = 0; i < n; i++)
-      result.pointsError =
-          std::max(result.pointsError, std::fabs(back[i] - h.point[d][i]));
   }
-  for (int c = 0; c < numComponents; c++) {
-    Gaussian g;
-    g.weight = r.weight[c];
+  cudaErrChk(cudaStreamSynchronize(stream));
+  std::vector<Result> results(fits);
+  for (int f = 0; f < fits; f++) {
+    const auto r = gmm.getGMMResult(0, f);
+    Result& result = results[f];
+    result.steps = r.convergeStep;
+    result.logLikelihood = r.logLikelihoodFinal;
+    result.pointsError = 0;
     for (int d = 0; d < 3; d++)
-      g.mean[d] = r.mean[c * 3 + d];
-    for (int e = 0; e < 9; e++)
-      g.cov[e] = r.coVariance[c * 9 + e];
-    result.components.push_back(g);
+      for (int i = 0; i < (int)histograms[f]->size(); i++)
+        result.pointsError =
+            std::max(result.pointsError, std::fabs(back[d][offset[f] + i] -
+                                                   histograms[f]->point[d][i]));
+    for (int c = 0; c < numComponents; c++) {
+      Gaussian g;
+      g.active = r.active[c];
+      g.weight = r.weight[c];
+      for (int d = 0; d < 3; d++)
+        g.mean[d] = r.mean[c * 3 + d];
+      for (int e = 0; e < 9; e++)
+        g.cov[e] = r.coVariance[c * 9 + e];
+      result.components.push_back(g);
+    }
   }
   for (int d = 0; d < 3; d++)
     cudaErrChk(cudaFree(point[d]));
   cudaErrChk(cudaFree(weight));
-  return result;
+  return results;
+}
+
+/** One fit of fitBatch: scale 0 for none. */
+Result fit(GMMModel& gmm, const Histogram& h,
+           const std::vector<Gaussian>& start, real scale, bool prune,
+           int maxIterations = kMaxIterations, bool checkCovariance = true,
+           real threshold = kThreshold, real pruneThreshold = kPruneThreshold) {
+  return fitBatch(gmm, {&h}, {start}, {scale}, prune, maxIterations,
+                  checkCovariance, threshold, pruneThreshold)[0];
 }
 
 /** Largest errors of the fitted components against the true ones. */
@@ -363,6 +436,41 @@ std::vector<Gaussian> hostEMStep(const Histogram& h,
   return next;
 }
 
+/** Largest error of an EM step of the GPU against the host: relative of the
+ *  weights, of the means, of the covariances relative to the first
+ *  variance. */
+real stepError(const std::vector<Gaussian>& fitted,
+               const std::vector<Gaussian>& host) {
+  real err = 0;
+  for (size_t c = 0; c < host.size(); c++) {
+    const Gaussian &a = fitted[c], &b = host[c];
+    err = std::max(err, std::fabs(a.weight - b.weight) / b.weight);
+    for (int d = 0; d < 3; d++)
+      err = std::max(err, std::fabs(a.mean[d] - b.mean[d]));
+    for (int e = 0; e < 9; e++)
+      err = std::max(err, std::fabs(a.cov[e] - b.cov[e]) / b.cov[0]);
+  }
+  return err;
+}
+
+/** One EM step of the GPU from start against that of the host: its steps,
+ *  components and log-likelihood. @return the step of the host */
+std::vector<Gaussian> checkOneStep(GMMModel& gmm, const Histogram& h,
+                                   const std::vector<Gaussian>& start) {
+  real hostLogLikelihood;
+  const std::vector<Gaussian> host = hostEMStep(h, start, hostLogLikelihood);
+  const Result r = fit(gmm, h, start, 0, false, 1);
+  const real err = stepError(r.components, host);
+  check(r.steps == 1 && r.components.size() == start.size(),
+        "one EM step, every component written", r.steps);
+  check(err < kOneStepError, "the EM step of the host", err);
+  check(std::fabs(r.logLikelihood - hostLogLikelihood) <
+            kOneStepError * std::fabs(hostLogLikelihood),
+        "the log-likelihood of the host",
+        std::fabs(r.logLikelihood / hostLogLikelihood - 1));
+  return host;
+}
+
 int testOneStep(GMMModel& gmm, int grid) {
   failures = 0;
   const std::vector<Gaussian> truth = twoComponents();
@@ -372,28 +480,11 @@ int testOneStep(GMMModel& gmm, int grid) {
   // correlated starts: the off-diagonal terms of the factor in the E step
   start[0].cov[1] = start[0].cov[3] = 0.02;
   start[1].cov[5] = start[1].cov[7] = -0.015;
-  real hostLogLikelihood;
-  const std::vector<Gaussian> host = hostEMStep(h, start, hostLogLikelihood);
-  const Result r = fit(gmm, h, start, 0, false, 1);
-  real err = 0;
-  for (size_t c = 0; c < host.size(); c++) {
-    const Gaussian &a = r.components[c], &b = host[c];
-    err = std::max(err, std::fabs(a.weight - b.weight) / b.weight);
-    for (int d = 0; d < 3; d++)
-      err = std::max(err, std::fabs(a.mean[d] - b.mean[d]));
-    for (int e = 0; e < 9; e++)
-      err = std::max(err, std::fabs(a.cov[e] - b.cov[e]) / b.cov[0]);
-  }
   std::printf("  %zu points\n", h.size());
   if (grid == kOneStepLargeGrid)
     check((int)h.size() > kStatisticsPass,
           "more points than a pass of the statistics", h.size());
-  check(r.steps == 1, "one EM step", r.steps);
-  check(err < kOneStepError, "the EM step of the host", err);
-  check(std::fabs(r.logLikelihood - hostLogLikelihood) <
-            kOneStepError * std::fabs(hostLogLikelihood),
-        "the log-likelihood of the host",
-        std::fabs(r.logLikelihood / hostLogLikelihood - 1));
+  checkOneStep(gmm, h, start);
   return failures;
 }
 
@@ -432,7 +523,8 @@ int testNormalize(GMMModel& gmm) {
                                        startNear(truth[1], -0.1)};
   // a fixed number of steps, before the convergence, for the same steps
   const Result plain = fit(gmm, h, start, 0, false, kNormalizeSteps);
-  const Result scaled = fit(gmm, h, start, 2.0, false, kNormalizeSteps);
+  const Result scaled =
+      fit(gmm, h, start, kNormalizeScale, false, kNormalizeSteps);
   real err = 0;
   for (size_t c = 0; c < truth.size(); c++) {
     const Gaussian &a = plain.components[c], &b = scaled.components[c];
@@ -461,8 +553,10 @@ int testTruth(GMMModel& gmm) {
   const std::vector<Gaussian> truth = twoComponents();
   const Result r = fit(gmm, histogramOf(truth, false), truth, 0, false,
                        kMaxIterations, true, kLargeThreshold);
-  check(r.steps == cudaGMMWeight::kMinStepsToConverge + 1,
+  check(r.steps == cudaGMMWeightKernel::kMinStepsToConverge + 1,
         "the least steps before the convergence", r.steps);
+  check(r.components[0].active && r.components[1].active,
+        "every component active without pruning", 0);
   return failures;
 }
 
@@ -486,6 +580,9 @@ int testPrune(GMMModel& gmm) {
   // an active component keeps kMinComponentWeight at least
   check(r.components[2].weight < 10 * cudaGMMWeightKernel::kPrunedWeight,
         "far component pruned", r.components[2].weight);
+  check(!r.components[2].active && r.components[0].active &&
+            r.components[1].active,
+        "the pruned component flagged inactive, the others active", 0);
   compare({r.components[0], r.components[1]}, truth);
   check(std::fabs(r.weightSum() - 1) < kWeightSumError, "weights sum to 1",
         r.weightSum() - 1);
@@ -496,7 +593,7 @@ int testSteps(GMMModel& gmm) {
   std::printf("steps\n");
   failures = 0;
   const std::vector<Gaussian> truth = twoComponents();
-  const int limit = cudaGMMWeight::kPruneInterval;
+  const int limit = kPruneLimit;
   const Result r = fit(gmm, histogramOf(truth, false), startWithFar(truth), 2.0,
                        true, limit);
   std::printf("  %d EM steps for %d at most, weights %.4f %.4f %.3e\n", r.steps,
@@ -510,6 +607,25 @@ int testSteps(GMMModel& gmm) {
         r.weightSum() - 1);
   check(std::isfinite(r.logLikelihood), "log-likelihood finite",
         r.logLikelihood);
+
+  // the pruning at the limit raises no other component: a small one on the
+  // first Gaussian, below the threshold after the one step of the limit 1,
+  // stays below it in the final step (raised to kRaisedShare / 4 it would
+  // take a share of the first one)
+  std::vector<Gaussian> start = startWithFar(truth);
+  Gaussian small = truth[0];
+  small.weight = kSmallStartWeight;
+  start.push_back(small);
+  const Result one = fit(gmm, histogramOf(truth, false), start, 2.0, true, 1);
+  std::printf("  limit 1: %d EM steps, weights %.4f %.4f %.3e %.3e\n",
+              one.steps, one.components[0].weight, one.components[1].weight,
+              one.components[2].weight, one.components[3].weight);
+  check(one.steps == 2 &&
+            one.components[2].weight <
+                10 * cudaGMMWeightKernel::kPrunedWeight &&
+            one.components[3].weight < kPruneThreshold,
+        "the pruning at the limit raises no other component",
+        one.components[3].weight);
   return failures;
 }
 
@@ -611,23 +727,28 @@ int testDegenerate(GMMModel& gmm) {
   for (const Gaussian& g : z.components)
     kept = std::max(kept, std::fabs(g.weight - start.weight));
   check(kept < kWeightSumError, "no weight: the weights kept", kept);
-
-  // a NaN mean: reset, then fitted
-  const Histogram h = histogramOf(twoComponents(), false);
-  std::vector<Gaussian> broken = three;
-  broken[2].mean[1] = NAN;
-  const Result m = fit(gmm, h, broken, 0, false);
-  bool meansFinite = std::isfinite(m.logLikelihood);
-  for (const Gaussian& g : m.components)
+  // a point of infinite weight (a bin whose sum overflowed the float): the
+  // EM stops at once, the components finite
+  Histogram overflowed = histogramOf(twoComponents(), false, kOneStepGrid);
+  overflowed.weight[0] = INFINITY;
+  const Result u = fit(gmm, overflowed, three, 0, true);
+  bool componentsFinite = true;
+  for (const Gaussian& g : u.components) {
+    componentsFinite &= std::isfinite(g.weight);
     for (int d = 0; d < 3; d++)
-      meansFinite = meansFinite && std::isfinite(g.mean[d]);
-  check(meansFinite, "a NaN mean: reset, the fit finite", m.logLikelihood);
+      componentsFinite &= std::isfinite(g.mean[d]);
+    for (int e = 0; e < 9; e++)
+      componentsFinite &= std::isfinite(g.cov[e]);
+  }
+  check(u.steps == 1 && componentsFinite,
+        "a point of infinite weight: one step, the components finite", u.steps);
 
   // no covariance check: a start that is not positive definite (|cov uv| >
   // the variances) is factored with the pivot floor: one EM step stays
   // finite, with positive covariances
   std::vector<Gaussian> skew = three;
   skew[0].cov[1] = skew[0].cov[3] = 0.08;
+  const Histogram h = histogramOf(twoComponents(), false);
   const Result c = fit(gmm, h, skew, 0, false, 1, false);
   bool positiveFit = std::isfinite(c.logLikelihood);
   for (const Gaussian& g : c.components)
@@ -635,43 +756,39 @@ int testDegenerate(GMMModel& gmm) {
   check(positiveFit, "no covariance check: a non-positive start fits finite",
         c.logLikelihood);
 
-  // the JSON of a non-finite fit: null, not nan or inf
-  cudaGMMWeight::GMMResult<real, 3> broken3(0, 1);
-  broken3.weight[0] = NAN;
-  broken3.logLikelihoodFinal = INFINITY;
-  broken3.convergeStep = 1;
-  for (int e = 0; e < 3; e++)
-    broken3.mean[e] = 0;
-  for (int e = 0; e < 9; e++)
-    broken3.coVariance[e] = e % 4 ? 0 : 1;
-  const std::string json = broken3.outputString();
-  check(json.find("null") != std::string::npos &&
-            json.find("nan") == std::string::npos &&
-            json.find("inf") == std::string::npos,
-        "the JSON of a non-finite fit has null", 0);
-
-  // no point, too many components: refused
-  auto refused = [&](int numComponents, int numPoints) {
-    std::vector<real> w(numComponents, 1.0 / numComponents),
-        mean(numComponents * 3, 0), cov(numComponents * 9, 0);
-    cudaGMMWeight::GMMParam_t<real> param = {.numComponents = numComponents,
-                                             .maxIteration = 1,
-                                             .threshold = kThreshold,
-                                             .weightInit = w.data(),
-                                             .meanInit = mean.data(),
-                                             .coVarianceInit = cov.data(),
-                                             .normalize = false,
-                                             .scale = 1,
-                                             .checkCovariance = true,
-                                             .covarianceTolerance =
-                                                 kCovarianceTolerance,
-                                             .minVariance = kMinVariance,
-                                             .prune = false,
-                                             .pruneThreshold = kPruneThreshold};
+  // no point, too many components or responsibilities, fits that do not
+  // cover the points, no iteration, a scale not positive and finite, no or
+  // non-finite initial components: refused (before any work on the points)
+  // fits: those of the offsets, or given without offsets; the initial means
+  // meanValue, or no initial components
+  auto refused = [&](int numComponents, int numPoints,
+                     const std::vector<int>& offsets = {}, int fits = 0,
+                     int maxIteration = 1, real scale = 1, real meanValue = 0,
+                     bool initial = true) {
+    if (fits == 0)
+      fits = offsets.empty() ? 1 : (int)offsets.size() - 1;
+    std::vector<real> w(fits * numComponents, 1.0 / numComponents),
+        mean(fits * numComponents * 3, meanValue),
+        cov(fits * numComponents * 9, 0), scales(fits, scale);
+    cudaGMMWeight::GMMParam_t<real> param = {
+        .numComponents = numComponents,
+        .maxIteration = maxIteration,
+        .threshold = kThreshold,
+        .weightInit = initial ? w.data() : nullptr,
+        .meanInit = mean.data(),
+        .coVarianceInit = cov.data(),
+        .normalize = true,
+        .scale = scales.data(),
+        .checkCovariance = true,
+        .covarianceTolerance = kCovarianceTolerance,
+        .minVariance = kMinVariance,
+        .prune = false,
+        .pruneThreshold = kPruneThreshold};
     real* none[3] = {nullptr, nullptr, nullptr};
     GMMPoints data(numPoints, none, nullptr);
     try {
-      gmm.config(&param, &data);
+      gmm.config(&param, &data, fits,
+                 offsets.empty() ? nullptr : offsets.data());
     } catch (const std::invalid_argument&) {
       return true;
     }
@@ -680,16 +797,35 @@ int testDegenerate(GMMModel& gmm) {
   check(refused(2, 0), "no point refused", 0);
   check(refused(cudaGMMWeight::kGMMThreads + 1, 10),
         "more components than threads refused", 0);
+  check(refused(2, 10, {0, 4, 9}) && refused(2, 10, {1, 4, 10}) &&
+            refused(2, 10, {0, 6, 4, 10}),
+        "fits that do not cover the points in order refused", 0);
+  check(refused(2, 10, {}, 3), "several fits without offsets refused", 0);
+  check(refused(2, 10, {}, 1, 0), "no EM iteration refused", 0);
+  check(refused(2, 10, {}, 1, 1, 0) && refused(2, 10, {}, 1, 1, NAN) &&
+            refused(2, 10, {}, 1, 1, INFINITY),
+        "normalised, a scale 0, NaN or infinite refused", 0);
+  check(refused(cudaGMMWeight::kGMMThreads,
+                INT_MAX / cudaGMMWeight::kGMMThreads + 1),
+        "more than INT_MAX responsibilities refused", 0);
+  check(refused(2, 10, {}, 1, 1, 1, 0, false), "no initial components refused",
+        0);
+  check(refused(2, 10, {}, 1, 1, 1, NAN), "a NaN initial mean refused", 0);
   return failures;
 }
 
-/** The fits are equal bit for bit. */
+/** The fits are equal bit for bit (the parameters of the components; not
+ *  the padding of a Gaussian). */
 bool sameFit(const Result& a, const Result& b) {
   bool same = a.steps == b.steps && a.logLikelihood == b.logLikelihood &&
               a.components.size() == b.components.size();
-  for (size_t c = 0; same && c < a.components.size(); c++)
-    same =
-        std::memcmp(&a.components[c], &b.components[c], sizeof(Gaussian)) == 0;
+  for (size_t c = 0; same && c < a.components.size(); c++) {
+    const Gaussian &x = a.components[c], &y = b.components[c];
+    same = std::memcmp(&x.weight, &y.weight, sizeof(x.weight)) == 0 &&
+           std::memcmp(x.mean, y.mean, sizeof(x.mean)) == 0 &&
+           std::memcmp(x.cov, y.cov, sizeof(x.cov)) == 0 &&
+           x.active == y.active;
+  }
   return same;
 }
 
@@ -708,17 +844,14 @@ int testReproducible(GMMModel& gmm) {
   return failures;
 }
 
-int testProduction(GMMModel& gmm) {
-  std::printf("production\n");
-  failures = 0;
-  const std::vector<Gaussian> truth = twoComponents();
-  const Histogram h = histogramOf(truth, false);
-  // means drawn in the unit ball, diagonal covariances, equal weights
-  std::mt19937 gen(2024);
+/** A start as the analysis draws it: means in the unit ball, round
+ *  covariances of the given variance, equal weights. */
+std::vector<Gaussian> drawnStart(int components, real variance,
+                                 std::mt19937& gen) {
   std::uniform_real_distribution<real> uniform(-1, 1);
-  std::vector<Gaussian> start(kProductionComponents);
+  std::vector<Gaussian> start(components);
   for (Gaussian& g : start) {
-    g = {1.0 / kProductionComponents, {}, {}};
+    g = {real(1) / components, {}, {}};
     real r2;
     do {
       r2 = 0;
@@ -728,8 +861,19 @@ int testProduction(GMMModel& gmm) {
       }
     } while (r2 > 1);
     for (int d = 0; d < 3; d++)
-      g.cov[d * 4] = 0.04;
+      g.cov[d * 4] = variance;
   }
+  return start;
+}
+
+int testProduction(GMMModel& gmm) {
+  std::printf("production\n");
+  failures = 0;
+  const std::vector<Gaussian> truth = twoComponents();
+  const Histogram h = histogramOf(truth, false);
+  std::mt19937 gen(2024);
+  const std::vector<Gaussian> start =
+      drawnStart(kProductionComponents, kProductionStartVariance, gen);
   const Result r = fit(gmm, h, start, 1.0, true, kProductionIterations, true,
                        kProductionThreshold);
   const Result two = fit(
@@ -752,6 +896,184 @@ int testProduction(GMMModel& gmm) {
   return failures;
 }
 
+int testBatch(GMMModel& gmm) {
+  std::printf("batch\n");
+  failures = 0;
+  const std::vector<Gaussian> truth = twoComponents();
+  std::vector<Gaussian> other = truth; // shifted and narrower
+  for (Gaussian& g : other) {
+    g.mean[0] *= -0.5;
+    g.mean[2] += 0.1;
+    for (real& c : g.cov)
+      c *= 0.5;
+  }
+  const Histogram a = histogramOf(truth, false);
+  const Histogram b = histogramOf(other, false, kOneStepLargeGrid);
+  Histogram one, none;
+  for (int d = 0; d < 3; d++)
+    one.point[d].push_back(0.1 * (d + 1));
+  one.weight.push_back(1000);
+  Histogram weightless = histogramOf(truth, false, kOneStepGrid);
+  std::fill(weightless.weight.begin(), weightless.weight.end(), weight_t(0));
+  const std::vector<const Histogram*> histograms = {&a, &b, &one, &none,
+                                                    &weightless};
+  const std::vector<std::vector<Gaussian>> starts = {
+      startWithFar(truth), startWithFar(other), startWithFar(truth),
+      startWithFar(truth), startWithFar(other)};
+  check((int)b.size() > kStatisticsPass,
+        "a fit with more points than a pass of the statistics", b.size());
+
+  // normalised and not, to convergence and stopped at a pruning at the limit
+  const std::vector<real> scaled = {2.0, 1.5, 3.0, 2.0, 1.0},
+                          plain(histograms.size(), 0);
+  const struct {
+    const char* name;
+    const std::vector<real>& scales;
+    int maxIterations;
+  } runs[] = {{"normalised", scaled, kMaxIterations},
+              {"not normalised", plain, kMaxIterations},
+              {"limit at the first pruning", scaled, kPruneLimit}};
+  for (const auto& run : runs) {
+    const std::vector<Result> batch =
+        fitBatch(gmm, histograms, starts, run.scales, true, run.maxIterations);
+    bool same = true;
+    std::printf("  %s: EM steps", run.name);
+    for (size_t f = 0; f < histograms.size(); f++) {
+      std::printf(" %d", batch[f].steps);
+      if (histograms[f]->size() > 0)
+        same &= sameFit(batch[f], fit(gmm, *histograms[f], starts[f],
+                                      run.scales[f], true, run.maxIterations));
+    }
+    std::printf("\n");
+    check(same, "each fit of the batch: the bits of the fit alone", 0);
+    check(batch[3].steps == 0, "the fit without points: no step",
+          batch[3].steps);
+    check(batch[4].steps == 1 && batch[4].logLikelihood == 0,
+          "the fit without weight: one step, log-likelihood 0", batch[4].steps);
+  }
+  return failures;
+}
+
+int testManyFits(GMMModel& gmm) {
+  std::printf("manyfits\n");
+  failures = 0;
+  std::mt19937 gen(97531);
+  std::uniform_real_distribution<real> unit(0.0, 1.0);
+  std::normal_distribution<real> normal(0.0, 1.0);
+  std::vector<Histogram> histograms(kManyFits);
+  std::vector<std::vector<Gaussian>> starts(kManyFits);
+  std::vector<real> scales(kManyFits);
+  for (int f = 0; f < kManyFits; f++) {
+    Histogram& h = histograms[f];
+    const int points = f % kManyFitsEmptyEvery == 0
+                           ? 0
+                           : 1 + (int)(unit(gen) * kManyFitsMaxPoints);
+    const real center[3] = {unit(gen) - 0.5, unit(gen) - 0.5, unit(gen) - 0.5};
+    const real sigma = 0.05 + 0.15 * unit(gen);
+    real largest = 0;
+    for (int i = 0; i < points; i++) {
+      for (int d = 0; d < 3; d++) {
+        h.point[d].push_back(center[d] + sigma * normal(gen));
+        largest = std::max(largest, std::fabs(h.point[d].back()));
+      }
+      h.weight.push_back((weight_t)(1 + 99 * unit(gen)));
+    }
+    scales[f] = std::max(largest, real(1e-3));
+    for (int c = 0; c < 3; c++) {
+      Gaussian g = {1.0 / 3, {}, {}};
+      for (int d = 0; d < 3; d++) {
+        g.mean[d] = center[d] + sigma * normal(gen);
+        g.cov[d * 4] = sigma * sigma;
+      }
+      starts[f].push_back(g);
+    }
+  }
+  std::vector<const Histogram*> pointers;
+  for (const Histogram& h : histograms)
+    pointers.push_back(&h);
+  const std::vector<Result> batch =
+      fitBatch(gmm, pointers, starts, scales, true, kProductionIterations, true,
+               kProductionThreshold);
+  bool same = true, finite = true, sums = true, empty = true;
+  int mostSteps = 0;
+  for (int f = 0; f < kManyFits; f++) {
+    if (histograms[f].size() == 0) {
+      empty &= batch[f].steps == 0;
+      continue;
+    }
+    mostSteps = std::max(mostSteps, batch[f].steps);
+    finite &= std::isfinite(batch[f].logLikelihood);
+    sums &= std::fabs(batch[f].weightSum() - 1) < kWeightSumError;
+    if (f % kManyFitsAloneEvery == 0)
+      same &= sameFit(batch[f],
+                      fit(gmm, histograms[f], starts[f], scales[f], true,
+                          kProductionIterations, true, kProductionThreshold));
+  }
+  std::printf("  %d fits, %d EM steps at most\n", kManyFits, mostSteps);
+  check(same, "fits of the batch: the bits of the fits alone", 0);
+  check(finite, "every fit finite", 0);
+  check(sums, "the weights of every fit sum to 1", 0);
+  check(empty, "the fits without points: no step", 0);
+  check(mostSteps <= kProductionIterations + 1, "the iteration limit",
+        mostSteps);
+  return failures;
+}
+
+int testComponents(GMMModel& gmm) {
+  std::printf("components\n");
+  failures = 0;
+  const std::vector<Gaussian> truth = twoComponents();
+  const Histogram h = histogramOf(truth, false, kOneStepGrid);
+  std::mt19937 gen(8642);
+  for (int components : {1, kMostComponents}) {
+    const std::vector<Gaussian> start =
+        drawnStart(components, kDrawnStartVariance, gen);
+    std::printf("  %d components, one EM step\n", components);
+    const std::vector<Gaussian> host = checkOneStep(gmm, h, start);
+    if (components == 1) {
+      // the first step gives the moments of the points, which do not move
+      const Result c = fit(gmm, h, start, 2.0, true);
+      std::printf("  1 component to convergence: %d EM steps\n", c.steps);
+      check(c.steps == cudaGMMWeightKernel::kMinStepsToConverge + 1,
+            "converged at the least steps", c.steps);
+      check(c.components[0].weight == 1, "weight 1", c.components[0].weight);
+      check(stepError(c.components, host) < kOneStepError,
+            "the moments of the points", stepError(c.components, host));
+    }
+  }
+
+  // a batch with the most components, normalised, pruning
+  std::vector<Gaussian> other = truth;
+  for (Gaussian& g : other)
+    g.mean[1] = -g.mean[1];
+  const Histogram b = histogramOf(other, false, kOneStepGrid);
+  const std::vector<std::vector<Gaussian>> starts = {
+      drawnStart(kMostComponents, kDrawnStartVariance, gen),
+      drawnStart(kMostComponents, kDrawnStartVariance, gen)};
+  const std::vector<real> scales = {1.5, 2.0};
+  const std::vector<Result> batch =
+      fitBatch(gmm, {&h, &b}, starts, scales, true, kProductionIterations, true,
+               kProductionThreshold, kMostComponentsPruneThreshold);
+  bool same = true, finite = true, sums = true;
+  for (int f = 0; f < 2; f++) {
+    int active = 0;
+    for (const Gaussian& g : batch[f].components)
+      active += g.weight > 10 * cudaGMMWeightKernel::kPrunedWeight;
+    std::printf("  %d components, fit %d: %d EM steps, %d left\n",
+                kMostComponents, f, batch[f].steps, active);
+    same &=
+        sameFit(batch[f], fit(gmm, f == 0 ? h : b, starts[f], scales[f], true,
+                              kProductionIterations, true, kProductionThreshold,
+                              kMostComponentsPruneThreshold));
+    finite &= std::isfinite(batch[f].logLikelihood);
+    sums &= std::fabs(batch[f].weightSum() - 1) < kWeightSumError;
+  }
+  check(same, "fits of the batch: the bits of the fits alone", 0);
+  check(finite, "every fit finite", 0);
+  check(sums, "the weights of every fit sum to 1", 0);
+  return failures;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -761,22 +1083,29 @@ int main(int argc, char** argv) {
       {"normalize", testNormalize},   {"prune", testPrune},
       {"steps", testSteps},           {"reproducible", testReproducible},
       {"production", testProduction}, {"line", testLine},
-      {"floor", testFloor},           {"degenerate", testDegenerate}};
+      {"floor", testFloor},           {"degenerate", testDegenerate},
+      {"batch", testBatch},           {"manyfits", testManyFits},
+      {"components", testComponents}};
   std::string only;
   for (int i = 1; i + 1 < argc; i++)
     if (std::string(argv[i]) == "--case")
       only = argv[i + 1];
   int bad = 0, ran = 0;
-  stream = createPriorityStream(StreamPriority::Diagnostic);
-  {
-    GMMModel gmm(stream);
-    for (const auto& c : cases)
-      if (only.empty() || only == c.first) {
-        bad += c.second(gmm);
-        ran++;
-      }
+  try {
+    stream = createPriorityStream(StreamPriority::Diagnostic);
+    {
+      GMMModel gmm(stream);
+      for (const auto& c : cases)
+        if (only.empty() || only == c.first) {
+          bad += c.second(gmm);
+          ran++;
+        }
+    }
+    cudaErrChk(cudaStreamDestroy(stream));
+  } catch (const std::exception& error) {
+    std::printf("gmmTest failed: %s\n", error.what());
+    return 1;
   }
-  cudaErrChk(cudaStreamDestroy(stream));
   if (ran == 0) {
     std::printf("unknown case %s\n", only.c_str());
     return 2;

@@ -20,25 +20,23 @@ private:
   std::unique_ptr<dataAnalysisPipelineImpl> impl;
 
 public:
-  /** Creates the output folders of the enabled analyses; collective (MPI),
-   *  every rank constructs it. */
+  /** Sets up the enabled analyses and opens their records files, one per
+   *  analysis and rank (on a restart: continued, cut at the first cycle,
+   *  or kept aside); collective (MPI), every rank constructs it. */
   dataAnalysisPipeline(iPic3D::c_Solver& KCode);
 
-  /** On an analysis cycle with the macrocell spectra, sort by cell the
-   *  particles of their species and pack B for them (synchronous); called
-   *  before startAnalysis. */
+  /** On an analysis cycle with the macrocell spectra or histograms, sort by
+   *  cell the particles of their species and, for the spectra, pack B
+   *  (synchronous); called before startAnalysis. */
   void prepareAnalysis(int cycle);
 
   /** Start the analyses of the cycle, if it is an analysis cycle, on the
    *  pipeline's thread; the mover must wait for waitForAnalysis. */
   void startAnalysis(int cycle);
 
-  /** Non-blocking: 1 while an analysis runs (not used currently). */
-  int checkAnalysis();
-
-  /** Blocking wait for the analysis: its result, 0 if none. An error of
-   *  the analysis thread is thrown again here, on the calling thread. */
-  int waitForAnalysis();
+  /** Blocking wait for the analysis, if one runs. An error of the analysis
+   *  thread is thrown again here, on the calling thread. */
+  void waitForAnalysis();
 
   ~dataAnalysisPipeline();
 };

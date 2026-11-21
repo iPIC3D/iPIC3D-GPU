@@ -425,6 +425,9 @@ private:
   // solver's arrays. Used by:
   //   - MomentsAwait()        (host-side cudaEventSynchronize)
   //   - outputCopyAsync()     (cudaStreamWaitEvent on outputStream)
+  //   - ScheduleHeatFlux() and the data analysis (startAnalysis):
+  //     cudaStreamWaitEvent on their streams (outputCopyAsync records it
+  //     again after a checkpoint sort)
   cudaEvent_t* cycleEndEvent; // [ns]
   // Per-species events of cudaLauncherAsync, created once in initCUDA.
   cudaEvent_t* moverHashedReadyEvt; // [ns] : recorded on streams[i]   after

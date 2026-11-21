@@ -17,15 +17,47 @@ inline constexpr int kMStepStatistics =
     1 + dataDim + dataDim * (dataDim + 1) / 2;
 /** Smallest component weight after an M step. */
 inline constexpr double kMinComponentWeight = 1e-8;
-/** Most threads per block of mStepStatisticsKernel. */
-inline constexpr int kMaxStatisticsThreads = 1024;
-/** Pruning: the weight of a pruned component, and the weight given to the
- *  other components below the threshold. */
+/** Threads per block of the EM kernels: also the most components. */
+inline constexpr int kGMMThreads = 256;
+static_assert(kGMMThreads % 64 == 0, "whole warps on NVIDIA and AMD");
+/** Pruning: the weight of a pruned component, and the share of the equal
+ *  weight 1 / numComponents given to the other components below the
+ *  threshold (the threshold at least): 0.05 with 10 components; not at the
+ *  iteration limit, where one EM step follows only. */
 inline constexpr double kPrunedWeight = 1e-15;
-inline constexpr double kRaisedWeight = 0.05;
-/** A non-finite mean is reset to distinct values in [-kResetMeanOffset,
- *  1 - kResetMeanOffset) times the half width of the data range. */
-inline constexpr double kResetMeanOffset = 0.3;
+inline constexpr double kRaisedShare = 0.5;
+/** EM steps at most between two prunings; a converged fit is checked at
+ *  once. */
+inline constexpr int kPruneInterval = 10;
+/** EM steps before the fit may converge: at time step 0, when the
+ *  distributions are exactly Gaussian, the fit otherwise stops after 2-3
+ *  iterations, far from the maximum of the likelihood. */
+inline constexpr int kMinStepsToConverge = 6;
+/** The phase of a fit: running, one last EM step after a pruning at the
+ *  iteration limit, done. */
+inline constexpr int kFitRunning = 0;
+inline constexpr int kFitFinalStep = 1;
+inline constexpr int kFitDone = 2;
+
+/** Where a fit is in its EM iterations (mStepFinalizeKernel). */
+template <typename T> struct GMMFitState {
+  T logLikelihood;    // of the last EM step, before its M step
+  T logLikelihoodOld; // of the step before; -inf at first and after a restart
+  T totalWeight;      // of the points, in the last EM step
+  int step;           // EM steps run
+  int sinceCheck;     // EM steps since the last pruning check
+};
+
+/** The settings of the fits that the EM iterations use, by value. */
+template <typename T> struct GMMControl {
+  int maxIteration;
+  T threshold; // of the log-likelihood gain per unit weight
+  bool checkCovariance;
+  T minVariance;
+  T minPivot;
+  bool prune;
+  T pruneThreshold;
+};
 
 /** |y|^2 with L y = b: b^T (L L^T)^-1 b, with L the factor of
  *  choleskyFactor (its diagonal inverted). */
@@ -44,8 +76,9 @@ __device__ __forceinline__ T mahalanobis2(const T* L, const T* b) {
 }
 
 /** Reset the non-finite elements of a coVariance matrix (to 0 off the
- *  diagonal, to minVariance on it), raise its variances to minVariance, copy
- *  its upper triangle to the lower one. */
+ *  diagonal, to minVariance on it) and copy its upper triangle to the lower
+ *  one; choleskyFactor then raises its variances (pivots) to minPivot, at
+ *  least minVariance. */
 template <typename T, int dataDim>
 __device__ __forceinline__ void checkCovariance(T* coVariance,
                                                 const T minVariance) {
@@ -57,7 +90,7 @@ __device__ __forceinline__ void checkCovariance(T* coVariance,
       coVariance[j * dataDim + i] = upper;
     }
     T& variance = coVariance[i * dataDim + i];
-    if (!(variance >= minVariance && isfinite(variance)))
+    if (!isfinite(variance))
       variance = minVariance;
   }
 }
@@ -103,304 +136,60 @@ __device__ __forceinline__ T choleskyFactor(T* coVariance, T* L,
   return -0.5 * (dataDim * log(2.0 * M_PI) + logDeterminant);
 }
 
-/**
- * @brief calculate the log likelihood of the data points for all components, to
- * be summed up to get the total log likelihood
- * @details this cuda kernel will be launched once for all data points
- * @param dataCUDAPtr pointer to the data, including numData
- * @param meanVector pointer to the mean vector, number of components * dataDim
- * @param coVarianceDecomp Cholesky factors (choleskyFactor: lower triangle,
- * diagonal inverted), number of components * dataDim * dataDim
- * @param normalizer pointer to the log normalisation of each component,
- * -0.5 * (dataDim * log(2 pi) + log(det coVariance)), number of components
- * @param logLikelihoodForPoints pointer to the logLikelihoodForPoints array, to
- * store the log p(x_i|mean,coVariance) of each data point, used later, number
- * of components * numData
- * @param numComponents number of components
- * @param flagActiveComponents boolean array with flags that indicate which
- * components are active, number of components
- *
- * Not used currently: the EM runs eStepKernel, mStepStatisticsKernel and
- * mStepFinalizeKernel.
- */
-template <typename T, int dataDim, typename U>
-__global__ void calcLogLikelihoodForPointsKernel(
-    const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr,
-    const T* meanVector, const T* coVarianceDecomp, const T* normalizer,
-    T* logLikelihoodForPoints, const int numComponents,
-    const bool* flagActiveComponents) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  auto numData = dataCUDAPtr->getNumData();
-  if (idx >= numData)
-    return;
-
-  for (int component = 0; component < numComponents; component++) {
-    auto logLikelihoods = logLikelihoodForPoints + component * numData;
-    if (!flagActiveComponents[component]) {
-      logLikelihoods[idx] = 0.0;
-      continue;
-    }
-    T xMinusMean[dataDim];
-    for (int dim = 0; dim < dataDim; dim++)
-      xMinusMean[dim] =
-          dataCUDAPtr->getDim(dim)[idx] - meanVector[component * dataDim + dim];
-    logLikelihoods[idx] =
-        normalizer[component] -
-        0.5 * mahalanobis2<T, dataDim>(
-                  coVarianceDecomp + component * dataDim * dataDim, xMinusMean);
-  }
+/** The coVariance of a component checked (checkCovariance, with
+ *  control.checkCovariance) and factored (choleskyFactor, pivots raised to
+ *  control.minPivot) into coVarianceDecomp. @return its log normalisation. */
+template <typename T, int dataDim>
+__device__ __forceinline__ T factorCoVariance(T* coVariance,
+                                              T* coVarianceDecomp,
+                                              const GMMControl<T>& control) {
+  if (control.checkCovariance)
+    checkCovariance<T, dataDim>(coVariance, control.minVariance);
+  return choleskyFactor<T, dataDim>(coVariance, coVarianceDecomp,
+                                    control.minPivot);
 }
 
 /**
- * @brief calculate the log likelihood of the data points for all components, to
- * be summed up to get the total log likelihood, and the posterior
- * @details this cuda kernel will be launched once for all data points
- *
- * @param dataCUDAPtr pointer to the data, including numData
- * @param logWeightVector pointer to the weight vector, log(weight), number of
- * components
- * @param logLikelihoodForPoints pointer to the log likelihood of the data
- * points for all components, p(x_i|mean,coVariance), number of components *
- * numData
- * @param logLikelihood pointer to the log likelihood(log p(x_i)) of the data
- * points, to be summed up to get the total log likelihood(L or log p(x)),
- * numData
- * @param posterior pointer to the posterior_nk(gamma) of the data points for
- * all components, to be summed up to get the total Posterior(Gamma), number of
- * components * numData
- * @param flagActiveComponents boolean array with flags that indicate which
- * components are active, number of components
- *
- * Not used currently: the EM runs eStepKernel, mStepStatisticsKernel and
- * mStepFinalizeKernel.
- */
-template <typename T, int dataDim, typename U>
-__global__ void calcLogLikelihoodPxAndposteriorKernel(
-    const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr,
-    const T* logWeightVector, const T* logLikelihoodForPoints, T* logLikelihood,
-    T* posterior, const int numComponents, const bool* flagActiveComponents) {
-
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  auto numData = dataCUDAPtr->getNumData();
-  if (idx >= numData)
-    return;
-
-  T maxValue = -INFINITY;
-  T sum = 0;
-
-  for (int component = 0; component < numComponents; component++) {
-    if (!flagActiveComponents[component])
-      continue;
-    T logPxComponent =
-        logWeightVector[component] +
-        logLikelihoodForPoints[component * numData +
-                               idx]; // log(weight) +
-                                     // log(p(x_i|mean,coVariance))
-    if (logPxComponent > maxValue)
-      maxValue = logPxComponent;
-  }
-
-  for (int component = 0; component < numComponents; component++) {
-    if (!flagActiveComponents[component])
-      continue;
-    T logPxComponent =
-        logWeightVector[component] +
-        logLikelihoodForPoints[component * numData +
-                               idx]; // log(weight) +
-                                     // log(p(x_i|mean,coVariance))
-    sum += exp(logPxComponent - maxValue);
-  }
-
-  logLikelihood[idx] = maxValue + log(sum);
-
-  for (int component = 0; component < numComponents; component++) {
-    if (!flagActiveComponents[component]) {
-      posterior[component * numData + idx] = 0.0;
-      continue;
-    }
-    posterior[component * numData + idx] -= logLikelihood[idx];
-  }
-}
-
-/**
- * @brief update the weight of each component
- * @details this cuda kernel will be launched once for all components, In one
- * block. The shared memory should be sizeof(T) * numComponents. The threads
- * of inactive components return before __syncthreads: fix before using it.
- *
- * @param logWeightVector pointer to the old weight vector, log(weight), number
- * of components
- * @param logPosterior pointer to the posterior_k(Gamma), number of components
- * @param flagActiveComponents boolean array with flags that indicate which
- * components are active, number of components
- *
- * Not used currently: the EM runs eStepKernel, mStepStatisticsKernel and
- * mStepFinalizeKernel.
- */
-template <typename T>
-__global__ void updateWeightKernel(T* logWeightVector, const T* logPosterior,
-                                   const int numComponents,
-                                   const bool* flagActiveComponents) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= numComponents)
-    return;
-  if (!flagActiveComponents[idx])
-    return;
-
-  extern __shared__ T
-      sharedLogMeanTimesPosterior[]; // for each component, the sum
-  sharedLogMeanTimesPosterior[threadIdx.x] =
-      logWeightVector[idx] +
-      logPosterior[idx]; // log(weight_k) + log(Posterior_k)
-  __syncthreads();
-
-  T sum = 0;
-  for (int i = 0; i < numComponents; i++) {
-    if (!flagActiveComponents[i])
-      continue;
-    sum += exp(sharedLogMeanTimesPosterior[i]);
-  }
-
-  logWeightVector[idx] = sharedLogMeanTimesPosterior[idx] - log(sum);
-
-  if (logWeightVector[idx] < log(1e-8))
-    logWeightVector[idx] = log(1e-8);
-}
-
-/**
- * @brief calculate the new coVariance matrix for each component, to be summed
- * up and divided to get the total coVariance matrix
- * @details this cuda kernel will be launched once for all data points
- *
- * @param dataCUDAPtr pointer to the data, including numData
- * @param logPosterior_nk pointer to the posterior_nk(Gamma), number of
- * components * numData
- * @param logPosterior_k pointer to the posterior_k(Gamma), number of components
- * @param meanVector pointer to the mean vector, number of components * dataDim,
- * just updated
- * @param tempCoVarianceForDataPoints pointer to the coVariance matrix for each
- * data point, number of components * dataNum * dataDim * dataDim
- * @param flagActiveComponents boolean array with flags that indicate which
- * components are active, number of components
- *
- * Not used currently: the EM runs eStepKernel, mStepStatisticsKernel and
- * mStepFinalizeKernel.
- */
-template <typename T, int dataDim, typename U>
-__global__ void updateCoVarianceKernel(
-    const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr,
-    const T* logPosterior_nk, const T* logPosterior_k, const T* meanVector,
-    T* tempCoVarianceForDataPoints, const int numComponents,
-    const bool* flagActiveComponents) {
-
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  auto numData = dataCUDAPtr->getNumData();
-  if (idx >= numData)
-    return;
-
-  // for each component
-  for (int component = 0; component < numComponents; component++) {
-    if (!flagActiveComponents[component])
-      continue;
-    auto logPosterior_nkComponent = logPosterior_nk + component * numData;
-    auto meanComponent = meanVector + component * dataDim;
-    auto coVarianceComponent =
-        tempCoVarianceForDataPoints + component * numData * dataDim * dataDim;
-
-    // update the coVariance matrix
-    T xMinusMean[dataDim]; // (x - mean^(t+1)) vector
-    for (int dim = 0; dim < dataDim; dim++) {
-      xMinusMean[dim] = dataCUDAPtr->getDim(dim)[idx] - meanComponent[dim];
-    }
-
-    for (int i = 0; i < dataDim; i++) {
-      for (int j = 0; j < dataDim; j++) {
-        const auto elementInMatrix = i * dataDim + j;
-        coVarianceComponent[elementInMatrix * numData + idx] =
-            exp(logPosterior_nkComponent[idx]) * xMinusMean[i] * xMinusMean[j];
-      }
-    }
-  }
-}
-
-/**
- * @brief decompose the coVariance matrix for each component
- * @details this cuda kernel will be launched once for all components
- *
- * @param coVariance pointer to the coVariance matrix, number of components *
- * dataDim * dataDim
- * @param coVarianceDecomp Cholesky factors (choleskyFactor: lower triangle,
- * diagonal inverted), number of components * dataDim * dataDim
- * @param normalizer pointer to the log normalisation of the density,
- * number of components
- * @param flagActiveComponents boolean array with flags that indicate which
- * components are active, number of components
- * @param minPivot smallest square of a diagonal element of the factor (the
- * variance of an axis given the previous ones): a smaller pivot (a nearly
- * singular or non-positive coVariance) is raised to it, and the coVariance
- * with it, so that the factor stays invertible
+ * @brief The initial coVariance of every active component of the fits that
+ * run, checked and factored (factorCoVariance), with its log normalisation;
+ * a fit already done (without points) keeps its components as they are.
+ * @details one block of numComponents threads per fit, component k of fit f
+ * at f * numComponents + k; the arrays as those of mStepFinalizeKernel
  */
 template <typename T, int dataDim>
-__global__ void
-decomposeCoVarianceKernel(T* coVariance, T* coVarianceDecomp, T* normalizer,
-                          const int numComponents,
-                          const bool* flagActiveComponents, const T minPivot) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= numComponents)
+__global__ void factorCoVarianceKernel(T* coVariance, T* coVarianceDecomp,
+                                       T* normalizer, const int numComponents,
+                                       const bool* flagActiveComponents,
+                                       const int* fitPhase,
+                                       const GMMControl<T> control) {
+  const int idx = blockIdx.x * numComponents + threadIdx.x;
+  if (fitPhase[blockIdx.x] == kFitDone || !flagActiveComponents[idx])
     return;
-  if (!flagActiveComponents[idx])
-    return;
-
-  normalizer[idx] = choleskyFactor<T, dataDim>(
+  normalizer[idx] = factorCoVariance<T, dataDim>(
       coVariance + idx * dataDim * dataDim,
-      coVarianceDecomp + idx * dataDim * dataDim, minPivot);
+      coVarianceDecomp + idx * dataDim * dataDim, control);
 }
 
 /**
- * @brief check the coVariance matrix of each component: a non-finite element
- * is reset (to 0 off the diagonal), a variance is raised to minVariance at
- * least, and the matrix is made symmetric. A matrix that is still nearly
- * singular is handled by the pivot floor of decomposeCoVarianceKernel.
- * @details this cuda kernel will be launched once for all components
- *
- * @param coVariance pointer to the coVariance matrix, number of components *
- * dataDim * dataDim
- * @param numComponents number of GMM components
- * @param flagActiveComponents boolean array with flags that indicate which
- * components are active, number of components
- * @param minVariance smallest value of the main diagonal
- */
-template <typename T, int dataDim>
-__global__ void checkAdjustCoVarianceKernel(T* coVariance,
-                                            const int numComponents,
-                                            const bool* flagActiveComponents,
-                                            const T minVariance) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= numComponents)
-    return;
-  if (!flagActiveComponents[idx])
-    return;
-
-  checkCovariance<T, dataDim>(coVariance + idx * dataDim * dataDim,
-                              minVariance);
-}
-
-/**
- * @brief Divide the data points by rescaleFactor (normalizeBack == false), or
- * multiply them by it (normalizeBack == true); one thread per point.
+ * @brief Divide the points of each fit by its scale (normalizeBack ==
+ * false), or multiply them by it (normalizeBack == true).
+ * @details the blocks of the E step: block b on the points blockFirst[b] +
+ * threadIdx.x of fit blockFit[b], below fitOffset[fit + 1]
  *
  * @param dataCUDAPtr pointer to the data, including numData
- * @param rescaleFactor the rescale factor of all dimensions
+ * @param scale the scale of each fit
  */
 template <typename T, int dataDim, typename U, bool normalizeBack>
 __global__ void normalizePointsKernel(
     cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* dataCUDAPtr,
-    const T rescaleFactor) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  auto numData = dataCUDAPtr->getNumData();
-  if (idx >= numData)
+    const int* fitOffset, const int* blockFit, const int* blockFirst,
+    const T* scale) {
+  const int fit = blockFit[blockIdx.x];
+  const int idx = blockFirst[blockIdx.x] + threadIdx.x;
+  if (idx >= fitOffset[fit + 1])
     return;
 
+  const T rescaleFactor = scale[fit];
   for (int dim = 0; dim < dataDim; dim++) {
     if constexpr (normalizeBack)
       dataCUDAPtr->getDim(dim)[idx] *= rescaleFactor;
@@ -410,66 +199,35 @@ __global__ void normalizePointsKernel(
 }
 
 /**
- * @brief normalize mean vector and cov-matrix back such that the range is the
- * original one
- * @details this cuda kernel will be launched once for all components
- *
- * @param meanVector pointer to the mean vector, number of components * dataDim
- * @param coVariance pointer to the coVariance matrix, number of components *
- * dataDim * dataDim
- * @param rescaleFactor the rescale factor of all dimensions
- * @param numComponents number of components, all rescaled (a pruned one keeps
- * the parameters it had, in the same units as the others)
- */
-template <typename T, int dataDim>
-__global__ void normalizeMeanAndCovBack(T* meanVector, T* coVariance,
-                                        const T rescaleFactor,
-                                        const int numComponents) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= numComponents)
-    return;
-
-  auto meanComponent = meanVector + idx * dataDim;
-  auto coVarianceComponent = coVariance + idx * dataDim * dataDim;
-  for (int i = 0; i < dataDim; i++)
-    meanComponent[i] *= rescaleFactor;
-  const T rescaleFactor2 = rescaleFactor * rescaleFactor;
-  for (int i = 0; i < dataDim * dataDim; i++)
-    coVarianceComponent[i] *= rescaleFactor2;
-}
-
-/**
  * @brief prune the active component of smallest weight below the threshold,
- * if any and if it is not the last active one: the other active components
- * below it get kRaisedWeight, the pruned one kPrunedWeight, and the weights of
+ * if any and if it is not the last active one: with raise, the other
+ * active components below it get kRaisedShare / numComponents (the
+ * threshold at least); the pruned one gets kPrunedWeight, and the weights of
  * the active ones are normalised
- * @details one block, one thread per component; shared memory sizeof(T) *
- * numComponents + sizeof(bool) * (numComponents + 1)
+ * @details called by every thread of a block of numComponents threads at
+ * least, the components of one fit; scratch: numComponents * sizeof(T) +
+ * numComponents + 1 bytes of shared memory, free again on return
  *
- * @param logWeightVector pointer to the old weight vector, log(weight), number
- * of components
+ * @param logWeightVector the weights of the components, log(weight)
  * @param weightThreshold the threshold below which the components are pruned
- * @param numComponents num components
- * @param flagActiveComponents boolean array with flags that indicate which
- * components are active plus one element for pruning flag, number of components
- * +1
+ * @param numComponents number of components
+ * @param flagActiveComponents the active components
+ * @param raise raise the other components below the threshold: not at the
+ * iteration limit, where one EM step follows only
+ * @return whether a component was pruned, in every thread
  */
 template <typename T>
-__global__ void
-pruneOneComponentKernel(T* logWeightVector, const T weightThreshold,
-                        const int numComponents, bool* flagActiveComponents) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= numComponents)
-    return;
-
-  extern __shared__ char
-      sharedMemory[]; // for each component, weight and flagActive
-
-  T* sharedWeights = (T*)sharedMemory; // First segment for weight values
-  bool* sharedFlags =
-      (bool*)&sharedWeights[numComponents]; // Second segment for boolean flags
-  sharedWeights[idx] = logWeightVector[idx];
-  sharedFlags[idx] = flagActiveComponents[idx];
+__device__ bool pruneOneComponent(T* logWeightVector, const T weightThreshold,
+                                  const int numComponents,
+                                  bool* flagActiveComponents, const bool raise,
+                                  unsigned char* scratch) {
+  T* sharedWeights = reinterpret_cast<T*>(scratch);
+  bool* sharedFlags = reinterpret_cast<bool*>(sharedWeights + numComponents);
+  const int idx = threadIdx.x;
+  if (idx < numComponents) {
+    sharedWeights[idx] = logWeightVector[idx];
+    sharedFlags[idx] = flagActiveComponents[idx];
+  }
   __syncthreads();
 
   if (idx == 0) {
@@ -484,111 +242,60 @@ pruneOneComponentKernel(T* logWeightVector, const T weightThreshold,
     if (prune)
       sharedFlags[smallest] = false;
     sharedFlags[numComponents] = prune;
-    flagActiveComponents[numComponents] = sharedFlags[numComponents];
   }
   __syncthreads();
 
-  flagActiveComponents[idx] = sharedFlags[idx];
-
-  if (sharedFlags[numComponents]) {
-
-    // an active component of low weight gets kRaisedWeight, an inactive one
+  const bool prune = sharedFlags[numComponents];
+  if (prune) {
+    // an active component of low weight gets a raised weight (with raise),
+    // at least the threshold before the normalisation below, an inactive one
     // kPrunedWeight
-    if (flagActiveComponents[idx] &&
-        (exp(logWeightVector[idx]) < weightThreshold)) {
-      logWeightVector[idx] = log(T(kRaisedWeight));
+    if (idx < numComponents) {
+      flagActiveComponents[idx] = sharedFlags[idx];
+      if (raise && sharedFlags[idx] &&
+          exp(logWeightVector[idx]) < weightThreshold)
+        logWeightVector[idx] =
+            log(fmax(T(kRaisedShare) / numComponents, weightThreshold));
+      if (!sharedFlags[idx])
+        logWeightVector[idx] = log(T(kPrunedWeight));
+      sharedWeights[idx] = logWeightVector[idx];
     }
-    if (!flagActiveComponents[idx]) {
-      logWeightVector[idx] = log(T(kPrunedWeight));
-    }
-
-    sharedWeights[idx] = logWeightVector[idx];
     __syncthreads();
 
-    if (!flagActiveComponents[idx])
-      return;
-
     // normalize weights of active components
-    T sum = 0.0;
-    for (int i = 0; i < numComponents; i++)
-      if (sharedFlags[i])
-        sum += exp(sharedWeights[i]);
-
-    logWeightVector[idx] -= log(sum);
-  }
-}
-
-/**
- * @brief safety check on the GMM components mean vector: reset the mean of
- * every component (active or not) with a non-finite element
- * @details one block, one thread per component; shared memory numComponents
- * booleans
- *
- * @param meanVector pointer to the mean vector, number of components * dataDim
- * @param numComponents num components
- * @param flagActiveComponents boolean array with flags that indicate which
- * components are active, number of components
- * @param flagResetMean set to whether the mean of an active component was
- * reset
- * @param range half width of the range of the data, in the units of the fit
- */
-template <typename T, int dataDim>
-__global__ void checkMeanValueComponents(T* meanVector, const int numComponents,
-                                         const bool* flagActiveComponents,
-                                         bool* flagResetMean, const T range) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= numComponents)
-    return;
-
-  extern __shared__ char sharedMemory[];
-  bool* sharedFlags = (bool*)&sharedMemory;
-
-  auto meanComponent = meanVector + idx * dataDim;
-  bool flagNaN = false;
-  for (int i = 0; i < dataDim; i++) {
-    if (!isfinite(meanComponent[i])) {
-      flagNaN = true;
-      break;
+    if (idx < numComponents && sharedFlags[idx]) {
+      T sum = 0.0;
+      for (int i = 0; i < numComponents; i++)
+        if (sharedFlags[i])
+          sum += exp(sharedWeights[i]);
+      logWeightVector[idx] -= log(sum);
     }
   }
-  sharedFlags[idx] = flagNaN;
-  // a distinct mean for each component, inside the range of the data
-  if (flagNaN) {
-    for (int i = 0; i < dataDim; i++) {
-      meanComponent[i] =
-          ((T)(i * dataDim + idx) / (T)(dataDim * dataDim + numComponents) -
-           T(kResetMeanOffset)) *
-          range;
-    }
-  }
-
-  __syncthreads();
-
-  if (idx == 0) {
-    bool reset = false;
-    for (int i = 0; i < numComponents; i++)
-      reset = reset || (sharedFlags[i] && flagActiveComponents[i]);
-    *flagResetMean = reset;
-  }
+  __syncthreads(); // the scratch is free again
+  return prune;
 }
 
-// ======= EM step on the data points: E step, M-step statistics, M-step
-// finalize (three kernels per iteration) =======
+// ======= EM step on the points of several fits: E step, M-step statistics,
+// M-step finalize (three kernels per iteration) =======
+// Fit f has the points [fitOffset[f], fitOffset[f + 1]) and the components
+// [f K, (f + 1) K) of every array of components (K = numComponents). The
+// kernels skip the fits whose phase is kFitDone.
 
 /**
  * @brief E step: the responsibility gamma_kn = w_k p_k(x_n) / p(x_n) of every
  * active component for every point (those of an inactive one are not
  * written), and h_n log p(x_n) for the log-likelihood.
- * @details one thread per point
+ * @details one thread per point: block b on the points blockFirst[b] +
+ * threadIdx.x of fit blockFit[b]
  *
  * @param data the points and their weights h
- * @param logWeight log of the component weights, numComponents
- * @param mean component means, numComponents * dataDim
+ * @param logWeight log of the component weights
+ * @param mean component means, K * dataDim per fit
  * @param coVarianceDecomp Cholesky factors (choleskyFactor: diagonal
- * inverted), numComponents * dataDim * dataDim
- * @param normalizer log normalisation of the components, numComponents
- * @param numComponents number of components
- * @param flagActiveComponents active components, numComponents
+ * inverted), K * dataDim * dataDim per fit
+ * @param normalizer log normalisation of the components
+ * @param numComponents number of components of a fit
+ * @param flagActiveComponents active components
  * @param gamma responsibilities, numComponents * numData (component major),
  * written for the active components
  * @param weightedLogLikelihood h_n log p(x_n), numData
@@ -596,14 +303,21 @@ __global__ void checkMeanValueComponents(T* meanVector, const int numComponents,
 template <typename T, int dataDim, typename U>
 __global__ void
 eStepKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* data,
-            const T* logWeight, const T* mean, const T* coVarianceDecomp,
-            const T* normalizer, const int numComponents,
-            const bool* flagActiveComponents, T* gamma,
+            const int* fitOffset, const int* blockFit, const int* blockFirst,
+            const int* fitPhase, const T* logWeight, const T* mean,
+            const T* coVarianceDecomp, const T* normalizer,
+            const int numComponents, const bool* flagActiveComponents, T* gamma,
             T* weightedLogLikelihood) {
-  const int n = blockIdx.x * blockDim.x + threadIdx.x;
-  const int numData = data->getNumData();
-  if (n >= numData)
+  const int fit = blockFit[blockIdx.x];
+  const int n = blockFirst[blockIdx.x] + threadIdx.x;
+  if (fitPhase[fit] == kFitDone || n >= fitOffset[fit + 1])
     return;
+  const int numData = data->getNumData();
+  logWeight += fit * numComponents;
+  mean += fit * numComponents * dataDim;
+  coVarianceDecomp += fit * numComponents * dataDim * dataDim;
+  normalizer += fit * numComponents;
+  flagActiveComponents += fit * numComponents;
 
   T x[dataDim];
   for (int d = 0; d < dataDim; d++)
@@ -651,27 +365,40 @@ eStepKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* data,
  * h gamma_kn (1, x - mean_k, upper triangle of (x - mean_k)(x - mean_k)^T)
  * for every active component, about its current mean (0 for an inactive
  * one), and of h log p(x) (the log-likelihood).
- * @details any number of blocks of a multiple of WARP_SIZE threads, at least
- * kMStepStatistics and at most kMaxStatisticsThreads; a fixed summation order
- * (no atomics). Block b writes
- * to partial[b * (numComponents * S + 1) + k * S + s], S =
- * kMStepStatistics<dataDim>, and the log-likelihood at numComponents * S.
+ * @details blocks of kGMMThreads threads (at least kMStepStatistics); fit f
+ * has the blocks [fitStatBlock[f], fitStatBlock[f + 1]) (blockFit gives the
+ * fit of a block), which walk its points with their own grid stride; a fixed
+ * summation order (no atomics). Block b writes to partial[b * (numComponents
+ * * S + 1) + k * S + s], S = kMStepStatistics<dataDim>, and the
+ * log-likelihood at numComponents * S.
  */
 template <typename T, int dataDim, typename U>
 __global__ void
 mStepStatisticsKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* data,
+                      const int* fitOffset, const int* blockFit,
+                      const int* fitStatBlock, const int* fitPhase,
                       const T* gamma, const T* weightedLogLikelihood,
                       const T* mean, const int numComponents,
                       const bool* flagActiveComponents, T* partial) {
-  __shared__ T
-      warpSum[kMaxStatisticsThreads / WARP_SIZE][kMStepStatistics<dataDim>];
+  static_assert(kMStepStatistics<dataDim> <= kGMMThreads,
+                "a thread per statistic in the block sums");
+  __shared__ T warpSum[kGMMThreads / WARP_SIZE][kMStepStatistics<dataDim>];
+  const int fit = blockFit[blockIdx.x];
+  if (fitPhase[fit] == kFitDone) // the same for the whole block
+    return;
   const int numData = data->getNumData();
-  const int stride = gridDim.x * blockDim.x;
-  const int first = blockIdx.x * blockDim.x + threadIdx.x;
+  const int firstBlock = fitStatBlock[fit];
+  const int stride = (fitStatBlock[fit + 1] - firstBlock) * blockDim.x;
+  const int first =
+      fitOffset[fit] + (blockIdx.x - firstBlock) * blockDim.x + threadIdx.x;
+  const int end = fitOffset[fit + 1];
   const int lane = threadIdx.x % WARP_SIZE, warp = threadIdx.x / WARP_SIZE;
   const U* h = data->getWeight();
+  mean += fit * numComponents * dataDim;
+  flagActiveComponents += fit * numComponents;
   T* blockPartial =
-      partial + blockIdx.x * (numComponents * kMStepStatistics<dataDim> + 1);
+      partial +
+      (size_t)blockIdx.x * (numComponents * kMStepStatistics<dataDim> + 1);
 
   // the block sums of the count values of every thread into out
   auto blockSum = [&](const T* value, const int count, T* out) {
@@ -691,7 +418,7 @@ mStepStatisticsKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* data,
   };
 
   T logLikelihood = 0;
-  for (int n = first; n < numData; n += stride)
+  for (int n = first; n < end; n += stride)
     logLikelihood += weightedLogLikelihood[n];
   blockSum(&logLikelihood, 1,
            blockPartial + numComponents * kMStepStatistics<dataDim>);
@@ -703,7 +430,7 @@ mStepStatisticsKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* data,
       continue;
     }
     T sums[kMStepStatistics<dataDim>] = {};
-    for (int n = first; n < numData; n += stride) {
+    for (int n = first; n < end; n += stride) {
       const T g = h[n] * gamma[k * numData + n];
       T diff[dataDim];
       for (int d = 0; d < dataDim; d++)
@@ -722,73 +449,144 @@ mStepStatisticsKernel(const cudaGMMWeight::GMMDataMultiDim<T, dataDim, U>* data,
 }
 
 /**
- * @brief M step, second part, one block: the block partials summed in order,
- * then thread k updates its active component.
+ * @brief M step, second part, one block per fit: the partials of its blocks
+ * summed in order, then thread k updates its active component; then the
+ * convergence of the fit and its pruning.
  *
  * With N_k = sum h gamma_k and N the sum over the active components: weight
  * N_k / N (as a log, floored at kMinComponentWeight); mean += S1_k / N_k;
  * coVariance = S2_k / N_k - (S1_k / N_k)(S1_k / N_k)^T (moments about the old
  * mean). A component with N_k = 0 keeps its mean and coVariance and gets the
- * smallest weight, for the pruning; with N = 0 every component is kept. Then
- * the coVariance check (with applyCovarianceCheck) and the Cholesky factor.
- * Thread 0 writes the log-likelihood and N to result.
- * @details one block of numComponents threads at least; dynamic shared memory
- * (numComponents * S + 1) * sizeof(T)
+ * smallest weight, for the pruning; with N = 0 or not finite every component
+ * is kept. Then
+ * the coVariance check (with checkCovariance) and the Cholesky factor.
+ *
+ * The fit converges when the log-likelihood (of the parameters before this M
+ * step) per unit weight gains less than the threshold, or decreases, from
+ * kMinStepsToConverge steps on, or at once when it is NaN or when N is 0 or
+ * not finite. At convergence, every
+ * kPruneInterval steps and at the iteration limit, the smallest component
+ * below the threshold is pruned (with prune), which restarts the EM (the
+ * log-likelihoods are not comparable) and, but at the limit, raises the other
+ * components below the threshold (pruneOneComponent). The fit is done when
+ * it converged without a restart, or at the iteration limit, after one more
+ * step if it restarted. The means stay finite: each is a weighted mean of the
+ * points, or the one before (the fit stops when N is not finite).
+ * @details one block of numComponents threads at least per fit; dynamic
+ * shared memory (numComponents * S + 1) * sizeof(T)
  */
 template <typename T, int dataDim>
 __global__ void
-mStepFinalizeKernel(const T* partial, const int numBlocks, T* logWeight,
-                    T* mean, T* coVariance, T* coVarianceDecomp, T* normalizer,
-                    const int numComponents, const bool* flagActiveComponents,
-                    const bool applyCovarianceCheck, const T minVariance,
-                    const T minPivot, T* result) {
+mStepFinalizeKernel(const T* partial, const int* fitStatBlock, int* fitPhase,
+                    GMMFitState<T>* fitState, T* logWeight, T* mean,
+                    T* coVariance, T* coVarianceDecomp, T* normalizer,
+                    const int numComponents, bool* flagActiveComponents,
+                    const GMMControl<T> control) {
   extern __shared__ __align__(sizeof(double)) unsigned char sharedBytes[];
+  __shared__ bool check, atLimit;
+  bool converged = false; // in thread 0
+  const int fit = blockIdx.x;
+  const int phase = fitPhase[fit];
+  if (phase == kFitDone) // the same for the whole block
+    return;
   T* total = reinterpret_cast<T*>(sharedBytes);
   const int width = numComponents * kMStepStatistics<dataDim> + 1;
+  const int firstBlock = fitStatBlock[fit];
+  const int numBlocks = fitStatBlock[fit + 1] - firstBlock;
   for (int i = threadIdx.x; i < width; i += blockDim.x) {
     T sum = 0;
     for (int b = 0; b < numBlocks; b++)
-      sum += partial[b * width + i];
+      sum += partial[(size_t)(firstBlock + b) * width + i];
     total[i] = sum;
   }
   __syncthreads();
+
+  logWeight += fit * numComponents;
+  mean += fit * numComponents * dataDim;
+  coVariance += fit * numComponents * dataDim * dataDim;
+  coVarianceDecomp += fit * numComponents * dataDim * dataDim;
+  normalizer += fit * numComponents;
+  flagActiveComponents += fit * numComponents;
 
   T weightSum = 0; // N
   for (int j = 0; j < numComponents; j++)
     if (flagActiveComponents[j])
       weightSum += total[j * kMStepStatistics<dataDim>];
-  if (threadIdx.x == 0) {
-    result[0] = total[width - 1];
-    result[1] = weightSum;
-  }
+  // a finite positive N (a bin weight that overflowed to infinity gives an
+  // infinite or NaN one: the fit stops as without weight)
+  const bool weighted = weightSum > 0 && weightSum < INFINITY;
+  const T logLikelihood = total[width - 1];
 
   const int k = threadIdx.x;
-  if (k >= numComponents || !flagActiveComponents[k])
-    return;
-  const T* stat = total + k * kMStepStatistics<dataDim>;
-  T* m = mean + k * dataDim;
-  T* c = coVariance + k * dataDim * dataDim;
-  const T weightK = stat[0]; // N_k
-  if (weightK > 0 && weightSum > 0) {
-    T shift[dataDim];
-    for (int d = 0; d < dataDim; d++)
-      shift[d] = stat[1 + d] / weightK;
-    int s = 1 + dataDim;
-    for (int i = 0; i < dataDim; i++)
-      for (int j = i; j < dataDim; j++, s++) {
-        c[i * dataDim + j] = stat[s] / weightK - shift[i] * shift[j];
-        c[j * dataDim + i] = c[i * dataDim + j];
-      }
-    for (int d = 0; d < dataDim; d++)
-      m[d] += shift[d];
-    logWeight[k] = log(fmax(weightK / weightSum, T(kMinComponentWeight)));
-  } else if (weightSum > 0) {
-    logWeight[k] = log(T(kMinComponentWeight));
+  if (k < numComponents && flagActiveComponents[k]) {
+    const T* stat = total + k * kMStepStatistics<dataDim>;
+    T* m = mean + k * dataDim;
+    T* c = coVariance + k * dataDim * dataDim;
+    const T weightK = stat[0]; // N_k
+    if (weightK > 0 && weighted) {
+      T shift[dataDim];
+      for (int d = 0; d < dataDim; d++)
+        shift[d] = stat[1 + d] / weightK;
+      int s = 1 + dataDim;
+      for (int i = 0; i < dataDim; i++)
+        for (int j = i; j < dataDim; j++, s++) {
+          c[i * dataDim + j] = stat[s] / weightK - shift[i] * shift[j];
+          c[j * dataDim + i] = c[i * dataDim + j];
+        }
+      for (int d = 0; d < dataDim; d++)
+        m[d] += shift[d];
+      logWeight[k] = log(fmax(weightK / weightSum, T(kMinComponentWeight)));
+    } else if (weighted) {
+      logWeight[k] = log(T(kMinComponentWeight));
+    }
+    normalizer[k] = factorCoVariance<T, dataDim>(
+        c, coVarianceDecomp + k * dataDim * dataDim, control);
   }
-  if (applyCovarianceCheck)
-    checkCovariance<T, dataDim>(c, minVariance);
-  normalizer[k] = choleskyFactor<T, dataDim>(
-      c, coVarianceDecomp + k * dataDim * dataDim, minPivot);
+  __syncthreads(); // the components updated, total free
+
+  if (threadIdx.x == 0) {
+    GMMFitState<T> state = fitState[fit];
+    state.logLikelihood = logLikelihood;
+    state.totalWeight = weightSum;
+    check = atLimit = false;
+    if (phase == kFitFinalStep) {
+      state.step++;
+      fitPhase[fit] = kFitDone;
+    } else {
+      const bool done = isnan(logLikelihood) ||
+                        ((fabs(logLikelihood - state.logLikelihoodOld) <
+                              control.threshold * weightSum ||
+                          logLikelihood < state.logLikelihoodOld) &&
+                         state.step >= kMinStepsToConverge);
+      state.logLikelihoodOld = logLikelihood;
+      state.step++;
+      state.sinceCheck++;
+      converged = done || !weighted;
+      atLimit = state.step >= control.maxIteration;
+      check = converged || state.sinceCheck == kPruneInterval || atLimit;
+    }
+    fitState[fit] = state;
+  }
+  __syncthreads();
+  if (!check) // the same for the whole block
+    return;
+
+  const bool restart =
+      control.prune &&
+      pruneOneComponent(logWeight, control.pruneThreshold, numComponents,
+                        flagActiveComponents, !atLimit, sharedBytes);
+  if (threadIdx.x == 0) {
+    GMMFitState<T>& state = fitState[fit];
+    // a restart: the log-likelihood of the fewer components is not
+    // comparable with the last one
+    if (restart)
+      state.logLikelihoodOld = -INFINITY;
+    state.sinceCheck = 0;
+    fitPhase[fit] = converged && !restart ? kFitDone
+                    : state.step >= control.maxIteration
+                        ? (restart ? kFitFinalStep : kFitDone)
+                        : kFitRunning;
+  }
 }
 
 } // namespace cudaGMMWeightKernel

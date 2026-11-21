@@ -26,6 +26,7 @@
 #include "MPIdata.h"
 #include "RestartReader.h"
 #include "asserts.h" // for assert_ge
+#include "dataAnalysisConfig.cuh"
 #include "debug.h"
 #include "input_array.h"
 #include "limits.h" // for INT_MAX
@@ -835,8 +836,23 @@ void Collective::readDataAnalysisInput(const ConfigFile& config) {
                  key, text.c_str());
     value = text == "1";
   };
+  // a per-species mask, nonzero = on, of every species `all` by default: the
+  // analysis of switchKey, when on, needs a species in it
+  auto readSpeciesMask = [&](const char* key, int all, const char* switchKey,
+                             bool on, std::vector<int>& mask) {
+    mask.assign(ns, all);
+    requireSpeciesList(readSpeciesList(config, key, mask), key);
+    requireInput(!on || std::any_of(mask.begin(), mask.end(),
+                                    [](int s) { return s != 0; }),
+                 "%s = 1 needs a species in %s", switchKey, key);
+  };
 
   readSwitch("VelocityHistogram", in.velocityHistogram);
+  readSpeciesMask("VelocityHistGMMSpecies", 1, "VelocityHistogram",
+                  in.velocityHistogram, in.histogramSpecies);
+  readSwitch("VelocityHistogramMacrocells", in.histogramMacrocells);
+  requireInput(!in.histogramMacrocells || in.velocityHistogram,
+               "VelocityHistogramMacrocells = 1 needs VelocityHistogram = 1");
   readSwitch("VelocityHistogramFixedRange", in.histogramFixedRange);
   // the default range depends on the sign of the charge; Min defaults to -Max
   in.histogramMax.resize(ns);
@@ -863,6 +879,7 @@ void Collective::readDataAnalysisInput(const ConfigFile& config) {
   readSwitch("VelocityGMM", in.gmm);
   requireInput(!in.gmm || in.velocityHistogram,
                "VelocityGMM = 1 needs VelocityHistogram = 1");
+  in.gmmComponents = config.read<int>("GMMComponents", in.gmmComponents);
   in.gmmMaxIterations =
       config.read<int>("GMMMaxIterations", in.gmmMaxIterations);
   in.gmmConvergenceThreshold = config.read<double>("GMMConvergenceThreshold",
@@ -876,6 +893,9 @@ void Collective::readDataAnalysisInput(const ConfigFile& config) {
   readSwitch("GMMPruneComponents", in.gmmPruneComponents);
   in.gmmPruneThreshold =
       config.read<double>("GMMPruneThreshold", in.gmmPruneThreshold);
+  requireInput(in.gmmComponents >= 1 && in.gmmComponents <= kGMMMaxComponents,
+               "GMMComponents must be in [1, %d], not %d", kGMMMaxComponents,
+               in.gmmComponents);
   requireInput(in.gmmMaxIterations >= 1,
                "GMMMaxIterations must be >= 1, not %d", in.gmmMaxIterations);
   requireInput(in.gmmConvergenceThreshold > 0 &&
@@ -885,31 +905,64 @@ void Collective::readDataAnalysisInput(const ConfigFile& config) {
   requireInput(in.gmmPruneThreshold > 0 && in.gmmPruneThreshold < 1,
                "GMMPruneThreshold must be in (0, 1), not %g",
                in.gmmPruneThreshold);
+  requireInput(!in.gmm || !in.gmmPruneComponents ||
+                   in.gmmPruneThreshold * in.gmmComponents < 1,
+               "GMMPruneThreshold (%g) must be below 1 / GMMComponents (%g) "
+               "with GMMPruneComponents = 1: the cold start gives each "
+               "component the weight 1 / GMMComponents",
+               in.gmmPruneThreshold, 1.0 / in.gmmComponents);
 
-  // the spectra need the macrocell sizes, at most the cells of a rank (the
-  // regular ones; a truncated last rank smaller than a macrocell has none),
-  // and a species
+  // the macrocell sizes of the spectra and of the macrocell histograms: each
+  // has its own keys, which default, axis by axis, to the common MacrocellNx,
+  // Ny, Nz; an analysis that is on needs its sizes, at most the cells of a
+  // rank (the regular ones; along an axis where a truncated last rank has
+  // fewer cells, its one macrocell has all of them); the spectra need a
+  // species too
   readSwitch("VelocitySpectra", in.velocitySpectra);
-  const char* sizeKeys[3] = {"MacrocellNx", "MacrocellNy", "MacrocellNz"};
+  const char* axes[3] = {"Nx", "Ny", "Nz"};
   const int cells[3] = {(nxc + XLEN - 1) / XLEN, (nyc + YLEN - 1) / YLEN,
                         (nzc + ZLEN - 1) / ZLEN};
   for (int a = 0; a < 3; a++) {
-    in.macrocell[a] = config.read<int>(sizeKeys[a], in.macrocell[a]);
-    requireInput(!in.velocitySpectra ||
-                     (in.macrocell[a] > 0 && in.macrocell[a] <= cells[a]),
-                 "VelocitySpectra = 1 needs %s in [1, %d] (the cells of a "
-                 "rank), not %d",
-                 sizeKeys[a], cells[a], in.macrocell[a]);
+    const std::string commonKey = std::string("Macrocell") + axes[a];
+    const int common = config.read<int>(commonKey, 0);
+    // the size of the analysis of this switch, given by <analysis>Macrocell
+    auto readSize = [&](const char* analysis, const char* switchKey, bool on,
+                        int& size) {
+      const std::string key = std::string(analysis) + commonKey;
+      size = config.read<int>(key, common);
+      requireInput(!on || (size > 0 && size <= cells[a]),
+                   "%s = 1 needs %s (default: %s) in [1, %d] (the cells of a "
+                   "rank), not %d",
+                   switchKey, key.c_str(), commonKey.c_str(), cells[a], size);
+    };
+    readSize("VelocitySpectra", "VelocitySpectra", in.velocitySpectra,
+             in.spectraMacrocellSize[a]);
+    readSize("VelocityHistogram", "VelocityHistogramMacrocells",
+             in.histogramMacrocells, in.histogramMacrocellSize[a]);
   }
-  in.spectraSpecies.assign(ns, 0);
-  requireSpeciesList(
-      readSpeciesList(config, "VelocitySpectraSpecies", in.spectraSpecies),
-      "VelocitySpectraSpecies");
-  requireInput(!in.velocitySpectra ||
-                   std::any_of(in.spectraSpecies.begin(),
-                               in.spectraSpecies.end(),
-                               [](int on) { return on != 0; }),
-               "VelocitySpectra = 1 needs a species in VelocitySpectraSpecies");
+  // and at most `most` macrocells on a rank (a regular one has the most)
+  auto requireMacrocells = [&](const char* analysis, const char* switchKey,
+                               bool on, const int size[3], int most) {
+    if (!on)
+      return;
+    long long macrocells = 1;
+    for (int a = 0; a < 3; a++)
+      macrocells *= (cells[a] + size[a] - 1) / size[a];
+    requireInput(macrocells <= most,
+                 "%s = 1 with macrocells of %dx%dx%d cells gives a rank of "
+                 "%dx%dx%d cells %lld macrocells, more than the %d it can "
+                 "hold: give larger %sMacrocellNx, Ny, Nz (default: "
+                 "MacrocellNx, Ny, Nz)",
+                 switchKey, size[0], size[1], size[2], cells[0], cells[1],
+                 cells[2], macrocells, most, analysis);
+  };
+  requireMacrocells("VelocitySpectra", "VelocitySpectra", in.velocitySpectra,
+                    in.spectraMacrocellSize, DAConfig::MAX_SPECTRA_MACROCELLS);
+  requireMacrocells("VelocityHistogram", "VelocityHistogramMacrocells",
+                    in.histogramMacrocells, in.histogramMacrocellSize,
+                    DAConfig::MAX_HISTOGRAM_MACROCELLS);
+  readSpeciesMask("VelocitySpectraSpecies", 0, "VelocitySpectra",
+                  in.velocitySpectra, in.spectraSpecies);
 }
 
 bool Collective::field_output_is_off() const { return (FieldOutputCycle <= 0); }
@@ -1136,14 +1189,29 @@ void Collective::Print() {
          << ParticleMergingThreshold
          << ": splitting and merging undo each other" << endl;
   const DataAnalysisInput& da = dataAnalysis_;
+  // the macrocells of an analysis: " of Nx x Ny x Nz cells"
+  auto macrocellsOf = [](const int size[3]) {
+    return " of " + std::to_string(size[0]) + " x " + std::to_string(size[1]) +
+           " x " + std::to_string(size[2]) + " cells";
+  };
   cout << "Data analysis     : ";
   if (!BenchmarkConfig::DIAGNOSTIC_CALCULATIONS_ENABLED)
     cout << "not in this build (BENCHMARK_MODE = 2)" << endl;
   else if (da.any())
     cout << "every " << da.cycle << " cycles in " << da.outputDir
-         << ", histograms " << (da.velocityHistogram ? "on" : "off") << ", GMM "
-         << (da.gmm ? "on" : "off") << ", macrocell spectra "
-         << (da.velocitySpectra ? "on" : "off")
+         << ", histograms "
+         << (!da.velocityHistogram ? std::string("off")
+             : da.histogramMacrocells
+                 ? "per macrocell" + macrocellsOf(da.histogramMacrocellSize)
+                 : std::string("per rank"))
+         << ", GMM "
+         << (da.gmm ? "on (" + std::to_string(da.gmmComponents) + " components)"
+                    : std::string("off"))
+         << ", macrocell spectra "
+         << (da.velocitySpectra
+                 ? "on (macrocells" + macrocellsOf(da.spectraMacrocellSize) +
+                       ")"
+                 : std::string("off"))
          << (BenchmarkConfig::DISK_OUTPUT_ENABLED
                  ? ""
                  : " (not written, BENCHMARK_MODE = 1)")

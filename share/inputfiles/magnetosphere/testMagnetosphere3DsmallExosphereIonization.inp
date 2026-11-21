@@ -118,12 +118,17 @@ SortingCycle     = 1                     # GPU cell-sort interval; 0 disables [d
 DataAnalysisCycle      = 50             # Analysis interval; 0 disables [default: 50]
 DataAnalysisOutputDir  = ./             # Parent folder of the outputs [default: ./]
 VelocityHistogram      = 0              # 3D velocity histograms [default: 0]
+VelocityHistGMMSpecies = 1 1 1 1 1 1    # Per-species mask of the histograms and GMM [default: all 1]
+VelocityHistogramMacrocells = 0         # Histograms and GMM per macrocell, not per rank [default: 0]
 VelocityGMM            = 0              # GMM fit of the histograms [default: 0]
-# The spectra need the macrocell sizes (at most the cells of a rank) and a species.
+GMMComponents          = 10             # Gaussians of each GMM fit, 1 to 256 [default: 10]
+# The spectra and the macrocell histograms need macrocell sizes (at most the
+# cells of a rank): MacrocellNx/Ny/Nz for both, or VelocitySpectraMacrocellNx/Ny/Nz
+# and VelocityHistogramMacrocellNx/Ny/Nz for each. The spectra need a species.
 VelocitySpectra        = 1              # Macrocell (v_par, v_perp) spectra [default: 0]
-MacrocellNx            = 10             # Macrocell x size in local cells [default: 0]
-MacrocellNy            = 10             # Macrocell y size in local cells [default: 0]
-MacrocellNz            = 10             # Macrocell z size in local cells [default: 0]
+MacrocellNx            = 10             # Common macrocell x size in cells [default: 0]
+MacrocellNy            = 10             # Common macrocell y size in cells [default: 0]
+MacrocellNz            = 10             # Common macrocell z size in cells [default: 0]
 VelocitySpectraSpecies = 1 1 0 0 1 0    # Per-species enable mask [default: all 0]
 
 # %%%%%%%%%%%%%%%%%%%% EXOSPHERE IONIZATION %%%%%%%%%%%%%%%%%%%%

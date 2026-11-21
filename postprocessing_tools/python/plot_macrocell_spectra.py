@@ -5,15 +5,13 @@ macrocell-spectra data-analysis module.
 
 Input path must be the main ``macrocellSpectra/`` directory.
 
-Output layout (one binary + one JSON per species per MPI rank):
-  <root>/subDomain_<rank>/species_<S>.bin   -- flat binary, appended per cycle
-  <root>/subDomain_<rank>/species_<S>.json  -- fully self-contained metadata
-
-Binary record layout:
-  Record K covers cycle  records[K].
-  Macrocell m = (mz*My + my)*Mx + mx  (x fastest).
-  Byte offset of macrocell m at record K:
-    K * record_size_bytes + m * bytes_per_macrocell
+Output layout (one records file per MPI rank, read_analysis_records.py):
+  <root>/subDomain<rank>_spectra.bin   -- one record per cycle and species:
+                                          the non-empty bins of every
+                                          macrocell
+  <root>/subDomain<rank>_spectra.json  -- the rank, its macrocell tiling, the
+                                          bins and the record layout
+Macrocell m = (mz*My + my)*Mx + mx  (x fastest).
 
 Examples
 --------
@@ -34,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,7 +40,8 @@ from typing import Iterator
 
 import numpy as np
 
-FLOAT_DTYPE = np.dtype("<f4")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from read_analysis_records import macrocell_of, read_sparse  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -50,195 +50,59 @@ FLOAT_DTYPE = np.dtype("<f4")
 
 @dataclass
 class Spectrum:
-    """One 2D (v_par, v_perp) histogram extracted from a species binary."""
-    meta: dict                       # full species_S.json contents
-    hist: np.ndarray                 # shape (n_vperp, n_vpar), float32
-    json_path: Path                  # path to species_S.json
-    macrocell: tuple[int, int, int]  # (mx, my, mz) 0-based macrocell indices
-    cycle: int                       # simulation cycle
-    record_index: int                # K: position in meta["records"]
-
-    @property
-    def n_vperp(self) -> int:
-        return int(self.meta["bins"]["vperp"])
-
-    @property
-    def n_vpar(self) -> int:
-        return int(self.meta["bins"]["vpar"])
+    """One 2D (v_par, v_perp) histogram of a macrocell at one cycle."""
+    meta: dict                         # subDomain<rank>_spectra.json
+    hist: np.ndarray                   # shape (n_vperp, n_vpar)
+    species: int
+    macrocell: tuple[int, int, int]    # (mx, my, mz) 0-based indices
+    cycle: int                         # simulation cycle
+    vpar_range: tuple[float, float]
+    vperp_range: tuple[float, float]
 
     @property
     def vpar_edges(self) -> np.ndarray:
-        v0, v1 = self.meta["ranges"]["vpar"]
-        return np.linspace(v0, v1, self.n_vpar + 1)
+        return np.linspace(*self.vpar_range, self.hist.shape[1] + 1)
 
     @property
     def vperp_edges(self) -> np.ndarray:
-        v0, v1 = self.meta["ranges"]["vperp"]
-        return np.linspace(v0, v1, self.n_vperp + 1)
+        return np.linspace(*self.vperp_range, self.hist.shape[0] + 1)
 
     @property
     def label(self) -> str:
         m = self.meta
         mx, my, mz = self.macrocell
-        tX = m["axis_tiling"]["x"][mx]   # [start, size]
-        tY = m["axis_tiling"]["y"][my]
-        tZ = m["axis_tiling"]["z"][mz]
-        gOff = m["subdomain_global_offset_cells"]
-        gx = gOff[0] + tX[0]
-        gy = gOff[1] + tY[0]
-        gz = gOff[2] + tZ[0]
+        Mx, My, _ = m["macrocells_per_axis"]
+        mc = macrocell_of(m, (mz * My + my) * Mx + mx)
         return (
             f"rank {m.get('subdomain_rank', '?')}  "
             f"mc[{mx},{my},{mz}]  "
-            f"size {tX[1]}x{tY[1]}x{tZ[1]}  "
-            f"globalOff [{gx},{gy},{gz}]  "
-            f"cycle {self.cycle}  species {m.get('species', '?')}"
+            f"size {'x'.join(map(str, mc.cells))}  "
+            f"globalOff [{','.join(map(str, mc.first_cell))}]  "
+            f"cycle {self.cycle}  species {self.species}"
         )
 
     @property
     def save_stem(self) -> str:
         """A path-safe stem for use when writing PNG files."""
-        m = self.meta
         mx, my, mz = self.macrocell
-        rank = m.get("subdomain_rank", 0)
-        s    = m.get("species", 0)
         return (
-            f"subDomain_{rank}/species_{s}/"
-            f"cycle_{self.cycle:06d}/"
-            f"mc_{mx}_{my}_{mz}"
+            f"subDomain_{self.meta.get('subdomain_rank', 0)}/"
+            f"species_{self.species}/cycle_{self.cycle:06d}/mc_{mx}_{my}_{mz}"
         )
 
 
 # ---------------------------------------------------------------------------
-# Loading
+# Discovery and loading
 # ---------------------------------------------------------------------------
 
-def load_spectrum(json_path: Path,
-                  mx: int, my: int, mz: int,
-                  cycle: int) -> Spectrum:
-    """Load one macrocell histogram for a given cycle from species_S.json/bin.
-
-    Parameters
-    ----------
-    json_path : Path
-        Path to a ``species_S.json`` file.
-    mx, my, mz : int
-        0-based macrocell indices along x, y, z.
-    cycle : int
-        Simulation cycle to retrieve; must be listed in ``meta["records"]``.
-    """
-    json_path = Path(json_path)
-    with json_path.open() as f:
-        meta = json.load(f)
-
-    records: list[int] = meta["records"]
-    if cycle not in records:
-        raise ValueError(
-            f"Cycle {cycle} not found in {json_path.name}. "
-            f"Available: {records}"
-        )
-    K = records.index(cycle)
-
-    Mx, My, Mz = meta["macrocells_per_axis"]
-    if not (0 <= mx < Mx and 0 <= my < My and 0 <= mz < Mz):
-        raise ValueError(
-            f"Macrocell ({mx},{my},{mz}) out of range "
-            f"(Mx={Mx}, My={My}, Mz={Mz})"
-        )
-
-    m = (mz * My + my) * Mx + mx
-    byte_offset = K * meta["record_size_bytes"] + m * meta["bytes_per_macrocell"]
-    n_vperp = meta["bins"]["vperp"]
-    n_vpar  = meta["bins"]["vpar"]
-    Nb = n_vperp * n_vpar
-    expected_bytes_per_macrocell = Nb * FLOAT_DTYPE.itemsize
-    if meta["bytes_per_macrocell"] != expected_bytes_per_macrocell:
-        raise ValueError(
-            f"{json_path}: bytes_per_macrocell={meta['bytes_per_macrocell']} "
-            f"does not match bins ({n_vperp}*{n_vpar}*{FLOAT_DTYPE.itemsize}="
-            f"{expected_bytes_per_macrocell})"
-        )
-
-    expected_record_bytes = meta["total_macrocells"] * meta["bytes_per_macrocell"]
-    if meta["record_size_bytes"] != expected_record_bytes:
-        raise ValueError(
-            f"{json_path}: record_size_bytes={meta['record_size_bytes']} "
-            f"does not match total_macrocells*bytes_per_macrocell="
-            f"{expected_record_bytes}"
-        )
-
-    bin_path = json_path.with_suffix(".bin")
-    if not bin_path.exists():
-        raise FileNotFoundError(f"Binary file not found: {bin_path}")
-
-    needed_bytes = byte_offset + meta["bytes_per_macrocell"]
-    actual_bytes = bin_path.stat().st_size
-    if actual_bytes < needed_bytes:
-        raise ValueError(
-            f"{bin_path}: file too small for record {K}, macrocell {m}: "
-            f"need at least {needed_bytes} bytes, got {actual_bytes}"
-        )
-
-    with bin_path.open("rb") as bf:
-        bf.seek(byte_offset)
-        raw = np.frombuffer(bf.read(meta["bytes_per_macrocell"]),
-                            dtype=FLOAT_DTYPE)
-
-    if raw.size != Nb:
-        raise ValueError(
-            f"{bin_path}: expected {Nb} float32 at record {K} macrocell {m}, "
-            f"got {raw.size}"
-        )
-
-    # Copy so the array is writable and not backed by the mmap buffer.
-    hist = raw.reshape(n_vperp, n_vpar).astype(np.float32, copy=True)
-    return Spectrum(meta=meta, hist=hist, json_path=json_path,
-                    macrocell=(mx, my, mz), cycle=cycle, record_index=K)
+def rank_of(path: Path) -> int | None:
+    """R for a subDomain<R>_spectra.bin path, or None if it does not match."""
+    match = re.fullmatch(r"subDomain(\d+)_spectra\.bin", path.name)
+    return int(match.group(1)) if match else None
 
 
-# ---------------------------------------------------------------------------
-# Discovery
-# ---------------------------------------------------------------------------
-
-def species_from_json_path(path: Path) -> int | None:
-    """Return S for a species_S.json path, or None if it does not match."""
-    try:
-        prefix, value = path.stem.split("_", 1)
-        if prefix != "species":
-            return None
-        return int(value)
-    except ValueError:
-        return None
-
-
-def subdomain_from_json_path(path: Path) -> int | None:
-    """Return R for a subDomain_R/species_S.json path."""
-    try:
-        prefix, value = path.parent.name.split("_", 1)
-        if prefix != "subDomain":
-            return None
-        return int(value)
-    except ValueError:
-        return None
-
-
-def json_sort_key(path: Path) -> tuple[int, int, str]:
-    """Sort by subdomain, then species, with stable path fallback."""
-    rank = subdomain_from_json_path(path)
-    species = species_from_json_path(path)
-    return (
-        rank if rank is not None else sys.maxsize,
-        species if species is not None else sys.maxsize,
-        str(path),
-    )
-
-
-def find_species_jsons(
-    root: Path,
-    species: int | None = None,
-    subdomain: int | None = None,
-) -> list[Path]:
-    """Return matching ``subDomain_R/species_S.json`` files under *root*."""
+def find_spectra_files(root: Path, subdomain: int | None = None) -> list[Path]:
+    """Return the matching ``subDomain<R>_spectra.bin`` files under *root*."""
     root = Path(root)
     if root.is_file():
         raise ValueError(
@@ -246,85 +110,38 @@ def find_species_jsons(
         )
     if not root.is_dir():
         raise FileNotFoundError(root)
-
-    jsons = root.glob("subDomain_*/species_*.json")
-    matches = [
-        p for p in jsons
-        if not p.name.endswith(".tmp")
-        and (species is None or species_from_json_path(p) == species)
-        and (subdomain is None or subdomain_from_json_path(p) == subdomain)
-    ]
-    return sorted(matches, key=json_sort_key)
-
-
-def enumerate_refs(
-    json_paths: list[Path],
-    cycle: int | None = None,
-    macrocell: tuple[int, int, int] | None = None,
-) -> list[tuple[Path, int, int, int, int]]:
-    """Build the list of (json_path, mx, my, mz, cycle) tuples to load.
-
-    For each species JSON, iterates over all (cycle, macrocell) combinations
-    after applying the optional filters.
-
-    Parameters
-    ----------
-    json_paths :
-        List of ``species_S.json`` paths returned by ``find_species_jsons``.
-    cycle :
-        If given, only this cycle is included (must exist in ``records``).
-    macrocell :
-        If given as ``(mx, my, mz)``, only this macrocell is included.
-    """
-    refs: list[tuple[Path, int, int, int, int]] = []
-    for jp in json_paths:
-        with jp.open() as f:
-            meta = json.load(f)
-        records: list[int] = meta["records"]
-        Mx, My, Mz = meta["macrocells_per_axis"]
-
-        # Determine which cycles to include.
-        if cycle is not None:
-            cycles = [cycle] if cycle in records else []
-            if not cycles:
-                print(f"[warn] cycle {cycle} not in {jp.name} records {records}",
-                      file=sys.stderr)
-        else:
-            cycles = list(records)
-
-        # Determine which macrocells to include.
-        if macrocell is not None:
-            mx0, my0, mz0 = macrocell
-            if not (0 <= mx0 < Mx and 0 <= my0 < My and 0 <= mz0 < Mz):
-                print(f"[warn] macrocell {macrocell} out of range for {jp.name}",
-                      file=sys.stderr)
-                continue
-            macrocells = [(mx0, my0, mz0)]
-        else:
-            macrocells = [
-                (mx, my, mz)
-                for mz in range(Mz)
-                for my in range(My)
-                for mx in range(Mx)
-            ]
-
-        for c in cycles:
-            for mx, my, mz in macrocells:
-                refs.append((jp, mx, my, mz, c))
-
-    return refs
+    files = [p for p in root.glob("subDomain*_spectra.bin")
+             if rank_of(p) is not None
+             and (subdomain is None or rank_of(p) == subdomain)]
+    return sorted(files, key=rank_of)
 
 
 def iter_spectra(
-    refs: list[tuple[Path, int, int, int, int]],
+    files: list[Path],
+    species: int | None = None,
+    cycle: int | None = None,
+    macrocell: tuple[int, int, int] | None = None,
 ) -> Iterator[Spectrum]:
-    """Load spectra from a list of (json_path, mx, my, mz, cycle) refs."""
-    for jp, mx, my, mz, c in refs:
-        try:
-            yield load_spectrum(jp, mx, my, mz, c)
-        except Exception as e:
-            print(f"[warn] skipping mc({mx},{my},{mz}) cycle {c} "
-                  f"from {jp.name}: {e}", file=sys.stderr)
+    """The spectra of the files, of a species, a cycle and a macrocell if
+    given."""
+    for f in files:
+        meta = json.loads(f.with_suffix(".json").read_text())
+        Mx, My, Mz = meta["macrocells_per_axis"]
+        if macrocell is not None and not all(
+                0 <= i < n for i, n in zip(macrocell, (Mx, My, Mz))):
+            print(f"[warn] macrocell {macrocell} out of range for {f.name}",
+                  file=sys.stderr)
+            continue
+        cells = [macrocell] if macrocell is not None else [
+            (mx, my, mz) for mz in range(Mz) for my in range(My)
+            for mx in range(Mx)]
+        for record in read_sparse(f, cycle, species):
+            for mx, my, mz in cells:
+                m = (mz * My + my) * Mx + mx
+                lo, hi = record.ranges[m, :2], record.ranges[m, 2:]
+                yield Spectrum(meta, record.dense(m), record.species,
+                               (mx, my, mz), record.cycle,
+                               (lo[0], hi[0]), (lo[1], hi[1]))
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +172,8 @@ def plot_spectrum(
     pcm = ax.pcolormesh(vpar_e, vperp_e, H, cmap="viridis", norm=norm,
                         shading="auto")
     cb = fig.colorbar(pcm, ax=ax)
-    cb.set_label("counts (log)" if norm is not None else "counts")
+    cb.set_label("|q| weight_scale (log)" if norm is not None
+                 else "|q| weight_scale")
 
     ax.set_xlabel(r"$v_\parallel$")
     ax.set_ylabel(r"$v_\perp$")
@@ -399,37 +217,29 @@ def main(argv: list[str] | None = None) -> int:
                    help="output directory for PNG files (suppresses display)")
     args = p.parse_args(argv)
 
-    # --- Discover species JSON files ---
+    # --- Discover the records files ---
     try:
-        json_paths = find_species_jsons(args.path,
-                                        species=args.species,
-                                        subdomain=args.subdomain)
+        files = find_spectra_files(args.path, subdomain=args.subdomain)
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-
-    if not json_paths:
-        print("No species_S.json files matched.", file=sys.stderr)
+    if not files:
+        print("No subDomain<R>_spectra.bin files matched.", file=sys.stderr)
         return 1
 
-    # --- Enumerate (json, mx, my, mz, cycle) references ---
     mc = tuple(args.macrocell) if args.macrocell is not None else None
-    refs = enumerate_refs(json_paths, cycle=args.cycle, macrocell=mc)
-
-    if not refs:
-        print("No (cycle, macrocell) combinations matched.", file=sys.stderr)
-        return 1
-    print(f"Plotting {len(refs)} spectrum record(s)...")
-
+    spectra = iter_spectra(files, species=args.species, cycle=args.cycle,
+                           macrocell=mc)
     plotted = 0
-    for spec in iter_spectra(refs):
+    for spec in spectra:
         out = (args.save / (spec.save_stem + ".png")) if args.save else None
         plot_spectrum(spec, out_file=out, show=args.save is None)
         plotted += 1
 
     if plotted == 0:
-        print("All records failed to load.", file=sys.stderr)
+        print("No (cycle, macrocell) combinations matched.", file=sys.stderr)
         return 1
+    print(f"Plotted {plotted} spectrum record(s).")
 
     return 0
 

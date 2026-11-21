@@ -3607,7 +3607,8 @@ void c_Solver::sortSpeciesByCell(int species) {
 /**
  * @brief Sort by cell the species with a nonzero entry in mask, on the GPU,
  * independently of the mover's periodic sorting (CalculateMoments and the
- * macrocell spectra of the data analysis need it).
+ * macrocell analyses of the data analysis, spectra and histograms, need
+ * it).
  */
 void c_Solver::sortSpecies(const std::vector<int>& mask) {
   for (int i = 0; i < ns; i++) {

@@ -142,30 +142,33 @@ void gpuAddscale2_3(cudaSolverType alfa, cudaSolverType beta,
 
 /**
  * Local dot product: sum_i a[i]*b[i].
- * d_scratch must point to a device cudaSolverType.
+ * d_scratch must point to a device cudaSolverType, h_result to one in
+ * page-locked host memory (the copy from the device).
  * Returns the result synchronously (D2H copy after kernel).
  * Not used: the solvers use gpuDot_async.
  */
 cudaSolverType gpuDot(const cudaSolverType* a, const cudaSolverType* b,
                       size_t n, cudaSolverType* d_scratch,
-                      cudaStream_t stream = 0);
+                      cudaSolverType* h_result, cudaStream_t stream = 0);
 
 /**
  * Local squared norm: sum_i a[i]*a[i].
- * d_scratch must point to a device cudaSolverType.
+ * d_scratch and h_result as for gpuDot.
  * Returns the result synchronously.
  * Not used by the solvers (gpuNorm2_async); the Maxwell unit test uses it.
  */
 cudaSolverType gpuNorm2(const cudaSolverType* a, size_t n,
-                        cudaSolverType* d_scratch, cudaStream_t stream = 0);
+                        cudaSolverType* d_scratch, cudaSolverType* h_result,
+                        cudaStream_t stream = 0);
 
 /**
  * Local sum: sum_i a[i].
- * d_scratch must point to a device cudaSolverType.
+ * d_scratch and h_result as for gpuDot.
  * Returns the result synchronously.  Not used.
  */
 cudaSolverType gpuReduceSum(const cudaSolverType* a, size_t n,
-                            cudaSolverType* d_scratch, cudaStream_t stream = 0);
+                            cudaSolverType* d_scratch, cudaSolverType* h_result,
+                            cudaStream_t stream = 0);
 
 /**
  * Async variants: launch reduction kernel + D→H copy into PINNED host

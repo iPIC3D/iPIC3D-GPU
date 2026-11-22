@@ -102,7 +102,7 @@
 #define AlignedFree(S) (delete[] S)
 #define AlignedAlloc(T, NUM) (new T[NUM])
 
-#define AlignedFreePinned(S) (cudaFreeHost(S))
+#define AlignedFreePinned(S) ((void)cudaFreeHost(S))
 #define AlignedAllocPinned(T, NUM) ((T*)allocateHostPinnedMem(sizeof(T), NUM))
 
 #endif
@@ -884,6 +884,36 @@ template <class type> struct array4 : public array_ref4<type> {
   ~array4() { array_ref4<type>::free(); }
   array4(size_t s4, size_t s3, size_t s2, size_t s1)
       : array_ref4<type>(s4, s3, s2, s1) {}
+};
+
+// array3 and array4 with their values in page-locked host memory: the host
+// arrays that are copied to or from the device. Only the values are
+// page-locked; the tables of pointers to the rows are ordinary memory.
+template <class type> struct pinned_array3 : public array_ref3<type> {
+  pinned_array3(size_t s3, size_t s2, size_t s1)
+      : array_ref3<type>(
+            newArray3<type>(AlignedAllocPinned(type, s3 * s2 * s1), s3, s2, s1),
+            s3, s2, s1) {}
+  pinned_array3(const pinned_array3&) = delete; // it owns its memory
+  void free() = delete; // the destructor frees: the values are not new[]
+  ~pinned_array3() {
+    AlignedFreePinned(this->fetch_arr());
+    delArray2<type*>(this->fetch_arr3()); // the pointer tables
+  }
+};
+
+template <class type> struct pinned_array4 : public array_ref4<type> {
+  pinned_array4(size_t s4, size_t s3, size_t s2, size_t s1)
+      : array_ref4<type>(
+            newArray4<type>(AlignedAllocPinned(type, s4 * s3 * s2 * s1), s4, s3,
+                            s2, s1),
+            s4, s3, s2, s1) {}
+  pinned_array4(const pinned_array4&) = delete; // it owns its memory
+  void free() = delete; // the destructor frees: the values are not new[]
+  ~pinned_array4() {
+    AlignedFreePinned(this->fetch_arr());
+    delArray3<type*>(this->fetch_arr4()); // the pointer tables
+  }
 };
 
 template <class type>

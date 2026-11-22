@@ -98,7 +98,6 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
       pXXsn(ns, nxn, nyn, nzn), pXYsn(ns, nxn, nyn, nzn),
       pXZsn(ns, nxn, nyn, nzn), pYYsn(ns, nxn, nyn, nzn),
       pYZsn(ns, nxn, nyn, nzn), pZZsn(ns, nxn, nyn, nzn),
-      heatFlux(ns * HeatFlux::ComponentCount, nxn, nyn, nzn),
 
       // array allocation: central points
       //
@@ -164,7 +163,7 @@ EMfields3D::EMfields3D(Collective* col, Grid* grid, VirtualTopology3D* vct)
   poissonChebRescaleEigMin = col->getPoissonChebRescaleEigMin();
   poissonChebRescaleEigMax = col->getPoissonChebRescaleEigMax();
   poissonChebEigRatio = col->getPoissonChebEigRatio();
-  qom = new double[ns];
+  qom = AlignedAllocPinned(double, ns); // copied to the device (d_qom)
   for (int i = 0; i < ns; i++)
     qom[i] = col->getQOM(i);
   // boundary conditions: EM fields
@@ -393,7 +392,7 @@ void EMfields3D::adjustNonPeriodicHeatFlux(int is) {
     lo[dir] = hi[dir] = face;
     for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
       double* a =
-          heatFlux.fetch_arr() + HeatFlux::componentIndex(is, c) * nodes;
+          heatFlux->fetch_arr() + HeatFlux::componentIndex(is, c) * nodes;
 #pragma omp parallel for collapse(2) schedule(static)
       for (int i = lo[0]; i <= hi[0]; i++)
         for (int j = lo[1]; j <= hi[1]; j++)
@@ -505,11 +504,11 @@ bool EMfields3D::isPlanetNode(int i, int j, int k, bool planeXZ) const {
   return xd * xd + yd * yd + zd * zd <= Planet_radius * Planet_radius;
 }
 
-std::vector<int> EMfields3D::planetNodes() const {
+PinnedVector<int> EMfields3D::planetNodes() const {
   const bool planeXZ = get_col().getCase() == "Dipole2D";
   if (planeXZ)
     assert_eq(nyn, 4);
-  std::vector<int> nodes;
+  PinnedVector<int> nodes;
   // every local node, the ghosts too: a ghost is a copy of a node of the
   // neighbour, which holds the planet charge there as well
   for (int i = 0; i < nxn; i++)
@@ -525,13 +524,18 @@ double EMfields3D::planetChargeDensity(int is) const {
 }
 
 void EMfields3D::ConstantChargePlanet() {
-  const std::vector<int> nodes = planetNodes();
+  const PinnedVector<int> nodes = planetNodes();
   for (int is = 0; is < ns; is++) {
     const double val = planetChargeDensity(is);
     double* rho = &rhons[is][0][0][0];
     for (int n : nodes)
       rho[n] = val;
   }
+}
+
+void EMfields3D::allocateHeatFlux() {
+  heatFlux = std::make_unique<pinned_array4_double>(
+      ns * HeatFlux::ComponentCount, nxn, nyn, nzn);
 }
 
 void EMfields3D::communicateGhostHeatFlux(int is) {
@@ -541,7 +545,7 @@ void EMfields3D::communicateGhostHeatFlux(int is) {
 
   for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
     double*** component =
-        convert_to_arr3(heatFlux[HeatFlux::componentIndex(is, c)]);
+        convert_to_arr3((*heatFlux)[HeatFlux::componentIndex(is, c)]);
     communicateInterp(nxn, nyn, nzn, component, vct, this);
   }
 
@@ -549,7 +553,7 @@ void EMfields3D::communicateGhostHeatFlux(int is) {
 
   for (int c = 0; c < HeatFlux::ComponentCount; ++c) {
     double*** component =
-        convert_to_arr3(heatFlux[HeatFlux::componentIndex(is, c)]);
+        convert_to_arr3((*heatFlux)[HeatFlux::componentIndex(is, c)]);
     communicateNode_P(nxn, nyn, nzn, component, vct, this);
   }
 }
@@ -760,7 +764,7 @@ void EMfields3D::print(void) const {}
 
 /*! destructor*/
 EMfields3D::~EMfields3D() {
-  delete[] qom;
+  AlignedFreePinned(qom);
   delete[] rhoINIT;
   delete[] DriftSpecies;
   freeDataType();

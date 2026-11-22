@@ -802,8 +802,8 @@ RestartReadContext& contextForRestartRead(const std::string& restartDir,
 
 void readAdiosFieldsRemapped(RestartReadContext& context, arr3_double Bxn,
                              arr3_double Byn, arr3_double Bzn, arr3_double Ex,
-                             arr3_double Ey, arr3_double Ez,
-                             array4_double* rhons, int ns, const Grid* grid) {
+                             arr3_double Ey, arr3_double Ez, arr4_double* rhons,
+                             int ns, const Grid* grid) {
   const RestartRemapPlan& plan = context.plan;
 
   for (const RestartNodeCopy& copy : plan.nodeCopies()) {
@@ -942,8 +942,8 @@ void readAdiosParticlesRemapped(RestartReadContext& context, int species,
 
 void readHdf5FieldsRemapped(RestartReadContext& context, arr3_double Bxn,
                             arr3_double Byn, arr3_double Bzn, arr3_double Ex,
-                            arr3_double Ey, arr3_double Ez,
-                            array4_double* rhons, int ns, const Grid* grid) {
+                            arr3_double Ey, arr3_double Ez, arr4_double* rhons,
+                            int ns, const Grid* grid) {
   const RestartRemapPlan& plan = context.plan;
   const std::string cycle_str = "cycle_" + std::to_string(context.lastCycle);
 
@@ -1167,7 +1167,7 @@ RestartReader::resolveCheckpoint(const std::string& restartDir,
 void RestartReader::readFields(const VCtopology3D* vct, const Grid* grid,
                                arr3_double Bxn, arr3_double Byn,
                                arr3_double Bzn, arr3_double Ex, arr3_double Ey,
-                               arr3_double Ez, array4_double* rhons_, int ns,
+                               arr3_double Ez, arr4_double* rhons_, int ns,
                                const std::string& restartDir, int last_cycle) {
   RestartReadContext& context =
       contextForRestartRead(restartDir, last_cycle, vct, grid);

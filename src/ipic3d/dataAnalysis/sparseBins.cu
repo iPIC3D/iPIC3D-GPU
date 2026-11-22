@@ -189,8 +189,11 @@ void SparseBins::writeRecord(RecordFile& file, int species, int cycle,
                              cudaStream_t stream) {
   if (nonEmpty == 0) // a record says something only with bins
     return;
-  weightHost.resize(nonEmpty);
-  indexHost.resize(nonEmpty);
+  // the staging as large as the device arrays, which grow with a margin
+  if (weightHost.size() < (std::size_t)capacity) {
+    weightHost.resize(capacity);
+    indexHost.resize(capacity);
+  }
   cudaErrChk(cudaMemcpyAsync(weightHost.data(), weightCUDA,
                              sizeof(binType) * nonEmpty, cudaMemcpyDeviceToHost,
                              stream));
@@ -208,7 +211,7 @@ void SparseBins::writeRecord(RecordFile& file, int species, int cycle,
   for (int r = 0; r < regions; r++)
     counts[r] = regionOffsets[r + 1] - regionOffsets[r];
   file.put(counts.data(), counts.size());
-  file.put(weightHost.data(), weightHost.size());
+  file.put(weightHost.data(), nonEmpty);
   file.put(index.data(), index.size());
   file.end();
 }

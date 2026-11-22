@@ -51,14 +51,17 @@ static int runTest() {
   histogramTypeIn maxRange[2] = {kVmax, kVmax};
   int binsPerDim[2] = {kBins, kBins};
 
-  velocityHistogramCUDA2D histogram(kHistogramSize);
-  histogram.setHistogram(minRange, maxRange, binsPerDim);
-  cudaErrChk(cudaMemset(histogram.getHistogramCUDA(), 0,
+  // the histogram object and the particles in page-locked memory: they are
+  // copied to the device
+  velocityHistogramCUDA2D* const histogram =
+      newHostPinnedObject<velocityHistogramCUDA2D>(kHistogramSize);
+  histogram->setHistogram(minRange, maxRange, binsPerDim);
+  cudaErrChk(cudaMemset(histogram->getHistogramCUDA(), 0,
                         kHistogramSize * sizeof(histogramTypeOut)));
 
-  std::vector<histogramTypeIn> u(kSampleCount);
-  std::vector<histogramTypeIn> v(kSampleCount);
-  std::vector<histogramTypeIn> q(kSampleCount, kCharge);
+  PinnedVector<histogramTypeIn> u(kSampleCount);
+  PinnedVector<histogramTypeIn> v(kSampleCount);
+  PinnedVector<histogramTypeIn> q(kSampleCount, kCharge);
   std::vector<histogramTypeOut> expected(kHistogramSize, 1.0);
 
   const histogramTypeIn resolution = (maxRange[0] - minRange[0]) / kBins;
@@ -102,7 +105,7 @@ static int runTest() {
   cudaErrChk(cudaMemcpy(qDevice, q.data(),
                         kSampleCount * sizeof(histogramTypeIn),
                         cudaMemcpyHostToDevice));
-  cudaErrChk(cudaMemcpy(histogramDevice, &histogram,
+  cudaErrChk(cudaMemcpy(histogramDevice, histogram,
                         sizeof(velocityHistogramCUDA2D),
                         cudaMemcpyHostToDevice));
 
@@ -111,10 +114,10 @@ static int runTest() {
   cudaErrChk(cudaGetLastError());
   cudaErrChk(cudaDeviceSynchronize());
 
-  histogram.copyHistogramAsync(0);
+  histogram->copyHistogramAsync(0);
   cudaErrChk(cudaDeviceSynchronize());
 
-  const auto* actual = histogram.getHistogram();
+  const auto* actual = histogram->getHistogram();
   bool pass = true;
   for (int i = 0; i < kHistogramSize; ++i) {
     if (std::fabs(static_cast<double>(actual[i] - expected[i])) > kTolerance) {
@@ -125,6 +128,7 @@ static int runTest() {
     }
   }
 
+  deleteHostPinnedObject(histogram);
   cudaErrChk(cudaFree(histogramDevice));
   cudaErrChk(cudaFree(qDevice));
   cudaErrChk(cudaFree(vDevice));

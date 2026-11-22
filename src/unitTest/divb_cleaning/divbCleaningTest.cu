@@ -49,7 +49,8 @@
 #include <vector>
 
 using T = cudaSolverType;
-using Vec = std::vector<T>;
+// the host vectors of the test, page-locked: copied to and from the device
+using Vec = PinnedVector<T>;
 
 constexpr double kH[3] = {0.1, 0.13, 0.07}; // grid spacings
 constexpr double kInf = std::numeric_limits<double>::infinity();
@@ -1045,14 +1046,16 @@ static void projectNullSpace(std::vector<Vec>& v,
   std::vector<T> global(ns[0].globalSize, 0.0), part;
   for (int r = 0; r < ranks; r++) {
     Dev d(v[r]), sums(Vec(std::max(ns[r].localSize, 1), 0));
-    gpuCleaningNullSums(d.p, ns[r], sums.p, part, 0);
+    PinnedVector<T> hostSums(sums.n);
+    gpuCleaningNullSums(d.p, ns[r], sums.p, hostSums.data(), part, 0);
     for (size_t q = 0; q < global.size(); q++)
       global[q] += part[q];
   }
   for (int r = 0; r < ranks; r++) {
     const SignedBox& box = ns[r].box;
     Dev d(v[r]), coef(Vec(box.n[0] + box.n[1] + box.n[2], 0));
-    gpuCleaningNullSubtract(d.p, ns[r], global, coef.p, 0);
+    PinnedVector<T> hostCoef(coef.n);
+    gpuCleaningNullSubtract(d.p, ns[r], global, coef.p, hostCoef.data(), 0);
     v[r] = d.get();
   }
 }
@@ -1237,7 +1240,7 @@ static void testDivEWalls() {
     const Grid g = makeGrid(m[0], m[1], m[2]);
     const bool odd[3] = {true, true, false}; // the conductor axes
     // the ghosts of GhostSet::Phi on every face, one launch
-    GhostRuleDev rules[kFaces];
+    PinnedVector<GhostRuleDev> rules(kFaces); // copied to the device
     bool all[kFaces], walls[kFaces];
     RowFaces rowFaces;
     for (int f = 0; f < kFaces; f++) {
@@ -1248,9 +1251,10 @@ static void testDivEWalls() {
     }
     rowFaces.planes = nodePlanes(g.nn, walls);
     GhostRuleDev* d_rules = nullptr;
-    cudaErrChk(cudaMalloc(&d_rules, sizeof rules));
+    const size_t ruleBytes = rules.size() * sizeof(GhostRuleDev);
+    cudaErrChk(cudaMalloc(&d_rules, ruleBytes));
     cudaErrChk(
-        cudaMemcpy(d_rules, rules, sizeof rules, cudaMemcpyHostToDevice));
+        cudaMemcpy(d_rules, rules.data(), ruleBytes, cudaMemcpyHostToDevice));
     const FaceSlabs shell = ghostShell(g.nc, all);
     auto fillPhi = [&](T* p) {
       GhostBatch batch;

@@ -73,12 +73,14 @@ private:
 };
 
 /**
- * Wait for a task of a ThreadPool and return its result. An exception of the
- * task is thrown again on the calling thread, its message prefixed with
- * `task` (what failed); uncaught, it ends every rank (MPIdata).
+ * Wait for a task of a ThreadPool (its std::future or std::shared_future) and
+ * return its result. An exception of the task is thrown again on the calling
+ * thread, its message prefixed with `task` (what failed); uncaught, it ends
+ * every rank (MPIdata).
  */
-template <typename T>
-T awaitTask(std::future<T>& future, const std::string& task) {
+template <typename Future>
+auto awaitTask(Future& future, const std::string& task)
+    -> decltype(future.get()) {
   try {
     return future.get();
   } catch (const std::exception& error) {

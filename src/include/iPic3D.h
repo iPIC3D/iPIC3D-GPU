@@ -60,7 +60,8 @@ using std::string;
 #include <future>
 #include <vector>
 
-class IOManager; // modular I/O manager (see IOManager.h)
+class IOManager;     // modular I/O manager (see IOManager.h)
+struct ParticleSums; // energy-diagnostics sums (particleSums.cuh)
 
 namespace iPic3D {
 class c_Solver;
@@ -105,15 +106,10 @@ class c_Solver {
 
 public:
   ~c_Solver();
-  c_Solver()
-      : col(0), vct(0), grid(0), EMf(0), particlesCommInj(nullptr),
-        particlesHost(nullptr), testpart(nullptr), exosphereIonization(nullptr),
-        ioManager(0), heatFluxCalculationEnabled_(false),
-        heatFluxOutputEnabled_(false), heatFluxScheduledCycle_(-1),
-        heatFluxStream(nullptr), heatFluxReadDoneEvt(nullptr),
-        heatFluxHostDoneEvt(nullptr), heatFluxCUDAPtr(nullptr),
-        heatFluxBulkCUDAPtr(nullptr), Ke(0), BulkEnergy(0), momentum(0),
-        Qtot(0), Qremoved(0), my_clock(0) {}
+  /** An empty solver; Init() creates its state. Defined with the destructor
+   *  in the library, which links the CUDA runtime that the page-locked
+   *  members need. */
+  c_Solver();
 
   // ======= Initialization and lifecycle =======
   /**
@@ -231,7 +227,8 @@ public:
    */
   void ScheduleHeatFlux(int cycle);
   /**
-   * @brief Schedule or execute GPU-to-host copies needed for output.
+   * @brief Schedule or execute GPU-to-host copies needed for output, and the
+   * particle sums of the energy diagnostics.
    *
    * @param cycle Current simulation cycle, or -1 for the final flush path.
    */
@@ -293,22 +290,16 @@ private:
   /** @brief Convert guarded sorter cell metadata to active-cell restart
    * metadata. */
   void prepareActiveRestartParticleCellMetadata();
-  /**
-   * @brief Register one species' host moment arrays as pinned memory.
-   *
-   * @param species Species index.
-   */
-  void registerMomentsPinnedMemory(int species);
-  /**
-   * @brief Unregister one species' host moment arrays from pinned memory.
-   *
-   * @param species Species index.
-   */
-  void unregisterMomentsPinnedMemory(int species);
-  /** @brief Register the persistent heat-flux host tensor as pinned memory. */
-  void registerHeatFluxPinnedMemory();
-  /** @brief Unregister the persistent heat-flux host tensor. */
-  void unregisterHeatFluxPinnedMemory();
+  /** Selects the GPU of this rank (cudaDeviceOnNode), before the first
+   *  page-locked host allocation; nonzero when a rank of the run cannot be
+   *  mapped to a device. */
+  int selectDevice();
+  /** The steps of outputCopyAsync, on outputStream, ready with
+   *  eventOutputCopy: the particle sums of every species into
+   *  particleSumsHostPtr, and the copies to the host particle arrays that
+   *  the outputs of cycle read. */
+  void sumParticlesAsync();
+  void copyParticlesToHostAsync(int cycle);
 
 private:
   // static MPIdata * mpi;
@@ -329,7 +320,7 @@ private:
       exosphereTaskFutures; // persistent future buffer (avoids
                             // per-call allocation)
   double* Ke; // kinetic energy of each species (relativistic in the Dipole
-              // cases, ParticleSoAHost::getKinetic)
+              // cases, particleSums.cuh)
   double* BulkEnergy; // bulk kinetic energy of each species, consider the bulk
                       // motion
   double* momentum;   // |momentum vector| of each species
@@ -342,13 +333,15 @@ private:
   IOManager* ioManager; // modular I/O manager (owns backends)
 
   RestartParticleCellMetadata restartParticleCellMetadata_;
-  std::vector<std::vector<int>> restartGuardedCellOffsets_;
-  std::vector<std::vector<int>> restartGuardedCellCounts_;
+  // per species, page-locked: copied from the device
+  std::vector<PinnedVector<int>> restartGuardedCellOffsets_;
+  std::vector<PinnedVector<int>> restartGuardedCellCounts_;
 
   int cudaDeviceOnNode; // the device this rank should use
   cudaStream_t* streams;
   cudaStream_t planetStream; // dedicated stream for planet BC processing
-  cudaStream_t outputStream; // dedicated stream for output D->H copies
+  cudaStream_t outputStream; // dedicated stream for the output D->H copies
+                             // and the particle sums
 
   std::future<int>* exitingResults;
   int* stayedParticle; // stayed particles for each species
@@ -411,6 +404,11 @@ private:
   ThreadPool* threadPoolPtr;
 
   cudaEvent_t event0, eventOutputCopy;
+  // The particle sums of the energy diagnostics, per species, on the GPU and
+  // in pinned host memory: computed on outputStream by outputCopyAsync before
+  // a diagnostics cycle, ready with eventOutputCopy (sumParticlesAsync).
+  ParticleSums* particleSumsCUDAPtr = nullptr; // [ns]
+  ParticleSums* particleSumsHostPtr = nullptr; // [ns]
   cudaEvent_t solverDoneEvent; ///< recorded on solverStream_ after field solve
   cudaEvent_t momentsPipelineDoneEvt; ///< recorded on solverStream_ at end of
                                       ///< the MomentsAwait() pipeline (after

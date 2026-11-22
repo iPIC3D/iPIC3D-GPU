@@ -535,11 +535,11 @@ int runInterpolationRangeComplementRegression(int rank) {
 
   const size_t centerSize = static_cast<size_t>(nxc) * nyc * nzc;
   const size_t nodeSize = static_cast<size_t>(nxn) * nyn * nzn;
-  std::vector<cudaSolverType> oldCenterHost(centerSize);
-  std::vector<cudaSolverType> newCenterHost(centerSize);
-  std::vector<cudaSolverType> oldReference(nodeSize);
-  std::vector<cudaSolverType> newReference(nodeSize);
-  std::vector<cudaSolverType> resultHost(nodeSize);
+  PinnedVector<cudaSolverType> oldCenterHost(centerSize);
+  PinnedVector<cudaSolverType> newCenterHost(centerSize);
+  PinnedVector<cudaSolverType> oldReference(nodeSize);
+  PinnedVector<cudaSolverType> newReference(nodeSize);
+  PinnedVector<cudaSolverType> resultHost(nodeSize);
 
   for (int i = 0; i < nxc; ++i) {
     for (int j = 0; j < nyc; ++j) {
@@ -1114,18 +1114,22 @@ struct GpuReductionScratch {
   GpuReductionScratch& operator=(const GpuReductionScratch&) = delete;
 
   cudaSolverType* ptr = nullptr;
+  // the page-locked host slot of the result
+  PinnedVector<cudaSolverType> result = PinnedVector<cudaSolverType>(1);
 };
 
-double localNorm2(const GPUKrylovVector& values,
-                  const GpuReductionScratch& scratch, cudaStream_t stream) {
-  return gpuNorm2(values.devPtr(), values.size(), scratch.ptr, stream);
+double localNorm2(const GPUKrylovVector& values, GpuReductionScratch& scratch,
+                  cudaStream_t stream) {
+  return gpuNorm2(values.devPtr(), values.size(), scratch.ptr,
+                  scratch.result.data(), stream);
 }
 
 double localNorm2Sum(const ConstGpuFieldPtrs& fields,
-                     const GpuReductionScratch& scratch, cudaStream_t stream) {
+                     GpuReductionScratch& scratch, cudaStream_t stream) {
   double sum = 0.0;
   for (const GPUFieldArray3* field : fields) {
-    sum += gpuNorm2(field->devPtr(), field->size(), scratch.ptr, stream);
+    sum += gpuNorm2(field->devPtr(), field->size(), scratch.ptr,
+                    scratch.result.data(), stream);
   }
   return sum;
 }
@@ -1163,9 +1167,9 @@ void zeroGpuFields(GpuFieldPtrs fields, cudaStream_t stream) {
 
 /** The size values of the device array d, once the work queued on stream
  *  is done. */
-std::vector<cudaSolverType> toHost(const cudaSolverType* d, size_t size,
-                                   cudaStream_t stream) {
-  std::vector<cudaSolverType> h(size);
+PinnedVector<cudaSolverType> toHost(const cudaSolverType* d, size_t size,
+                                    cudaStream_t stream) {
+  PinnedVector<cudaSolverType> h(size);
   cudaErrChk(cudaStreamSynchronize(stream));
   cudaErrChk(cudaMemcpy(h.data(), d, size * sizeof(cudaSolverType),
                         cudaMemcpyDeviceToHost));
@@ -1173,10 +1177,10 @@ std::vector<cudaSolverType> toHost(const cudaSolverType* d, size_t size,
 }
 
 /** n values uniform in [-1, 1), from a generator seeded with seed. */
-std::vector<cudaSolverType> randomValues(size_t n, unsigned seed) {
+PinnedVector<cudaSolverType> randomValues(size_t n, unsigned seed) {
   std::mt19937_64 gen(seed);
   std::uniform_real_distribution<double> uniform(-1.0, 1.0);
-  std::vector<cudaSolverType> v(n);
+  PinnedVector<cudaSolverType> v(n);
   for (auto& value : v)
     value = uniform(gen);
   return v;
@@ -1207,7 +1211,7 @@ void runPeriodicCase(EMfields3D& fields, const TestInput& input, Check& check) {
   fields.gpuSolverSyncH2D(stream);
   fields.gpuCalculateE(0);
   fields.gpuAdvanceE(); // E^n -> E(n+1), normally done by gpuCalculateB
-  fields.gpuSolverSyncD2H(stream);
+  fields.gpuSolverSyncD2H(FieldOutputArrays::all(), stream);
   const FieldArray electric = electricFields(fields);
   checkConstantElectric(electric, check, input.periodicElectric(),
                         fullBounds(electric[0]), kElectricLabels);
@@ -1219,7 +1223,7 @@ void runReflectiveCase(EMfields3D& fields, Grid3DCU& grid,
   setElectricFields(fields, input.reflectiveElectric());
   fields.gpuSolverSyncH2D(stream);
   communicateElectricBoundaries(fields, grid);
-  fields.gpuSolverSyncD2H(stream);
+  fields.gpuSolverSyncD2H(FieldOutputArrays::all(), stream);
   checkReflective(fields, check, input);
 }
 
@@ -1268,7 +1272,7 @@ void runManufacturedCase(EMfields3D& fields, Grid3DCU& grid,
   solverToElectric(fields, oldElectric, grid, stream);
   fields.gpuCalculateE(0);
   fields.gpuAdvanceE(); // E^n -> E(n+1), normally done by gpuCalculateB
-  fields.gpuSolverSyncD2H(stream);
+  fields.gpuSolverSyncD2H(FieldOutputArrays::all(), stream);
   checkManufactured(fields, check, grid, input);
 }
 
@@ -1281,7 +1285,7 @@ void runBoundaryRowsCase(EMfields3D& fields, Grid3DCU& grid,
   prepareManufacturedMoments(fields);
 
   const int n = maxwellVectorSize(grid);
-  const std::vector<cudaSolverType> hx = randomValues(n, 1234 + rank);
+  const PinnedVector<cudaSolverType> hx = randomValues(n, 1234 + rank);
   GPUKrylovVector x(n), image(n), reapplied(n), rowsOnly(n);
   // the allocations zero the arrays outside the solver stream
   cudaErrChk(cudaDeviceSynchronize());
@@ -1295,7 +1299,7 @@ void runBoundaryRowsCase(EMfields3D& fields, Grid3DCU& grid,
   rowsOnly.setZero(stream);
   for (GPUKrylovVector* target : {&reapplied, &rowsOnly})
     fields.gpuBoundaryRows(target->devPtr());
-  std::vector<cudaSolverType> hImage(n), hReapplied(n), hRows(n);
+  PinnedVector<cudaSolverType> hImage(n), hReapplied(n), hRows(n);
   image.copyToHost(hImage.data(), stream);
   reapplied.copyToHost(hReapplied.data(), stream);
   rowsOnly.copyToHost(hRows.data(), stream);
@@ -1329,7 +1333,7 @@ void runSmoothedFacesCase(EMfields3D& fields, Grid3DCU& grid,
 
   const int nxn = grid.getNXN(), nyn = grid.getNYN(), nzn = grid.getNZN();
   const size_t size = (size_t)nxn * nyn * nzn;
-  const std::array<std::vector<cudaSolverType>, 3> e = {
+  const std::array<PinnedVector<cudaSolverType>, 3> e = {
       toHost(fields.gpuExForPcls().devPtr(), size, stream),
       toHost(fields.gpuEyForPcls().devPtr(), size, stream),
       toHost(fields.gpuEzForPcls().devPtr(), size, stream)};
@@ -1389,7 +1393,7 @@ void runInflowLayersCase(EMfields3D& fields, Grid3DCU& grid,
   const bool physicalHi[3] = {topo.getXright_neighbor() == MPI_PROC_NULL,
                               topo.getYright_neighbor() == MPI_PROC_NULL,
                               topo.getZright_neighbor() == MPI_PROC_NULL};
-  auto layerDeviation = [&](const std::vector<cudaSolverType>& a,
+  auto layerDeviation = [&](const PinnedVector<cudaSolverType>& a,
                             const int n[3], int f, double value, bool onNodes) {
     const int dir = f / 2;
     const int first = f % 2 ? n[dir] - L - 1 : 0;
@@ -1424,7 +1428,7 @@ void runInflowLayersCase(EMfields3D& fields, Grid3DCU& grid,
     const size_t size = (size_t)n[0] * n[1] * n[2];
     double dev = 0.0;
     for (int c = 0; c < 3; c++) {
-      const std::vector<cudaSolverType> h =
+      const PinnedVector<cudaSolverType> h =
           toHost(a[c]->devPtr(), size, stream);
       for (int f = 0; f < 6; f++)
         if (owns[f])
@@ -1503,7 +1507,7 @@ void runConductorWallCase(EMfields3D& fields, Grid3DCU& grid,
   // the wall value on the face nodes: W, the mean of the 4 face nodes of a
   // cell face, from the initial node B_x, averaged over the 4 cells of the
   // node
-  const std::vector<cudaSolverType> bx0 =
+  const PinnedVector<cudaSolverType> bx0 =
       toHost(fields.gpuBxn().devPtr(), nodes, stream);
   auto wallValue = [&](int i, int j, int k) { // W of the cell face (j, k)
     return 0.25 * (bx0[node(i, j, k)] + bx0[node(i, j + 1, k)] +
@@ -1516,13 +1520,13 @@ void runConductorWallCase(EMfields3D& fields, Grid3DCU& grid,
         expected[node(w[0], j, k)] =
             0.25 * (wallValue(w[0], j - 1, k - 1) + wallValue(w[0], j, k - 1) +
                     wallValue(w[0], j - 1, k) + wallValue(w[0], j, k));
-  const std::vector<cudaSolverType> div0 = divergence();
-  const std::vector<cudaSolverType> bxc0 =
+  const PinnedVector<cudaSolverType> div0 = divergence();
+  const PinnedVector<cudaSolverType> bxc0 =
       toHost(fields.gpuBxc().devPtr(), cells, stream);
 
   // the deviation of the ghost nodes of a node field from its image in the
   // wall: odd about the face value (2 face - node 2) or even (node 2)
-  auto imageDeviation = [&](const std::vector<cudaSolverType>& a, bool odd) {
+  auto imageDeviation = [&](const PinnedVector<cudaSolverType>& a, bool odd) {
     double dev = 0.0;
     for (const auto& w : walls) {
       const int face = w[0];
@@ -1539,7 +1543,7 @@ void runConductorWallCase(EMfields3D& fields, Grid3DCU& grid,
     return dev;
   };
   // max |value| over the face nodes of the walls
-  auto wallMax = [&](const std::vector<cudaSolverType>& a) {
+  auto wallMax = [&](const PinnedVector<cudaSolverType>& a) {
     double m = 0.0;
     for (const auto& w : walls)
       for (int j = 1; j < nyn - 1; j++)
@@ -1563,8 +1567,9 @@ void runConductorWallCase(EMfields3D& fields, Grid3DCU& grid,
     gpuDivN2C(gauss.devPtr(), fields.gpuEx().devPtr(), fields.gpuEy().devPtr(),
               fields.gpuEz().devPtr(), nxc, nyc, nzc, grid.get_invdx(),
               grid.get_invdy(), grid.get_invdz(), stream);
-    const std::vector<cudaSolverType> d = toHost(gauss.devPtr(), cells, stream);
-    const std::vector<cudaSolverType> rho =
+    const PinnedVector<cudaSolverType> d =
+        toHost(gauss.devPtr(), cells, stream);
+    const PinnedVector<cudaSolverType> rho =
         toHost(fields.gpuRhoc().devPtr(), cells, stream);
     double r = 0.0;
     for (int i = 1; i < nxc - 1; i++)
@@ -1588,7 +1593,7 @@ void runConductorWallCase(EMfields3D& fields, Grid3DCU& grid,
   for (int cycle = 0; cycle < 3; cycle++) {
     fields.gpuCalculateE(cycle);
     for (int c = 0; c < 3; c++) {
-      const std::vector<cudaSolverType> h =
+      const PinnedVector<cudaSolverType> h =
           toHost(storedE[c]->devPtr(), nodes, stream);
       if (c != 0)
         local[5] = std::max(local[5], wallMax(h));
@@ -1597,7 +1602,7 @@ void runConductorWallCase(EMfields3D& fields, Grid3DCU& grid,
     local[8] = std::max(local[8], gaussResidual());
     for (GPUFieldArray3* const* E : {solvedE, smoothedE})
       for (int c = 0; c < 3; c++) {
-        const std::vector<cudaSolverType> h =
+        const PinnedVector<cudaSolverType> h =
             toHost(E[c]->devPtr(), nodes, stream);
         if (c != 0)
           local[3] = std::max(local[3], wallMax(h));
@@ -1608,10 +1613,10 @@ void runConductorWallCase(EMfields3D& fields, Grid3DCU& grid,
       local[4] = std::max(
           local[4],
           imageDeviation(toHost(nodeB[c]->devPtr(), nodes, stream), c == 0));
-    const std::vector<cudaSolverType> bx =
+    const PinnedVector<cudaSolverType> bx =
         toHost(fields.gpuBxn().devPtr(), nodes, stream);
-    const std::vector<cudaSolverType> d = divergence();
-    const std::vector<cudaSolverType> bxc =
+    const PinnedVector<cudaSolverType> d = divergence();
+    const PinnedVector<cudaSolverType> bxc =
         toHost(fields.gpuBxc().devPtr(), cells, stream);
     for (const auto& w : walls)
       for (int j = 1; j < nyn - 1; j++)
@@ -1686,7 +1691,7 @@ void runConductorEdgesCase(EMfields3D& fields, Grid3DCU& grid,
   // vector, and the values of the identity rows written over a sentinel,
   // all back on the nodes
   const int nK = maxwellVectorSize(grid);
-  const std::vector<cudaSolverType> hx = randomValues(nK, 777 + rank);
+  const PinnedVector<cudaSolverType> hx = randomValues(nK, 777 + rank);
   std::vector<GPUFieldArray3> v, im, rows, src;
   for (int c = 0; c < 3; c++) {
     v.emplace_back(n[0], n[1], n[2]);
@@ -1698,7 +1703,7 @@ void runConductorEdgesCase(EMfields3D& fields, Grid3DCU& grid,
   // the allocations zero the arrays outside the solver stream
   cudaErrChk(cudaDeviceSynchronize());
   x.copyFromHost(hx.data(), stream);
-  std::vector<cudaSolverType> sentinel(nodes, 7.0);
+  PinnedVector<cudaSolverType> sentinel(nodes, 7.0);
   for (int c = 0; c < 3; c++)
     src[c].copyFromHost(sentinel.data());
   // the uploads ran on the default stream, which the non-blocking solver
@@ -1719,7 +1724,7 @@ void runConductorEdgesCase(EMfields3D& fields, Grid3DCU& grid,
                                      src[2].devPtr()};
   fields.gpuBoundary().rowValues(srcPtr, stream);
   cudaErrChk(cudaStreamSynchronize(stream));
-  std::array<std::vector<cudaSolverType>, 3> hv, him, hrows, hs;
+  std::array<PinnedVector<cudaSolverType>, 3> hv, him, hrows, hs;
   for (int c = 0; c < 3; c++) {
     hv[c] = toHost(v[c].devPtr(), nodes, stream);
     him[c] = toHost(im[c].devPtr(), nodes, stream);
@@ -1832,7 +1837,7 @@ std::array<double, 3> runConductorMode(EMfields3D& fields, Grid3DCU& grid,
       fields.gpuCalculateE(cycle);
       fields.gpuCalculateB(cycle);
     }
-    std::array<std::vector<cudaSolverType>, 3> e, b;
+    std::array<PinnedVector<cudaSolverType>, 3> e, b;
     GPUFieldArray3* const E[3] = {&fields.gpuEx(), &fields.gpuEy(),
                                   &fields.gpuEz()};
     GPUFieldArray3* const B[3] = {&fields.gpuBxc(), &fields.gpuByc(),
@@ -1844,7 +1849,7 @@ std::array<double, 3> runConductorMode(EMfields3D& fields, Grid3DCU& grid,
     gpuDivN2C(div.devPtr(), E[0]->devPtr(), E[1]->devPtr(), E[2]->devPtr(),
               nc[0], nc[1], nc[2], grid.get_invdx(), grid.get_invdy(),
               grid.get_invdz(), stream);
-    const std::vector<cudaSolverType> d = toHost(div.devPtr(), cells, stream);
+    const PinnedVector<cudaSolverType> d = toHost(div.devPtr(), cells, stream);
     // [0] max |E_x| on the walls, [1] max |div E|, [2] max |E|; energy:
     // the cells' B^2 and the owned nodes' E^2 (trapezoidal on the walls)
     double mx[3] = {0.0, 0.0, 0.0}, sum = 0.0;
@@ -1920,9 +1925,9 @@ void checkImageLinearity(EMfields3D& fields, const Grid3DCU& grid, int rank,
   const cudaStream_t stream = fields.gpuSolverStream();
   const int n = maxwellVectorSize(grid);
   const double a = 0.7, b = -1.3;
-  const std::vector<cudaSolverType> hu = randomValues(n, 5151 + rank);
-  const std::vector<cudaSolverType> hv = randomValues(n, 6262 + rank);
-  std::vector<cudaSolverType> hw(n);
+  const PinnedVector<cudaSolverType> hu = randomValues(n, 5151 + rank);
+  const PinnedVector<cudaSolverType> hv = randomValues(n, 6262 + rank);
+  PinnedVector<cudaSolverType> hw(n);
   for (int q = 0; q < n; q++)
     hw[q] = a * hu[q] + b * hv[q];
   GPUKrylovVector u(n), v(n), w(n), zero(n), image(n);
@@ -1943,8 +1948,8 @@ void checkImageLinearity(EMfields3D& fields, const Grid3DCU& grid, int rank,
         fields.gpuMaxwellImageLocal(image.devPtr(), x.devPtr());
       return toHost(image.devPtr(), n, stream);
     };
-    const std::vector<cudaSolverType> Au = apply(u), A0 = apply(zero),
-                                      Av = apply(v), Aw = apply(w);
+    const PinnedVector<cudaSolverType> Au = apply(u), A0 = apply(zero),
+                                       Av = apply(v), Aw = apply(w);
     double err = 0.0, scale = 0.0;
     for (int q = 0; q < n; q++) {
       const double expected = a * Au[q] + b * Av[q];
@@ -2032,7 +2037,7 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
   // order XL, XR, YL, YR, ZL, ZR (a later face overwrites the edges)
   auto faceRules = [&](GPUFieldArray3& a, int array) {
     const int n[3] = {nxc, nyc, nzc};
-    std::vector<cudaSolverType> h =
+    PinnedVector<cudaSolverType> h =
         toHost(a.devPtr(), (size_t)nxc * nyc * nzc, stream);
     auto at = [&](const int c[3]) {
       return ((size_t)c[0] * nyc + c[1]) * nzc + c[2];
@@ -2084,7 +2089,7 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
         return ghost == 0 ? extent - 2 : 1;
       return ghost == 0 ? 1 : extent - 2;
     };
-    std::vector<cudaSolverType> h(plane);
+    PinnedVector<cudaSolverType> h(plane);
     for (int a = 0; a < count; a++) {
       cudaSolverType* p = arrays[a] + (nxc - 1) * plane;
       cudaErrChk(cudaStreamSynchronize(stream));
@@ -2134,7 +2139,7 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
     return (c[axis] == 1 && conductor(2 * axis + 1)) ||
            (c[axis] == nn[axis] - 2 && conductor(2 * axis));
   };
-  std::vector<cudaSolverType> hx = randomValues(n, 4321 + rank);
+  PinnedVector<cudaSolverType> hx = randomValues(n, 4321 + rank);
   for (int i = 1; i < nxn - 1; i++)
     for (int j = 1; j < nyn - 1; j++)
       for (int k = 1; k < nzn - 1; k++)
@@ -2195,7 +2200,7 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
                   lap[2].devPtr(), nxn, nyn, nzn, stream);
 
   // the operator data on the host, for the face rows
-  std::array<std::vector<cudaSolverType>, 3> hv, hD;
+  std::array<PinnedVector<cudaSolverType>, 3> hv, hD;
   for (int c = 0; c < 3; c++) {
     hv[c] = toHost(v[c].devPtr(), nodes, stream);
     hD[c] = toHost(D[c].devPtr(), nodes, stream);
@@ -2204,7 +2209,7 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
     return ((size_t)i * nyn + j) * nzn + k;
   };
   const double q[3] = {0.25 * ix, 0.25 * iy, 0.25 * iz};
-  std::vector<cudaSolverType> hImage(n), hRef(n);
+  PinnedVector<cudaSolverType> hImage(n), hRef(n);
   image.copyToHost(hImage.data(), stream);
   ref.copyToHost(hRef.data(), stream);
   cudaErrChk(cudaStreamSynchronize(stream));
@@ -2252,8 +2257,8 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
       const int plane = low ? 1 : nn[axis] - 2;
       const int out = low ? -1 : 1; // the ghost side
       // component c of the node field F at (i, j, k) through the image
-      auto img = [&](const std::array<std::vector<cudaSolverType>, 3>& F, int c,
-                     int i, int j, int k) {
+      auto img = [&](const std::array<PinnedVector<cudaSolverType>, 3>& F,
+                     int c, int i, int j, int k) {
         int p3[3] = {i, j, k};
         if (p3[axis] == plane && c != axis)
           return 0.0;
@@ -2265,7 +2270,7 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
         return sign * F[c][nodeAt(p3[0], p3[1], p3[2])];
       };
       // d/d(e) of component c of F at the cell (ci, cj, ck): nodes ci..ci+1
-      auto dN2C = [&](const std::array<std::vector<cudaSolverType>, 3>& F,
+      auto dN2C = [&](const std::array<PinnedVector<cudaSolverType>, 3>& F,
                       int c, int e, int ci, int cj, int ck) {
         double sum = 0.0;
         for (int a = 0; a < 2; a++)
@@ -2337,7 +2342,7 @@ void runImageReferenceCase(EMfields3D& fields, Grid3DCU& grid,
   GPUKrylovVector blocking(n);
   fields.gpuMaxwellImage<EMfields3D::HaloMode::Blocking>(blocking.devPtr(),
                                                          x.devPtr());
-  std::vector<cudaSolverType> hBlocking(n);
+  PinnedVector<cudaSolverType> hBlocking(n);
   blocking.copyToHost(hBlocking.data(), stream);
   cudaErrChk(cudaStreamSynchronize(stream));
   for (int q = 0; q < n; q++)
@@ -2413,13 +2418,13 @@ void runLocalImageCase(EMfields3D& fields, Grid3DCU& grid,
 
   const int n = maxwellVectorSize(grid);
   const int nn[3] = {grid.getNXN(), grid.getNYN(), grid.getNZN()};
-  const std::vector<cudaSolverType> hx = randomValues(n, 2468 + rank);
+  const PinnedVector<cudaSolverType> hx = randomValues(n, 2468 + rank);
   GPUKrylovVector x(n), full(n), local(n);
   cudaErrChk(cudaDeviceSynchronize());
   x.copyFromHost(hx.data(), stream);
   fields.gpuMaxwellImage(full.devPtr(), x.devPtr());
   fields.gpuMaxwellImageLocal(local.devPtr(), x.devPtr());
-  std::vector<cudaSolverType> hFull(n), hLocal(n);
+  PinnedVector<cudaSolverType> hFull(n), hLocal(n);
   full.copyToHost(hFull.data(), stream);
   local.copyToHost(hLocal.data(), stream);
   cudaErrChk(cudaStreamSynchronize(stream));
@@ -2658,7 +2663,7 @@ long runGhostFillLayout(const FillLayout& layout, const TestInput& baseInput,
     const size_t size = (size_t)e[0] * e[1] * e[2];
     const int slots = bc.slots(set);
     std::vector<GPUFieldArray3> arrays;
-    std::vector<std::vector<cudaSolverType>> host(slots);
+    std::vector<PinnedVector<cudaSolverType>> host(slots);
     for (int a = 0; a < slots; a++)
       arrays.emplace_back(e[0], e[1], e[2]);
     cudaErrChk(cudaDeviceSynchronize());
@@ -2684,7 +2689,7 @@ long runGhostFillLayout(const FillLayout& layout, const TestInput& baseInput,
       for (int f = 0; f < 6; f++)
         maxRank = std::max(maxRank, bc.rule(set, a, f).rank);
     for (int a = 0; a < slots; a++) {
-      std::vector<cudaSolverType>& h = host[a];
+      PinnedVector<cudaSolverType>& h = host[a];
       for (int pass = 0; pass <= maxRank; pass++)
         for (int f = 0; f < 6; f++) {
           const GhostRuleDev& r = bc.rule(set, a, f);
@@ -2693,10 +2698,10 @@ long runGhostFillLayout(const FillLayout& layout, const TestInput& baseInput,
           const int axis = f / 2, ghost = f % 2 ? e[axis] - 1 : 0;
           const int inward = f % 2 ? -1 : 1;
           const int slow = axis == 0 ? 1 : 0, fast = axis == 2 ? 1 : 2;
-          const std::vector<cudaSolverType> wall =
+          const PinnedVector<cudaSolverType> wall =
               r.kind == GHOST_WALL
                   ? toHost(r.wall, (size_t)e[slow] * e[fast], stream)
-                  : std::vector<cudaSolverType>();
+                  : PinnedVector<cudaSolverType>();
           for (int u = 0; u < e[slow]; u++)
             for (int w = 0; w < e[fast]; w++) {
               int c3[3];
@@ -2739,7 +2744,7 @@ long runGhostFillLayout(const FillLayout& layout, const TestInput& baseInput,
               filled++;
             }
         }
-      const std::vector<cudaSolverType> device =
+      const PinnedVector<cudaSolverType> device =
           toHost(arrays[a].devPtr(), size, stream);
       long setFailures = 0;
       for (size_t m = 0; m < size; m++)
@@ -2771,8 +2776,8 @@ long runGhostFillLayout(const FillLayout& layout, const TestInput& baseInput,
     for (int a = 0; a < kArrays; a++)
       arrays.emplace_back(e[0], e[1], e[2]);
     cudaErrChk(cudaDeviceSynchronize());
-    std::vector<std::vector<cudaSolverType>> host(kArrays);
-    cudaSolverType* p[kArrays];
+    std::vector<PinnedVector<cudaSolverType>> host(kArrays);
+    PinnedVector<cudaSolverType*> p(kArrays); // copied to the device
     for (int a = 0; a < kArrays; a++) {
       host[a].resize(size);
       for (auto& value : host[a])
@@ -2781,14 +2786,15 @@ long runGhostFillLayout(const FillLayout& layout, const TestInput& baseInput,
       p[a] = arrays[a].devPtr();
     }
     cudaSolverType** d_p = nullptr;
-    cudaErrChk(cudaMalloc(&d_p, sizeof(p)));
-    cudaErrChk(cudaMemcpy(d_p, p, sizeof(p), cudaMemcpyHostToDevice));
+    cudaErrChk(cudaMalloc(&d_p, kArrays * sizeof(cudaSolverType*)));
+    cudaErrChk(cudaMemcpy(d_p, p.data(), kArrays * sizeof(cudaSolverType*),
+                          cudaMemcpyHostToDevice));
     cudaErrChk(cudaDeviceSynchronize()); // as above
     bc.foldMoments(d_p, kArrays, stream);
     cudaErrChk(cudaStreamSynchronize(stream));
     cudaErrChk(cudaFree(d_p));
     for (int a = 0; a < kArrays; a++) {
-      std::vector<cudaSolverType>& h = host[a];
+      PinnedVector<cudaSolverType>& h = host[a];
       for (int f = 0; f < 6; f++) {
         if (!planes.active[f])
           continue;
@@ -2801,7 +2807,7 @@ long runGhostFillLayout(const FillLayout& layout, const TestInput& baseInput,
                 h[((size_t)i * e[1] + j) * e[2] + k] *= 2.0;
             }
       }
-      const std::vector<cudaSolverType> device =
+      const PinnedVector<cudaSolverType> device =
           toHost(arrays[a].devPtr(), size, stream);
       for (size_t m = 0; m < size; m++)
         failures += device[m] != h[m];
@@ -2908,7 +2914,7 @@ WaveLevelResult runObliqueWaveLevel(int cells, const TestInput& baseInput,
     fields.gpuCalculateB(cycle);
   }
 
-  fields.gpuSolverSyncD2H(stream);
+  fields.gpuSolverSyncD2H(FieldOutputArrays::all(), stream);
   const WaveState backwardEulerReference =
       backwardEulerWaveState(wave, input.dt, steps);
   const WaveState continuumReference =

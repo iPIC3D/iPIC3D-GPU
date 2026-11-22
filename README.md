@@ -214,6 +214,8 @@ Each checkpoint goes to the slot not holding the run's previous checkpoint: a fr
 
 A write cut off before step 4 therefore leaves the slot without a manifest. Each checkpoint gets a `generation` one above the highest in the restart root, so the newest checkpoint always has the highest generation.
 
+With `AsyncOutput = 1` (the default, see [Deferred writing](#deferred-writing)) the rank files are written by a writer thread while the run goes on, and the barrier of step 3 is non-blocking: steps 3 and 4 complete at a later cycle, once every rank has closed its file. Until then a restart reads the previous checkpoint, in the other slot. One checkpoint is written at a time, and the final checkpoint is complete when the run ends.
+
 The rank-file format depends on the checkpoint backend (`RestartWriteMethod`, see [I/O Backends](#io-backends)):
 
 - **ADIOS2** (`adios2`, default when built): `restart_A/restart_<rank>.bp` or `restart_B/restart_<rank>.bp`.
@@ -661,6 +663,8 @@ A species not in `ParticlesOutputSpecies` has no particle variables or datasets;
 | `MomentsOutputTag` | empty | Moments, tokens below |
 | `SimulationName` | — | Prefix of the VTK and parallel-HDF5 file names; required |
 
+A cycle copies from the GPU to the host only the field arrays that its outputs read: those of these tags, for the energy diagnostics E, the cell B and the species densities and currents, and everything for a checkpoint. The host arrays of the fields, moments and particles are page-locked for the whole run, as the host side of every copy to or from the GPU is: they stay in physical memory and count in the host memory of a rank.
+
 #### Field output tags (`FieldOutputTag`)
 
 A `+`-separated string selecting which grid-level fields to write. Example: `FieldOutputTag = B+E+rho`
@@ -732,7 +736,7 @@ A `+`-separated string selecting which arrays of the particles of the species of
 | `q` | Particle charge |
 | `ID` | Particle ID (species with `TrackParticleID` only) |
 
-A cycle copies from the GPU only what its outputs read: these arrays of these species for a particle output, the velocities and charges of every species for the energy diagnostics, everything for a checkpoint. The mover waits for this copy, so a smaller particle output also takes less time.
+A cycle copies from the GPU only what its outputs read: these arrays of these species for a particle output, everything for a checkpoint. The energy diagnostics copy no particles: they sum them on the GPU. The mover waits for this copy, so a smaller particle output also takes less time.
 
 The ADIOS2 checkpoints use further tokens internally (`proc_topology`, `E`, `B`, `Js`, `rhos`, `pressure`, `particle_cell_metadata`); they are not particle output tokens.
 
@@ -746,6 +750,14 @@ The ADIOS2 checkpoints use further tokens internally (`proc_topology`, `E`, `B`,
 | `RestartDirName` | `data` | Restart root containing `latest_restart.json` and `restart_A` / `restart_B` |
 
 The slots, the restart command and what a checkpoint holds are described in [Restart](#restart).
+
+### Deferred writing
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `AsyncOutput` | `1` | `1`: the particle outputs, the checkpoints and the `shdf5` field outputs are written by writer threads while the run goes on. `0`: they are written at their cycle, on the main thread |
+
+The cycle of such an output waits only for the copy of its data from the GPU to host memory; one writer thread for HDF5 and one for ADIOS2 then write them to disk, at low priority, in the order of their cycles. The host buffers keep the data until written: a later copy into them waits for the writer, so an output may take until the next copy of its data to be written. The end of the run waits for the last writes and prints how long the main thread waited for the writers in total. A writer's error stops the run: an ADIOS2 one at the next cycle, with the output it came from; a serial-HDF5 one at once (that writer aborts, as it does on the main thread). The `pvtk`, `nbcvtk` and `phdf5` field outputs (collective MPI writes, which only the main thread may make), the energy diagnostics and the test particles are written at their cycle.
 
 ### Diagnostics and other output
 

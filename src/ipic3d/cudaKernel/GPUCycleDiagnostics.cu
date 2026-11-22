@@ -1661,6 +1661,9 @@ struct GPUCycleDiagnostics::Impl {
   ArrayPartial* hArrayPartials = nullptr;
   ParticlePartial* dParticlePartials = nullptr;
   ParticlePartial* hParticlePartials = nullptr;
+  // page-locked: the report of this rank, whose particle records are copied
+  // from the device
+  ParticleLocalReport* hParticleReport = nullptr;
   CellSortBlockReport* dCellSortPartials = nullptr;
   CellSortBlockReport* hCellSortPartials = nullptr;
   CellSortStage4DiagnosticPartial* dStage4Partials = nullptr;
@@ -1681,6 +1684,8 @@ struct GPUCycleDiagnostics::Impl {
                           DIAG_MAX_BLOCKS * sizeof(ParticlePartial)));
     cudaErrChk(cudaHostAlloc(&hParticlePartials,
                              DIAG_MAX_BLOCKS * sizeof(ParticlePartial),
+                             cudaHostAllocDefault));
+    cudaErrChk(cudaHostAlloc(&hParticleReport, sizeof(ParticleLocalReport),
                              cudaHostAllocDefault));
   }
 
@@ -1719,6 +1724,8 @@ struct GPUCycleDiagnostics::Impl {
       cudaFree(dParticlePartials);
     if (hParticlePartials)
       cudaFreeHost(hParticlePartials);
+    if (hParticleReport)
+      cudaFreeHost(hParticleReport);
     if (dCellSortPartials)
       cudaFree(dCellSortPartials);
     if (hCellSortPartials)
@@ -1930,7 +1937,8 @@ void GPUCycleDiagnostics::reportParticleRange(
       nop > capacity || requestedBegin > nop || requestedEnd > nop ||
       requestedBegin > capacity || requestedEnd > capacity;
   const int blocks = reductionBlocks(safeCount);
-  ParticleLocalReport local = {};
+  ParticleLocalReport& local = *impl_->hParticleReport;
+  local = {};
   local.requestedBegin = requestedBegin;
   local.requestedCount = requestedCount;
   local.rangeCount = safeCount;

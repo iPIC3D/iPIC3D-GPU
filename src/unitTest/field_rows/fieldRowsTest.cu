@@ -57,7 +57,8 @@
 #include <vector>
 
 using T = cudaSolverType;
-using Vec = std::vector<T>;
+// the host vectors of the test, page-locked: copied to and from the device
+using Vec = PinnedVector<T>;
 
 static int failures = 0;
 static void check(bool ok, const char* what, double value) {
@@ -494,7 +495,7 @@ static void testPointList() {
     structure = structure && listMatches(L, boxes, n);
     if (L.empty())
       continue;
-    std::vector<int> host(3 * L.count());
+    PinnedVector<int> host(3 * L.count());
     for (int p = 0; p < L.count(); p++)
       L.at(p, host[3 * p], host[3 * p + 1], host[3 * p + 2]);
     int* d = nullptr;
@@ -502,7 +503,7 @@ static void testPointList() {
     const PointLaunch launch = pointLaunch(L);
     k_listPoints<<<launch.grid, launch.block>>>(d, L);
     cudaErrChk(cudaGetLastError());
-    std::vector<int> dev(host.size());
+    PinnedVector<int> dev(host.size());
     cudaErrChk(cudaMemcpy(dev.data(), d, dev.size() * sizeof(int),
                           cudaMemcpyDeviceToHost));
     cudaErrChk(cudaFree(d));

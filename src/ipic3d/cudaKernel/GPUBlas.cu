@@ -508,49 +508,37 @@ static inline int reduceGridSize(size_t n) {
 //  Reduction host wrappers
 // =========================================================================
 
+// The blocking ones wait for the result in the page-locked slot h_result;
+// gpuDot and gpuNorm2 launch and copy as their _async variants below.
+
 cudaSolverType gpuDot(const cudaSolverType* a, const cudaSolverType* b,
                       size_t n, cudaSolverType* d_scratch,
-                      cudaStream_t stream) {
-  cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(cudaSolverType), stream));
-  if (n > 0) {
-    k_dotReduce<<<reduceGridSize(n), BLAS_BLOCK, 0, stream>>>(a, b, n,
-                                                              d_scratch);
-    cudaErrChk(cudaGetLastError());
-  }
-  cudaSolverType result;
-  cudaErrChk(cudaMemcpyAsync(&result, d_scratch, sizeof(cudaSolverType),
-                             cudaMemcpyDeviceToHost, stream));
+                      cudaSolverType* h_result, cudaStream_t stream) {
+  gpuDot_async(a, b, n, d_scratch, h_result, stream);
   cudaErrChk(cudaStreamSynchronize(stream));
-  return result;
+  return *h_result;
 }
 
 cudaSolverType gpuNorm2(const cudaSolverType* a, size_t n,
-                        cudaSolverType* d_scratch, cudaStream_t stream) {
-  cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(cudaSolverType), stream));
-  if (n > 0) {
-    k_norm2Reduce<<<reduceGridSize(n), BLAS_BLOCK, 0, stream>>>(a, n,
-                                                                d_scratch);
-    cudaErrChk(cudaGetLastError());
-  }
-  cudaSolverType result;
-  cudaErrChk(cudaMemcpyAsync(&result, d_scratch, sizeof(cudaSolverType),
-                             cudaMemcpyDeviceToHost, stream));
+                        cudaSolverType* d_scratch, cudaSolverType* h_result,
+                        cudaStream_t stream) {
+  gpuNorm2_async(a, n, d_scratch, h_result, stream);
   cudaErrChk(cudaStreamSynchronize(stream));
-  return result;
+  return *h_result;
 }
 
 cudaSolverType gpuReduceSum(const cudaSolverType* a, size_t n,
-                            cudaSolverType* d_scratch, cudaStream_t stream) {
+                            cudaSolverType* d_scratch, cudaSolverType* h_result,
+                            cudaStream_t stream) {
   cudaErrChk(cudaMemsetAsync(d_scratch, 0, sizeof(cudaSolverType), stream));
   if (n > 0) {
     k_sumReduce<<<reduceGridSize(n), BLAS_BLOCK, 0, stream>>>(a, n, d_scratch);
     cudaErrChk(cudaGetLastError());
   }
-  cudaSolverType result;
-  cudaErrChk(cudaMemcpyAsync(&result, d_scratch, sizeof(cudaSolverType),
+  cudaErrChk(cudaMemcpyAsync(h_result, d_scratch, sizeof(cudaSolverType),
                              cudaMemcpyDeviceToHost, stream));
   cudaErrChk(cudaStreamSynchronize(stream));
-  return result;
+  return *h_result;
 }
 
 // ---- Signed box sums and updates (the null-space components of the

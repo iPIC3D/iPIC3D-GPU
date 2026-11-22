@@ -67,10 +67,12 @@ void check(bool ok, const char* what, double value = 0) {
     failures++;
 }
 
-/** Particles of one species on the host, sorted by cell where it matters. */
+/** Particles of one species on the host, sorted by cell where it matters.
+ *  Page-locked, as every host buffer of the test that is copied to or from
+ *  the device. */
 struct Particles {
-  std::vector<real> u, v, w, q, x, y, z;
-  std::vector<cudaPclType_ID> id;
+  PinnedVector<real> u, v, w, q, x, y, z;
+  PinnedVector<cudaPclType_ID> id;
   size_t size() const { return q.size(); }
   void resize(size_t n) {
     for (auto* f : {&u, &v, &w, &q, &x, &y, &z})
@@ -80,13 +82,14 @@ struct Particles {
 };
 
 /** Departure flags of the particles; empty for none. */
-using Flags = std::vector<departureArrayElementType>;
+using Flags = PinnedVector<departureArrayElementType>;
 
 bool flagged(const Flags& flags, size_t i) {
   return !flags.empty() && flags[i].dest != 0;
 }
 
-template <typename T> T* toDevice(const std::vector<T>& host, size_t capacity) {
+template <typename T>
+T* toDevice(const PinnedVector<T>& host, size_t capacity) {
   T* device;
   cudaErrChk(cudaMalloc(&device, std::max<size_t>(capacity, 1) * sizeof(T)));
   if (!host.empty())
@@ -96,7 +99,7 @@ template <typename T> T* toDevice(const std::vector<T>& host, size_t capacity) {
 }
 
 template <typename T>
-void fromDevice(std::vector<T>& host, T* device, size_t n) {
+void fromDevice(PinnedVector<T>& host, T* device, size_t n) {
   host.resize(n);
   if (n > 0)
     cudaErrChk(
@@ -139,7 +142,7 @@ Particles download(ParticleSoADevice soa, size_t n) {
 /** Cells in a row along x; cell c spans [c, c + 1) kCell, y and z in
  *  [0, kCell). */
 struct Cells {
-  std::vector<int> start, count;
+  PinnedVector<int> start, count;
   int size() const { return (int)count.size(); }
 };
 
@@ -155,7 +158,7 @@ Particles thermalCells(const std::vector<int>& counts, Cells& cells, real drift,
   std::uniform_real_distribution<real> uniform(0.0, 1.0);
   Particles p;
   cells.start.clear();
-  cells.count = counts;
+  cells.count.assign(counts.begin(), counts.end());
   for (int c = 0; c < (int)counts.size(); c++) {
     cells.start.push_back((int)p.size());
     for (int i = 0; i < counts[c]; i++) {
@@ -597,10 +600,10 @@ Particles split(const Particles& before, uint32_t count, uint32_t shift,
                 const SplitGeometry& geometry, bool trackID) {
   ParticleSoADevice soa = upload(before, before.size() + count, trackID);
   ParticleIDGenerator generator;
-  ParticleIDGenerator::counter_type firstNew = 1000;
-  cudaErrChk(cudaMalloc(&generator.nextSequence, sizeof(firstNew)));
-  cudaErrChk(cudaMemcpy(generator.nextSequence, &firstNew, sizeof(firstNew),
-                        cudaMemcpyHostToDevice));
+  const PinnedVector<ParticleIDGenerator::counter_type> firstNew(1, 1000);
+  cudaErrChk(cudaMalloc(&generator.nextSequence, sizeof(firstNew[0])));
+  cudaErrChk(cudaMemcpy(generator.nextSequence, firstNew.data(),
+                        sizeof(firstNew[0]), cudaMemcpyHostToDevice));
   if (count > 0)
     particleSplittingKernel<<<(count + kBlockSize - 1) / kBlockSize,
                               kBlockSize>>>(soa, count, shift, geometry,
@@ -629,8 +632,8 @@ std::set<int> checkSplit(const Particles& before, int numCells, uint32_t count,
   const SplitGeometry geometry = splitGeometry(flatZ);
   const Particles after = split(before, count, shift, geometry, true);
   const size_t nop = before.size();
-  const std::vector<real>* const pos0[3] = {&before.x, &before.y, &before.z};
-  const std::vector<real>* const pos1[3] = {&after.x, &after.y, &after.z};
+  const PinnedVector<real>* const pos0[3] = {&before.x, &before.y, &before.z};
+  const PinnedVector<real>* const pos1[3] = {&after.x, &after.y, &after.z};
 
   // A parent is the particle whose charge halved; its twin is found by the
   // charge, the velocity and the two positions kept.

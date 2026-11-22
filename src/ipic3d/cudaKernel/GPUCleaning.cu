@@ -209,15 +209,15 @@ CleaningNullSpace cleaningNullSpace(const Lap27Op& op, bool nodes,
 }
 
 /** The terms of gpuSubSignedTerms from the global sums: coef receives the
- *  line coefficients of the rows of box (to be copied to d_coef, which the
- *  terms point into); returns the number of terms. */
+ *  nCoef line coefficients of the rows of box (to be copied to d_coef, which
+ *  the terms point into); returns the number of terms. */
 static int cleaningNullTerms(const CleaningNullSpace& ns,
                              const std::vector<cudaSolverType>& global,
-                             std::vector<cudaSolverType>& coef,
+                             cudaSolverType* coef, int& nCoef,
                              const cudaSolverType* d_coef,
                              SignedTerm terms[kMaxSignedTerms]) {
   int nTerms = 0, nFamilies = 0;
-  coef.clear();
+  nCoef = 0;
   const cudaSolverType* xyLines = nullptr; // global line sums of family (x, y)
   for (int s = 0; s < ns.nSums; s++) {
     const CleaningNullSpace::Sum& sum = ns.sums[s];
@@ -230,12 +230,12 @@ static int cleaningNullTerms(const CleaningNullSpace& ns,
     }
     // a coefficient for every row of box along c, shared rows included
     const int c = sum.axis;
-    t.line = d_coef + coef.size();
+    t.line = d_coef + nCoef;
     for (int row = ns.box.lo[c]; row < ns.box.hi[c]; row++) {
       int g = ns.box.par[c] + row;
       if (ns.periodic[c])
         g %= ns.N[c];
-      coef.push_back(global[sum.global + g] / sum.count);
+      coef[nCoef++] = global[sum.global + g] / sum.count;
     }
     if (c == 2)
       xyLines = &global[sum.global];
@@ -253,36 +253,35 @@ static int cleaningNullTerms(const CleaningNullSpace& ns,
 }
 
 void gpuCleaningNullSums(const cudaSolverType* d_b, const CleaningNullSpace& ns,
-                         cudaSolverType* d_sums,
+                         cudaSolverType* d_sums, cudaSolverType* h_sums,
                          std::vector<cudaSolverType>& global,
                          cudaStream_t stream) {
-  std::vector<cudaSolverType> local(ns.localSize);
   for (int s = 0; s < ns.nSums; s++)
     gpuSignedBoxSums(d_b, ns.sums[s].box, ns.sums[s].axis,
                      d_sums + ns.sums[s].local, stream);
-  cudaErrChk(cudaMemcpyAsync(local.data(), d_sums,
-                             local.size() * sizeof(cudaSolverType),
+  cudaErrChk(cudaMemcpyAsync(h_sums, d_sums,
+                             ns.localSize * sizeof(cudaSolverType),
                              cudaMemcpyDeviceToHost, stream));
   cudaErrChk(cudaStreamSynchronize(stream));
   global.assign(ns.globalSize, 0.0);
   for (int s = 0; s < ns.nSums; s++)
     for (int l = 0; l < ns.sums[s].lines; l++)
       global[ns.sums[s].global + ns.sums[s].first + l] =
-          local[ns.sums[s].local + l];
+          h_sums[ns.sums[s].local + l];
 }
 
 void gpuCleaningNullSubtract(cudaSolverType* d_b, const CleaningNullSpace& ns,
                              const std::vector<cudaSolverType>& global,
-                             cudaSolverType* d_coef, cudaStream_t stream) {
-  std::vector<cudaSolverType> coef;
+                             cudaSolverType* d_coef, cudaSolverType* h_coef,
+                             cudaStream_t stream) {
   SignedTerm terms[kMaxSignedTerms];
-  const int nTerms = cleaningNullTerms(ns, global, coef, d_coef, terms);
-  if (!coef.empty())
-    cudaErrChk(cudaMemcpyAsync(d_coef, coef.data(),
-                               coef.size() * sizeof(cudaSolverType),
+  int nCoef = 0;
+  const int nTerms =
+      cleaningNullTerms(ns, global, h_coef, nCoef, d_coef, terms);
+  if (nCoef > 0)
+    cudaErrChk(cudaMemcpyAsync(d_coef, h_coef, nCoef * sizeof(cudaSolverType),
                                cudaMemcpyHostToDevice, stream));
   gpuSubSignedTerms(d_b, ns.box, terms, nTerms, stream);
-  // the host coefficients must outlive their copy
   cudaErrChk(cudaStreamSynchronize(stream));
 }
 

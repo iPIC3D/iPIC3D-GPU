@@ -20,6 +20,7 @@ using warp_mask_t = uint64_t;
 #include <limits>
 #include <sstream>
 #include <type_traits>
+#include <vector>
 
 // ── Portable warp intrinsic helpers (defined once, used everywhere) ──
 // Only available in device compilation units (.cu files compiled by nvcc/hipcc)
@@ -176,19 +177,8 @@ __host__ inline cudaStream_t createPriorityStream(StreamPriority priority) {
 
 /////////////////////////////////// CUDA type copy to device
 
-template <typename T>
-__host__ inline T* copyToDevice(T* objectOnHost, cudaStream_t stream = 0) {
-  if (objectOnHost == nullptr)
-    throw std::runtime_error("CopyToDevice: can not copy a nullptr to device.");
-  T* ptr = nullptr;
-  cudaErrChk(cudaMalloc(&ptr, sizeof(T)));
-  cudaErrChk(
-      cudaMemcpyAsync(ptr, objectOnHost, sizeof(T), cudaMemcpyDefault, stream));
-
-  cudaErrChk(cudaStreamSynchronize(stream));
-  return ptr;
-}
-
+/** A device copy of the numberOfElement objects on the host, which are in
+ *  page-locked memory (newHostPinnedObject, newHostPinnedObjectArray). */
 template <typename T>
 __host__ inline T* copyArrayToDevice(T* objectOnHost, int numberOfElement,
                                      cudaStream_t stream = 0) {
@@ -201,6 +191,12 @@ __host__ inline T* copyArrayToDevice(T* objectOnHost, int numberOfElement,
 
   cudaErrChk(cudaStreamSynchronize(stream));
   return ptr;
+}
+
+/** A device copy of the object on the host, as copyArrayToDevice. */
+template <typename T>
+__host__ inline T* copyToDevice(T* objectOnHost, cudaStream_t stream = 0) {
+  return copyArrayToDevice(objectOnHost, 1, stream);
 }
 
 ////////////////////////////////// One dimenstion to high dim index
@@ -274,6 +270,34 @@ template <typename T> void deleteHostPinnedObjectArray(T* ptr, size_t num) {
   }
   cudaErrChk(cudaFreeHost(ptr));
 }
+
+/**
+ * @brief The std allocator of page-locked host memory. Every copy between
+ * the host and the device has page-locked memory on its host side, allocated
+ * so where it is created: the objects of newHostPinnedObject, the vectors of
+ * this allocator (PinnedVector), the pinned_array host arrays (Alloc.h).
+ */
+template <typename T> struct PinnedAllocator {
+  using value_type = T;
+  PinnedAllocator() = default;
+  template <typename U> PinnedAllocator(const PinnedAllocator<U>&) {}
+  T* allocate(size_t count) {
+    return (T*)allocateHostPinnedMem(sizeof(T), count);
+  }
+  // no throw: it runs in destructors
+  void deallocate(T* ptr, size_t) { (void)cudaFreeHost(ptr); }
+  template <typename U> bool operator==(const PinnedAllocator<U>&) const {
+    return true;
+  }
+  template <typename U> bool operator!=(const PinnedAllocator<U>&) const {
+    return false;
+  }
+};
+
+/** A std::vector in page-locked host memory: a host buffer that is copied to
+ *  or from the device is one, from where it is created. A large one (MBs) is
+ *  slow to allocate: keep it where it is copied again. */
+template <typename T> using PinnedVector = std::vector<T, PinnedAllocator<T>>;
 
 ////////////////////////////////// Round up to
 template <typename T>

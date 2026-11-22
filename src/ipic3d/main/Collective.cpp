@@ -161,6 +161,14 @@ void Collective::requireInput(bool ok, const char* fmt, ...) const {
   MPIdata::exit(1);
 }
 
+void Collective::readSwitch(const ConfigFile& config, const char* key,
+                            bool& value) const {
+  const string text = config.read<string>(key, value ? "1" : "0");
+  requireInput(text == "0" || text == "1", "%s must be 0 or 1, not \"%s\"", key,
+               text.c_str());
+  value = text == "1";
+}
+
 /*! Read the input file; on a restart also select the checkpoint to load (the
  * fields and particles are loaded later) */
 void Collective::ReadInput(string inputfile) {
@@ -359,6 +367,9 @@ void Collective::ReadInput(const ConfigFile& config) {
     };
     ParticlesWriteMethod = readFileBackend("ParticlesWriteMethod");
     RestartWriteMethod = readFileBackend("RestartWriteMethod");
+    // outputs written on writer threads while the run goes on
+    // (AsyncOutput.h), or at their cycle on the main thread
+    readSwitch(config, "AsyncOutput", asyncOutput);
     // the species whose particles are written, nonzero = on, every species
     // by default
     std::vector<int> particleSpecies(ns, 1);
@@ -873,13 +884,6 @@ void Collective::readDataAnalysisInput(const ConfigFile& config) {
   auto requireSpeciesList = [&](bool ok, const char* key) {
     requireInput(ok, "%s needs one number, or one per species (%d)", key, ns);
   };
-  // an on/off option: 0 or 1 (read<bool> takes any other word for true)
-  auto readSwitch = [&](const char* key, bool& value) {
-    const std::string text = config.read<std::string>(key, value ? "1" : "0");
-    requireInput(text == "0" || text == "1", "%s must be 0 or 1, not \"%s\"",
-                 key, text.c_str());
-    value = text == "1";
-  };
   // a per-species mask, nonzero = on, of every species `all` by default: the
   // analysis of switchKey, when on, needs a species in it
   auto readSpeciesMask = [&](const char* key, int all, const char* switchKey,
@@ -891,13 +895,13 @@ void Collective::readDataAnalysisInput(const ConfigFile& config) {
                  "%s = 1 needs a species in %s", switchKey, key);
   };
 
-  readSwitch("VelocityHistogram", in.velocityHistogram);
+  readSwitch(config, "VelocityHistogram", in.velocityHistogram);
   readSpeciesMask("VelocityHistGMMSpecies", 1, "VelocityHistogram",
                   in.velocityHistogram, in.histogramSpecies);
-  readSwitch("VelocityHistogramMacrocells", in.histogramMacrocells);
+  readSwitch(config, "VelocityHistogramMacrocells", in.histogramMacrocells);
   requireInput(!in.histogramMacrocells || in.velocityHistogram,
                "VelocityHistogramMacrocells = 1 needs VelocityHistogram = 1");
-  readSwitch("VelocityHistogramFixedRange", in.histogramFixedRange);
+  readSwitch(config, "VelocityHistogramFixedRange", in.histogramFixedRange);
   // the default range depends on the sign of the charge; Min defaults to -Max
   in.histogramMax.resize(ns);
   for (int s = 0; s < ns; s++)
@@ -920,7 +924,7 @@ void Collective::readDataAnalysisInput(const ConfigFile& config) {
                  "and above its VelocityHistogramMin (%g), by a finite width",
                  s, in.histogramMax[s], in.histogramMin[s]);
 
-  readSwitch("VelocityGMM", in.gmm);
+  readSwitch(config, "VelocityGMM", in.gmm);
   requireInput(!in.gmm || in.velocityHistogram,
                "VelocityGMM = 1 needs VelocityHistogram = 1");
   in.gmmComponents = config.read<int>("GMMComponents", in.gmmComponents);
@@ -928,13 +932,13 @@ void Collective::readDataAnalysisInput(const ConfigFile& config) {
       config.read<int>("GMMMaxIterations", in.gmmMaxIterations);
   in.gmmConvergenceThreshold = config.read<double>("GMMConvergenceThreshold",
                                                    in.gmmConvergenceThreshold);
-  readSwitch("GMMWarmStart", in.gmmWarmStart);
-  readSwitch("GMMNormalize", in.gmmNormalize);
-  readSwitch("GMMCheckCovariance", in.gmmCheckCovariance);
+  readSwitch(config, "GMMWarmStart", in.gmmWarmStart);
+  readSwitch(config, "GMMNormalize", in.gmmNormalize);
+  readSwitch(config, "GMMCheckCovariance", in.gmmCheckCovariance);
   in.gmmCovarianceTolerance =
       config.read<double>("GMMCovarianceTolerance", in.gmmCovarianceTolerance);
   in.gmmMinVariance = config.read<double>("GMMMinVariance", in.gmmMinVariance);
-  readSwitch("GMMPruneComponents", in.gmmPruneComponents);
+  readSwitch(config, "GMMPruneComponents", in.gmmPruneComponents);
   in.gmmPruneThreshold =
       config.read<double>("GMMPruneThreshold", in.gmmPruneThreshold);
   requireInput(in.gmmComponents >= 1 && in.gmmComponents <= kGMMMaxComponents,
@@ -962,7 +966,7 @@ void Collective::readDataAnalysisInput(const ConfigFile& config) {
   // rank (the regular ones; along an axis where a truncated last rank has
   // fewer cells, its one macrocell has all of them); the spectra need a
   // species too
-  readSwitch("VelocitySpectra", in.velocitySpectra);
+  readSwitch(config, "VelocitySpectra", in.velocitySpectra);
   const char* axes[3] = {"Nx", "Ny", "Nz"};
   const int cells[3] = {(nxc + XLEN - 1) / XLEN, (nyc + YLEN - 1) / YLEN,
                         (nzc + ZLEN - 1) / ZLEN};
@@ -1028,7 +1032,7 @@ void Collective::read_field_restart(const VCtopology3D* vct, const Grid* grid,
                                     arr3_double Bxn, arr3_double Byn,
                                     arr3_double Bzn, arr3_double Ex,
                                     arr3_double Ey, arr3_double Ez,
-                                    array4_double* rhons_, int ns) const {
+                                    arr4_double* rhons_, int ns) const {
   // Delegate to RestartReader (implementation in inputoutput/RestartReader.cpp)
   RestartReader::readFields(vct, grid, Bxn, Byn, Bzn, Ex, Ey, Ez, rhons_, ns,
                             getRestartReadDirName(), last_cycle);
@@ -1598,7 +1602,7 @@ void Collective::Print() {
   double hostEMf =
       (19.0 * gridN + 4.0 * gridC + ns * (10.0 * gridN + gridC)) * 8;
   // The HeatFlux::ComponentCount node heat-flux arrays of each species are
-  // always allocated but touched (resident) only when heat flux is computed
+  // allocated only when the output writes the heat flux
   const double hostHeatFlux =
       heatFlux ? ns * HeatFlux::ComponentCount * gridN * 8.0 : 0.0;
   // Restart cell metadata when checkpoints are written: offsets and counts

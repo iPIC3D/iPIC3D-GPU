@@ -377,7 +377,7 @@ protected:
   // the bins of the last init(), region after region; and the grids
   histogramTypeOut* binsCUDA = nullptr;
   BinGrid* gridCUDA = nullptr;
-  std::vector<BinGrid> gridHost;
+  PinnedVector<BinGrid> gridHost; // page-locked: copied from the device
 
   /** The bins of all the regions. */
   size_t totalBins() const { return (size_t)regions * regionBins; }

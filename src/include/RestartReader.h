@@ -71,7 +71,7 @@ public:
   static void readFields(const VCtopology3D* vct, const Grid* grid,
                          arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
                          arr3_double Ex, arr3_double Ey, arr3_double Ez,
-                         array4_double* rhons, int ns,
+                         arr4_double* rhons, int ns,
                          const std::string& restartDir, int last_cycle);
 
   // ---------------------------------------------------------------

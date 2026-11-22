@@ -87,20 +87,6 @@ public: // common parameter
   fillerBuffer* wallList = nullptr;
 
 public:
-  __host__ moverParameter(ParticleSoAHost* pclHost, VirtualTopology3D* vct)
-      : dt(pclHost->timeStep_), qom(pclHost->chargeOverMass_),
-        c(pclHost->speedOfLight_), invc(1.0 / pclHost->speedOfLight_),
-        NiterMover(pclHost->numMoverIterations_),
-        umax(pclHost->velocityCapMaxX_), umin(pclHost->velocityCapMinX_),
-        vmax(pclHost->velocityCapMaxY_), vmin(pclHost->velocityCapMinY_),
-        wmax(pclHost->velocityCapMaxZ_), wmin(pclHost->velocityCapMinZ_) {
-    // create the particle array, stream 0
-    pclsArray = particleArrayCUDA(pclHost).copyToDevice();
-    departureArray = departureArrayType(pclHost->getNOP() * 1.5).copyToDevice();
-    if (pclHost->tracksParticleID())
-      particleIDGenerator = pclHost->getParticleIDGenerator();
-  }
-
   /**
    * @brief Construct a mover parameter bundle from existing device buffers.
    *

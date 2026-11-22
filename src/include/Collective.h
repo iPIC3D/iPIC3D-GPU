@@ -66,6 +66,9 @@ private:
   /** Stops the run on every rank unless ok; rank 0 prints "ERROR: in input
    *  file <name> <fmt...>". */
   void requireInput(bool ok, const char* fmt, ...) const;
+  /** Reads the on/off option key into value, which holds its default: 0 or
+   *  1 (read<bool> takes any other word for true). */
+  void readSwitch(const ConfigFile& config, const char* key, bool& value) const;
   /** Reads and checks the data-analysis options (after ns, qom, the cells
    *  and XLEN, YLEN, ZLEN). */
   void readDataAnalysisInput(const ConfigFile& config);
@@ -84,7 +87,7 @@ public:
   void read_field_restart(const VCtopology3D* vct, const Grid* grid,
                           arr3_double Bxn, arr3_double Byn, arr3_double Bzn,
                           arr3_double Ex, arr3_double Ey, arr3_double Ez,
-                          array4_double* rhons_, int ns) const;
+                          arr4_double* rhons_, int ns) const;
 
   void read_particles_restart(const VCtopology3D* vct, int species_number,
                               vector_double& u, vector_double& v,
@@ -265,6 +268,10 @@ public:
    *  them in the build (IOManager). */
   string getParticlesWriteMethod() const { return ParticlesWriteMethod; }
   string getRestartWriteMethod() const { return RestartWriteMethod; }
+  /** AsyncOutput: the particle outputs, the checkpoints and the serial-HDF5
+   *  field outputs are written on writer threads while the run goes on
+   *  (AsyncOutput.h). */
+  bool getAsyncOutput() const { return asyncOutput; }
   /** ParticlesOutputSpecies: the species whose particles are written,
    *  increasing. */
   const std::vector<int>& getParticlesOutputSpecies() const {
@@ -697,6 +704,8 @@ private:
   int RestartOutputCycle;
   /*! Checkpoint backend */
   string RestartWriteMethod;
+  /*! Deferred writing of the outputs (AsyncOutput) */
+  bool asyncOutput = true;
   /*! Output for diagnostics */
   int DiagnosticsOutputCycle;
   /*! planet boundary diagnostics cycle (0 disables) */

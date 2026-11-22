@@ -68,8 +68,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <initializer_list>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <vector>
@@ -97,20 +99,46 @@ template <typename T> static T* deviceBuffer(size_t n) {
   return device;
 }
 
-/** Device copy of n host values; release with cudaFree. */
-template <typename T> static T* toDevice(const T* host, size_t n) {
-  T* device = deviceBuffer<T>(n);
-  cudaErrChk(cudaMemcpy(device, host, n * sizeof(T), cudaMemcpyHostToDevice));
+// The host buffers of the test that are copied to or from the device are
+// page-locked: PinnedVector for the values, PinnedObject for the objects.
+
+/** Device copy of the host values; release with cudaFree. */
+template <typename T> static T* toDevice(const PinnedVector<T>& host) {
+  T* device = deviceBuffer<T>(host.size());
+  cudaErrChk(cudaMemcpy(device, host.data(), host.size() * sizeof(T),
+                        cudaMemcpyHostToDevice));
   return device;
+}
+template <typename T> static T* toDevice(std::initializer_list<T> values) {
+  return toDevice(PinnedVector<T>(values));
+}
+
+/** One value to the device. */
+template <typename T> static void setDevice(T* device, const T& value) {
+  const PinnedVector<T> host(1, value);
+  cudaErrChk(
+      cudaMemcpy(device, host.data(), sizeof(T), cudaMemcpyHostToDevice));
 }
 
 /** Host copy of n device values. */
 template <typename T>
-static std::vector<T> fromDevice(const T* device, size_t n) {
-  std::vector<T> host(n);
+static PinnedVector<T> fromDevice(const T* device, size_t n) {
+  PinnedVector<T> host(n);
   cudaErrChk(
       cudaMemcpy(host.data(), device, n * sizeof(T), cudaMemcpyDeviceToHost));
   return host;
+}
+
+/** An object in page-locked host memory (copyToDevice copies it). */
+struct PinnedDelete {
+  template <typename T> void operator()(T* object) const {
+    deleteHostPinnedObject(object);
+  }
+};
+template <typename T> using PinnedObject = std::unique_ptr<T, PinnedDelete>;
+template <typename T, typename... Args>
+static PinnedObject<T> pinnedObject(Args... args) {
+  return PinnedObject<T>(newHostPinnedObject<T>(args...));
 }
 
 /** Sort the n staged (energy, merged index) pairs by descending energy; the
@@ -192,15 +220,11 @@ static void check(bool ok, const std::string& what, bool& allPassed) {
 }
 
 static PlanetBCState readState(const PlanetBCState* d_state) {
-  PlanetBCState h;
-  cudaErrChk(
-      cudaMemcpy(&h, d_state, sizeof(PlanetBCState), cudaMemcpyDeviceToHost));
-  return h;
+  return fromDevice(d_state, 1)[0];
 }
 
 static void setIonChargeCycle(PlanetBCState* d_state, cudaParticleType q) {
-  cudaErrChk(cudaMemcpy(&d_state->ionChargeCycle, &q, sizeof(cudaParticleType),
-                        cudaMemcpyHostToDevice));
+  setDevice(&d_state->ionChargeCycle, q);
 }
 
 /** Radius at which a reflected particle that ended its push at distance r from
@@ -239,21 +263,20 @@ static void tangentBasis(const double nv[3], double t1[3], double t2[3]) {
 /** Run the reflection kernel, specular or diffuse, on one electron species
  *  with every particle surviving (cutoff 0).  Returns the compacted output,
  *  in the kernel's order. */
-static std::vector<SpeciesParticle>
-reflectAll(const std::vector<SpeciesParticle>& in, bool diffuse, int doSphere,
+static PinnedVector<SpeciesParticle>
+reflectAll(const PinnedVector<SpeciesParticle>& in, bool diffuse, int doSphere,
            cudaCommonType ox, cudaCommonType oy, cudaCommonType oz,
            cudaCommonType R) {
   const int n = (int)in.size();
-  planetArray pa(in.data(), n);
-  planetArray* d_pa = pa.copyToDevice();
-  std::vector<uint32_t> idx(n);
+  const auto pa = pinnedObject<planetArray>(in.data(), n);
+  planetArray* d_pa = pa->copyToDevice();
+  PinnedVector<uint32_t> idx(n);
   std::iota(idx.begin(), idx.end(), 0u);
-  const int zero = 0;
-  planetArray** d_ptrs = toDevice(&d_pa, 1);
-  int* d_offsets = toDevice(&zero, 1);
-  int* d_cutoff = toDevice(&zero, 1);
-  int* d_count = toDevice(&zero, 1);
-  uint32_t* d_idx = toDevice(idx.data(), n);
+  planetArray** d_ptrs = toDevice({d_pa});
+  int* d_offsets = toDevice({0});
+  int* d_cutoff = toDevice({0});
+  int* d_count = toDevice({0});
+  uint32_t* d_idx = toDevice(idx);
   SpeciesParticle* d_out = deviceBuffer<SpeciesParticle>(n);
   const PlanetElectrons electrons = {d_ptrs, d_offsets, d_idx, 1, n};
   const PlanetReflection reflection = {ox,       oy,      oz,    R,
@@ -261,7 +284,7 @@ reflectAll(const std::vector<SpeciesParticle>& in, bool diffuse, int doSphere,
   planetReflectCompactKernel<<<(n + BLOCK - 1) / BLOCK, BLOCK>>>(
       electrons, d_cutoff, reflection, d_out, d_count);
   cudaErrChk(cudaDeviceSynchronize());
-  std::vector<SpeciesParticle> out = fromDevice(d_out, n);
+  PinnedVector<SpeciesParticle> out = fromDevice(d_out, n);
   out.resize(fromDevice(d_count, 1)[0]);
   cudaFree(d_ptrs);
   cudaFree(d_offsets);
@@ -287,7 +310,7 @@ static bool diffuseReflectionCase(int doSphere, cudaCommonType ox,
   const int n = 200000;
   std::mt19937_64 gen(17 + doSphere);
   std::normal_distribution<double> normal;
-  std::vector<SpeciesParticle> in(n);
+  PinnedVector<SpeciesParticle> in(n);
   for (int i = 0; i < n; i++) {
     double d[3] = {normal(gen), doSphere == 1 ? normal(gen) : 0.0, normal(gen)};
     const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
@@ -297,7 +320,7 @@ static bool diffuseReflectionCase(int doSphere, cudaCommonType ox,
               doSphere == 1 ? oy + r0 * d[1] / len : oy + 0.3,
               oz + r0 * d[2] / len, (cudaPclType_ID)i);
   }
-  const std::vector<SpeciesParticle> out =
+  const PinnedVector<SpeciesParticle> out =
       reflectAll(in, true, doSphere, ox, oy, oz, R);
   const int count = (int)out.size();
 
@@ -381,7 +404,7 @@ static bool specularGeometryCase(int doSphere, cudaCommonType ox,
   const double velNT[NUM_KINDS][3] = {
       {-0.3, 0.2, -0.1}, {0.25, -0.15, 0.05}, {0, 0.3, 0.1}};
 
-  std::vector<SpeciesParticle> in;
+  PinnedVector<SpeciesParticle> in;
   std::vector<int> kind;
   for (int a = 0; a < 5; a++) {
     const double* ray = doSphere == 1 ? rays3D[a] : rays2D[a];
@@ -407,7 +430,7 @@ static bool specularGeometryCase(int doSphere, cudaCommonType ox,
       }
     }
   }
-  const std::vector<SpeciesParticle> out =
+  const PinnedVector<SpeciesParticle> out =
       reflectAll(in, false, doSphere, ox, oy, oz, R);
 
   int nOutwardChanged = 0;
@@ -459,7 +482,7 @@ static bool centreCase(bool diffuse, int doSphere, cudaCommonType ox,
                        cudaCommonType oy, cudaCommonType oz, cudaCommonType R) {
   SpeciesParticle p;
   p.set(0.1, -0.2, 0.3, -1.0, ox, oy, oz, (cudaPclType_ID)0);
-  const std::vector<SpeciesParticle> out =
+  const PinnedVector<SpeciesParticle> out =
       reflectAll({p}, diffuse, doSphere, ox, oy, oz, R);
   if (out.size() != 1)
     return false;
@@ -481,27 +504,26 @@ static bool centreCase(bool diffuse, int doSphere, cudaCommonType ox,
 static bool manyElectronCutoffCase() {
   const int nSpecies = 3; // species 0 has no hits
   const int counts[nSpecies] = {0, 3000, 2077};
-  const int offsets[nSpecies] = {0, 0, 3000};
+  const PinnedVector<int> offsets = {0, 0, 3000};
   const int n = counts[1] + counts[2];
   std::mt19937_64 gen(41);
   std::uniform_real_distribution<double> uniform;
   std::normal_distribution<double> normal;
 
-  std::vector<SpeciesParticle> pcls[nSpecies];
-  planetArray* h_ptrs[nSpecies];
-  std::vector<planetArray> arrays;
-  arrays.reserve(nSpecies);
+  PinnedVector<SpeciesParticle> pcls[nSpecies];
+  PinnedVector<planetArray*> h_ptrs(nSpecies);
+  std::vector<PinnedObject<planetArray>> arrays;
   for (int s = 0; s < nSpecies; s++) {
     pcls[s].resize(std::max(counts[s], 1));
     for (int i = 0; i < counts[s]; i++)
       pcls[s][i].set(0.1 * normal(gen), 0.1 * normal(gen), 0.1 * normal(gen),
                      -s * (0.5 + uniform(gen)), 5.3, 5.0, 5.0,
                      (cudaPclType_ID)i);
-    arrays.emplace_back(pcls[s].data(), counts[s]);
-    h_ptrs[s] = arrays.back().copyToDevice();
+    arrays.push_back(pinnedObject<planetArray>(pcls[s].data(), counts[s]));
+    h_ptrs[s] = arrays.back()->copyToDevice();
   }
-  planetArray** d_ptrs = toDevice(h_ptrs, nSpecies);
-  int* d_offsets = toDevice(offsets, nSpecies);
+  planetArray** d_ptrs = toDevice(h_ptrs);
+  int* d_offsets = toDevice(offsets);
   int* d_cutoff = deviceBuffer<int>(1);
   cudaParticleType* d_energy = deviceBuffer<cudaParticleType>(nextPow2(n));
   uint32_t* d_idx = deviceBuffer<uint32_t>(nextPow2(n));
@@ -515,10 +537,10 @@ static bool manyElectronCutoffCase() {
     planetEnergyKernel<<<(counts[s] + BLOCK - 1) / BLOCK, BLOCK>>>(
         h_ptrs[s], counts[s], -1.0, 1.0, d_energy, d_idx, offsets[s], nullptr);
   sortByEnergy(d_energy, d_idx, n);
-  const std::vector<uint32_t> sorted = fromDevice(d_idx, n);
-  const std::vector<cudaParticleType> sortedEnergy = fromDevice(d_energy, n);
+  const PinnedVector<uint32_t> sorted = fromDevice(d_idx, n);
+  const PinnedVector<cudaParticleType> sortedEnergy = fromDevice(d_energy, n);
   // the sort over several blocks: descending energies, every electron once
-  std::vector<uint32_t> seen(sorted);
+  PinnedVector<uint32_t> seen(sorted);
   std::sort(seen.begin(), seen.end());
   bool ok = true;
   for (int i = 0; i < n; i++)
@@ -543,7 +565,7 @@ static bool manyElectronCutoffCase() {
   for (const double target : targets) {
     PlanetBCState st = {};
     st.ionChargeCycle = target;
-    cudaErrChk(cudaMemcpy(d_state, &st, sizeof(st), cudaMemcpyHostToDevice));
+    setDevice(d_state, st);
     cudaErrChk(cudaMemset(d_absorbed, 0, nSpecies * sizeof(cudaParticleType)));
     runCutoff(electrons, d_energy, d_warpCharge, d_state, d_absorbed, d_cutoff);
 
@@ -559,7 +581,7 @@ static bool manyElectronCutoffCase() {
     }
 
     const int cutoff = fromDevice(d_cutoff, 1)[0];
-    const std::vector<cudaParticleType> h_absorbed =
+    const PinnedVector<cudaParticleType> h_absorbed =
         fromDevice(d_absorbed, nSpecies);
     st = readState(d_state);
     // the sums differ from the host's by their order: round-off of the total
@@ -616,13 +638,13 @@ static int runTest() {
   //  Particles (all inside the sphere at (5.3, 5, 5), moving along +x)
   // ────────────────────────────────────────────────────────────
   const int nIonPlanet = 5;
-  SpeciesParticle ionPcls[nIonPlanet];
+  PinnedVector<SpeciesParticle> ionPcls(nIonPlanet);
   for (int i = 0; i < nIonPlanet; i++)
     ionPcls[i].set(/*u*/ 0.01, /*v*/ 0.0, /*w*/ 0.0, /*q*/ 2.0,
                    /*x*/ 5.3, /*y*/ 5.0, /*z*/ 5.0, (cudaParticleType)i);
 
   const int nElec0 = 4;
-  SpeciesParticle elec0Pcls[nElec0];
+  PinnedVector<SpeciesParticle> elec0Pcls(nElec0);
   {
     const cudaParticleType qs[] = {-0.25, -4.0, -1.0, -0.5};
     const cudaParticleType us[] = {0.40, 0.30, 0.20, 0.10};
@@ -631,7 +653,7 @@ static int runTest() {
                        (cudaParticleType)i);
   }
   const int nElec1 = 3;
-  SpeciesParticle elec1Pcls[nElec1];
+  PinnedVector<SpeciesParticle> elec1Pcls(nElec1);
   {
     const cudaParticleType qs[] = {-2.5, -1.5, -1.0};
     const cudaParticleType us[] = {0.50, 0.35, 0.05};
@@ -648,32 +670,24 @@ static int runTest() {
   // ─── Expected values ───────────────────────────────────────
   const cudaParticleType expectedIonCharge = 10.0;
   const uint32_t expectedSortedGidx[] = {0, 4, 1, 5, 2, 3, 6};
-  std::vector<cudaParticleType> expectedEnergy(totalElecPlanet);
+  PinnedVector<cudaParticleType> expectedEnergy(totalElecPlanet);
   for (int g = 0; g < totalElecPlanet; g++)
     expectedEnergy[g] = hostEnergy(pclOf(g), qomElec[g < nElec0 ? 0 : 1], c);
 
   // ════════════════════════════════════════════════════════════
   //  Device buffers
   // ════════════════════════════════════════════════════════════
-  planetArray ionPA(ionPcls, nIonPlanet);
-  planetArray* d_ionPA = ionPA.copyToDevice();
-  planetArray elec0PA(elec0Pcls, nElec0);
-  planetArray* d_elec0PA = elec0PA.copyToDevice();
-  planetArray elec1PA(elec1Pcls, nElec1);
-  planetArray* d_elec1PA = elec1PA.copyToDevice();
+  const auto ionPA = pinnedObject<planetArray>(ionPcls.data(), nIonPlanet);
+  planetArray* d_ionPA = ionPA->copyToDevice();
+  const auto elec0PA = pinnedObject<planetArray>(elec0Pcls.data(), nElec0);
+  planetArray* d_elec0PA = elec0PA->copyToDevice();
+  const auto elec1PA = pinnedObject<planetArray>(elec1Pcls.data(), nElec1);
+  planetArray* d_elec1PA = elec1PA->copyToDevice();
 
-  planetArray* h_elecPtrs[2] = {d_elec0PA, d_elec1PA};
-  planetArray** d_elecPtrs;
-  cudaErrChk(cudaMalloc(&d_elecPtrs, nElecSpecies * sizeof(planetArray*)));
-  cudaErrChk(cudaMemcpy(d_elecPtrs, h_elecPtrs,
-                        nElecSpecies * sizeof(planetArray*),
-                        cudaMemcpyHostToDevice));
+  planetArray** d_elecPtrs = toDevice({d_elec0PA, d_elec1PA});
 
-  int h_speciesOffsets[2] = {0, nElec0};
-  int* d_speciesOffsets;
-  cudaErrChk(cudaMalloc(&d_speciesOffsets, nElecSpecies * sizeof(int)));
-  cudaErrChk(cudaMemcpy(d_speciesOffsets, h_speciesOffsets,
-                        nElecSpecies * sizeof(int), cudaMemcpyHostToDevice));
+  const PinnedVector<int> h_speciesOffsets = {0, nElec0};
+  int* d_speciesOffsets = toDevice(h_speciesOffsets);
 
   PlanetBCState* d_state;
   cudaErrChk(cudaMalloc(&d_state, sizeof(PlanetBCState)));
@@ -697,9 +711,7 @@ static int runTest() {
   cudaErrChk(cudaDeviceSynchronize());
   {
     const PlanetBCState st = readState(d_state);
-    cudaParticleType diagIon = 0;
-    cudaErrChk(cudaMemcpy(&diagIon, d_diag, sizeof(cudaParticleType),
-                          cudaMemcpyDeviceToHost));
+    const cudaParticleType diagIon = fromDevice(d_diag, 1)[0];
     std::cout << "  ion |Q| this cycle = " << st.ionChargeCycle
               << "  diagnostic = " << diagIon << "  (expected "
               << expectedIonCharge << ")\n";
@@ -728,14 +740,9 @@ static int runTest() {
       /*speciesOffset=*/nElec0, d_diag + elecGlobal[1]);
   cudaErrChk(cudaDeviceSynchronize());
 
-  std::vector<cudaParticleType> h_energy(totalElecPlanet);
-  std::vector<uint32_t> h_gidx(totalElecPlanet);
-  cudaErrChk(cudaMemcpy(h_energy.data(), d_energyBuf,
-                        totalElecPlanet * sizeof(cudaParticleType),
-                        cudaMemcpyDeviceToHost));
-  cudaErrChk(cudaMemcpy(h_gidx.data(), d_globalIdxBuf,
-                        totalElecPlanet * sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost));
+  PinnedVector<cudaParticleType> h_energy =
+      fromDevice(d_energyBuf, totalElecPlanet);
+  PinnedVector<uint32_t> h_gidx = fromDevice(d_globalIdxBuf, totalElecPlanet);
   {
     bool energyPass = true;
     for (int i = 0; i < totalElecPlanet; i++) {
@@ -747,10 +754,8 @@ static int runTest() {
     }
     check(energyPass, "energies match (gamma-1) c^2 / |qom|", allPassed);
 
-    cudaParticleType diagElec[2];
-    cudaErrChk(cudaMemcpy(diagElec, d_diag + elecGlobal[0],
-                          2 * sizeof(cudaParticleType),
-                          cudaMemcpyDeviceToHost));
+    const PinnedVector<cudaParticleType> diagElec =
+        fromDevice(d_diag + elecGlobal[0], 2);
     std::cout << "  hit |Q|: A = " << diagElec[0]
               << " (expected 5.75), B = " << diagElec[1] << " (expected 5)\n";
     check(closeRel(diagElec[0], 5.75) && closeRel(diagElec[1], 5.0),
@@ -759,11 +764,11 @@ static int runTest() {
 
   // Same velocity, weights 40x apart → identical energy keys.
   {
-    SpeciesParticle twin[2];
+    PinnedVector<SpeciesParticle> twin(2);
     twin[0].set(0.3, 0.1, -0.2, -0.1, 5.3, 5.0, 5.0, 0.0);
     twin[1].set(0.3, 0.1, -0.2, -4.0, 5.3, 5.0, 5.0, 1.0);
-    planetArray twinPA(twin, 2);
-    planetArray* d_twinPA = twinPA.copyToDevice();
+    const auto twinPA = pinnedObject<planetArray>(twin.data(), 2);
+    planetArray* d_twinPA = twinPA->copyToDevice();
     cudaParticleType* d_twinE;
     uint32_t* d_twinIdx;
     cudaErrChk(cudaMalloc(&d_twinE, 2 * sizeof(cudaParticleType)));
@@ -771,9 +776,7 @@ static int runTest() {
     planetEnergyKernel<<<1, BLOCK>>>(d_twinPA, 2, -1.0, c, d_twinE, d_twinIdx,
                                      0, nullptr);
     cudaErrChk(cudaDeviceSynchronize());
-    cudaParticleType twinE[2];
-    cudaErrChk(cudaMemcpy(twinE, d_twinE, 2 * sizeof(cudaParticleType),
-                          cudaMemcpyDeviceToHost));
+    const PinnedVector<cudaParticleType> twinE = fromDevice(d_twinE, 2);
     check(twinE[0] == twinE[1],
           "energy independent of macroparticle weight (|q| 0.1 vs 4)",
           allPassed);
@@ -785,12 +788,12 @@ static int runTest() {
   // Multi-block launch: hit charge summed over several blocks and warps.
   {
     const int nBig = 2000; // 8 blocks of 256, last one partial
-    std::vector<SpeciesParticle> big(nBig);
+    PinnedVector<SpeciesParticle> big(nBig);
     for (int i = 0; i < nBig; i++)
       big[i].set(0.01 * (i % 7), 0.0, 0.0, -0.5, 5.3, 5.0, 5.0,
                  (cudaParticleType)i);
-    planetArray bigPA(big.data(), nBig);
-    planetArray* d_bigPA = bigPA.copyToDevice();
+    const auto bigPA = pinnedObject<planetArray>(big.data(), nBig);
+    planetArray* d_bigPA = bigPA->copyToDevice();
     cudaParticleType *d_bigE, *d_bigQ;
     uint32_t* d_bigIdx;
     cudaErrChk(cudaMalloc(&d_bigE, nBig * sizeof(cudaParticleType)));
@@ -800,9 +803,7 @@ static int runTest() {
     planetEnergyKernel<<<(nBig + BLOCK - 1) / BLOCK, BLOCK>>>(
         d_bigPA, nBig, -1.0, c, d_bigE, d_bigIdx, 0, d_bigQ);
     cudaErrChk(cudaDeviceSynchronize());
-    cudaParticleType bigQ = 0;
-    cudaErrChk(cudaMemcpy(&bigQ, d_bigQ, sizeof(cudaParticleType),
-                          cudaMemcpyDeviceToHost));
+    const cudaParticleType bigQ = fromDevice(d_bigQ, 1)[0];
     std::cout << "  multi-block hit |Q| = " << bigQ << "  (expected 1000)\n";
     check(bigQ == 1000.0, "multi-block hit-charge accumulation", allPassed);
     cudaFree(d_bigE);
@@ -817,12 +818,8 @@ static int runTest() {
   printSeparator("TEST 3 — Bitonic sort (descending energy)");
   sortByEnergy(d_energyBuf, d_globalIdxBuf, totalElecPlanet);
 
-  cudaErrChk(cudaMemcpy(h_energy.data(), d_energyBuf,
-                        totalElecPlanet * sizeof(cudaParticleType),
-                        cudaMemcpyDeviceToHost));
-  cudaErrChk(cudaMemcpy(h_gidx.data(), d_globalIdxBuf,
-                        totalElecPlanet * sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost));
+  h_energy = fromDevice(d_energyBuf, totalElecPlanet);
+  h_gidx = fromDevice(d_globalIdxBuf, totalElecPlanet);
   {
     bool sortPass = true;
     for (int i = 0; i < totalElecPlanet; i++) {
@@ -877,8 +874,7 @@ static int runTest() {
     electrons.total = cc.nElec;
     runCutoff(electrons, d_energyBuf, d_warpCharge, d_state, d_diag + ns,
               d_cutoff);
-    cudaErrChk(
-        cudaMemcpy(&h_cutoff, d_cutoff, sizeof(int), cudaMemcpyDeviceToHost));
+    h_cutoff = fromDevice(d_cutoff, 1)[0];
     const PlanetBCState st = readState(d_state);
 
     cudaParticleType absorbed = 0;
@@ -905,10 +901,8 @@ static int runTest() {
           "charge conserved: ∑ ion - ∑ absorbed electron == residual",
           allPassed);
 
-    cudaParticleType absorbedBySpecies[2];
-    cudaErrChk(cudaMemcpy(absorbedBySpecies, d_diag + ns,
-                          2 * sizeof(cudaParticleType),
-                          cudaMemcpyDeviceToHost));
+    const PinnedVector<cudaParticleType> absorbedBySpecies =
+        fromDevice(d_diag + ns, 2);
     std::cout << "  absorbed |Q|: A = " << absorbedBySpecies[0]
               << " (expected 6.25), B = " << absorbedBySpecies[1]
               << " (expected 9)\n";
@@ -960,13 +954,10 @@ static int runTest() {
       electrons, d_cutoff, specular, d_outputBuf, d_survivorCounters);
   cudaErrChk(cudaDeviceSynchronize());
 
-  int h_survivorCounters[2] = {0, 0};
-  cudaErrChk(cudaMemcpy(h_survivorCounters, d_survivorCounters,
-                        nElecSpecies * sizeof(int), cudaMemcpyDeviceToHost));
-  std::vector<SpeciesParticle> h_outputBuf(totalElecPlanet);
-  cudaErrChk(cudaMemcpy(h_outputBuf.data(), d_outputBuf,
-                        totalElecPlanet * sizeof(SpeciesParticle),
-                        cudaMemcpyDeviceToHost));
+  const PinnedVector<int> h_survivorCounters =
+      fromDevice(d_survivorCounters, nElecSpecies);
+  const PinnedVector<SpeciesParticle> h_outputBuf =
+      fromDevice(d_outputBuf, totalElecPlanet);
 
   std::cout << "  Survivors per species: A=" << h_survivorCounters[0]
             << "  B=" << h_survivorCounters[1] << "\n";

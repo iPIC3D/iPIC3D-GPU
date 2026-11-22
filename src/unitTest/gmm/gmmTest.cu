@@ -203,8 +203,9 @@ real density(const Gaussian& g, const real* x) {
 
 /** Bin centres of the histogram (u, v, w arrays) and their weights. */
 struct Histogram {
-  std::vector<real> point[3];
-  std::vector<weight_t> weight;
+  // page-locked: copied to the device
+  PinnedVector<real> point[3];
+  PinnedVector<weight_t> weight;
   size_t size() const { return weight.size(); }
 };
 
@@ -306,10 +307,11 @@ fitBatch(GMMModel& gmm, const std::vector<const Histogram*>& histograms,
                                            .prune = prune,
                                            .pruneThreshold = pruneThreshold};
 
-  GMMPoints data(n, point, weight);
-  gmm.config(&param, &data, fits, offset.data());
+  // page-locked: config copies it to the device
+  const PinnedVector<GMMPoints> data(1, GMMPoints(n, point, weight));
+  gmm.config(&param, data.data(), fits, offset.data());
   gmm.initGMM();
-  std::vector<real> back[3];
+  PinnedVector<real> back[3];
   for (int d = 0; d < 3; d++) {
     back[d].resize(n);
     cudaErrChk(cudaMemcpyAsync(back[d].data(), point[d], n * sizeof(real),
@@ -785,13 +787,14 @@ int testDegenerate(GMMModel& gmm) {
         .prune = false,
         .pruneThreshold = kPruneThreshold};
     real* none[3] = {nullptr, nullptr, nullptr};
-    GMMPoints data(numPoints, none, nullptr);
+    const PinnedVector<GMMPoints> data(1, GMMPoints(numPoints, none, nullptr));
     try {
-      gmm.config(&param, &data, fits,
+      gmm.config(&param, data.data(), fits,
                  offsets.empty() ? nullptr : offsets.data());
     } catch (const std::invalid_argument&) {
       return true;
     }
+    cudaErrChk(cudaStreamSynchronize(stream)); // the queued copy of data
     return false;
   };
   check(refused(2, 0), "no point refused", 0);

@@ -522,6 +522,7 @@ if(BUILD_UTESTS)
   add_subdirectory(src/unitTest/gmm)
   add_subdirectory(src/unitTest/thread_errors)
   add_subdirectory(src/unitTest/analysis_records)
+  add_subdirectory(src/unitTest/async_output)
 endif()
 
 add_subdirectory(share/inputfiles)

@@ -235,8 +235,11 @@ void FieldBoundary::releaseDevice() {
   if (d_rules_)
     cudaErrChk(cudaFree(d_rules_));
   d_rules_ = nullptr;
-  for (SetPlan& P : sets_)
+  PinnedVector<GhostRuleDev>().swap(rules_);
+  for (SetPlan& P : sets_) {
+    P.rule = nullptr;
     P.d_rule = nullptr;
+  }
   for (GPUFieldArray3& w : wall_)
     w.free();
   planned_ = false;
@@ -271,6 +274,11 @@ void FieldBoundary::buildPlan() {
       caseWallProfile(S, side, caseProfile_[side]);
 
   // ---- ghost sets ----
+  // The rules of all sets in one host table, a part of it per set.
+  const size_t rulesPerSet = (size_t)kGhostBatchMax * kFaces;
+  rules_.assign(std::size(sets_) * rulesPerSet, kKeep);
+  for (size_t s = 0; s < std::size(sets_); s++)
+    sets_[s].rule = rules_.data() + s * rulesPerSet;
   // A set is a sequence of passes: a pass gives the rule of (slot, face),
   // GHOST_KEEP for none, and the last rule of a face wins; its rank, the
   // index of its pass, orders the composition at edges
@@ -295,7 +303,7 @@ void FieldBoundary::buildPlan() {
           rank++;
         };
         (take(passes(slot, f)), ...);
-        P.rule[slot][f] = r;
+        P.rule[slot * kFaces + f] = r;
         active[f] = active[f] || r.kind != GHOST_KEEP;
       }
     P.shell = ghostShell(onCells ? cells : nodes, active);
@@ -445,15 +453,12 @@ void FieldBoundary::buildPlan() {
   define(GhostSet::Psi, false, false, 1);
 
   // the rule tables on the device
-  constexpr int kSets = static_cast<int>(GhostSet::Count);
-  constexpr int kPerSet = kGhostBatchMax * kFaces;
-  cudaErrChk(cudaMalloc(&d_rules_, kSets * kPerSet * sizeof(GhostRuleDev)));
-  for (int s = 0; s < kSets; s++) {
-    cudaErrChk(cudaMemcpy(d_rules_ + s * kPerSet, sets_[s].rule,
-                          kPerSet * sizeof(GhostRuleDev),
-                          cudaMemcpyHostToDevice));
-    sets_[s].d_rule = d_rules_ + s * kPerSet;
-  }
+  const size_t ruleBytes = rules_.size() * sizeof(GhostRuleDev);
+  cudaErrChk(cudaMalloc(&d_rules_, ruleBytes));
+  cudaErrChk(
+      cudaMemcpy(d_rules_, rules_.data(), ruleBytes, cudaMemcpyHostToDevice));
+  for (SetPlan& P : sets_)
+    P.d_rule = d_rules_ + (P.rule - rules_.data());
 
   // ---- rows of the Maxwell system ----
   {

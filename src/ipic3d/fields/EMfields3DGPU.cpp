@@ -30,6 +30,7 @@
 #include "Com3DNonblk.h"
 #include "EMfields3D.h"
 #include "Grid3DCU.h"
+#include "OutputTagConfig.h" // FieldOutputArrays
 #include "Parameters.h"
 #include "TimeTasks.h"
 #include "VCtopology3D.h"
@@ -185,7 +186,7 @@ void EMfields3D::gpuSolverAllocate() {
 
   // ---- Planet nodes of the constant-charge model ----
   if (hasPlanet()) {
-    const std::vector<int> nodes = planetNodes();
+    const PinnedVector<int> nodes = planetNodes();
     planetNodeCount_ = (int)nodes.size();
     if (planetNodeCount_ > 0) {
       cudaErrChk(cudaMalloc(&d_planetNodes_, nodes.size() * sizeof(int)));
@@ -321,6 +322,7 @@ void EMfields3D::gpuSolverAllocate() {
       }
       cudaErrChk(cudaMalloc(&d_cleanLines_,
                             2 * cleanLinesSlots() * sizeof(cudaSolverType)));
+      h_cleanLines_.resize(2 * cleanLinesSlots());
       // the Chebyshev iterates, for the longer solve (an unset one has size 0)
       cleanChebLength_ = (int)std::max(divE_.b.size(), divB_.b.size());
       cudaErrChk(cudaMalloc(&d_cleanCheb_, 2 * (size_t)cleanChebLength_ *
@@ -467,6 +469,7 @@ void EMfields3D::gpuSolverFree() {
     cudaFree(d_cleanLines_);
     d_cleanLines_ = nullptr;
   }
+  PinnedVector<cudaSolverType>().swap(h_cleanLines_);
   if (d_cleanCheb_) {
     cudaFree(d_cleanCheb_);
     d_cleanCheb_ = nullptr;
@@ -699,7 +702,7 @@ void EMfields3D::gpuSolverSyncH2D(cudaStream_t stream) {
   d_By_ext.copyFromHostAsync(By_ext.fetch_arr(), stream);
   d_Bz_ext.copyFromHostAsync(Bz_ext.fetch_arr(), stream);
 
-  cudaStreamSynchronize(stream);
+  cudaErrChk(cudaStreamSynchronize(stream));
 
   // The boundary of the initial fields, whatever the initialisation of the
   // case left in the ghosts: E_t = 0 on a conductor in E^n too (for th < 1
@@ -724,69 +727,53 @@ void EMfields3D::gpuSolverSyncH2D(cudaStream_t stream) {
   cudaErrChk(cudaStreamSynchronize(solverStream_));
 }
 
-void EMfields3D::gpuSolverSyncD2H(cudaStream_t stream) {
-  // Fields and moments needed on the host by output, diagnostics, restart
-  // checkpoints and Catalyst
-  d_Ex.copyToHostAsync(Ex.fetch_arr(), stream);
-  d_Ey.copyToHostAsync(Ey.fetch_arr(), stream);
-  d_Ez.copyToHostAsync(Ez.fetch_arr(), stream);
-
-  d_Bxc.copyToHostAsync(Bxc.fetch_arr(), stream);
-  d_Byc.copyToHostAsync(Byc.fetch_arr(), stream);
-  d_Bzc.copyToHostAsync(Bzc.fetch_arr(), stream);
-  d_Bxn.copyToHostAsync(Bxn.fetch_arr(), stream);
-  d_Byn.copyToHostAsync(Byn.fetch_arr(), stream);
-  d_Bzn.copyToHostAsync(Bzn.fetch_arr(), stream);
-
-  d_rhon.copyToHostAsync(rhon.fetch_arr(), stream);
-  d_Jx.copyToHostAsync(Jx.fetch_arr(), stream);
-  d_Jy.copyToHostAsync(Jy.fetch_arr(), stream);
-  d_Jz.copyToHostAsync(Jz.fetch_arr(), stream);
-
-  // Per-species 4D arrays: copy species-by-species to match the
-  // per-species cudaHostRegister granularity.  Bulk cudaMemcpyAsync
-  // on a host buffer whose sub-regions are separately pinned can
-  // cause "invalid argument" errors.
-  {
-    const size_t speciesSlice = (size_t)nxn * nyn * nzn;
-    const size_t sliceBytes = speciesSlice * sizeof(cudaSolverType);
-    for (int is = 0; is < ns; is++) {
-      cudaErrChk(cudaMemcpyAsync(rhons.fetch_arr() + is * speciesSlice,
-                                 d_rhons.speciesPtr(is), sliceBytes,
-                                 cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaMemcpyAsync(Jxs.fetch_arr() + is * speciesSlice,
-                                 d_Jxs.speciesPtr(is), sliceBytes,
-                                 cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaMemcpyAsync(Jys.fetch_arr() + is * speciesSlice,
-                                 d_Jys.speciesPtr(is), sliceBytes,
-                                 cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaMemcpyAsync(Jzs.fetch_arr() + is * speciesSlice,
-                                 d_Jzs.speciesPtr(is), sliceBytes,
-                                 cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaMemcpyAsync(pXXsn.fetch_arr() + is * speciesSlice,
-                                 d_pXXsn.speciesPtr(is), sliceBytes,
-                                 cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaMemcpyAsync(pXYsn.fetch_arr() + is * speciesSlice,
-                                 d_pXYsn.speciesPtr(is), sliceBytes,
-                                 cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaMemcpyAsync(pXZsn.fetch_arr() + is * speciesSlice,
-                                 d_pXZsn.speciesPtr(is), sliceBytes,
-                                 cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaMemcpyAsync(pYYsn.fetch_arr() + is * speciesSlice,
-                                 d_pYYsn.speciesPtr(is), sliceBytes,
-                                 cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaMemcpyAsync(pYZsn.fetch_arr() + is * speciesSlice,
-                                 d_pYZsn.speciesPtr(is), sliceBytes,
-                                 cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaMemcpyAsync(pZZsn.fetch_arr() + is * speciesSlice,
-                                 d_pZZsn.speciesPtr(is), sliceBytes,
-                                 cudaMemcpyDeviceToHost, stream));
-    }
+void EMfields3D::gpuSolverSyncD2H(const FieldOutputArrays& arrays,
+                                  cudaStream_t stream) {
+  // the groups that the host consumers of the cycle read (output,
+  // diagnostics, checkpoints, Catalyst); the other host arrays keep older
+  // values, read by none of them
+  if (arrays.E) {
+    d_Ex.copyToHostAsync(Ex.fetch_arr(), stream);
+    d_Ey.copyToHostAsync(Ey.fetch_arr(), stream);
+    d_Ez.copyToHostAsync(Ez.fetch_arr(), stream);
+  }
+  if (arrays.cellB) {
+    d_Bxc.copyToHostAsync(Bxc.fetch_arr(), stream);
+    d_Byc.copyToHostAsync(Byc.fetch_arr(), stream);
+    d_Bzc.copyToHostAsync(Bzc.fetch_arr(), stream);
+  }
+  if (arrays.nodeB) {
+    d_Bxn.copyToHostAsync(Bxn.fetch_arr(), stream);
+    d_Byn.copyToHostAsync(Byn.fetch_arr(), stream);
+    d_Bzn.copyToHostAsync(Bzn.fetch_arr(), stream);
+  }
+  if (arrays.rho)
+    d_rhon.copyToHostAsync(rhon.fetch_arr(), stream);
+  if (arrays.J) {
+    d_Jx.copyToHostAsync(Jx.fetch_arr(), stream);
+    d_Jy.copyToHostAsync(Jy.fetch_arr(), stream);
+    d_Jz.copyToHostAsync(Jz.fetch_arr(), stream);
   }
 
-  d_PHI.copyToHostAsync(PHI.fetch_arr(), stream);
+  if (arrays.speciesRho)
+    d_rhons.copyToHostAsync(rhons.fetch_arr(), stream);
+  if (arrays.speciesJ) {
+    d_Jxs.copyToHostAsync(Jxs.fetch_arr(), stream);
+    d_Jys.copyToHostAsync(Jys.fetch_arr(), stream);
+    d_Jzs.copyToHostAsync(Jzs.fetch_arr(), stream);
+  }
+  if (arrays.pressure) {
+    d_pXXsn.copyToHostAsync(pXXsn.fetch_arr(), stream);
+    d_pXYsn.copyToHostAsync(pXYsn.fetch_arr(), stream);
+    d_pXZsn.copyToHostAsync(pXZsn.fetch_arr(), stream);
+    d_pYYsn.copyToHostAsync(pYYsn.fetch_arr(), stream);
+    d_pYZsn.copyToHostAsync(pYZsn.fetch_arr(), stream);
+    d_pZZsn.copyToHostAsync(pZZsn.fetch_arr(), stream);
+  }
+  if (arrays.phi)
+    d_PHI.copyToHostAsync(PHI.fetch_arr(), stream);
 
-  cudaStreamSynchronize(stream);
+  cudaErrChk(cudaStreamSynchronize(stream));
 }
 
 // =========================================================================
@@ -3072,11 +3059,13 @@ void EMfields3D::gpuRemoveCleaningNullSpace(cudaSolverType* d_b,
     return;
   std::vector<cudaSolverType> global;
   for (int pass = 0; pass < 2; pass++) {
-    gpuCleaningNullSums(d_b, ns, d_cleanLines_, global, solverStream_);
+    gpuCleaningNullSums(d_b, ns, d_cleanLines_, h_cleanLines_.data(), global,
+                        solverStream_);
     MPI_Allreduce(MPI_IN_PLACE, global.data(), ns.globalSize,
                   mpiTypeOf<cudaSolverType>(), MPI_SUM,
                   get_vct().getFieldComm());
     gpuCleaningNullSubtract(d_b, ns, global, d_cleanLines_ + cleanLinesSlots(),
+                            h_cleanLines_.data() + cleanLinesSlots(),
                             solverStream_);
   }
 }

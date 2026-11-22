@@ -85,7 +85,7 @@ public:
       throw std::runtime_error(
           "Particle ID generator received invalid species index");
     speciesIndex_ = speciesIndex;
-    hostNextSequence_ = 0;
+    hostNextSequence() = 0;
   }
 
   void ensureDeviceCounter(cudaStream_t stream = 0) {
@@ -125,19 +125,19 @@ public:
             "Particle ID generator exceeded uint64 ID range");
     }
 
-    hostNextSequence_ = std::max(hostNextSequence_, nextSequence);
+    hostNextSequence() = std::max(hostNextSequence(), nextSequence);
     if (deviceNextSequence_ != nullptr)
       syncDeviceCounter(stream);
   }
 
   counter_type reserveHostSequenceBlock(counter_type count,
                                         cudaStream_t stream = 0) {
-    const counter_type base = hostNextSequence_;
+    const counter_type base = hostNextSequence();
     const counter_type capacity = sequenceCapacity();
-    if (hostNextSequence_ > capacity || count > capacity - hostNextSequence_)
+    if (base > capacity || count > capacity - base)
       throw std::runtime_error(
           "Particle ID generator exhausted uint64 ID range");
-    hostNextSequence_ += count;
+    hostNextSequence() += count;
     if (deviceNextSequence_ != nullptr)
       syncDeviceCounter(stream);
     return base;
@@ -162,6 +162,8 @@ public:
   }
 
 private:
+  counter_type& hostNextSequence() { return hostNextSequence_[0]; }
+
   static constexpr cudaPclType_ID maxValidID() {
     return PARTICLE_ID_INVALID - static_cast<cudaPclType_ID>(1);
   }
@@ -181,7 +183,7 @@ private:
   }
 
   void syncDeviceCounter(cudaStream_t stream) {
-    cudaErrChk(cudaMemcpyAsync(deviceNextSequence_, &hostNextSequence_,
+    cudaErrChk(cudaMemcpyAsync(deviceNextSequence_, hostNextSequence_.data(),
                                sizeof(counter_type), cudaMemcpyHostToDevice,
                                stream));
     cudaErrChk(cudaStreamSynchronize(stream));
@@ -196,13 +198,13 @@ private:
 
   void moveFrom(ParticleIDGeneratorState& other) {
     deviceNextSequence_ = other.deviceNextSequence_;
-    hostNextSequence_ = other.hostNextSequence_;
+    hostNextSequence() = other.hostNextSequence();
     mpiRank_ = other.mpiRank_;
     mpiSize_ = other.mpiSize_;
     speciesIndex_ = other.speciesIndex_;
     speciesCount_ = other.speciesCount_;
     other.deviceNextSequence_ = nullptr;
-    other.hostNextSequence_ = 0;
+    other.hostNextSequence() = 0;
     other.mpiRank_ = 0;
     other.mpiSize_ = 1;
     other.speciesIndex_ = 0;
@@ -210,7 +212,9 @@ private:
   }
 
   counter_type* deviceNextSequence_ = nullptr;
-  counter_type hostNextSequence_ = 0;
+  // the host counter, page-locked (copied to the device counter)
+  PinnedVector<counter_type> hostNextSequence_ =
+      PinnedVector<counter_type>(1, 0);
   int mpiRank_ = 0;
   int mpiSize_ = 1;
   int speciesIndex_ = 0;

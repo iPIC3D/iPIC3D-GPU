@@ -310,9 +310,10 @@ public:
   }
 
 private:
-  arr3_double field0_;
-  arr3_double field1_;
-  arr3_double field2_;
+  // page-locked: copied to and from the device
+  pinned_array3_double field0_;
+  pinned_array3_double field1_;
+  pinned_array3_double field2_;
 };
 
 class DeviceFields {
@@ -1008,20 +1009,21 @@ int main(int argc, char** argv) {
       return EXIT_FAILURE;
     }
 
-    if (runsGpu(options.backend)) {
-      const int localReady = selectDeviceForRank() ? 1 : 0;
-      int allReady = 0;
-      MPI_Allreduce(&localReady, &allReady, 1, MPI_INT, MPI_MIN,
-                    MPIdata::get_PicGlobalComm());
-      if (!allReady) {
-        if (rank == 0) {
-          std::cerr << "haloCommunicationTest SKIP: every MPI rank needs a "
-                       "visible CUDA/HIP device for backend "
-                    << backendName(options.backend) << ".\n";
-        }
-        MPIdata::finalize_mpi();
-        return kSkipReturnCode;
+    // The CPU backend needs a device too: the host field arrays are
+    // page-locked (EMfields3D, HostFields), which starts CUDA on the device
+    // that is current then
+    const int localReady = selectDeviceForRank() ? 1 : 0;
+    int allReady = 0;
+    MPI_Allreduce(&localReady, &allReady, 1, MPI_INT, MPI_MIN,
+                  MPIdata::get_PicGlobalComm());
+    if (!allReady) {
+      if (rank == 0) {
+        std::cerr << "haloCommunicationTest SKIP: every MPI rank needs a "
+                     "visible CUDA/HIP device for backend "
+                  << backendName(options.backend) << ".\n";
       }
+      MPIdata::finalize_mpi();
+      return kSkipReturnCode;
     }
 
     Parameters::init_parameters();

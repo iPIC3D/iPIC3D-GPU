@@ -12,8 +12,10 @@
 #include "OutputTagConfig.h"
 #include "RestartSlotManager.h"
 #include "ipicfwd.h"
+#include <memory>
 #include <vector>
 
+class AsyncOutput;
 struct RestartParticleCellMetadata;
 
 #ifndef NO_MPI
@@ -100,11 +102,28 @@ public:
   void writeRestart(int cycle);
 
   /**
-   * @brief Close output files and release backend resources.
+   * @brief Wait for the deferred outputs, complete them (the last checkpoint
+   * is published here), then close output files and release backend
+   * resources.
    *
-   * Called from c_Solver::Finalize() after the last restart has been written.
+   * Called from c_Solver::Finalize() after the last checkpoint has been
+   * submitted.
    */
   void finalize();
+
+  // ======= Deferred output (AsyncOutput.h) =======
+
+  /** Once a cycle, on the main thread: completes the written outputs (the
+   *  barrier and manifest of a checkpoint). */
+  void poll();
+
+  /** Before the copies into the host particle buffers (outputCopyAsync):
+   *  waits for the outputs still writing from them. */
+  void beforeParticleCopy();
+
+  /** Before the copies into the host field arrays (gpuSolverSyncD2H) or heat
+   *  flux (ScheduleHeatFlux): waits for the outputs still writing from them. */
+  void beforeFieldCopy();
 
   // ======= GPU-host copy scheduling queries =======
 
@@ -120,10 +139,15 @@ public:
 
   /** The arrays of each species that the host outputs of a cycle read
    *  (needsParticleSync), which outputCopyAsync copies: every array for a
-   *  checkpoint; else the velocities and charges for the diagnostics and
-   *  the arrays of ParticlesOutputTag of the species of
-   *  ParticlesOutputSpecies for the particle output. */
+   *  checkpoint, else the arrays of ParticlesOutputTag of the species of
+   *  ParticlesOutputSpecies for the particle output. The energy diagnostics
+   *  read none: they sum the particles on the GPU (particleSums.cuh). */
   std::vector<ParticleOutputArrays> hostParticles(int cycle) const;
+
+  /** The field arrays that the outputs of a cycle read on the host
+   *  (gpuSolverSyncD2H): every array for a checkpoint, else those of the
+   *  tags of the field output (fieldOutputArraysOf). */
+  FieldOutputArrays hostFields(int cycle) const;
 
   /** @brief Will this cycle write at least one configured field or moment
    * quantity through an available backend? */
@@ -159,6 +183,13 @@ private:
   ParticleBackend particleBackend_ = ParticleBackend::NONE;
   RestartBackend restartBackend_ = RestartBackend::NONE;
   RestartSlotManager restartSlots_;
+
+  // ======= Deferred output =======
+  std::unique_ptr<AsyncOutput> async_;
+  /** Duplicate of the global communicator, for the barriers that complete
+   *  the checkpoints only: each rank reaches them at another point of its
+   *  calls, so they may not share a communicator with other collectives. */
+  MPI_Comm checkpointComm_ = MPI_COMM_NULL;
 
   // ======= Owned backend objects =======
 #ifndef NO_HDF5

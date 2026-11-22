@@ -535,10 +535,14 @@ void dataAnalysisPipelineImpl::fitGMM(int cycle, int species) {
     GMMType* centers[kDim];
     for (int d = 0; d < kDim; d++)
       centers[d] = allCenters[d] + base;
-    cudaGMMWeight::GMMDataMultiDim<GMMType, kDim, weightType> data(
-        fitOffset.back(), centers, histograms->getNonEmptyWeights() + base);
+    // the description of the points, page-locked: config copies it to the
+    // device
+    using Points = cudaGMMWeight::GMMDataMultiDim<GMMType, kDim, weightType>;
+    const PinnedVector<Points> data(
+        1, Points(fitOffset.back(), centers,
+                  histograms->getNonEmptyWeights() + base));
 
-    gmm->config(&param, &data, last - first, fitOffset.data());
+    gmm->config(&param, data.data(), last - first, fitOffset.data());
     gmm->initGMM();
     for (int f = first; f < last; f++)
       lastFit[species][fitted[f]] =

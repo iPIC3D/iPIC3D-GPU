@@ -236,19 +236,21 @@ CleaningNullSpace cleaningNullSpace(const Lap27Op& op, bool nodes,
                                     const bool oddWalls[3], bool mean);
 
 /** One pass of the null-space removal on one rank, before the sum over the
- *  ranks: the signed sums of b into the localSize device slots d_sums, then
- *  placed in global (globalSize, zero elsewhere).  Synchronises stream. */
+ *  ranks: the signed sums of b into the localSize device slots d_sums, copied
+ *  to as many page-locked host slots h_sums, then placed in global
+ *  (globalSize, zero elsewhere).  Synchronises stream. */
 void gpuCleaningNullSums(const cudaSolverType* d_b, const CleaningNullSpace& ns,
-                         cudaSolverType* d_sums,
+                         cudaSolverType* d_sums, cudaSolverType* h_sums,
                          std::vector<cudaSolverType>& global,
                          cudaStream_t stream);
 
 /** After the sum over the ranks: b loses the terms of the global sums
  *  (d_coef receives the line coefficients, at most one per row along each
- *  axis).  Synchronises stream. */
+ *  axis, from as many page-locked host slots h_coef).  Synchronises stream. */
 void gpuCleaningNullSubtract(cudaSolverType* d_b, const CleaningNullSpace& ns,
                              const std::vector<cudaSolverType>& global,
-                             cudaSolverType* d_coef, cudaStream_t stream);
+                             cudaSolverType* d_coef, cudaSolverType* h_coef,
+                             cudaStream_t stream);
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
 /** Whether axis a is flat in the mask FLAT (lap27FlatMask). */

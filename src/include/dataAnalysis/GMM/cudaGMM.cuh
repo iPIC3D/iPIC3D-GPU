@@ -118,6 +118,9 @@ private:
   GrowingBuffer<int, true> phase;
   GrowingBuffer<cudaGMMWeightKernel::GMMFitState<T>, true> state;
   GrowingBuffer<T, true> scale;
+  // the block tables of config(), page-locked: copied to the device
+  PinnedVector<int> fitOffset, fitStatisticsBlock;
+  PinnedVector<int> eStepFit, eStepFirst, statisticsFit;
 
 public:
   /**
@@ -126,13 +129,14 @@ public:
    * @param GMMParam the settings, and the initial components (required, in
    * the units of the points) and the scale of each fit, fit after fit; the
    * components are normalised with the points when the settings ask to
-   * @param data the points of all the fits
+   * @param data the points of all the fits; the object in page-locked
+   * memory (it is copied to the device)
    * @param fits the fits
    * @param offsets the points of fit f are [offsets[f], offsets[f + 1]), from
    * 0 to all the points (a fit may have none); nullptr for one fit of all
    * the points
-   * The device arrays of the points must live until initGMM returns; the
-   * fit keeps no pointer to the two objects.
+   * data and the device arrays of the points must live until initGMM
+   * returns; the fit keeps no pointer to the two objects.
    */
   __host__ void config(const GMMParam_t<T>* GMMParam,
                        const GMMDataMultiDim<T, dataDim, U>* data, int fits = 1,
@@ -155,9 +159,10 @@ public:
           "GMM: the initial components and the scales are required");
     if (fits < 1 || (!offsets && fits != 1))
       throw std::invalid_argument("GMM: no fit, or several without offsets");
-    const std::vector<int> fitOffset =
-        offsets ? std::vector<int>(offsets, offsets + fits + 1)
-                : std::vector<int>{0, numData};
+    if (offsets)
+      fitOffset.assign(offsets, offsets + fits + 1);
+    else
+      fitOffset.assign({0, numData});
     if (fitOffset.front() != 0 || fitOffset.back() != numData ||
         !std::is_sorted(fitOffset.begin(), fitOffset.end()))
       throw std::invalid_argument("GMM: the fits must cover the points, in "
@@ -191,8 +196,10 @@ public:
 
     // the blocks: per fit, of the E step one per kGMMThreads points, of the
     // statistics those of the launch of a fit alone
-    std::vector<int> eStepFit, eStepFirst, statisticsFit;
-    std::vector<int> fitStatisticsBlock(numFits + 1);
+    eStepFit.clear();
+    eStepFirst.clear();
+    statisticsFit.clear();
+    fitStatisticsBlock.assign(numFits + 1, 0);
     for (int f = 0; f < numFits; f++) {
       for (int n = fitOffset[f]; n < fitOffset[f + 1]; n += kGMMThreads) {
         eStepFit.push_back(f);
@@ -270,7 +277,6 @@ public:
     upload(phaseCUDA.get(), phase.get(), numFits);
     upload(stateCUDA.get(), state.get(), numFits);
     upload(scaleCUDA.get(), scale.get(), numFits);
-    // from pageable memory: staged before the calls return
     upload(fitOffsetCUDA.get(), fitOffset.data(), numFits + 1);
     upload(fitStatisticsBlockCUDA.get(), fitStatisticsBlock.data(),
            numFits + 1);

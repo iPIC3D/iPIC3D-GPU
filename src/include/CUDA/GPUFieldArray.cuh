@@ -5,7 +5,8 @@
  * Provides GPU-allocated 3D/4D arrays that mirror the host array3_double /
  * array4_double layout (row-major, contiguous) but live entirely in device
  * memory.  Host↔device transfers are explicit: initialisation, restart,
- * output and diagnostics.
+ * output and diagnostics.  The host side of every transfer is page-locked
+ * memory (a pinned_array, a PinnedVector).
  *
  * All three wrapper types are parameterised on the element type T;
  * GPUFieldArray3, GPUFieldArray4 and GPUKrylovVector are the cudaSolverType
@@ -312,6 +313,8 @@ public:
     cudaErrChk(cudaMemsetAsync(d_ptr_, 0, size_ * sizeof(T), stream));
   }
 
+  // The two copies are asynchronous (h is page-locked): h stays as it is
+  // until s has run the copy, and is read after s is synchronised.
   void copyFromHost(const T* h, cudaStream_t s = 0) {
     cudaErrChk(cudaMemcpyAsync(d_ptr_, h, size_ * sizeof(T),
                                cudaMemcpyHostToDevice, s));

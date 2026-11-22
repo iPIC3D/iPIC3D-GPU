@@ -84,6 +84,8 @@ template <class T> class array1;
 template <class T> class array2;
 template <class T> class array3;
 template <class T> class array4;
+template <class T> struct pinned_array3;
+template <class T> struct pinned_array4;
 template <class T> class array_fetch1;
 template <class T> class const_array_get1;
 template <class T> class const_array_get2;
@@ -121,6 +123,9 @@ typedef iPic3D::array1<double> array1_double;
 typedef iPic3D::array2<double> array2_double;
 typedef iPic3D::array3<double> array3_double;
 typedef iPic3D::array4<double> array4_double;
+// their values in page-locked memory: copied to or from the device
+typedef iPic3D::pinned_array3<double> pinned_array3_double;
+typedef iPic3D::pinned_array4<double> pinned_array4_double;
 typedef iPic3D::array4<pfloat> array4_pfloat;
 // This directive should be consistent with the directives in Alloc.h
 // #if defined(FLAT_ARRAYS) || defined(CHECK_BOUNDS)

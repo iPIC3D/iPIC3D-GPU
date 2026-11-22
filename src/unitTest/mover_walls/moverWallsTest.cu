@@ -108,8 +108,8 @@ __global__ void k_steps(MoverState* p, int n, int steps, Setup su) {
 
 /** The particles after `steps` steps on the device. */
 template <bool kRelativistic>
-std::vector<MoverState> onDevice(const std::vector<MoverState>& p, int steps,
-                                 const Setup& su) {
+PinnedVector<MoverState> onDevice(const PinnedVector<MoverState>& p, int steps,
+                                  const Setup& su) {
   const size_t bytes = p.size() * sizeof(MoverState);
   MoverState* d = nullptr;
   cudaErrChk(cudaMalloc(&d, bytes));
@@ -118,15 +118,15 @@ std::vector<MoverState> onDevice(const std::vector<MoverState>& p, int steps,
       <<<getGridSize((int)p.size(), kBlockSize), kBlockSize>>>(d, (int)p.size(),
                                                                steps, su);
   cudaErrChk(cudaGetLastError());
-  std::vector<MoverState> out(p.size());
+  PinnedVector<MoverState> out(p.size());
   cudaErrChk(cudaMemcpy(out.data(), d, bytes, cudaMemcpyDeviceToHost));
   cudaErrChk(cudaFree(d));
   return out;
 }
 
 /** The particles after `steps` steps on the host. */
-std::vector<MoverState> onHost(std::vector<MoverState> p, int steps,
-                               const Setup& su) {
+PinnedVector<MoverState> onHost(PinnedVector<MoverState> p, int steps,
+                                const Setup& su) {
   for (MoverState& s : p)
     for (int k = 0; k < steps; k++)
       step<false>(s, su);
@@ -147,12 +147,12 @@ Setup setup(const real B[3], const real E[3], const bool wall[3],
 }
 
 /** n thermal particles, uniform in the walled directions. */
-std::vector<MoverState> thermal(int n, const Setup& su, unsigned seed,
-                                real vth = kVth) {
+PinnedVector<MoverState> thermal(int n, const Setup& su, unsigned seed,
+                                 real vth = kVth) {
   std::mt19937_64 gen(seed);
   std::normal_distribution<real> maxwell(0.0, vth);
   std::uniform_real_distribution<real> unit(0.0, 1.0);
-  std::vector<MoverState> p(n);
+  PinnedVector<MoverState> p(n);
   for (MoverState& s : p)
     for (int a = 0; a < 3; a++) {
       s.x[a] = std::isfinite(su.hi[a]) ? unit(gen) * su.hi[a] : 0.0;
@@ -162,7 +162,7 @@ std::vector<MoverState> thermal(int n, const Setup& su, unsigned seed,
 }
 
 /** The particles beyond a wall or with a velocity that is not finite. */
-int outside(const std::vector<MoverState>& p, const Setup& su) {
+int outside(const PinnedVector<MoverState>& p, const Setup& su) {
   int n = 0;
   for (const MoverState& s : p)
     for (int a = 0; a < 3; a++)
@@ -187,7 +187,7 @@ int testInvariants() {
   const bool wall[3] = {false, true, false};
   const Setup su = setup(B, E, wall);
   const int steps = 400;
-  const std::vector<MoverState> start = thermal(20000, su, 1);
+  const PinnedVector<MoverState> start = thermal(20000, su, 1);
   const auto P = [&](const MoverState& s) {
     return s.v[0] - kQom * B[2] * s.x[1];
   };
@@ -197,7 +197,7 @@ int testInvariants() {
   };
   int bad = 0;
   for (const bool device : {false, true}) {
-    const std::vector<MoverState> end =
+    const PinnedVector<MoverState> end =
         device ? onDevice<false>(start, steps, su) : onHost(start, steps, su);
     real dP = 0, dH = 0;
     for (size_t i = 0; i < start.size(); i++) {
@@ -221,13 +221,13 @@ int testBox() {
   const bool wall[3] = {true, true, true};
   const Setup su = setup(B, E, wall);
   const int steps = 400;
-  const std::vector<MoverState> start = thermal(20000, su, 2);
+  const PinnedVector<MoverState> start = thermal(20000, su, 2);
   const auto v2 = [](const MoverState& s) {
     return s.v[0] * s.v[0] + s.v[1] * s.v[1] + s.v[2] * s.v[2];
   };
   int bad = 0;
   for (const bool device : {false, true}) {
-    const std::vector<MoverState> end =
+    const PinnedVector<MoverState> end =
         device ? onDevice<false>(start, steps, su) : onHost(start, steps, su);
     real dE = 0;
     for (size_t i = 0; i < start.size(); i++)
@@ -339,7 +339,7 @@ int testNoWall() {
   const real B[3] = {0.3 * kB, -0.5 * kB, kB}, E[3] = {1e-4, -2e-4, 3e-4};
   const bool wall[3] = {false, false, false};
   const Setup su = setup(B, E, wall);
-  const std::vector<MoverState> start = thermal(1000, su, 4);
+  const PinnedVector<MoverState> start = thermal(1000, su, 4);
   int differ = 0;
   for (MoverState s : start) {
     MoverState free;
@@ -358,8 +358,8 @@ int testRelativistic() {
   const real B[3] = {0, 0, kB}, E[3] = {0, 0, 0};
   const bool wall[3] = {false, true, false};
   const Setup su = setup(B, E, wall, 0.5);
-  const std::vector<MoverState> start = thermal(20000, su, 5, 0.1);
-  const std::vector<MoverState> end = onDevice<true>(start, 400, su);
+  const PinnedVector<MoverState> start = thermal(20000, su, 5, 0.1);
+  const PinnedVector<MoverState> end = onDevice<true>(start, 400, su);
   const auto gamma = [](const MoverState& s) {
     return 1.0 / std::sqrt(1.0 - (s.v[0] * s.v[0] + s.v[1] * s.v[1] +
                                   s.v[2] * s.v[2]));

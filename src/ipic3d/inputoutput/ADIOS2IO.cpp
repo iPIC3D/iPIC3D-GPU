@@ -10,9 +10,6 @@
 #include "VCtopology3D.h"
 
 #include "adios2.h"
-#include "mpi.h"
-
-#include "MPIdata.h"
 
 #include <algorithm>
 #include <chrono>
@@ -97,7 +94,9 @@ void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag,
   this->nstestpart = nstestpart_in;
 
   // ADIOS2
-  this->adios = adios2::ADIOS(MPIdata::get_PicGlobalComm());
+  // a serial instance: its engines write one file per rank and make no MPI
+  // call, so the writer threads may use them (AsyncOutput.h)
+  this->adios = adios2::ADIOS();
 
   // open files
   if (!fieldTag.empty()) {
@@ -114,11 +113,9 @@ void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag,
     defineBuildAttributes(ioParticle);
     auto filePath =
         saveDirName + "/particle_" + to_string(cartisianRank) + ".bp";
-    engineParticle =
-        ioParticle.Open(filePath,
-                        col->getRestart_status() == 0 ? adios2::Mode::Write
-                                                      : adios2::Mode::Append,
-                        MPI_COMM_SELF);
+    engineParticle = ioParticle.Open(filePath, col->getRestart_status() == 0
+                                                   ? adios2::Mode::Write
+                                                   : adios2::Mode::Append);
     particleOptions = tagOptions(particleTag, outputTagOptions, "Particle");
   }
 
@@ -168,8 +165,7 @@ void ADIOS2Manager::writeRestartOutput(int cycle, const string& restartDir) {
 
   const string filePath =
       restartDir + "/restart_" + to_string(cartisianRank) + ".bp";
-  adios2::Engine engineRestart =
-      ioRestart.Open(filePath, adios2::Mode::Write, MPI_COMM_SELF);
+  adios2::Engine engineRestart = ioRestart.Open(filePath, adios2::Mode::Write);
   engineRestart.BeginStep();
 
   auto cycleVar = _variableHelper<int>(ioRestart, "cycle");

@@ -810,8 +810,9 @@ public:
       }
     }
 
-    // kinetic energy of species i on this rank (the ranks sum to its Ke[i]
-    // of ConservedQuantities.txt)
+    // kinetic energy of species i on this rank, of the host particles as
+    // last copied from the GPU (Ke[i] of ConservedQuantities.txt is summed
+    // on the GPU, particleSums.cuh). Not used: no output requests this tag
     if (tag.find("k_energy", 0) != string::npos) {
       for (int i = 0; i < ns; ++i) {
         stringstream ii;

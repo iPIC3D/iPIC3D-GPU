@@ -105,14 +105,13 @@ function(add_halo_communication_test name mpi_ranks exchange_case suite backend)
       PROCESSORS ${mpi_ranks}
       RUN_SERIAL TRUE
       TIMEOUT 90
+      SKIP_RETURN_CODE 77
   )
-  if(backend STREQUAL "gpu")
-    set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 77)
-  endif()
 endfunction()
 
-# Keep CPU and GPU registrations separate: CPU validation remains available on
-# hosts without a device, while GPU-only cases can report CTest's skip code 77.
+# CPU and GPU exchanges are registered separately. Both need a device (the
+# host field arrays are page-locked) and report CTest's skip code 77 without
+# one.
 add_halo_communication_test(
   haloCommunicationConventionalDistributedCPU 8 conventional distributed cpu)
 add_halo_communication_test(

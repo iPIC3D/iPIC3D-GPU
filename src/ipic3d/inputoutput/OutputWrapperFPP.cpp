@@ -35,6 +35,11 @@ void OutputWrapperFPP::init_output_files(Collective* col, VCtopology3D* vct,
                                          int nstestpart, bool outputFiles,
                                          bool restartFiles) {
 #ifndef NO_HDF5
+  // The set-up of the HDF5 library here, on the main thread: the library
+  // does it at its first call, with MPI calls in a parallel HDF5, and a
+  // rank's first call may otherwise be a deferred write on a writer thread,
+  // which may make no MPI call (AsyncOutput.h).
+  H5open();
   col_ = col;
   cartesian_rank = vct->getCartesian_rank();
   stringstream num_proc_ss;

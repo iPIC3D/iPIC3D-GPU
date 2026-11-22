@@ -70,6 +70,7 @@
 #include "particleArrayCUDA.cuh"
 #include "particleControlKernel.cuh"
 #include "particleExchange.cuh"
+#include "particleSums.cuh"
 
 #if defined(USE_CATALYST) && IPIC3D_COMPILE_DISK_OUTPUT
 #include "Adaptor.h"
@@ -223,6 +224,16 @@ static std::string provenanceReport(const Collective& col,
   return out.str();
 }
 // MPIdata* iPic3D::c_Solver::mpi=0;
+c_Solver::c_Solver()
+    : col(0), vct(0), grid(0), EMf(0), particlesCommInj(nullptr),
+      particlesHost(nullptr), testpart(nullptr), exosphereIonization(nullptr),
+      ioManager(0), heatFluxCalculationEnabled_(false),
+      heatFluxOutputEnabled_(false), heatFluxScheduledCycle_(-1),
+      heatFluxStream(nullptr), heatFluxReadDoneEvt(nullptr),
+      heatFluxHostDoneEvt(nullptr), heatFluxCUDAPtr(nullptr),
+      heatFluxBulkCUDAPtr(nullptr), Ke(0), BulkEnergy(0), momentum(0), Qtot(0),
+      Qremoved(0), my_clock(0) {}
+
 /**
  * @brief Destroy the solver and release host-side runtime objects.
  *
@@ -387,6 +398,10 @@ int c_Solver::Init(int argc, char** argv) {
 #ifndef NO_MPI
   MPI_Barrier(MPIdata::get_PicGlobalComm());
 #endif
+  // The GPU of this rank, before the host arrays that are copied to and from
+  // it are allocated (EMfields3D, the particles)
+  if (selectDevice() != 0)
+    return 1;
   // Create the local grid
   grid = new Grid3DCU(col, vct);        // Create the local grid
   EMf = new EMfields3D(col, grid, vct); // Create Electromagnetic Fields Object
@@ -585,17 +600,79 @@ int c_Solver::Init(int argc, char** argv) {
     return 1;
 #if IPIC3D_COMPILE_DISK_OUTPUT
   if (Parameters::get_doWriteOutput() || restart_cycle > 0 ||
-      col->getCallFinalize()) {
+      col->getCallFinalize())
     ioManager->setRestartParticleCellMetadata(&restartParticleCellMetadata_);
-    if (ioManager->needsParticleSync(first_cycle)) {
-      outputCopyAsync(first_cycle - 1);
-      cudaErrChk(cudaEventSynchronize(eventOutputCopy));
-    }
+  // the host particle copies and the particle sums that the outputs and the
+  // energy diagnostics of the first cycle read
+  if (ioManager->needsParticleSync(first_cycle) ||
+      col->diagnostics_due(first_cycle)) {
+    outputCopyAsync(first_cycle - 1);
+    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
   }
 #endif
 
   my_clock = new Timing(myrank);
 
+  return 0;
+}
+
+/**
+ * @brief Select the GPU assigned to this MPI rank.
+ *
+ * Called before the first page-locked host allocation (the host field and
+ * particle arrays): such an allocation starts CUDA on the device that is
+ * current then, so a later selection would leave a second context on device
+ * 0.
+ * @return 0, or 1 when a rank of the run cannot be mapped to a device.
+ */
+int c_Solver::selectDevice() {
+  MPI_Comm sharedComm = MPI_COMM_NULL;
+  int sharedRank = 0, sharedSize = 0;
+  int deviceCount = 0;
+  MPI_Comm_split_type(MPIdata::get_PicGlobalComm(), MPI_COMM_TYPE_SHARED, 0,
+                      MPI_INFO_NULL, &sharedComm);
+  MPI_Comm_rank(sharedComm, &sharedRank);
+  MPI_Comm_size(sharedComm, &sharedSize);
+
+  const cudaError_t countStatus = cudaGetDeviceCount(&deviceCount);
+  const char* failureReason = nullptr;
+  if (countStatus != cudaSuccess) {
+    failureReason = cudaGetErrorString(countStatus);
+  } else if (deviceCount <= 0) {
+    failureReason = "no visible GPU devices";
+  } else if (sharedSize > deviceCount && sharedSize % deviceCount != 0) {
+    failureReason =
+        "local MPI rank count is not divisible by the GPU device count";
+  } else {
+    // Use one rank per device when possible; otherwise assign equal-sized
+    // contiguous groups of local ranks to each device.
+    const int ranksPerDevice =
+        sharedSize > deviceCount ? sharedSize / deviceCount : 1;
+    cudaDeviceOnNode = sharedRank / ranksPerDevice;
+    const cudaError_t setStatus = cudaSetDevice(cudaDeviceOnNode);
+    if (setStatus != cudaSuccess)
+      failureReason = cudaGetErrorString(setStatus);
+  }
+
+  if (failureReason) {
+    cerr << "Error: cannot map MPI rank " << MPIdata::get_rank()
+         << " to a GPU device (local ranks=" << sharedSize
+         << ", visible GPU devices=" << deviceCount << "): " << failureReason
+         << "." << endl;
+  }
+
+  MPI_Comm_free(&sharedComm);
+  const int mappingFailure = failureReason ? 1 : 0;
+  int anyMappingFailure = 0;
+  MPI_Allreduce(&mappingFailure, &anyMappingFailure, 1, MPI_INT, MPI_MAX,
+                MPIdata::get_PicGlobalComm());
+  if (anyMappingFailure)
+    return 1;
+#ifndef NDEBUG
+  if (sharedRank == 0)
+    cout << "[*]GPU assignment: shared comm size: " << sharedSize
+         << " visible GPU devices: " << deviceCount << endl;
+#endif
   return 0;
 }
 
@@ -624,57 +701,6 @@ int c_Solver::initCUDA() {
       (BenchmarkConfig::MODE == 1 && heatFluxRequested);
   heatFluxScheduledCycle_ = -1;
 
-  // ======= Select the GPU assigned to this MPI rank =======
-  {
-    MPI_Comm sharedComm = MPI_COMM_NULL;
-    int sharedRank = 0, sharedSize = 0;
-    int deviceCount = 0;
-    MPI_Comm_split_type(MPIdata::get_PicGlobalComm(), MPI_COMM_TYPE_SHARED, 0,
-                        MPI_INFO_NULL, &sharedComm);
-    MPI_Comm_rank(sharedComm, &sharedRank);
-    MPI_Comm_size(sharedComm, &sharedSize);
-
-    const cudaError_t countStatus = cudaGetDeviceCount(&deviceCount);
-    const char* failureReason = nullptr;
-    if (countStatus != cudaSuccess) {
-      failureReason = cudaGetErrorString(countStatus);
-    } else if (deviceCount <= 0) {
-      failureReason = "no visible GPU devices";
-    } else if (sharedSize > deviceCount && sharedSize % deviceCount != 0) {
-      failureReason =
-          "local MPI rank count is not divisible by the GPU device count";
-    } else {
-      // Use one rank per device when possible; otherwise assign equal-sized
-      // contiguous groups of local ranks to each device.
-      const int ranksPerDevice =
-          sharedSize > deviceCount ? sharedSize / deviceCount : 1;
-      cudaDeviceOnNode = sharedRank / ranksPerDevice;
-      const cudaError_t setStatus = cudaSetDevice(cudaDeviceOnNode);
-      if (setStatus != cudaSuccess)
-        failureReason = cudaGetErrorString(setStatus);
-    }
-
-    if (failureReason) {
-      cerr << "Error: cannot map MPI rank " << MPIdata::get_rank()
-           << " to a GPU device (local ranks=" << sharedSize
-           << ", visible GPU devices=" << deviceCount << "): " << failureReason
-           << "." << endl;
-    }
-
-    MPI_Comm_free(&sharedComm);
-    const int mappingFailure = failureReason ? 1 : 0;
-    int anyMappingFailure = 0;
-    MPI_Allreduce(&mappingFailure, &anyMappingFailure, 1, MPI_INT, MPI_MAX,
-                  MPIdata::get_PicGlobalComm());
-    if (anyMappingFailure)
-      return 1;
-#ifndef NDEBUG
-    if (sharedRank == 0)
-      cout << "[*]GPU assignment: shared comm size: " << sharedSize
-           << " visible GPU devices: " << deviceCount << endl;
-#endif
-  }
-
   // ======= Create per-species streams and async launcher state =======
   streams = new cudaStream_t[ns * 2];
   stayedParticle = new int[ns];
@@ -685,11 +711,14 @@ int c_Solver::initCUDA() {
     stayedParticle[i] = 0;
   }
   cudaErrChk(cudaStreamCreate(&planetStream));
-  // Dedicated stream for the output D->H copies.  Isolating it from the
-  // per-species streams[] removes implicit ordering between the output copy
-  // and the next cycle's mover/sort kernels, which is re-established
-  // explicitly via cycleEndEvent/eventOutputCopy below.
+  // Dedicated stream for the output D->H copies and the particle sums of the
+  // energy diagnostics.  Isolating it from the per-species streams[] removes
+  // implicit ordering between the output copy and the next cycle's mover/sort
+  // kernels, which is re-established explicitly via
+  // cycleEndEvent/eventOutputCopy below.
   cudaErrChk(cudaStreamCreate(&outputStream));
+  cudaErrChk(cudaMalloc(&particleSumsCUDAPtr, ns * sizeof(ParticleSums)));
+  cudaErrChk(cudaMallocHost(&particleSumsHostPtr, ns * sizeof(ParticleSums)));
   // The heat flux overlaps the field solve: below it, ordered by events only
   if (heatFluxCalculationEnabled_)
     heatFluxStream = createPriorityStream(StreamPriority::Diagnostic);
@@ -888,20 +917,10 @@ int c_Solver::initCUDA() {
     cudaErrChk(cudaEventRecord(momentsPipelineDoneEvt, EMf->gpuSolverStream()));
   }
 
-  // Moments stay on the device; the host moment arrays are filled only by the
-  // output and restart device-to-host syncs, which copy species by species.
-  // They are pinned here, per species, after gpuSolverSyncH2D: a whole-array
-  // cudaMemcpyAsync over separately pinned slices, as in gpuSolverSyncH2D,
-  // fails with "invalid argument".
-#if IPIC3D_COMPILE_DISK_OUTPUT
-  for (int i = 0; i < ns; i++)
-    registerMomentsPinnedMemory(i);
-#endif
-
-#if IPIC3D_COMPILE_DISK_OUTPUT
+  // the host heat flux of the output: ScheduleHeatFlux copies it from the
+  // device
   if (heatFluxOutputEnabled_)
-    registerHeatFluxPinnedMemory();
-#endif
+    EMf->allocateHeatFlux();
 
   threadPoolPtr = new ThreadPool(ns);
   cudaErrChk(cudaEventCreateWithFlags(&event0, cudaEventDisableTiming));
@@ -1023,13 +1042,12 @@ int c_Solver::initCUDA() {
       // Device array of per-electron-species planetArray device pointers.
       cudaErrChk(cudaMalloc(&planetArrayCUDAPtrDevice,
                             planetElecSpeciesCount * sizeof(planetArray*)));
-      planetArray** tmpPtrs = new planetArray*[planetElecSpeciesCount];
+      PinnedVector<planetArray*> tmpPtrs(planetElecSpeciesCount);
       for (int e = 0; e < planetElecSpeciesCount; e++)
         tmpPtrs[e] = planetArrayCUDAPtr[planetElecSpeciesMap[e]];
-      cudaErrChk(cudaMemcpy(planetArrayCUDAPtrDevice, tmpPtrs,
+      cudaErrChk(cudaMemcpy(planetArrayCUDAPtrDevice, tmpPtrs.data(),
                             planetElecSpeciesCount * sizeof(planetArray*),
                             cudaMemcpyHostToDevice));
-      delete[] tmpPtrs;
 
       cudaErrChk(cudaMalloc(&planetElecOffsetsDevice,
                             planetElecSpeciesCount * sizeof(int)));
@@ -1276,18 +1294,13 @@ int c_Solver::deInitCUDA() {
     cudaStreamDestroy(streams[i]);
   cudaStreamDestroy(planetStream);
   cudaStreamDestroy(outputStream);
+  cudaErrChk(cudaFree(particleSumsCUDAPtr));
+  cudaErrChk(cudaFreeHost(particleSumsHostPtr));
   if (heatFluxCalculationEnabled_)
     cudaStreamDestroy(heatFluxStream);
   delete[] streams;
   delete[] stayedParticle;
   delete[] exitingResults;
-
-#if IPIC3D_COMPILE_DISK_OUTPUT
-  for (int i = 0; i < ns; i++)
-    unregisterMomentsPinnedMemory(i);
-  if (heatFluxOutputEnabled_)
-    unregisterHeatFluxPinnedMemory();
-#endif
 
   return 0;
 }
@@ -1344,93 +1357,6 @@ void c_Solver::copyHeatFluxD2H(int species, cudaStream_t stream) {
 #else
   (void)species;
   (void)stream;
-  return;
-#endif
-}
-
-/**
- * @brief Register one species' host-side moment arrays as pinned memory.
- *
- * Pinning these buffers enables faster asynchronous D2H copies of the field
- * solver's device moments into the EMfields3D host arrays (gpuSolverSyncD2H,
- * for output and restarts).
- * @param species Species index whose host moment arrays are pinned.
- */
-void c_Solver::registerMomentsPinnedMemory(int species) {
-  const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
-  cudaErrChk(cudaHostRegister((void*)&(EMf->getRHOns().get(species, 0, 0, 0)),
-                              gridSize * sizeof(cudaCommonType),
-                              cudaHostRegisterDefault));
-  cudaErrChk(cudaHostRegister((void*)&(EMf->getJxs().get(species, 0, 0, 0)),
-                              gridSize * sizeof(cudaCommonType),
-                              cudaHostRegisterDefault));
-  cudaErrChk(cudaHostRegister((void*)&(EMf->getJys().get(species, 0, 0, 0)),
-                              gridSize * sizeof(cudaCommonType),
-                              cudaHostRegisterDefault));
-  cudaErrChk(cudaHostRegister((void*)&(EMf->getJzs().get(species, 0, 0, 0)),
-                              gridSize * sizeof(cudaCommonType),
-                              cudaHostRegisterDefault));
-  cudaErrChk(cudaHostRegister((void*)&(EMf->getpXXsn().get(species, 0, 0, 0)),
-                              gridSize * sizeof(cudaCommonType),
-                              cudaHostRegisterDefault));
-  cudaErrChk(cudaHostRegister((void*)&(EMf->getpXYsn().get(species, 0, 0, 0)),
-                              gridSize * sizeof(cudaCommonType),
-                              cudaHostRegisterDefault));
-  cudaErrChk(cudaHostRegister((void*)&(EMf->getpXZsn().get(species, 0, 0, 0)),
-                              gridSize * sizeof(cudaCommonType),
-                              cudaHostRegisterDefault));
-  cudaErrChk(cudaHostRegister((void*)&(EMf->getpYYsn().get(species, 0, 0, 0)),
-                              gridSize * sizeof(cudaCommonType),
-                              cudaHostRegisterDefault));
-  cudaErrChk(cudaHostRegister((void*)&(EMf->getpYZsn().get(species, 0, 0, 0)),
-                              gridSize * sizeof(cudaCommonType),
-                              cudaHostRegisterDefault));
-  cudaErrChk(cudaHostRegister((void*)&(EMf->getpZZsn().get(species, 0, 0, 0)),
-                              gridSize * sizeof(cudaCommonType),
-                              cudaHostRegisterDefault));
-}
-
-/**
- * @brief Unregister one species' host-side moment arrays from pinned memory.
- * @param species Species index whose host moment arrays are unpinned.
- */
-void c_Solver::unregisterMomentsPinnedMemory(int species) {
-  cudaErrChk(
-      cudaHostUnregister((void*)&(EMf->getRHOns().get(species, 0, 0, 0))));
-  cudaErrChk(cudaHostUnregister((void*)&(EMf->getJxs().get(species, 0, 0, 0))));
-  cudaErrChk(cudaHostUnregister((void*)&(EMf->getJys().get(species, 0, 0, 0))));
-  cudaErrChk(cudaHostUnregister((void*)&(EMf->getJzs().get(species, 0, 0, 0))));
-  cudaErrChk(
-      cudaHostUnregister((void*)&(EMf->getpXXsn().get(species, 0, 0, 0))));
-  cudaErrChk(
-      cudaHostUnregister((void*)&(EMf->getpXYsn().get(species, 0, 0, 0))));
-  cudaErrChk(
-      cudaHostUnregister((void*)&(EMf->getpXZsn().get(species, 0, 0, 0))));
-  cudaErrChk(
-      cudaHostUnregister((void*)&(EMf->getpYYsn().get(species, 0, 0, 0))));
-  cudaErrChk(
-      cudaHostUnregister((void*)&(EMf->getpYZsn().get(species, 0, 0, 0))));
-  cudaErrChk(
-      cudaHostUnregister((void*)&(EMf->getpZZsn().get(species, 0, 0, 0))));
-}
-
-void c_Solver::registerHeatFluxPinnedMemory() {
-#if IPIC3D_COMPILE_DISK_OUTPUT
-  const auto gridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
-  const size_t bytes = static_cast<size_t>(ns) *
-                       static_cast<size_t>(HeatFlux::ComponentCount) *
-                       static_cast<size_t>(gridSize) * sizeof(cudaCommonType);
-  cudaErrChk(cudaHostRegister((void*)EMf->getHeatFluxRaw(), bytes,
-                              cudaHostRegisterDefault));
-#else
-  return;
-#endif
-}
-
-void c_Solver::unregisterHeatFluxPinnedMemory() {
-#if IPIC3D_COMPILE_DISK_OUTPUT
-  cudaErrChk(cudaHostUnregister((void*)EMf->getHeatFluxRaw()));
-#else
   return;
 #endif
 }
@@ -1554,6 +1480,8 @@ void c_Solver::ScheduleHeatFlux(int cycle) {
 
 #if IPIC3D_COMPILE_DISK_OUTPUT
   if (heatFluxOutputEnabled_) {
+    // the deferred field outputs still writing the host heat flux first
+    ioManager->beforeFieldCopy();
     for (int s = 0; s < ns; ++s) {
       copyHeatFluxD2H(s, heatFluxStream);
       cudaErrChk(cudaEventRecord(heatFluxHostDoneEvt[s], heatFluxStream));
@@ -2964,36 +2892,36 @@ void c_Solver::writeParticleNum(int cycle) {
 void c_Solver::WriteOutput(int cycle) {
 #if IPIC3D_COMPILE_DISK_OUTPUT
 
-  const bool fieldOutputDue = ioManager && ioManager->needsFieldOutput(cycle);
-  const bool particleOutputDue =
-      ioManager && ioManager->needsParticleOutput(cycle);
-  const bool restartOutputDue =
-      ioManager && ioManager->needsRestartParticleSync(cycle);
+  // complete the deferred outputs written since the last cycle
+  ioManager->poll();
+
+  const bool fieldOutputDue = ioManager->needsFieldOutput(cycle);
+  const bool particleOutputDue = ioManager->needsParticleOutput(cycle);
+  const bool restartOutputDue = ioManager->needsRestartParticleSync(cycle);
 
 #ifdef USE_CATALYST
   const bool catalystNeedsHostData =
       Adaptor::RequestDataDescription(col->getDt() * cycle, cycle);
 #endif
 
-  // ---- Sync device → host only when I/O needs the host arrays ----
+  // ---- Copy to the host the field arrays the host consumers read ----
   {
-    bool needFieldSync = false;
+    // the field output (its tags) or a checkpoint (every array)
+    FieldOutputArrays fields = ioManager->hostFields(cycle);
 #ifdef USE_CATALYST
-    needFieldSync = catalystNeedsHostData;
+    if (catalystNeedsHostData)
+      fields = FieldOutputArrays::all();
 #endif
-    // Diagnostics (energy conservation) need host E, B, rhons, Jxs
+    // the energy diagnostics: E, the cell B, the species density and current
+    // (the bulk energy)
     if (col->diagnostics_due(cycle))
-      needFieldSync = true;
-    // Restart checkpoint needs host fields
-    if (restartOutputDue)
-      needFieldSync = true;
-    // Field file output needs host fields
-    if (fieldOutputDue)
-      needFieldSync = true;
-    if (needFieldSync) {
+      fields.E = fields.cellB = fields.speciesRho = fields.speciesJ = true;
+    if (fields.any()) {
+      // the deferred outputs still writing from the host arrays first
+      ioManager->beforeFieldCopy();
       // gpuSolverSyncD2H internally synchronises the solver stream after
       // issuing all D2H copies, so no separate cudaStreamSynchronize is needed.
-      EMf->gpuSolverSyncD2H(EMf->gpuSolverStream());
+      EMf->gpuSolverSyncD2H(fields, EMf->gpuSolverStream());
     }
   }
 
@@ -3127,19 +3055,26 @@ void c_Solver::prepareActiveRestartParticleCellMetadata() {
 }
 
 /**
- * @brief Schedule asynchronous GPU-to-host particle copies for a future output
- * cycle.
+ * @brief Schedule the asynchronous GPU-to-host particle copies of a future
+ * output cycle, and the particle sums of its energy diagnostics.
  *
- * The solver calls this one cycle ahead of output. Passing `cycle == -1`
- * forces the copy path used during final restart writing.
+ * The solver calls this one cycle ahead of output. Finalize passes
+ * `cycle == -1` for the final checkpoint: the cycle looked at is then 0, a
+ * checkpoint cycle, whose copy is of every array.
  * @param cycle Current simulation cycle used to predict the next output step.
  */
 void c_Solver::outputCopyAsync(int cycle) {
 #if IPIC3D_COMPILE_DISK_OUTPUT
-  // The main loop calls this one cycle ahead. Return before issuing any copy
-  // unless the predicted cycle actually consumes host particle data.
-  if (!ioManager || !ioManager->needsParticleSync(cycle + 1))
+  // The main loop calls this one cycle ahead. Return before issuing any work
+  // unless the predicted cycle reads host particle data or the particle sums.
+  const bool diagnostics = col->diagnostics_due(cycle + 1);
+  const bool hostCopy = ioManager->needsParticleSync(cycle + 1);
+  if (!diagnostics && !hostCopy)
     return;
+  // the deferred outputs still writing from the host particle buffers and
+  // cell metadata first
+  if (hostCopy)
+    ioManager->beforeParticleCopy();
 
   {
     const bool restartSync = ioManager->needsRestartParticleSync(cycle + 1);
@@ -3169,47 +3104,69 @@ void c_Solver::outputCopyAsync(int cycle) {
       cudaErrChk(cudaStreamWaitEvent(outputStream, cycleEndEvent[s], 0));
     }
 
-    // Direct GPU SoA -> host SoA transfers of the arrays that the outputs of
-    // the cycle read (IOManager::hostParticles): the mover waits for them.
-    // The other host arrays stay as they were, read by no output then.
-    const std::vector<ParticleOutputArrays> host =
-        ioManager->hostParticles(cycle + 1);
-    for (int i = 0; i < ns; i++) {
-      const ParticleOutputArrays& arrays = host[i];
-      if (!arrays.any())
-        continue;
-      const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
-      // Resize the host SoA vectors to receive the current particle count.
-      ParticleSoAHost& to = *particlesHost[i];
-      particleArrayCUDA& from = *pclsArrayHostPtr[i];
-      to.prepareSoAForNOP(nop);
-      if (nop == 0)
-        continue;
-      auto copy = [&](auto* dst, const auto* src) {
-        cudaErrChk(cudaMemcpyAsync(dst, src, nop * sizeof(*src),
-                                   cudaMemcpyDefault, outputStream));
-      };
-      if (arrays.velocity) {
-        copy(to.getUallMut(), from.getU());
-        copy(to.getVallMut(), from.getV());
-        copy(to.getWallMut(), from.getW());
-      }
-      if (arrays.charge)
-        copy(to.getQallMut(), from.getQ());
-      if (arrays.position) {
-        copy(to.getXallMut(), from.getX());
-        copy(to.getYallMut(), from.getY());
-        copy(to.getZallMut(), from.getZ());
-      }
-      if (arrays.id && to.tracksParticleID())
-        copy(to.getIDallMut(), from.getID());
-    }
+    if (diagnostics)
+      sumParticlesAsync();
+    if (hostCopy)
+      copyParticlesToHostAsync(cycle + 1);
     cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
   }
 #else
   (void)cycle;
   return;
 #endif
+}
+
+void c_Solver::copyParticlesToHostAsync(int cycle) {
+  // Direct GPU SoA -> host SoA transfers of the arrays that the outputs of
+  // the cycle read (IOManager::hostParticles): the mover waits for them.
+  // The other host arrays stay as they were, read by no output then.
+  const std::vector<ParticleOutputArrays> host =
+      ioManager->hostParticles(cycle);
+  for (int i = 0; i < ns; i++) {
+    const ParticleOutputArrays& arrays = host[i];
+    if (!arrays.any())
+      continue;
+    const uint32_t nop = pclsArrayHostPtr[i]->getNOP();
+    // Resize the host SoA vectors to receive the current particle count.
+    ParticleSoAHost& to = *particlesHost[i];
+    particleArrayCUDA& from = *pclsArrayHostPtr[i];
+    to.prepareSoAForNOP(nop);
+    if (nop == 0)
+      continue;
+    auto copy = [&](auto* dst, const auto* src) {
+      cudaErrChk(cudaMemcpyAsync(dst, src, nop * sizeof(*src),
+                                 cudaMemcpyDefault, outputStream));
+    };
+    if (arrays.velocity) {
+      copy(to.getUallMut(), from.getU());
+      copy(to.getVallMut(), from.getV());
+      copy(to.getWallMut(), from.getW());
+    }
+    if (arrays.charge)
+      copy(to.getQallMut(), from.getQ());
+    if (arrays.position) {
+      copy(to.getXallMut(), from.getX());
+      copy(to.getYallMut(), from.getY());
+      copy(to.getZallMut(), from.getZ());
+    }
+    if (arrays.id && to.tracksParticleID())
+      copy(to.getIDallMut(), from.getID());
+  }
+}
+
+void c_Solver::sumParticlesAsync() {
+  cudaErrChk(cudaMemsetAsync(particleSumsCUDAPtr, 0, ns * sizeof(ParticleSums),
+                             outputStream));
+  for (int s = 0; s < ns; s++) {
+    particleArrayCUDA& pcls = *pclsArrayHostPtr[s];
+    // the relativistic push of the planet cases (moverSubcyclesKernel)
+    launchParticleSums(pcls.getU(), pcls.getV(), pcls.getW(), pcls.getQ(),
+                       pcls.getNOP(), col->getQOM(s), col->getC(), doPlanet_,
+                       particleSumsCUDAPtr + s, outputStream);
+  }
+  cudaErrChk(cudaMemcpyAsync(particleSumsHostPtr, particleSumsCUDAPtr,
+                             ns * sizeof(ParticleSums), cudaMemcpyDeviceToHost,
+                             outputStream));
 }
 
 /**
@@ -3219,17 +3176,14 @@ void c_Solver::outputCopyAsync(int cycle) {
 void c_Solver::WriteConserved(int cycle) {
 #if IPIC3D_COMPILE_DISK_OUTPUT
   if (col->diagnostics_due(cycle)) {
-    // particlesHost[*]->getKinetic/getTotalQ() iterate over the host SoA
-    // u/v/w/q arrays, which are populated only by the async D->H copies in
-    // outputCopyAsync() on outputStream and signalled by eventOutputCopy.
-    // The mover launched just before WriteOutput() only inserts a stream-side
-    // wait on eventOutputCopy (cudaStreamWaitEvent in cudaLauncherAsync), it
-    // does NOT block the host. Without the synchronize below, diagnostics on
-    // cycle i>first_cycle can read torn / partially-copied host buffers from
-    // outputCopyAsync(i-1), producing nonsense conserved quantities.
-    // eventOutputCopy is pre-recorded at init and first-cycle output is
-    // explicitly primed when configured outputs need host particle data.
+    // The particle sums of the cycle, computed on the GPU by
+    // outputCopyAsync(cycle - 1) on outputStream (primed in Init for the
+    // first cycle): eventOutputCopy follows them. The mover launched just
+    // before WriteOutput() only waits for it on the GPU, so wait here.
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    std::vector<ParticleSums> sums(ns);
+    MPI_Allreduce(particleSumsHostPtr, sums.data(), kParticleSumsValues * ns,
+                  MPI_DOUBLE, MPI_SUM, vct->getParticleComm());
     Eenergy = EMf->getEenergy();
     Benergy = EMf->getBenergy();
     TOTenergy = 0.0;
@@ -3239,14 +3193,13 @@ void c_Solver::WriteConserved(int cycle) {
       return std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
     };
     for (int is = 0; is < ns; is++) {
-      const ParticleSoAHost::KineticSums k = particlesHost[is]->getKinetic();
-      Ke[is] = k.energy;
+      Ke[is] = sums[is].energy;
       BulkEnergy[is] = EMf->getBulkEnergy(is);
       TOTenergy += Ke[is];
-      momentum[is] = norm(k.momentum);
+      momentum[is] = norm(sums[is].momentum);
       for (int c = 0; c < 3; c++)
-        P[c] += k.momentum[c];
-      Qtot[is] = particlesHost[is]->getTotalQ();
+        P[c] += sums[is].momentum[c];
+      Qtot[is] = sums[is].charge;
       TOTcharge += Qtot[is];
     }
     TOTmomentum = norm(P);
@@ -3550,7 +3503,8 @@ void c_Solver::Finalize() {
       col->getCallFinalize() && Parameters::get_doWriteOutput() &&
       col->getRestartOutputCycle() > 0) {
     // Sync EM fields from device to host before final restart write
-    EMf->gpuSolverSyncD2H(EMf->gpuSolverStream());
+    ioManager->beforeFieldCopy();
+    EMf->gpuSolverSyncD2H(FieldOutputArrays::all(), EMf->gpuSolverStream());
 
     outputCopyAsync(-1);
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));

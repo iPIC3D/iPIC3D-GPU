@@ -8,7 +8,7 @@
  *
  * Provides:
  *  - Particle generation (maxwellian, restart, pitch_angle_energy, etc.)
- *  - Diagnostics (getKinetic, getTotalQ, getMaxVelocity,
+ *  - Diagnostics (getLocalKinetic, getMaxVelocity,
  * getVelocityDistribution)
  *  - Cell-sorted reorder (serial + parallel)
  *  - BC configuration queries (for GPU kernel setup)
@@ -355,7 +355,7 @@ public:
   /** @brief Load particle data for this species from a restart file. */
   void restartLoad();
 
-  // ===== Diagnostics (MPI reductions via borrowed communicator) =====
+  // ===== Diagnostics =====
 
   /** Kinetic energy and momentum vector of a set of particles. */
   struct KineticSums {
@@ -368,7 +368,10 @@ public:
    *  gamma m v, gamma = 1 / sqrt(1 - v^2 / c^2); otherwise 1/2 m v^2 and
    *  m v.  m = q / (q/m) is the particle mass.  In the relativistic case a
    *  particle with |v| >= c (possible only in loaded data) is left out: the
-   *  mover deletes it before the push. */
+   *  mover deletes it before the push.
+   *  Not used: the energy diagnostics sum the particles on the GPU
+   *  (particleSums.cuh), and no output requests the k_energy tag of the
+   *  serial-HDF5 writer, which calls it. */
   KineticSums getLocalKinetic() const {
     double ke = 0.0, px = 0.0, py = 0.0, pz = 0.0;
     const int numParticles = getNOP();
@@ -401,35 +404,9 @@ public:
     return local;
   }
 
-  /** getLocalKinetic summed over all ranks. */
-  KineticSums getKinetic() const {
-    const KineticSums local = getLocalKinetic();
-    const double in[4] = {local.energy, local.momentum[0], local.momentum[1],
-                          local.momentum[2]};
-    double out[4];
-    MPI_Allreduce(in, out, 4, MPI_DOUBLE, MPI_SUM, mpiComm_);
-    KineticSums total;
-    total.energy = out[0];
-    for (int c = 0; c < 3; c++)
-      total.momentum[c] = out[c + 1];
-    return total;
-  }
-
   /** Whether the mover pushes this species relativistically
-   *  (moverSubcyclesKernel): the energy and momentum of getKinetic. */
+   *  (moverSubcyclesKernel): the energy and momentum of getLocalKinetic. */
   void setRelativistic(bool relativistic) { relativistic_ = relativistic; }
-
-  /** Total charge (MPI-reduced across all ranks). */
-  double getTotalQ() const {
-    double localQ = 0.0;
-    const int numParticles = getNOP();
-#pragma omp parallel for reduction(+ : localQ)
-    for (int idx = 0; idx < numParticles; idx++)
-      localQ += q[idx];
-    double totalQ = 0.0;
-    MPI_Allreduce(&localQ, &totalQ, 1, MPI_DOUBLE, MPI_SUM, mpiComm_);
-    return totalQ;
-  }
 
   /** Maximum velocity magnitude (MPI-reduced across all ranks). */
   double getMaxVelocity() const;

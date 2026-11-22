@@ -175,7 +175,7 @@ public:
    *  the moment fold. */
   int slots(GhostSet s) const { return set(s).slots; }
   const GhostRuleDev& rule(GhostSet s, int slot, int f) const {
-    return set(s).rule[slot][f];
+    return set(s).rule[slot * kFaces + f];
   }
   const FaceSlabs& shell(GhostSet s) const { return set(s).shell; }
   const FaceSlabs& momentPlanes() const { return momentPlanes_; }
@@ -189,8 +189,8 @@ private:
   struct SetPlan {
     bool cells = false, particle = false;
     int slots = 1;
-    GhostRuleDev rule[kGhostBatchMax][kFaces]; // per slot (host copy)
-    const GhostRuleDev* d_rule = nullptr;      // the same, on the device
+    GhostRuleDev* rule = nullptr; // [slot][face]: its part of rules_ (host)
+    const GhostRuleDev* d_rule = nullptr; // the same, on the device
     FaceSlabs shell;
   };
   struct LayerList {
@@ -204,7 +204,10 @@ private:
   FieldBoundarySpec spec_;
   bool planned_ = false;
   SetPlan sets_[static_cast<int>(GhostSet::Count)];
-  GhostRuleDev* d_rules_ = nullptr; // the rule tables of all sets
+  // the rule tables of all sets, [kGhostBatchMax][kFaces] each: on the host,
+  // page-locked (copied to the device), and on the device
+  PinnedVector<GhostRuleDev> rules_;
+  GhostRuleDev* d_rules_ = nullptr;
   LayerList layers_[static_cast<int>(LayerSet::Count)];
   RowFaces rows_;                         // conductor and inflow rows
   FaceSlabs momentPlanes_;                // particle-physical face node planes

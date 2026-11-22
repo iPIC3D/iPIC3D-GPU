@@ -127,8 +127,10 @@ static_assert(kLargeParticles > kBatchParticles, "two batches");
 /** The stream of the histograms: non-blocking, as in the analysis. */
 cudaStream_t stream;
 
+/** Page-locked, as every host buffer of the test that is copied to or from
+ *  the device. */
 struct Particles {
-  std::vector<cudaCommonType> u, v, w, q;
+  PinnedVector<cudaCommonType> u, v, w, q;
   int size() const { return (int)q.size(); }
   void push(cudaCommonType pu, cudaCommonType pv, cudaCommonType pw,
             cudaCommonType pq) {
@@ -152,7 +154,7 @@ struct Range {
  *  overflows (as the GPU without fixedRange). */
 Range dataRange(const Particles& p, const int* bins = kBins) {
   Range range;
-  const std::vector<cudaCommonType>* axis[3] = {&p.u, &p.v, &p.w};
+  const PinnedVector<cudaCommonType>* axis[3] = {&p.u, &p.v, &p.w};
   for (int d = 0; d < 3; d++) {
     cudaCommonType lo = INFINITY, hi = -INFINITY;
     for (cudaCommonType x : *axis[d])
@@ -223,9 +225,9 @@ void cpuWeightScale(const Particles& p, double& toFixed, double& toOutput) {
 
 /** The histogram of the GPU bit for bit: the same fixed-point weights and
  *  integer sums, on the CPU. */
-std::vector<histogramTypeOut> cpuFixedPointHistogram(const Particles& p,
-                                                     const Range& r = {},
-                                                     const int* bins = kBins) {
+PinnedVector<histogramTypeOut> cpuFixedPointHistogram(const Particles& p,
+                                                      const Range& r = {},
+                                                      const int* bins = kBins) {
   double toFixed, toOutput;
   cpuWeightScale(p, toFixed, toOutput);
   std::vector<unsigned long long> sum((size_t)bins[0] * bins[1] * bins[2], 0);
@@ -235,7 +237,7 @@ std::vector<histogramTypeOut> cpuFixedPointHistogram(const Particles& p,
       sum[bin] +=
           (unsigned long long)std::nearbyint(std::fabs(p.q[i]) * toFixed);
   }
-  std::vector<histogramTypeOut> hist(sum.size());
+  PinnedVector<histogramTypeOut> hist(sum.size());
   for (size_t i = 0; i < sum.size(); i++)
     hist[i] = (histogramTypeOut)((double)sum[i] * toOutput);
   return hist;
@@ -244,17 +246,18 @@ std::vector<histogramTypeOut> cpuFixedPointHistogram(const Particles& p,
 /** The particles into soa, on the stream of the histograms, which does not
  *  wait for the legacy stream. */
 void upload(velocitySoA& soa, const Particles& p) {
-  const std::vector<cudaCommonType>* fields[4] = {&p.u, &p.v, &p.w, &p.q};
+  const PinnedVector<cudaCommonType>* fields[4] = {&p.u, &p.v, &p.w, &p.q};
   for (int f = 0; f < 4; f++)
     if (p.size() > 0)
       cudaErrChk(cudaMemcpyAsync(soa.getElement(f), fields[f]->data(),
                                  p.size() * sizeof(cudaCommonType),
                                  cudaMemcpyHostToDevice, stream));
+  cudaErrChk(cudaStreamSynchronize(stream)); // p may go after the call
 }
 
 /** The first bins of the last init() of h, on the host. */
-std::vector<histogramTypeOut> hostBins(histogramRegions& h, size_t bins) {
-  std::vector<histogramTypeOut> host(bins);
+PinnedVector<histogramTypeOut> hostBins(histogramRegions& h, size_t bins) {
+  PinnedVector<histogramTypeOut> host(bins);
   cudaErrChk(cudaMemcpyAsync(host.data(), h.deviceBins(),
                              sizeof(histogramTypeOut) * bins,
                              cudaMemcpyDeviceToHost, stream));
@@ -263,8 +266,8 @@ std::vector<histogramTypeOut> hostBins(histogramRegions& h, size_t bins) {
 }
 
 /** The GPU histogram of the particles (kVmin, kVmax: the fixed range). */
-std::vector<histogramTypeOut> gpuHistogram(velocityHistogram3D& histogram,
-                                           const Particles& p) {
+PinnedVector<histogramTypeOut> gpuHistogram(velocityHistogram3D& histogram,
+                                            const Particles& p) {
   velocitySoA soa(p.size(), 0);
   upload(soa, p);
   histogram.init(&soa, kVmin, kVmax, stream);
@@ -276,7 +279,7 @@ bool report(bool ok, const std::string& what) {
   return ok;
 }
 
-bool compare(const std::vector<histogramTypeOut>& gpu,
+bool compare(const PinnedVector<histogramTypeOut>& gpu,
              const std::vector<double>& cpu, const std::string& what) {
   double maxError = 0;
   int wrong = 0;
@@ -291,8 +294,9 @@ bool compare(const std::vector<histogramTypeOut>& gpu,
   return report(wrong == 0, what + detail.str());
 }
 
-bool sameBits(const std::vector<histogramTypeOut>& a,
-              const std::vector<histogramTypeOut>& b, const std::string& what) {
+bool sameBits(const PinnedVector<histogramTypeOut>& a,
+              const PinnedVector<histogramTypeOut>& b,
+              const std::string& what) {
   return report(a.size() == b.size() &&
                     std::memcmp(a.data(), b.data(),
                                 a.size() * sizeof(histogramTypeOut)) == 0,
@@ -303,13 +307,13 @@ bool sameBits(const std::vector<histogramTypeOut>& a,
  *  offsets of the regions), in increasing index, their contents, and their
  *  centres on the ranges of their regions (bins per axis). */
 bool checkCompaction(histogramRegions& h,
-                     const std::vector<histogramTypeOut>& gpu,
+                     const PinnedVector<histogramTypeOut>& gpu,
                      const std::vector<Range>& ranges, const int* bins) {
   const int regionBins = bins[0] * bins[1] * bins[2];
   const int total = h.compactNonEmpty(stream);
   const std::vector<int>& offsets = h.getRegionOffsets();
-  std::vector<cudaCommonType> center[3];
-  std::vector<histogramTypeOut> weight(total);
+  PinnedVector<cudaCommonType> center[3];
+  PinnedVector<histogramTypeOut> weight(total);
   histogramTypeIn* const* centers =
       total > 0 ? h.getNonEmptyCenters(stream) : nullptr;
   for (int d = 0; d < 3; d++) {
@@ -368,7 +372,7 @@ struct ReadRecord {
   sparseBins::SparseRecordHeader header;
   std::vector<double> ranges;
   std::vector<std::uint32_t> counts;
-  std::vector<histogramTypeOut> weights;
+  PinnedVector<histogramTypeOut> weights;
   std::vector<std::uint32_t> bins;
   bool ok = false;
 };
@@ -455,7 +459,7 @@ std::vector<ReadRecord> readRecords(const std::string& path, int regionBins) {
 /** A record holds the histograms of the GPU: its header, the range and the
  *  non-empty bins of every region, their contents and indices. */
 bool sameRecord(const ReadRecord& r, int cycle, int species,
-                const std::vector<histogramTypeOut>& gpu,
+                const PinnedVector<histogramTypeOut>& gpu,
                 const std::vector<Range>& ranges, int regionBins) {
   const int R = (int)ranges.size();
   bool ok = r.ok && r.header.magic == kHistogramRecordMagic &&
@@ -486,7 +490,8 @@ bool sameRecord(const ReadRecord& r, int cycle, int species,
  *  records read back and the JSON, none without a non-empty bin; on a
  *  restart the same layout continued without the records from its cycle on,
  *  another kept aside. */
-bool checkRecords(histogramRegions& h, const std::vector<histogramTypeOut>& gpu,
+bool checkRecords(histogramRegions& h,
+                  const PinnedVector<histogramTypeOut>& gpu,
                   const std::vector<Range>& ranges, int regionBins,
                   const std::string& what) {
   namespace fs = std::filesystem;
@@ -815,7 +820,7 @@ struct SortedRank {
   macrocell::MacrocellPartition part;
   Particles particles;                   // cell after cell
   std::vector<int> macrocellOf;          // per particle, -1 in a ghost cell
-  std::vector<int> cellStart, cellCount; // per guarded cell
+  PinnedVector<int> cellStart, cellCount; // per guarded cell
 };
 
 /** The rank: count(cell, macrocell) particles in each guarded cell (x
@@ -879,7 +884,7 @@ SortedRank shuffleCells(const SortedRank& rank, unsigned seed) {
  *  sums of the GPU with the scale of the charges of the macrocell. */
 struct MacrocellReference {
   std::vector<Range> range;
-  std::vector<histogramTypeOut> bins;
+  PinnedVector<histogramTypeOut> bins;
 };
 
 MacrocellReference cpuMacrocellHistograms(const SortedRank& rank,
@@ -894,7 +899,7 @@ MacrocellReference cpuMacrocellHistograms(const SortedRank& rank,
   for (int m = 0; m < M; m++) {
     ref.range.push_back(fixedRange ? Range{}
                                    : dataRange(of[m], kMacrocellBins3));
-    const std::vector<histogramTypeOut> bins =
+    const PinnedVector<histogramTypeOut> bins =
         cpuFixedPointHistogram(of[m], ref.range[m], kMacrocellBins3);
     ref.bins.insert(ref.bins.end(), bins.begin(), bins.end());
   }
@@ -905,7 +910,7 @@ MacrocellReference cpuMacrocellHistograms(const SortedRank& rank,
  *  double, relative to the bin. */
 double macrocellDoubleError(const SortedRank& rank,
                             const MacrocellReference& ref,
-                            const std::vector<histogramTypeOut>& gpu) {
+                            const PinnedVector<histogramTypeOut>& gpu) {
   const Particles& p = rank.particles;
   std::vector<double> sum(gpu.size(), 0.0);
   for (int i = 0; i < p.size(); i++) {
@@ -923,8 +928,8 @@ double macrocellDoubleError(const SortedRank& rank,
 }
 
 /** The GPU macrocell histograms of the rank (kVmin, kVmax: the fixed range). */
-std::vector<histogramTypeOut> gpuMacrocellHistograms(macrocellHistogram3D& h,
-                                                     const SortedRank& rank) {
+PinnedVector<histogramTypeOut> gpuMacrocellHistograms(macrocellHistogram3D& h,
+                                                      const SortedRank& rank) {
   velocitySoA soa(rank.particles.size(), 0);
   upload(soa, rank.particles);
   int *cellStart, *cellCount;
@@ -938,7 +943,7 @@ std::vector<histogramTypeOut> gpuMacrocellHistograms(macrocellHistogram3D& h,
                              cells * sizeof(int), cudaMemcpyHostToDevice,
                              stream));
   h.init(&soa, cellStart, cellCount, kVmin, kVmax, stream);
-  std::vector<histogramTypeOut> bins =
+  PinnedVector<histogramTypeOut> bins =
       hostBins(h, (size_t)rank.part.M * kMacrocellBins);
   cudaErrChk(cudaFree(cellStart));
   cudaErrChk(cudaFree(cellCount));

@@ -462,4 +462,46 @@ inline OutputTagConfig parseOutputTags(const std::string& fieldTag,
   return cfg;
 }
 
+/** The groups of the field solver's arrays that the host outputs of a cycle
+ *  read, which EMfields3D::gpuSolverSyncD2H copies to the host arrays. */
+struct FieldOutputArrays {
+  bool E = false;          // Ex, Ey, Ez
+  bool nodeB = false;      // Bxn, Byn, Bzn
+  bool cellB = false;      // Bxc, Byc, Bzc
+  bool rho = false;        // rhon, the total charge density
+  bool speciesRho = false; // rhons
+  bool J = false;          // Jx, Jy, Jz, the total current
+  bool speciesJ = false;   // Jxs, Jys, Jzs
+  bool pressure = false;   // pXXsn ... pZZsn
+  bool phi = false;        // PHI
+
+  bool any() const {
+    return E || nodeB || cellB || rho || speciesRho || J || speciesJ ||
+           pressure || phi;
+  }
+  static FieldOutputArrays all() {
+    return {true, true, true, true, true, true, true, true, true};
+  }
+};
+
+/** The arrays that the field output of cfg reads: B is the node B (plus the
+ *  external field, kept on the host); a total current needs the species
+ *  currents too (the parallel-HDF5 and serial-HDF5 writers sum them,
+ *  sumOverSpeciesJ). The heat flux has a copy of its own (ScheduleHeatFlux).
+ */
+inline FieldOutputArrays fieldOutputArraysOf(const OutputTagConfig& cfg) {
+  FieldOutputArrays arrays;
+  arrays.E = cfg.writeE;
+  arrays.nodeB = cfg.writeB;
+  arrays.rho = cfg.writeRhoTot;
+  arrays.speciesRho = !cfg.rhoSpecies.empty();
+  arrays.J = cfg.writeJTot;
+  arrays.speciesJ = !cfg.JSpecies.empty() || cfg.writeJTot;
+  arrays.pressure = !cfg.PXXSpecies.empty() || !cfg.PXYSpecies.empty() ||
+                    !cfg.PXZSpecies.empty() || !cfg.PYYSpecies.empty() ||
+                    !cfg.PYZSpecies.empty() || !cfg.PZZSpecies.empty() ||
+                    cfg.needsAnyPTot();
+  return arrays;
+}
+
 #endif // OUTPUT_TAG_CONFIG_H

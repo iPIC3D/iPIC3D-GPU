@@ -43,7 +43,8 @@ public: // con-de-structor
 
   /**
    * @brief Create a device array from host data.
-   * @param hostArrayPtr Host pointer holding the source elements.
+   * @param hostArrayPtr Host pointer holding the source elements, in
+   * page-locked memory.
    * @param size Number of valid source elements.
    */
   __host__ arrayCUDA(const T* hostArrayPtr, commonInt size)
@@ -59,7 +60,8 @@ public: // con-de-structor
 
   /**
    * @brief Create a device array from host data with extra spare capacity.
-   * @param hostArrayPtr Host pointer holding the source elements.
+   * @param hostArrayPtr Host pointer holding the source elements, in
+   * page-locked memory.
    * @param size Number of valid source elements.
    * @param expandIndex Capacity growth factor applied before allocation.
    */
@@ -174,6 +176,8 @@ public: // utilities
     return arraySize;
   }
 
+  /** A device copy of this object, which is in page-locked memory
+   *  (newHostPinnedObject). */
   __host__ virtual arrayCUDA* copyToDevice() {
     arrayCUDA* ptr = nullptr;
     cudaErrChk(cudaMalloc((void**)&ptr, sizeof(arrayCUDA)));

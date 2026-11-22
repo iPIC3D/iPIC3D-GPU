@@ -35,6 +35,7 @@
 #include "mpi.h"
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "HeatFluxComponents.h"
@@ -48,6 +49,8 @@
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
 #include "GPUCycleDiagnostics.cuh"
 #endif
+
+struct FieldOutputArrays; // OutputTagConfig.h
 
 /**
  * @brief Electromagnetic fields, sources, and implicit-solver work arrays for
@@ -341,18 +344,20 @@ public:
     return pZZsn.get(is, X, Y, Z);
   }
 
-  arr4_double getHeatFlux() { return heatFlux; }
+  /** Allocates the host heat flux, page-locked; called when the output
+   *  writes it (the accessors below are for that case only). */
+  void allocateHeatFlux();
+  arr4_double getHeatFlux() { return *heatFlux; }
   arr3_double getHeatFluxComponent(int is, int component) {
     return arr3_double(
-        heatFlux.fetch_arr4()[HeatFlux::componentIndex(is, component)], nxn,
+        heatFlux->fetch_arr4()[HeatFlux::componentIndex(is, component)], nxn,
         nyn, nzn);
   }
   double getHeatFlux(int X, int Y, int Z, int is, int component) const {
-    return heatFlux.get(HeatFlux::componentIndex(is, component), X, Y, Z);
+    return heatFlux->get(HeatFlux::componentIndex(is, component), X, Y, Z);
   }
-  double* getHeatFluxRaw() { return heatFlux.fetch_arr(); }
   double* getHeatFluxSpeciesPtr(int is) {
-    return heatFlux.fetch_arr() +
+    return heatFlux->fetch_arr() +
            HeatFlux::componentIndex(is, 0) * nxn * nyn * nzn;
   }
 
@@ -492,9 +497,11 @@ public:
    * (FieldBoundary::initWall), the ghosts of the cell B (BCellStart; the
    * first gpuMaxwellSource reads them without an exchange of its own). */
   void gpuSolverSyncH2D(cudaStream_t stream = 0);
-  /** Copy the fields and moments to the host (output, diagnostics, restart,
-   * Catalyst). */
-  void gpuSolverSyncD2H(cudaStream_t stream = 0);
+  /** Copy the given groups of the fields and moments to the host arrays
+   * (what the output, the diagnostics, a checkpoint or Catalyst read at a
+   * cycle), and wait for them. */
+  void gpuSolverSyncD2H(const FieldOutputArrays& arrays,
+                        cudaStream_t stream = 0);
   // ---- GPU Solver: halo exchange and boundary of the fields ----
   /** The field boundary conditions (GPUFieldBoundary.cuh): the spec, built
    *  at construction, and the GPU plan, built in gpuSolverAllocate. */
@@ -919,8 +926,9 @@ private: // initialization helpers
    *  neighbour's node it copies, except across a periodic face, whose ghost
    *  coordinates are not wrapped.  The host and the GPU constant-charge
    *  models both use this list, so they set the same nodes whatever the
-   *  device compiler contracts into multiply-adds. */
-  std::vector<int> planetNodes() const;
+   *  device compiler contracts into multiply-adds.  Page-locked: copied to
+   *  the device. */
+  PinnedVector<int> planetNodes() const;
   /** sign(q) rhoINIT / 4 pi of species is: its planet charge density. */
   double planetChargeDensity(int is) const;
   /** Zero the species currents Jxs/Jys/Jzs and pressures p**sn. With
@@ -1021,7 +1029,8 @@ private:
   double B0x, B0y, B0z, delta;
   /** Earth Model parameters */
   double B1x, B1y, B1z;
-  /*! charge to mass ratio array for different species */
+  /*! charge to mass ratio array for different species (page-locked: copied
+   * to the device) */
   double* qom;
   /*! u0, v0, w0 of species 0 (E0 = -(u0 x B0) / c, TaylorGreen flow) */
   double ue0, ve0, we0;
@@ -1067,27 +1076,30 @@ private:
   /** Planet radius */
   double Planet_radius;
 
+  // The host arrays below that are copied to or from the device
+  // (gpuSolverSyncH2D, gpuSolverSyncD2H) are page-locked (pinned_array).
+
   /*! PHI: electric potential (indexX, indexY, indexZ), defined on central
    * points between nodes */
-  array3_double PHI;
+  pinned_array3_double PHI;
 
   // Electric field components defined on nodes
   //
-  array3_double Ex;
-  array3_double Ey;
-  array3_double Ez;
+  pinned_array3_double Ex;
+  pinned_array3_double Ey;
+  pinned_array3_double Ez;
 
   // magnetic field components defined on central points between nodes
   //
-  array3_double Bxc;
-  array3_double Byc;
-  array3_double Bzc;
+  pinned_array3_double Bxc;
+  pinned_array3_double Byc;
+  pinned_array3_double Bzc;
 
   // magnetic field components defined on nodes
   //
-  array3_double Bxn;
-  array3_double Byn;
-  array3_double Bzn;
+  pinned_array3_double Bxn;
+  pinned_array3_double Byn;
+  pinned_array3_double Bzn;
 
   /*! temporary node arrays of the initializations (initSpeciesCurrents,
    * initGEMHarris, initNullPoints) */
@@ -1100,42 +1112,45 @@ private:
   // *******************************************************************************
 
   /*! Charge density, defined on nodes */
-  array3_double rhon;
+  pinned_array3_double rhon;
   /*! SPECIES: charge density for each species, defined on nodes */
-  array4_double rhons;
+  pinned_array4_double rhons;
   /*! SPECIES: charge density for each species, defined on central points of the
    * cell */
   array4_double rhocs;
 
   // current density defined on nodes
   //
-  array3_double Jx;
-  array3_double Jy;
-  array3_double Jz;
+  pinned_array3_double Jx;
+  pinned_array3_double Jy;
+  pinned_array3_double Jz;
 
   // species-specific current densities defined on nodes
   //
-  array4_double Jxs;
-  array4_double Jys;
-  array4_double Jzs;
+  pinned_array4_double Jxs;
+  pinned_array4_double Jys;
+  pinned_array4_double Jzs;
 
   // external magnetic field on nodes
-  array3_double Bx_ext;
-  array3_double By_ext;
-  array3_double Bz_ext;
+  pinned_array3_double Bx_ext;
+  pinned_array3_double By_ext;
+  pinned_array3_double Bz_ext;
 
   array3_double Bx_tot;
   array3_double By_tot;
   array3_double Bz_tot;
 
   // pressure tensor components, defined on nodes
-  array4_double pXXsn;
-  array4_double pXYsn;
-  array4_double pXZsn;
-  array4_double pYYsn;
-  array4_double pYZsn;
-  array4_double pZZsn;
-  array4_double heatFlux;
+  pinned_array4_double pXXsn;
+  pinned_array4_double pXYsn;
+  pinned_array4_double pXZsn;
+  pinned_array4_double pYYsn;
+  pinned_array4_double pYZsn;
+  pinned_array4_double pZZsn;
+  // heat flux of the output, [ns * HeatFlux::ComponentCount][nxn][nyn][nzn],
+  // copied from the device: it exists only when the output writes it
+  // (allocateHeatFlux)
+  std::unique_ptr<pinned_array4_double> heatFlux;
 
   // boundary conditions for EM field: 0 = perfect conductor, 1 = magnetic
   // mirror, 2 = open
@@ -1304,6 +1319,8 @@ private:
   const CleaningSolve* cleaning_ = nullptr;
   // the null-space sums, then the line coefficients (cleanLinesSlots() each)
   cudaSolverType* d_cleanLines_ = nullptr;
+  // their page-locked host slots, for the copies of the sums and coefficients
+  PinnedVector<cudaSolverType> h_cleanLines_;
   // the two Chebyshev iterates of the cleaning preconditioner, of
   // cleanChebLength_ each
   cudaSolverType* d_cleanCheb_ = nullptr;

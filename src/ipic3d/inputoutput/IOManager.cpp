@@ -5,6 +5,7 @@
 
 #include "IOManager.h"
 #include "Alloc.h" // newArr3, newArr4, delArr3, delArr4
+#include "AsyncOutput.h"
 #include "BenchmarkMode.h"
 #include "Collective.h"
 #include "EMfields3D.h"
@@ -19,8 +20,11 @@
 #include "VCtopology3D.h"
 #include "debug.h" // eprintf, warning_printf
 
+#include <functional>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef NO_HDF5
@@ -34,6 +38,76 @@
 using std::string;
 
 namespace {
+
+// The host buffers that the deferred outputs read (AsyncOutput.h): the next
+// GPU copy into them waits for those outputs.
+/** The host particle buffers and the cell metadata of a checkpoint
+ *  (outputCopyAsync). */
+constexpr HostBuffers kParticleBuffers = 1u << 0;
+/** The host field arrays of EMfields3D (gpuSolverSyncD2H) and its heat flux
+ *  (ScheduleHeatFlux). */
+constexpr HostBuffers kFieldBuffers = 1u << 1;
+
+/** The lane of the writes of a particle or checkpoint backend. */
+OutputLane laneOf(bool adios2) {
+  return adios2 ? OutputLane::Adios2 : OutputLane::Hdf5;
+}
+
+/** An output that one function writes, complete once written. */
+class WriteJob final : public OutputJob {
+public:
+  WriteJob(string name, std::function<void()> write)
+      : name_(std::move(name)), write_(std::move(write)) {}
+  string name() const override { return name_; }
+  void write() override { write_(); }
+
+private:
+  string name_;
+  std::function<void()> write_;
+};
+
+/** A checkpoint: each rank writes its rank file on a lane; once every rank
+ *  has (a barrier on the checkpoints' communicator, tested at the polls),
+ *  rank 0 publishes the slot, its manifest and latest_restart.json. Until
+ *  then the slot has no manifest, and the previous checkpoint, in the other
+ *  slot, stays the one a restart reads. */
+class CheckpointJob final : public OutputJob {
+public:
+  CheckpointJob(RestartSlotManager& slots, RestartWriteTarget target,
+                MPI_Comm comm, std::function<void()> write)
+      : slots_(slots), target_(std::move(target)), comm_(comm),
+        write_(std::move(write)) {}
+  string name() const override {
+    return "checkpoint of cycle " + std::to_string(target_.cycle);
+  }
+  void write() override {
+    if (write_)
+      write_();
+  }
+  bool finish(bool wait) override {
+    if (barrier_ == MPI_REQUEST_NULL) // not started
+      MPI_Ibarrier(comm_, &barrier_);
+    int done = 0;
+    if (wait) {
+      MPI_Wait(&barrier_, MPI_STATUS_IGNORE);
+      done = 1;
+    } else {
+      MPI_Test(&barrier_, &done, MPI_STATUS_IGNORE);
+    }
+    if (!done)
+      return false;
+    slots_.publishIfRoot(target_);
+    slots_.completeLocal(target_);
+    return true;
+  }
+
+private:
+  RestartSlotManager& slots_;
+  RestartWriteTarget target_;
+  MPI_Comm comm_;
+  std::function<void()> write_;
+  MPI_Request barrier_ = MPI_REQUEST_NULL;
+};
 
 /** The particle and checkpoint backends of this build, by preference, by
  *  their name in the input file (ParticlesWriteMethod, RestartWriteMethod). */
@@ -100,6 +174,8 @@ IOManager::~IOManager() {
             "Last output cycle may be truncated.\n",
             fieldreqcounter_, momentreqcounter_);
   }
+  // the writers finish their jobs before the backends they use go
+  async_.reset();
 #ifndef NO_HDF5
   delete outputWrapperFPP_;
 #endif
@@ -133,6 +209,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
   testpart_ = testpart;
   ns_ = ns;
   nstestpart_ = nstestpart;
+  async_ = std::make_unique<AsyncOutput>(col->getAsyncOutput());
   first_cycle_ = first_cycle;
   restart_cycle_ = col->getRestartOutputCycle();
 
@@ -187,6 +264,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
                                                                  : "hdf5",
                        vct->getCartesian_rank(), MPIdata::get_nprocs(),
                        restartMesh, col->getRestartReadSlot());
+    MPI_Comm_dup(MPIdata::get_PicGlobalComm(), &checkpointComm_);
   }
 #ifndef USE_ADIOS2
   if (fieldBackend_ == FieldBackend::ADIOS2) {
@@ -297,7 +375,16 @@ void IOManager::writeFields(int cycle) {
   // Serial HDF5 (one file per process).
   case FieldBackend::SHDF5:
 #ifndef NO_HDF5
-    outputWrapperFPP_->append_field_moment_output(cfg, cycle);
+    // from the host field arrays (and heat flux), which keep the data until
+    // written
+    async_->submit(OutputLane::Hdf5,
+                   std::make_unique<WriteJob>(
+                       "field output of cycle " + std::to_string(cycle),
+                       [this, &cfg, cycle] {
+                         outputWrapperFPP_->append_field_moment_output(cfg,
+                                                                       cycle);
+                       }),
+                   kFieldBuffers);
 #endif
     break;
 
@@ -366,6 +453,7 @@ void IOManager::writeFields(int cycle) {
   // Parallel HDF5.
   case FieldBackend::PARALLEL_HDF5:
 #ifndef NO_HDF5
+    async_->waitLane(OutputLane::Hdf5); // HDF5 is used by one thread
     WriteOutputParallel(grid_, EMf_, col_, vct_, cycle, cfg);
 #endif
     break;
@@ -388,25 +476,35 @@ void IOManager::writeParticles(int cycle) {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return;
 
+  std::function<void()> write;
   switch (particleBackend_) {
 
   case ParticleBackend::ADIOS2:
 #ifdef USE_ADIOS2
-    adiosManager_->appendParticleOutput(cycle);
+    write = [this, cycle] { adiosManager_->appendParticleOutput(cycle); };
 #endif
     break;
 
   case ParticleBackend::SHDF5:
 #ifndef NO_HDF5
     if (outputWrapperFPP_)
-      outputWrapperFPP_->append_particles(col_->getPclOutputTag(), cycle,
-                                          col_->getParticlesOutputSpecies());
+      write = [this, cycle] {
+        outputWrapperFPP_->append_particles(col_->getPclOutputTag(), cycle,
+                                            col_->getParticlesOutputSpecies());
+      };
 #endif
     break;
 
   case ParticleBackend::NONE:
     break;
   }
+  // from the host particle buffers, which keep the data until written
+  if (write)
+    async_->submit(laneOf(particleBackend_ == ParticleBackend::ADIOS2),
+                   std::make_unique<WriteJob>("particle output of cycle " +
+                                                  std::to_string(cycle),
+                                              std::move(write)),
+                   kParticleBuffers);
 }
 
 // ======= Test-particle output =======
@@ -422,9 +520,11 @@ void IOManager::writeTestParticles(int cycle) {
   // SoA accessors.
 
 #ifndef NO_HDF5
-  if (outputWrapperFPP_)
+  if (outputWrapperFPP_) {
+    async_->waitLane(OutputLane::Hdf5); // HDF5 is used by one thread
     outputWrapperFPP_->append_output("testpartpos + testpartvel+ testparttag",
                                      cycle, 0);
+  }
 #endif
 }
 
@@ -437,6 +537,10 @@ void IOManager::writeRestart(int cycle) {
   if (restartBackend_ == RestartBackend::NONE)
     return;
 
+  // One checkpoint at a time: a checkpoint goes to the slot the run's
+  // previous one is not in, known once that one is published.
+  async_->drain();
+
   // Rank 0 removes the slot's manifest; only then may the ranks replace
   // their files, so an interrupted write leaves a slot marked incomplete.
   RestartWriteTarget target = restartSlots_.beginWrite(cycle);
@@ -445,18 +549,23 @@ void IOManager::writeRestart(int cycle) {
 #endif
   restartSlots_.prepareRankFile(target);
 
+  std::function<void()> write;
   switch (restartBackend_) {
 
   case RestartBackend::ADIOS2:
 #ifdef USE_ADIOS2
-    adiosManager_->writeRestartOutput(cycle, target.dataDir);
+    write = [this, cycle, dir = target.dataDir] {
+      adiosManager_->writeRestartOutput(cycle, dir);
+    };
 #endif
     break;
 
   case RestartBackend::SHDF5:
 #ifndef NO_HDF5
     if (outputWrapperFPP_)
-      outputWrapperFPP_->append_restart(cycle, target.dataDir);
+      write = [this, cycle, dir = target.dataDir] {
+        outputWrapperFPP_->append_restart(cycle, dir);
+      };
 #endif
     break;
 
@@ -464,13 +573,13 @@ void IOManager::writeRestart(int cycle) {
     break;
   }
 
-  // Do not publish a slot until every rank has closed its new rank file.
-#ifndef NO_MPI
-  MPI_Barrier(MPIdata::get_PicGlobalComm());
-#endif
-
-  restartSlots_.publishIfRoot(target);
-  restartSlots_.completeLocal(target);
+  // From the host particle buffers (and cell metadata) and field arrays,
+  // which keep the data until written; published once every rank has
+  // closed its new rank file (CheckpointJob).
+  async_->submit(laneOf(restartBackend_ == RestartBackend::ADIOS2),
+                 std::make_unique<CheckpointJob>(
+                     restartSlots_, target, checkpointComm_, std::move(write)),
+                 kParticleBuffers | kFieldBuffers);
 }
 
 // ======= Finalization =======
@@ -478,6 +587,24 @@ void IOManager::writeRestart(int cycle) {
 void IOManager::finalize() {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return;
+
+  // The deferred outputs: written and completed (the final checkpoint
+  // published) before the files close and MPI ends.
+  if (async_)
+    async_->drain();
+  if (checkpointComm_ != MPI_COMM_NULL)
+    MPI_Comm_free(&checkpointComm_);
+  if (async_ && async_->deferred()) {
+    const double waited = async_->waitedSeconds();
+    double most = 0.0;
+    MPI_Reduce(&waited, &most, 1, MPI_DOUBLE, MPI_MAX, 0,
+               MPIdata::get_PicGlobalComm());
+    // 0 without a deferred output in the run
+    if (MPIdata::get_rank() == 0 && most > 0.0)
+      printf("[*] Deferred output: the main thread waited %.3f s for the "
+             "writers (the most of a rank)\n",
+             most);
+  }
 
   // Drain any in-flight NBCVTK split-collective writes from the last output
   // cycle. Must run before MPI_Finalize and is collective on the file's
@@ -488,6 +615,21 @@ void IOManager::finalize() {
     adiosManager_->closeOutputFiles();
 #endif
   // OutputWrapperFPP has no explicit close; the destructor handles cleanup.
+}
+
+void IOManager::poll() {
+  if (async_)
+    async_->poll();
+}
+
+void IOManager::beforeParticleCopy() {
+  if (async_)
+    async_->waitForReaders(kParticleBuffers);
+}
+
+void IOManager::beforeFieldCopy() {
+  if (async_)
+    async_->waitForReaders(kFieldBuffers);
 }
 
 void IOManager::drainNBCVTKPending() {
@@ -563,18 +705,21 @@ bool IOManager::needsParticleSync(int cycle) const {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return false;
 
-  return needsRestartParticleSync(cycle) || needsParticleOutput(cycle) ||
-         col_->diagnostics_due(cycle);
+  return needsRestartParticleSync(cycle) || needsParticleOutput(cycle);
+}
+
+FieldOutputArrays IOManager::hostFields(int cycle) const {
+  if (needsRestartParticleSync(cycle))
+    return FieldOutputArrays::all();
+  if (needsFieldOutput(cycle))
+    return fieldOutputArraysOf(col_->getOutputConfig());
+  return {};
 }
 
 std::vector<ParticleOutputArrays> IOManager::hostParticles(int cycle) const {
   if (needsRestartParticleSync(cycle))
     return std::vector<ParticleOutputArrays>(ns_, {true, true, true, true});
   std::vector<ParticleOutputArrays> arrays(ns_);
-  // the kinetic energy, momentum and charge of every species
-  if (col_->diagnostics_due(cycle))
-    for (ParticleOutputArrays& species : arrays)
-      species.velocity = species.charge = true;
   if (needsParticleOutput(cycle))
     for (const int s : col_->getParticlesOutputSpecies())
       arrays[s] |= col_->getParticlesOutputArrays();

@@ -109,7 +109,8 @@ public:
   __host__ ~particleArrayCUDA() { freeSoA(); }
 
   /**
-   * @brief Copy this host-side metadata object to device memory.
+   * @brief Copy this host-side metadata object, which is in page-locked
+   * memory (newHostPinnedObject), to device memory.
    * @return Device pointer to the copied metadata object.
    */
   __host__ particleArrayCUDA* copyToDevice() {

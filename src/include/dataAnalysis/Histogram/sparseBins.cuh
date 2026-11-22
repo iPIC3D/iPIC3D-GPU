@@ -106,8 +106,9 @@ private:
   int* blockOffsetCUDA = nullptr;  // per block of bins, its first; + total
   int* blockOffsetHost = nullptr;  // pinned copy
   std::vector<int> regionOffsets;  // regions + 1
-  std::vector<binType> weightHost; // the staging of writeRecord()
-  std::vector<int> indexHost;
+  // the staging of writeRecord(), page-locked: copied from the device
+  PinnedVector<binType> weightHost;
+  PinnedVector<int> indexHost;
 };
 
 } // namespace sparseBins

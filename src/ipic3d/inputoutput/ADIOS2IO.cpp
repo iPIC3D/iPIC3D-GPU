@@ -50,9 +50,8 @@ tagOptions(const string& tag,
 } // namespace
 
 void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag,
-                                    int sample, Collective* col_in,
-                                    VCtopology3D* vct_in, Grid3DCU* grid_in,
-                                    EMfields3D* EMf_in,
+                                    Collective* col_in, VCtopology3D* vct_in,
+                                    Grid3DCU* grid_in, EMfields3D* EMf_in,
                                     ParticleSoAHost** outputPart_in, int ns_in,
                                     ParticleSoAHost** testpart_in,
                                     int nstestpart_in) {
@@ -69,19 +68,15 @@ void ADIOS2Manager::initOutputFiles(string fieldTag, string particleTag,
   this->saveDirName = col_in->getSaveDirName();
   this->restartDirName = col_in->getRestartDirName();
   if (col_in->getRestartOutputCycle()) {
-    this->restartTag =
-        "proc_topology+E+B+rhos+Js+pressure+position+velocity+q"s;
-    if (col_in->anyRegularParticleID()) {
-      this->restartTag += "+ID";
-    }
-    this->restartTag += "+particle_cell_metadata";
+    // ID: of the species with IDs (_particleID)
+    this->restartTag = "proc_topology+E+B+rhos+Js+pressure+position+velocity+"
+                       "q+ID+particle_cell_metadata"s;
   } else {
     this->restartTag = ""s;
   }
 
   this->fieldTag = fieldTag;
   this->particleTag = particleTag;
-  this->sample = sample;
 
   this->col = col_in;
   this->vct = vct_in;
@@ -128,7 +123,8 @@ void ADIOS2Manager::appendFieldOutput(int cycle) {
   throw runtime_error("Field output is not supported yet");
 }
 
-void ADIOS2Manager::appendParticleOutput(int cycle) {
+void ADIOS2Manager::appendParticleOutput(
+    int cycle, const std::vector<ParticleView>& views) {
   if (particleOptions.empty())
     return;
 
@@ -141,7 +137,7 @@ void ADIOS2Manager::appendParticleOutput(int cycle) {
   // auto start = chrono::high_resolution_clock::now();
 
   for (const auto& option : particleOptions) {
-    option(ioParticle, engineParticle, col->getParticlesOutputSpecies());
+    option(ioParticle, engineParticle, col->getParticlesOutputSpecies(), views);
   }
 
   // engineParticle.PerformPuts(); // do the heavy job here
@@ -170,22 +166,14 @@ void ADIOS2Manager::writeRestartOutput(int cycle, const string& restartDir) {
 
   auto cycleVar = _variableHelper<int>(ioRestart, "cycle");
   engineRestart.Put<int>(cycleVar, cycle);
+  // every particle of every species
+  const std::vector<ParticleView> views = viewsOf(part, ns);
   for (const auto& option : restartOptions) {
-    option(ioRestart, engineRestart, col->getAllSpecies());
+    option(ioRestart, engineRestart, col->getAllSpecies(), views);
   }
 
   engineRestart.EndStep();
   engineRestart.Close();
-}
-
-void ADIOS2Manager::appendOutput(int cycle) {
-  if (!open)
-    throw runtime_error("Output files are not open");
-
-  appendParticleOutput(cycle);
-
-  outputCount++;
-  lastCycle = cycle;
 }
 
 void ADIOS2Manager::closeOutputFiles() {

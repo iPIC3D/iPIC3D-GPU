@@ -92,19 +92,21 @@ void OutputWrapperFPP::init_output_files(Collective* col, VCtopology3D* vct,
 #endif
 }
 
-void OutputWrapperFPP::append_output(const char* tag, int cycle, int sample) {
+void OutputWrapperFPP::append_particles(
+    const ParticleOutputArrays& arrays, int cycle,
+    const std::vector<int>& species, const std::vector<ParticleView>& views) {
 #ifndef NO_HDF5
   hdf5_agent.open_append(output_file);
-  output_mgr.output(tag, cycle, sample);
+  hdf5_agent.writeParticles(arrays, cycle, species, views);
   hdf5_agent.close();
 #endif
 }
 
-void OutputWrapperFPP::append_particles(const string& tag, int cycle,
-                                        const std::vector<int>& species) {
+void OutputWrapperFPP::append_test_particles(const ParticleOutputArrays& arrays,
+                                             int cycle) {
 #ifndef NO_HDF5
   hdf5_agent.open_append(output_file);
-  hdf5_agent.output(tag, cycle, 0, species);
+  hdf5_agent.writeTestParticles(arrays, cycle);
   hdf5_agent.close();
 #endif
 }
@@ -134,17 +136,8 @@ void OutputWrapperFPP::append_restart(int cycle, const string& restartDir) {
   hdf5_agent.open(restart_file);
   output_mgr.output("proc_topology ", cycle);
   output_mgr.output("Eall + Ball + rhos + Jsall + pressure", cycle);
-  string particleTag = "position + velocity + q";
-  if (col_->anyRegularParticleID()) {
-    particleTag += " + ID";
-  }
-  output_mgr.output(particleTag, cycle, 0);
+  hdf5_agent.writeAllParticles(cycle); // the IDs of the species with IDs
   output_mgr.output("particle_cell_metadata", cycle);
-  string testParticleTag = "testpartpos + testpartvel + testpartcharge";
-  if (col_->anyTestParticleID()) {
-    testParticleTag += " + testparttag";
-  }
-  output_mgr.output(testParticleTag, cycle, 0);
   output_mgr.output("last_cycle", cycle);
   hdf5_agent.close();
 #endif

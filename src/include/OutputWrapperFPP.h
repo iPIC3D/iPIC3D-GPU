@@ -60,11 +60,15 @@ public:
                          EMfields3D* EMf, ParticleSoAHost** part, int ns,
                          ParticleSoAHost** testpart, int nstestpart,
                          bool outputFiles, bool restartFiles);
-  void append_output(const char* tag, int cycle, int sample);
-  /** The particle data of tag (position, velocity, q, ID) of the given
-   *  species at a cycle, into the output file of the rank. */
-  void append_particles(const string& tag, int cycle,
-                        const std::vector<int>& species);
+  /** The particle arrays of arrays of the given species at a cycle, from
+   *  their views (the particles the output writes), into the output file of
+   *  the rank. */
+  void append_particles(const ParticleOutputArrays& arrays, int cycle,
+                        const std::vector<int>& species,
+                        const std::vector<ParticleView>& views);
+  /** The same arrays of every test particle at a cycle, into the output
+   *  file of the rank. */
+  void append_test_particles(const ParticleOutputArrays& arrays, int cycle);
   void append_field_moment_output(const OutputTagConfig& cfg, int cycle);
   void
   setRestartParticleCellMetadata(const RestartParticleCellMetadata* metadata);

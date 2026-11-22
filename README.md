@@ -619,6 +619,8 @@ MomentsOutputTag = rho+J+P_tot   # rho and J of every species, the summed pressu
 ParticlesOutputCycle   = 1000    # <= 0: no particle output [default: 0]
 ParticlesOutputTag     = position+velocity+q
 ParticlesOutputSpecies = 0 1 0 1 # species 1 and 3 only [default: every species]
+ParticlesOutputTrackedFraction = -1 0.1 -1 -1 # species with IDs: the fraction written, 0: none, 1: all, -1: off [default: -1]
+ParticlesOutputMaxPerCell = 0 0 0 16 # at most 16 particles of species 3 in a cell, 0: all; not with a fraction [default: 0]
 ParticlesWriteMethod   = adios2  # adios2 or shdf5 [default: adios2 if built, else shdf5]
 
 # restart checkpoints
@@ -635,7 +637,7 @@ How these keys act:
 - **When.** An output of cycle `N > 0` is written at the cycles that are multiples of `N`, cycle 0 included; the field output also at the first cycle of a restart. `N <= 0` switches that output off.
 - **What.** A tag joins tokens with `+`; spaces around a token are ignored. An empty tag writes nothing: the field output needs a token in `FieldOutputTag` or `MomentsOutputTag`, the particle output one in `ParticlesOutputTag`. An unknown field or moment token is ignored with a warning; an unknown particle token stops the run.
 - **Where.** `FieldWriteMethod` is required in every input file, also with the field output off. `ParticlesWriteMethod` and `RestartWriteMethod` may be left out, which takes ADIOS2 if the build has it, else serial HDF5. A backend the build lacks is replaced by the other one, with a warning; with neither, those data are not written, a warning is printed and the run goes on (see [I/O Backends](#io-backends)).
-- **Checked at startup.** The run stops before the first cycle, naming the key, for: the old key `WriteMethod`; a missing or unknown `FieldWriteMethod`; a `ParticlesWriteMethod` or `RestartWriteMethod` other than `adios2` or `shdf5`; an unknown particle token; a `ParticlesOutputSpecies` with neither one nor `ns` values, or with no species while particles are written.
+- **Checked at startup.** The run stops before the first cycle, naming the key, for: the old key `WriteMethod`; a missing or unknown `FieldWriteMethod`; a `ParticlesWriteMethod` or `RestartWriteMethod` other than `adios2` or `shdf5`; an unknown particle token; a `ParticlesOutputSpecies` with neither one nor `ns` values, or with no species while particles are written; a `ParticlesOutputTrackedFraction` with neither one nor `ns` values, or one neither `-1` nor from 0 to 1; a `ParticlesOutputMaxPerCell` with neither one nor `ns` values, or a negative one. Two settings without effect only print a warning, for a species whose particles are written: a `ParticlesOutputTrackedFraction` other than `-1` for a species without `TrackParticleID`, and a `ParticlesOutputMaxPerCell` for a species whose `ParticlesOutputTrackedFraction` is on.
 
 ### Output files
 
@@ -723,6 +725,8 @@ A `+`-separated string selecting which per-species or total moments to write. Ex
 | `ParticlesOutputCycle` | `0` | Write the particles every N cycles. `<= 0` disables particle output |
 | `ParticlesOutputTag` | empty | Arrays written, tokens below; another token is an input error. Empty: no particle output |
 | `ParticlesOutputSpecies` | all `1` | Per-species mask: one value for every species or one per species, nonzero = written. With particle output on, at least one species. Checkpoints always hold every species |
+| `ParticlesOutputTrackedFraction` | `-1` | The fraction of the particles of a species with `TrackParticleID` that is written, the same particles at every output, see [Selecting the particles written](#selecting-the-particles-written): one value for every species or one per species, each from `0` (none) to `1` (all), or `-1` (off). With it on, `ParticlesOutputMaxPerCell` has no effect on that species. No effect on a species without `TrackParticleID`. Checkpoints always hold every particle |
+| `ParticlesOutputMaxPerCell` | `0` | At most this many particles of each species are written per cell, see [Selecting the particles written](#selecting-the-particles-written): one value for every species or one per species; `0`: every particle of that species. No effect on a species with `ParticlesOutputTrackedFraction` on. Checkpoints always hold every particle |
 | `ParticlesWriteMethod` | `adios2` if built, else `shdf5` | Particle backend: `adios2` or `shdf5`, see [I/O Backends](#io-backends) |
 
 #### Particle output tags (`ParticlesOutputTag`)
@@ -736,9 +740,27 @@ A `+`-separated string selecting which arrays of the particles of the species of
 | `q` | Particle charge |
 | `ID` | Particle ID (species with `TrackParticleID` only) |
 
-A cycle copies from the GPU only what its outputs read: these arrays of these species for a particle output, everything for a checkpoint. The energy diagnostics copy no particles: they sum them on the GPU. The mover waits for this copy, so a smaller particle output also takes less time.
+A cycle copies from the GPU only what its outputs read: these arrays of these species for a particle output (with `ParticlesOutputTrackedFraction` or `ParticlesOutputMaxPerCell`, of the particles written only), everything for a checkpoint. The energy diagnostics copy no particles: they sum them on the GPU. The mover waits for this copy, so a smaller particle output also takes less time.
 
 The ADIOS2 checkpoints use further tokens internally (`proc_topology`, `E`, `B`, `Js`, `rhos`, `pressure`, `particle_cell_metadata`); they are not particle output tokens.
+
+#### Selecting the particles written
+
+Each species selects its particles in at most one of two ways. A species with `TrackParticleID` and `ParticlesOutputTrackedFraction` on (not `-1`) writes its fraction, and its `ParticlesOutputMaxPerCell` has no effect. Any other species writes what `ParticlesOutputMaxPerCell` gives. Both use one number per particle: `u`, a 64-bit hash of the particle's ID divided by `2^64`, uniform from 0 to 1 and uncorrelated with the position and the velocity. A different hash is used for each species, so the species are selected independently. Since the ID never changes, neither does `u`. A species without `TrackParticleID` has no IDs (`TrackParticleID` is a flag per species): it hashes the particle's position and first velocity component instead, which change from cycle to cycle, so each output writes another random sample. The selection runs on the GPU, so only the written particles are copied to the host; the host waits for their number before it starts the next cycle. The charges of the different species never mix. Positions, velocities and IDs are written unchanged.
+
+**Tracked fraction.** With `ParticlesOutputTrackedFraction = f` from 0 to 1, a species with `TrackParticleID` writes its particles with `u < f`: `0` writes none (the species' variables and datasets are written with no particles), `1` writes all of them.
+
+- **Which.** About the fraction `f` of the species' particles, `f n` give or take `sqrt(f (1 - f) n)`. Every particle has the probability `f`, whatever its position or velocity. The same particles are written at every output, wherever they move, until they leave the domain; a new particle (injected or split) is written if its `u < f`. A restart continues with the same particles. With `ID` in `ParticlesOutputTag`, the trajectories of the written particles can thus be followed from file to file.
+- **Charge.** Each written particle has its charge divided by `f`, the same at every output. Densities, currents and pressures computed from the written particles are, on average, those of the simulation: a cell holding `m` written particles gives its density within about `1 / sqrt(m)`.
+- **Cost.** No sort: the particles are compacted on the GPU and written in their order there. GPU memory: two buffers of 12 bytes in all per written particle of the largest selected species, a quarter more for growth.
+
+**Cap per cell.** With `ParticlesOutputMaxPerCell = K > 0` a species without the fraction writes, of a cell holding `n` particles of that species, `min(n, K)`: all of them when `n <= K`, else the `K` with the smallest `u`. A cell thus writes at most `K` particles of each species with a cap; a species with `0` writes all its particles.
+
+- **Which.** Every particle of the cell is written with the probability `K / n` and every set of `K` particles is equally likely: the written particles are a uniform random sample of the cell, whatever their order on the GPU. With IDs, the same particles are written from one output to the next as long as the population of their cell does not change; without IDs, another sample at each output.
+- **Charge.** The written particles of a cell carry its charge: each has its charge times `Q / Q_kept`, the charges of all and of the written particles of the cell (`n / K` when the particles of the cell have equal charges). The charge of each cell is then exact: binned by cell, the density of the written particles is that of the simulation; interpolated to the nodes it is close but not exact, the written particles sitting elsewhere in the cell than the others. Currents and pressures are the cell's charge times the charge-weighted means of the written particles, which are a sample of the cell's.
+- **Cost.** The selection needs the species sorted by cell: a particle output cycle sorts it once more, as a checkpoint does (one sort when both fall on the same cycle). A cell's particles are written together, cell after cell. GPU memory: the cell sort's buffers, 12 bytes per particle of capacity of the species plus three integers per cell, which a run with checkpoints or `SortingCycle` holds already; else the first capped output allocates them for the rest of the run.
+
+The files hold the same variables and datasets as without a selection, with fewer particles. `particleNum<rank>.csv` keeps counting every particle.
 
 ### Restart checkpoints
 

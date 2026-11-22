@@ -10,6 +10,7 @@
 #define IO_MANAGER_H
 
 #include "OutputTagConfig.h"
+#include "ParticleSample.h"
 #include "RestartSlotManager.h"
 #include "ipicfwd.h"
 #include <memory>
@@ -117,8 +118,9 @@ public:
    *  barrier and manifest of a checkpoint). */
   void poll();
 
-  /** Before the copies into the host particle buffers (outputCopyAsync):
-   *  waits for the outputs still writing from them. */
+  /** Before the copies into the host particle buffers and the particle
+   *  samples (outputCopyAsync): waits for the outputs still writing from
+   *  them. */
   void beforeParticleCopy();
 
   /** Before the copies into the host field arrays (gpuSolverSyncD2H) or heat
@@ -137,12 +139,29 @@ public:
    */
   bool needsParticleSync(int cycle) const;
 
-  /** The arrays of each species that the host outputs of a cycle read
-   *  (needsParticleSync), which outputCopyAsync copies: every array for a
-   *  checkpoint, else the arrays of ParticlesOutputTag of the species of
-   *  ParticlesOutputSpecies for the particle output. The energy diagnostics
-   *  read none: they sum the particles on the GPU (particleSums.cuh). */
+  /** The arrays of each species that the host outputs of a cycle read from
+   *  the host copy of all the particles (needsParticleSync), which
+   *  outputCopyAsync copies: every array for a checkpoint, else the arrays of
+   *  ParticlesOutputTag of the species of ParticlesOutputSpecies that write
+   *  all their particles (Collective::particleOutputSelected) for the
+   *  particle output, no ID for a species without IDs. The energy
+   *  diagnostics read none: they sum the particles on the GPU
+   *  (particleSums.cuh). */
   std::vector<ParticleOutputArrays> hostParticles(int cycle) const;
+
+  /** The arrays of each species that the particle output of a cycle writes
+   *  from the particles ParticlesOutputTrackedFraction or
+   *  ParticlesOutputMaxPerCell selects, which outputCopyAsync selects on the
+   *  GPU into particleSample: the arrays of ParticlesOutputTag of the
+   *  species of ParticlesOutputSpecies that write some of their particles
+   *  only (Collective::particleOutputSelected), no ID for a species without
+   *  IDs, at a particle output cycle. */
+  std::vector<ParticleOutputArrays> sampledParticles(int cycle) const;
+
+  /** The particles of species that the particle output writes
+   *  (sampledParticles), which outputCopyAsync fills after
+   *  beforeParticleCopy. */
+  ParticleSample& particleSample(int species) { return samples_[species]; }
 
   /** The field arrays that the outputs of a cycle read on the host
    *  (gpuSolverSyncD2H): every array for a checkpoint, else those of the
@@ -178,6 +197,13 @@ public:
   RestartBackend getRestartBackend() const { return restartBackend_; }
 
 private:
+  /** The arrays of ParticlesOutputTag of each species of
+   *  ParticlesOutputSpecies at a particle output cycle (no ID for a species
+   *  without IDs): of those that write all their particles, or (selected)
+   *  of those that write some only (Collective::particleOutputSelected). */
+  std::vector<ParticleOutputArrays> particleOutputArrays(int cycle,
+                                                         bool selected) const;
+
   // ======= Backend selection =======
   FieldBackend fieldBackend_ = FieldBackend::NONE;
   ParticleBackend particleBackend_ = ParticleBackend::NONE;
@@ -239,6 +265,8 @@ private:
   EMfields3D* EMf_ = nullptr;
   ParticleSoAHost** outputPart_ = nullptr;
   ParticleSoAHost** testpart_ = nullptr;
+  // the particles selected for the particle output, per species
+  std::vector<ParticleSample> samples_;
   int ns_ = 0;
   int nstestpart_ = 0;
   int first_cycle_ = 0;

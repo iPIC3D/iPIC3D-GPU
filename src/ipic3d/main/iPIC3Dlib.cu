@@ -70,6 +70,7 @@
 #include "particleArrayCUDA.cuh"
 #include "particleControlKernel.cuh"
 #include "particleExchange.cuh"
+#include "particleOutputSelect.cuh"
 #include "particleSums.cuh"
 
 #if defined(USE_CATALYST) && IPIC3D_COMPILE_DISK_OUTPUT
@@ -97,6 +98,10 @@ constexpr int INITIAL_PLANET_BUF_CAP =
     1024; // initial planet cross-species buffer capacity
 // smallest density of the heat flux (the bulk velocity J / rho)
 constexpr cudaMomentType HEAT_FLUX_RHO_FLOOR = 1.0e-30;
+// Salt of the keys of ParticlesOutputTrackedFraction and
+// ParticlesOutputMaxPerCell (particleOutputSelect.cuh),
+// times species + 1: the species are chosen independently.
+constexpr std::uint64_t PARTICLE_SELECT_SALT = 0x9e3779b97f4a7c15ULL;
 
 using namespace iPic3D;
 
@@ -719,6 +724,9 @@ int c_Solver::initCUDA() {
   cudaErrChk(cudaStreamCreate(&outputStream));
   cudaErrChk(cudaMalloc(&particleSumsCUDAPtr, ns * sizeof(ParticleSums)));
   cudaErrChk(cudaMallocHost(&particleSumsHostPtr, ns * sizeof(ParticleSums)));
+  cudaErrChk(cudaMalloc(&particleSampleCountCUDAPtr, ns * sizeof(int)));
+  cudaErrChk(cudaMallocHost(&particleSampleCountHostPtr, ns * sizeof(int)));
+  particleFractionBlockSums.resize(ns);
   // The heat flux overlaps the field solve: below it, ordered by events only
   if (heatFluxCalculationEnabled_)
     heatFluxStream = createPriorityStream(StreamPriority::Diagnostic);
@@ -1296,6 +1304,12 @@ int c_Solver::deInitCUDA() {
   cudaStreamDestroy(outputStream);
   cudaErrChk(cudaFree(particleSumsCUDAPtr));
   cudaErrChk(cudaFreeHost(particleSumsHostPtr));
+  cudaErrChk(cudaFree(particleSampleCountCUDAPtr));
+  cudaErrChk(cudaFreeHost(particleSampleCountHostPtr));
+  for (GrowingDeviceArray<int>& blockSums : particleFractionBlockSums)
+    blockSums.release();
+  particleFractionIdx.release();
+  particleFractionStage.release();
   if (heatFluxCalculationEnabled_)
     cudaStreamDestroy(heatFluxStream);
   delete[] streams;
@@ -1459,8 +1473,8 @@ void c_Solver::ScheduleHeatFlux(int cycle) {
   cudaErrChk(cudaStreamWaitEvent(heatFluxStream, momentsPipelineDoneEvt, 0));
 
   for (int s = 0; s < ns; ++s) {
-    // the particles too: the sort of a checkpoint (outputCopyAsync) runs on
-    // their stream with no host wait
+    // the particles too: the sort of a checkpoint or of a capped particle
+    // output (outputCopyAsync) runs on their stream with no host wait
     cudaErrChk(cudaStreamWaitEvent(heatFluxStream, cycleEndEvent[s], 0));
     copyHeatFluxBulkD2D(s, heatFluxStream);
     cudaErrChk(cudaMemsetAsync(heatFluxCUDAPtr[s], 0,
@@ -2752,8 +2766,9 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
     //   - outputCopyAsync() : cudaStreamWaitEvent on outputStream
     //   - cudaLauncherAsync (next cycle, indirectly via eventOutputCopy)
     //   - ScheduleHeatFlux() and the data analysis (startAnalysis):
-    //     cudaStreamWaitEvent on their streams, also after the checkpoint
-    //     sort of outputCopyAsync, which records the event again
+    //     cudaStreamWaitEvent on their streams, also after the sort of a
+    //     checkpoint or of a capped particle output (outputCopyAsync), which
+    //     records the event again
     cudaErrChk(cudaEventRecord(cycleEndEvent[i], streams[i]));
   }
 
@@ -3055,73 +3070,93 @@ void c_Solver::prepareActiveRestartParticleCellMetadata() {
 }
 
 /**
- * @brief Schedule the asynchronous GPU-to-host particle copies of a future
- * output cycle, and the particle sums of its energy diagnostics.
+ * @brief Schedule the asynchronous GPU-to-host particle copies of the next
+ * cycle's outputs, and the particle sums of its energy diagnostics.
  *
- * The solver calls this one cycle ahead of output. Finalize passes
- * `cycle == -1` for the final checkpoint: the cycle looked at is then 0, a
- * checkpoint cycle, whose copy is of every array.
- * @param cycle Current simulation cycle used to predict the next output step.
+ * The main loop calls this at the end of cycle, for cycle + 1, Init for the
+ * first cycle; Finalize with finalCheckpoint, for the final checkpoint only
+ * (every array of every particle).
+ * @param cycle Current simulation cycle (not read with finalCheckpoint).
+ * @param finalCheckpoint Only the copy of the final checkpoint.
  */
-void c_Solver::outputCopyAsync(int cycle) {
+void c_Solver::outputCopyAsync(int cycle, bool finalCheckpoint) {
 #if IPIC3D_COMPILE_DISK_OUTPUT
-  // The main loop calls this one cycle ahead. Return before issuing any work
-  // unless the predicted cycle reads host particle data or the particle sums.
-  const bool diagnostics = col->diagnostics_due(cycle + 1);
-  const bool hostCopy = ioManager->needsParticleSync(cycle + 1);
+  const int next = cycle + 1;
+  // Return before issuing any work unless the next cycle reads host
+  // particle data or the particle sums.
+  const bool diagnostics = !finalCheckpoint && col->diagnostics_due(next);
+  const bool hostCopy = finalCheckpoint || ioManager->needsParticleSync(next);
   if (!diagnostics && !hostCopy)
     return;
-  // the deferred outputs still writing from the host particle buffers and
-  // cell metadata first
+  // the deferred outputs still writing from the host particle buffers, the
+  // samples and the cell metadata first
   if (hostCopy)
     ioManager->beforeParticleCopy();
-
-  {
-    const bool restartSync = ioManager->needsRestartParticleSync(cycle + 1);
-    if (restartSync) {
-      ensureRestartParticleCellMetadataBuffers();
-    }
-
-    // Explicit edge: wait for every species' end-of-cycle event before reading
-    // particle SoA from device. cycleEndEvent[s] is recorded on streams[s] at
-    // the end of MoverAwaitAndPclExchange and so happens-after every in-place
-    // SoA write of the current cycle. First-cycle output priming uses the
-    // events pre-recorded during CUDA initialization. Using a
-    // dedicated outputStream isolates the D->H copies from the per-species
-    // streams used by the next cycle's mover/sort, so those kernels can run
-    // ahead in parallel with output as long as they wait on eventOutputCopy.
-    for (int s = 0; s < ns; ++s) {
-      if (restartSync) {
-        cudaErrChk(cudaStreamWaitEvent(streams[s], cycleEndEvent[s], 0));
-        cudaErrChk(cudaStreamWaitEvent(streams[s], eventOutputCopy, 0));
-
-        if (pclsArrayHostPtr[s]->getNOP() > 0)
-          sortSpeciesByCell(s);
-
-        copyRestartParticleCellMetadataFromDevice(s, streams[s]);
-        cudaErrChk(cudaEventRecord(cycleEndEvent[s], streams[s]));
-      }
-      cudaErrChk(cudaStreamWaitEvent(outputStream, cycleEndEvent[s], 0));
-    }
-
-    if (diagnostics)
-      sumParticlesAsync();
-    if (hostCopy)
-      copyParticlesToHostAsync(cycle + 1);
-    cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
+  const bool restartSync =
+      finalCheckpoint || ioManager->needsRestartParticleSync(next);
+  // every particle of the arrays the outputs read; the particles selected of
+  // the species with ParticlesOutputTrackedFraction or
+  // ParticlesOutputMaxPerCell
+  std::vector<ParticleOutputArrays> host(ns), sampled(ns);
+  if (finalCheckpoint) {
+    host.assign(ns, ParticleOutputArrays::all());
+  } else if (hostCopy) {
+    host = ioManager->hostParticles(next);
+    sampled = ioManager->sampledParticles(next);
   }
+  if (restartSync)
+    ensureRestartParticleCellMetadataBuffers();
+
+  // Explicit edge: wait for every species' end-of-cycle event before reading
+  // particle SoA from device. cycleEndEvent[s] is recorded on streams[s] at
+  // the end of MoverAwaitAndPclExchange and so happens-after every in-place
+  // SoA write of the current cycle. First-cycle output priming uses the
+  // events pre-recorded during CUDA initialization. Using a
+  // dedicated outputStream isolates the D->H copies from the per-species
+  // streams used by the next cycle's mover/sort, so those kernels can run
+  // ahead in parallel with output as long as they wait on eventOutputCopy.
+  // A checkpoint (its cell metadata) and the cap of the particles written
+  // per cell need the species sorted by cell: the cycle's sort leaves the
+  // particles that arrived unsorted. The fraction needs no sort.
+  for (int s = 0; s < ns; ++s) {
+    const bool sample = sampled[s].any();
+    const bool capped = sample && col->particleOutputMaxPerCell(s) > 0;
+    if (restartSync || sample) {
+      cudaErrChk(cudaStreamWaitEvent(streams[s], cycleEndEvent[s], 0));
+      cudaErrChk(cudaStreamWaitEvent(streams[s], eventOutputCopy, 0));
+
+      if ((restartSync || capped) && pclsArrayHostPtr[s]->getNOP() > 0)
+        sortSpeciesByCell(s);
+
+      if (restartSync)
+        copyRestartParticleCellMetadataFromDevice(s, streams[s]);
+      if (sample)
+        countSampledParticlesAsync(s);
+      cudaErrChk(cudaEventRecord(cycleEndEvent[s], streams[s]));
+    }
+    cudaErrChk(cudaStreamWaitEvent(outputStream, cycleEndEvent[s], 0));
+  }
+
+  // the full copies first: queued behind the counts too (cycleEndEvent),
+  // they start as soon as these end, while the host sizes the samples
+  if (diagnostics)
+    sumParticlesAsync();
+  copyParticlesToHostAsync(host);
+  copySampledParticlesAsync(sampled);
+  cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
 #else
   (void)cycle;
+  (void)finalCheckpoint;
   return;
 #endif
 }
 
-void c_Solver::copyParticlesToHostAsync(int cycle) {
-  // Direct GPU SoA -> host SoA transfers of the arrays that the outputs of
-  // the cycle read (IOManager::hostParticles): the mover waits for them.
-  // The other host arrays stay as they were, read by no output then.
-  const std::vector<ParticleOutputArrays> host =
-      ioManager->hostParticles(cycle);
+void c_Solver::copyParticlesToHostAsync(
+    const std::vector<ParticleOutputArrays>& host) {
+  // Direct GPU SoA -> host SoA transfers of the arrays of every particle
+  // that the outputs of the cycle read (IOManager::hostParticles): the mover
+  // waits for them. The other host arrays stay as they were, read by no
+  // output then.
   for (int i = 0; i < ns; i++) {
     const ParticleOutputArrays& arrays = host[i];
     if (!arrays.any())
@@ -3151,6 +3186,135 @@ void c_Solver::copyParticlesToHostAsync(int cycle) {
     }
     if (arrays.id && to.tracksParticleID())
       copy(to.getIDallMut(), from.getID());
+  }
+}
+
+namespace {
+
+/** The keys of the particles p of species s: of their IDs if they have
+ *  some, else of their coordinates. */
+ParticleSelectKeys selectKeys(particleArrayCUDA& p, int s) {
+  return {p.tracksParticleID() ? p.getID() : nullptr,
+          p.getX(),
+          p.getY(),
+          p.getZ(),
+          p.getU(),
+          PARTICLE_SELECT_SALT * (std::uint64_t)(s + 1)};
+}
+
+// the cap scans its cells into the sort's block sums
+static_assert(kSelectScanBlock >= SORT_SCAN_ELEMENTS_PER_BLOCK,
+              "CellSorter::block_sums holds the block totals of the cap");
+
+} // namespace
+
+// The particles of a species that its particle output writes
+// (particleOutputSelect.cuh). With a cap, from the species sorted by cell:
+// the sort's cell counts and starts, its free buffers for the rest
+// (cell_offsets: the first output slot of each cell, sorted_indices: the
+// indices written, scratch: one array at a time). With the fraction, from
+// the particles in their order, with buffers of its own.
+void c_Solver::countSampledParticlesAsync(int s) {
+  // on the species' stream (after its sort with a cap): only these wait on
+  // the host
+  particleSampleCountHostPtr[s] = 0;
+  particleArrayCUDA& pcls = *pclsArrayHostPtr[s];
+  const uint32_t nop = pcls.getNOP();
+  const int maxPerCell = col->particleOutputMaxPerCell(s);
+  const double fraction = col->particleOutputFraction(s);
+  if (nop == 0 || (maxPerCell == 0 && fraction == 0.0)) // a fraction 0: none
+    return;
+  if (maxPerCell > 0) {
+    CellSorter& sorter = cellSorters[s];
+    launchCapCount(sorter.getCellCounts(), sorter.getNumCells(), maxPerCell,
+                   sorter.buffers.cell_offsets, sorter.buffers.block_sums,
+                   particleSampleCountCUDAPtr + s, streams[s]);
+  } else {
+    GrowingDeviceArray<int>& blockSums = particleFractionBlockSums[s];
+    blockSums.reserve((nop + kSelectScanBlock - 1) / kSelectScanBlock);
+    launchFractionCount(selectKeys(pcls, s), nop, selectLimit(fraction),
+                        blockSums.ptr, particleSampleCountCUDAPtr + s,
+                        streams[s]);
+  }
+  cudaErrChk(cudaMemcpyAsync(particleSampleCountHostPtr + s,
+                             particleSampleCountCUDAPtr + s, sizeof(int),
+                             cudaMemcpyDeviceToHost, streams[s]));
+}
+
+void c_Solver::copySampledParticlesAsync(
+    const std::vector<ParticleOutputArrays>& sampled) {
+  // the numbers of particles written, which size the samples and the
+  // buffers of the fraction (grown once, for every species)
+  std::uint32_t largestFraction = 0;
+  for (int s = 0; s < ns; s++) {
+    if (!sampled[s].any())
+      continue;
+    cudaErrChk(cudaStreamSynchronize(streams[s])); // the count
+    const std::uint32_t n = particleSampleCountHostPtr[s];
+    ioManager->particleSample(s).prepare(n, sampled[s],
+                                         particlesHost[s]->tracksParticleID());
+    if (col->particleOutputMaxPerCell(s) == 0)
+      largestFraction = std::max(largestFraction, n);
+  }
+  particleFractionIdx.reserve(largestFraction);
+  particleFractionStage.reserve(largestFraction);
+
+  // per species the indices of the particles written (with a cap also
+  // their charges), then their arrays through a device stage; the species
+  // run in turn on outputStream, so they share the buffers of the fraction
+  for (int s = 0; s < ns; s++) {
+    const ParticleOutputArrays& arrays = sampled[s];
+    const std::uint32_t n = particleSampleCountHostPtr[s];
+    if (!arrays.any() || n == 0)
+      continue;
+    ParticleSample& sample = ioManager->particleSample(s);
+    particleArrayCUDA& pcls = *pclsArrayHostPtr[s];
+    const ParticleSelectKeys keys = selectKeys(pcls, s);
+    const int maxPerCell = col->particleOutputMaxPerCell(s);
+    CellSorter& sorter = cellSorters[s];
+    // the cap: the sort's free buffers (scratch: the capacity of a SoA field)
+    std::uint32_t* const idx = maxPerCell > 0 ? sorter.buffers.sorted_indices
+                                              : particleFractionIdx.ptr;
+    void* const stage =
+        maxPerCell > 0 ? sorter.scratch.ptr : (void*)particleFractionStage.ptr;
+    cudaPclType_Q* const qStage =
+        arrays.charge ? static_cast<cudaPclType_Q*>(stage) : nullptr;
+    if (maxPerCell > 0) { // the charges of each cell
+      launchCapSelect(sorter.getCellCounts(), sorter.getCellStartOffsets(),
+                      sorter.buffers.cell_offsets, sorter.getNumCells(),
+                      maxPerCell, keys, pcls.getQ(), idx, qStage, outputStream);
+    } else { // the fraction: charges q / f
+      const double fraction = col->particleOutputFraction(s);
+      launchFractionSelect(keys, pcls.getNOP(), selectLimit(fraction),
+                           particleFractionBlockSums[s].ptr, idx, outputStream);
+      if (qStage)
+        launchGatherScaled(qStage, pcls.getQ(), idx, n, 1.0 / fraction,
+                           outputStream);
+    }
+    auto toHost = [&](auto* dst) {
+      cudaErrChk(cudaMemcpyAsync(dst, stage, n * sizeof(*dst),
+                                 cudaMemcpyDeviceToHost, outputStream));
+    };
+    auto copy = [&](auto* dst, const auto* src) {
+      using T = std::remove_const_t<std::remove_pointer_t<decltype(src)>>;
+      static_assert(sizeof(T) <= sizeof(double), "the stage holds doubles");
+      launchGather<T>(static_cast<T*>(stage), src, idx, n, outputStream);
+      toHost(dst);
+    };
+    if (qStage)
+      toHost(sample.q());
+    if (arrays.position) {
+      copy(sample.x(), pcls.getX());
+      copy(sample.y(), pcls.getY());
+      copy(sample.z(), pcls.getZ());
+    }
+    if (arrays.velocity) {
+      copy(sample.u(), pcls.getU());
+      copy(sample.v(), pcls.getV());
+      copy(sample.w(), pcls.getW());
+    }
+    if (arrays.id) // only for a species with IDs (IOManager::sampledParticles)
+      copy(sample.id(), pcls.getID());
   }
 }
 
@@ -3506,7 +3670,7 @@ void c_Solver::Finalize() {
     ioManager->beforeFieldCopy();
     EMf->gpuSolverSyncD2H(FieldOutputArrays::all(), EMf->gpuSolverStream());
 
-    outputCopyAsync(-1);
+    outputCopyAsync(LastCycle() - 1, true);
     cudaErrChk(cudaEventSynchronize(eventOutputCopy));
     // Final restart data is written after the last loop iteration has
     // completed, so the resume label is the next loop cycle.

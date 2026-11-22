@@ -652,7 +652,8 @@ void dataAnalysisPipelineImpl::startAnalysis(int cycle) {
            input.velocitySpectra ? "macrocellSpectra" : "");
 
   // the particles are final after the last work on their streams: the sort
-  // of a checkpoint (outputCopyAsync) runs there with no host wait
+  // of a checkpoint or of a capped particle output (outputCopyAsync) runs
+  // there with no host wait
   for (int i = 0; i < solver.ns; i++)
     cudaErrChk(cudaStreamWaitEvent(stream.get(), solver.cycleEndEvent[i], 0));
   analysisCycle = cycle;

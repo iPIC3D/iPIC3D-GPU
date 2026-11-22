@@ -39,6 +39,7 @@ using std::string;
 
 #include "ExosphereIonization.h"
 #include "HeatFluxComponents.h"
+#include "OutputTagConfig.h" // ParticleOutputArrays
 #include "ParticleCommInjection.h"
 #include "ParticleSoAHost.h"
 #include "RestartParticleCellMetadata.h"
@@ -50,6 +51,7 @@ using std::string;
 #include "particleArrayCUDA.cuh"
 #include "particleControlKernel.cuh"
 #include "particleExchange.cuh"
+#include "particleOutputSelect.cuh"
 #include "planetKernel.cuh"
 #include "threadPool.hpp"
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
@@ -227,12 +229,13 @@ public:
    */
   void ScheduleHeatFlux(int cycle);
   /**
-   * @brief Schedule or execute GPU-to-host copies needed for output, and the
-   * particle sums of the energy diagnostics.
+   * @brief Schedule the GPU-to-host copies of the next cycle's outputs, and
+   * the particle sums of its energy diagnostics.
    *
-   * @param cycle Current simulation cycle, or -1 for the final flush path.
+   * @param cycle Current simulation cycle (not read with finalCheckpoint).
+   * @param finalCheckpoint Only the copy of the final checkpoint (Finalize).
    */
-  void outputCopyAsync(int cycle);
+  void outputCopyAsync(int cycle, bool finalCheckpoint = false);
   /**
    * @brief Write configured outputs for one cycle.
    *
@@ -296,10 +299,17 @@ private:
   int selectDevice();
   /** The steps of outputCopyAsync, on outputStream, ready with
    *  eventOutputCopy: the particle sums of every species into
-   *  particleSumsHostPtr, and the copies to the host particle arrays that
-   *  the outputs of cycle read. */
+   *  particleSumsHostPtr; the copies of the arrays (per species) of every
+   *  particle to the host particle arrays; and those of the particles that
+   *  ParticlesOutputTrackedFraction or ParticlesOutputMaxPerCell selects (the
+   *  cap from the species sorted by cell) to the IOManager's samples: their
+   *  count per species on its stream (countSampledParticlesAsync), which
+   *  copySampledParticlesAsync waits for on the host. */
   void sumParticlesAsync();
-  void copyParticlesToHostAsync(int cycle);
+  void copyParticlesToHostAsync(const std::vector<ParticleOutputArrays>& host);
+  void countSampledParticlesAsync(int species);
+  void
+  copySampledParticlesAsync(const std::vector<ParticleOutputArrays>& sampled);
 
 private:
   // static MPIdata * mpi;
@@ -409,6 +419,19 @@ private:
   // a diagnostics cycle, ready with eventOutputCopy (sumParticlesAsync).
   ParticleSums* particleSumsCUDAPtr = nullptr; // [ns]
   ParticleSums* particleSumsHostPtr = nullptr; // [ns]
+  // The numbers of particles that ParticlesOutputTrackedFraction or
+  // ParticlesOutputMaxPerCell selects, per species, on the GPU and in pinned
+  // host memory (countSampledParticlesAsync, read by
+  // copySampledParticlesAsync)
+  int* particleSampleCountCUDAPtr = nullptr; // [ns]
+  int* particleSampleCountHostPtr = nullptr; // [ns]
+  // ParticlesOutputTrackedFraction (no sort): the block counts
+  // of each species, from its count to its selection; the indices and one
+  // array of the particles written, for every species (they run in turn on
+  // outputStream). They grow at need.
+  std::vector<GrowingDeviceArray<int>> particleFractionBlockSums; // [ns]
+  GrowingDeviceArray<std::uint32_t> particleFractionIdx;
+  GrowingDeviceArray<double> particleFractionStage;
   cudaEvent_t solverDoneEvent; ///< recorded on solverStream_ after field solve
   cudaEvent_t momentsPipelineDoneEvt; ///< recorded on solverStream_ at end of
                                       ///< the MomentsAwait() pipeline (after
@@ -425,7 +448,8 @@ private:
   //   - outputCopyAsync()     (cudaStreamWaitEvent on outputStream)
   //   - ScheduleHeatFlux() and the data analysis (startAnalysis):
   //     cudaStreamWaitEvent on their streams (outputCopyAsync records it
-  //     again after a checkpoint sort)
+  //     again after the sort of a checkpoint or of a capped particle output
+  //     and after the count of the particles a species writes)
   cudaEvent_t* cycleEndEvent; // [ns]
   // Per-species events of cudaLauncherAsync, created once in initCUDA.
   cudaEvent_t* moverHashedReadyEvt; // [ns] : recorded on streams[i]   after

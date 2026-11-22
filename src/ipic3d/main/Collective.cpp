@@ -386,6 +386,31 @@ void Collective::ReadInput(const ConfigFile& config) {
                      !ParticlesOutputSpecies.empty(),
                  "ParticlesOutputSpecies has no species: ParticlesOutputCycle "
                  "= 0 writes no particles");
+    // the particle output writes at most this many particles of each
+    // species in a cell, 0: all of them (particleOutputSelect.cuh)
+    ParticlesOutputMaxPerCell.assign(ns, 0);
+    requireInput(readSpeciesList(config, "ParticlesOutputMaxPerCell",
+                                 ParticlesOutputMaxPerCell) &&
+                     std::all_of(ParticlesOutputMaxPerCell.begin(),
+                                 ParticlesOutputMaxPerCell.end(),
+                                 [](int k) { return k >= 0; }),
+                 "ParticlesOutputMaxPerCell needs one number, or one per "
+                 "species (%d), at least 0",
+                 ns);
+    // of a species with IDs, the particle output writes the particles of
+    // u < this fraction (particleOutputSelect.cuh), ParticlesOutputMaxPerCell
+    // then ignored: 1 all, 0 none; -1 off
+    ParticlesOutputTrackedFraction.assign(ns, -1.0);
+    requireInput(readSpeciesList(config, "ParticlesOutputTrackedFraction",
+                                 ParticlesOutputTrackedFraction) &&
+                     std::all_of(ParticlesOutputTrackedFraction.begin(),
+                                 ParticlesOutputTrackedFraction.end(),
+                                 [](double f) {
+                                   return f == -1.0 || (f >= 0.0 && f <= 1.0);
+                                 }),
+                 "ParticlesOutputTrackedFraction needs one number, or one per "
+                 "species (%d), each -1 (off) or from 0 to 1",
+                 ns);
     MomentsOutputTag = config.read<string>("MomentsOutputTag", "");
     outputConfig_ = parseOutputTags(FieldOutputTag, MomentsOutputTag, ns);
     TestParticlesOutputCycle = config.read<int>("TestPartOutputCycle", 0);
@@ -1241,6 +1266,40 @@ void Collective::Print() {
          << " is not below ParticleMergingThreshold = "
          << ParticleMergingThreshold
          << ": splitting and merging undo each other" << endl;
+  // the particles written per species (ParticlesOutputTrackedFraction,
+  // ParticlesOutputMaxPerCell)
+  bool anySet = false;
+  for (const int s : ParticlesOutputSpecies)
+    anySet = anySet || ParticlesOutputTrackedFraction[s] >= 0.0 ||
+             ParticlesOutputMaxPerCell[s] > 0;
+  if (particle_output_requested() && anySet) {
+    cout << "Particle output   :";
+    for (const int s : ParticlesOutputSpecies) {
+      cout << " species " << s << ":";
+      if (particleOutputFractionOn(s))
+        cout << " fraction " << particleOutputFraction(s);
+      else if (particleOutputMaxPerCell(s) > 0)
+        cout << " at most " << particleOutputMaxPerCell(s) << " per cell";
+      else
+        cout << " all";
+      cout << ";";
+    }
+    cout << endl;
+    for (const int s : ParticlesOutputSpecies) {
+      if (ParticlesOutputTrackedFraction[s] >= 0.0 && !getTrackParticleID(s))
+        cout << "WARNING: ParticlesOutputTrackedFraction = "
+             << ParticlesOutputTrackedFraction[s] << " of species " << s
+             << " has no effect: the species has no particle IDs "
+                "(TrackParticleID)"
+             << endl;
+      if (particleOutputFractionOn(s) && ParticlesOutputMaxPerCell[s] > 0)
+        cout << "WARNING: ParticlesOutputMaxPerCell = "
+             << ParticlesOutputMaxPerCell[s] << " of species " << s
+             << " has no effect: ParticlesOutputTrackedFraction = "
+             << ParticlesOutputTrackedFraction[s] << " selects its particles"
+             << endl;
+    }
+  }
   const DataAnalysisInput& da = dataAnalysis_;
   // the macrocells of an analysis: " of Nx x Ny x Nz cells"
   auto macrocellsOf = [](const int size[3]) {
@@ -1766,6 +1825,17 @@ void Collective::save(const std::string& header) {
   my_file << "DivCleaningTol           = " << DivCleaningTol << endl;
   my_file << "CG error tolerance       = " << CGtol << endl;
   my_file << "Mover iterations         = " << NiterMover << endl;
+  // the particles the particle output writes, as applied: a fraction only of
+  // a species with IDs, no cap with the fraction on
+  my_file << "ParticlesOutputTrackedFraction =";
+  for (int s = 0; s < ns; s++)
+    my_file << " "
+            << (particleOutputFractionOn(s) ? particleOutputFraction(s) : -1.0);
+  my_file << " (-1: off)" << endl;
+  my_file << "ParticlesOutputMaxPerCell =";
+  for (int s = 0; s < ns; s++)
+    my_file << " " << particleOutputMaxPerCell(s);
+  my_file << " (0: every particle)" << endl;
   my_file << "---------------------------" << endl;
   my_file << "Results saved in: " << SaveDirName << endl;
   my_file << "Restart saved in: " << RestartDirName << endl;

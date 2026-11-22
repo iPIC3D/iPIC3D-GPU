@@ -40,6 +40,7 @@ developers: D. Burgess, June/July 2006
 #include "MPIdata.h"
 #include "OutputTagConfig.h"
 #include "PSKException.h"
+#include "ParticleSample.h"
 #include "ParticleSoAHost.h"
 #include "RestartParticleCellMetadata.h"
 #include "VCtopology3D.h"
@@ -184,7 +185,6 @@ public:
   OutputAgentBase(const OutputAgentBase& a) { ; }
 
   virtual void output(const std::string& tag, int cycle) = 0;
-  virtual void output(const std::string& tag, int cycle, int sample) = 0;
 
   virtual void open(const std::string& outf) = 0;
   virtual void close(void) = 0;
@@ -201,7 +201,6 @@ public:
   OutputAgent(const OutputAgent& a) { ; }
 
   virtual void output(const std::string& tag, int cycle) = 0;
-  virtual void output(const std::string& tag, int cycle, int sample) = 0;
 
   void open(const std::string& outf) { output_adaptor.open(outf); }
   void open_append(const std::string& outf) {
@@ -226,12 +225,6 @@ public:
     typename std::list<OutputAgentBase*>::iterator p = agents_list.begin();
     while (p != agents_list.end())
       (*p++)->output(tag, cycle);
-  }
-
-  void output(const std::string& tag, int cycle, int sample) {
-    typename std::list<OutputAgentBase*>::iterator p = agents_list.begin();
-    while (p != agents_list.end())
-      (*p++)->output(tag, cycle, sample);
   }
 };
 
@@ -350,10 +343,6 @@ public:
     Jxs,Jys,Jzs
     rhos -> charge densities for each species
     pressure -> pressure tensor for each species
-    position -> particle position (x,y)
-    velocity -> particle velocity (u,v,w)
-    q -> particle charge
-    ID -> particle ID for tracked species
     k_energy -> kinetic energy for each species
     B_energy -> magnetic field energy of this rank
     E_energy -> electric field energy of this rank
@@ -1000,244 +989,61 @@ public:
       writeHeatFluxTot(c);
   }
 
-  /** Every sample-th of the n values of src (n / sample rounded up),
-   *  gathered in parallel, for the sampled particle outputs.  These are not
-   *  used: the callers pass sample = 0 (IOManager, OutputWrapperFPP). */
-  template <typename T>
-  static std::vector<T> everyNth(const T* src, int n, int sample) {
-    std::vector<T> out(n > 0 ? (n + sample - 1) / sample : 0);
-#pragma omp parallel for schedule(static)
-    for (int m = 0; m < (int)out.size(); m++)
-      out[m] = src[(size_t)m * sample];
-    return out;
+  /** The particle arrays that arrays names (the ID for a species with IDs)
+   *  of the given species, from views (one per species):
+   *  /particles/species_<s>/<x|y|z|u|v|w|q|ID>/cycle_<cycle>. */
+  void writeParticles(const ParticleOutputArrays& arrays, int cycle,
+                      const std::vector<int>& species,
+                      const std::vector<ParticleView>& views) {
+    for (const int s : species)
+      writeArrays("/particles/species_" + std::to_string(s) + "/", cycle,
+                  views[s], arrays);
   }
 
-  /** The particle data of tag of every species (and the test particles
-   *  of tag). */
-  void output(const string& tag, int cycle, int sample) {
-    output(tag, cycle, sample, _col->getAllSpecies());
-  }
-
-  /** The particle data of tag (position, velocity, q, ID; x, u, q or ID
-   *  every sample-th particle with sample > 0) of the given species, and
-   *  the test particles of tag. */
-  void output(const string& tag, int cycle, int sample,
-              const std::vector<int>& species) {
-    stringstream cc;
-    cc << cycle;
+  /** The same arrays of every particle of every test-particle species:
+   *  /testparticles/species_<s>/<x|y|z|u|v|w|q|ID>/cycle_<cycle>. */
+  void writeTestParticles(const ParticleOutputArrays& arrays, int cycle) {
     const int ns = _col->getNs();
-    const int nstestpart = _col->getNsTestPart();
+    for (int i = 0; i < _col->getNsTestPart(); ++i) {
+      const ParticleSoAHost& p = *_part[i + ns];
+      writeArrays("/testparticles/species_" +
+                      std::to_string(p.get_species_num()) + "/",
+                  cycle, viewOf(p), arrays);
+    }
+  }
 
-    // Particle position
-    if (tag.find("position", 0) != string::npos & sample == 0) {
-      for (const int i : species) {
-        stringstream ii;
-        ii << i;
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/x/cycle_" + cc.str(),
-            PSK::Dimens(_part[i]->getNOP()), _part[i]->getXall());
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/y/cycle_" + cc.str(),
-            PSK::Dimens(_part[i]->getNOP()), _part[i]->getYall());
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/z/cycle_" + cc.str(),
-            PSK::Dimens(_part[i]->getNOP()), _part[i]->getZall());
-      }
-    }
-    // Test Particle position
-    else if (tag.find("testpartpos", 0) != string::npos & sample == 0) {
-      for (int i = 0; i < nstestpart; ++i) {
-        stringstream ii;
-        ii << (_part[i + ns]->get_species_num());
-        this->output_adaptor.write(
-            "/testparticles/species_" + ii.str() + "/x/cycle_" + cc.str(),
-            PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getXall());
-        this->output_adaptor.write(
-            "/testparticles/species_" + ii.str() + "/y/cycle_" + cc.str(),
-            PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getYall());
-        this->output_adaptor.write(
-            "/testparticles/species_" + ii.str() + "/z/cycle_" + cc.str(),
-            PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getZall());
-      }
-    } else if (tag.find("x", 0) != string::npos & sample == 0) {
-      for (const int i : species) {
-        stringstream ii;
-        ii << i;
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/x/cycle_" + cc.str(),
-            PSK::Dimens(_part[i]->getNOP()), _part[i]->getXall());
-      }
-    } else if (tag.find("x", 0) != string::npos & sample != 0) {
-      for (const int i : species) {
-        stringstream ii;
-        ii << i;
-        const std::vector<double> X =
-            everyNth(_part[i]->getXall(), _part[i]->getNOP(), sample);
-        this->output_adaptor.write("/particles/species_" + ii.str() +
-                                       "/x/cycle_" + cc.str(),
-                                   PSK::Dimens(X.size()), X);
-      }
-    } else if (tag.find("position", 0) != string::npos & sample != 0) {
-      for (const int i : species) {
-        stringstream ii;
-        ii << i;
-        const int nop = _part[i]->getNOP();
-        const std::vector<double> X =
-            everyNth(_part[i]->getXall(), nop, sample);
-        const std::vector<double> Y =
-            everyNth(_part[i]->getYall(), nop, sample);
-        const std::vector<double> Z =
-            everyNth(_part[i]->getZall(), nop, sample);
-        this->output_adaptor.write("/particles/species_" + ii.str() +
-                                       "/x/cycle_" + cc.str(),
-                                   PSK::Dimens(X.size()), X);
-        this->output_adaptor.write("/particles/species_" + ii.str() +
-                                       "/y/cycle_" + cc.str(),
-                                   PSK::Dimens(Y.size()), Y);
-        this->output_adaptor.write("/particles/species_" + ii.str() +
-                                       "/z/cycle_" + cc.str(),
-                                   PSK::Dimens(Z.size()), Z);
-      }
-    }
+  /** Every array of every particle of every species and test-particle
+   *  species: a checkpoint. */
+  void writeAllParticles(int cycle) {
+    writeParticles(ParticleOutputArrays::all(), cycle, _col->getAllSpecies(),
+                   viewsOf(_part.data(), _col->getNs()));
+    writeTestParticles(ParticleOutputArrays::all(), cycle);
+  }
 
-    // Particle velocity
-    if (tag.find("velocity", 0) != string::npos & sample == 0) {
-      for (const int i : species) {
-        stringstream ii;
-        ii << i;
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/u/cycle_" + cc.str(),
-            PSK::Dimens(_part[i]->getNOP()), _part[i]->getUall());
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/v/cycle_" + cc.str(),
-            PSK::Dimens(_part[i]->getNOP()), _part[i]->getVall());
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/w/cycle_" + cc.str(),
-            PSK::Dimens(_part[i]->getNOP()), _part[i]->getWall());
-      }
-    } else if (tag.find("testpartvel", 0) != string::npos & sample == 0) {
-      for (int i = 0; i < nstestpart; ++i) {
-        stringstream ii;
-        ii << (_part[i + ns]->get_species_num());
-        this->output_adaptor.write(
-            "/testparticles/species_" + ii.str() + "/u/cycle_" + cc.str(),
-            PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getUall());
-        this->output_adaptor.write(
-            "/testparticles/species_" + ii.str() + "/v/cycle_" + cc.str(),
-            PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getVall());
-        this->output_adaptor.write(
-            "/testparticles/species_" + ii.str() + "/w/cycle_" + cc.str(),
-            PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getWall());
-      }
-    } else if (tag.find("u", 0) != string::npos & sample == 0) {
-      for (const int i : species) {
-        stringstream ii;
-        ii << i;
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/u/cycle_" + cc.str(),
-            PSK::Dimens(_part[i]->getNOP()), _part[i]->getUall());
-      }
-    } else if (tag.find("u", 0) != string::npos & sample != 0) {
-      for (const int i : species) {
-        stringstream ii;
-        ii << i;
-        const std::vector<double> U =
-            everyNth(_part[i]->getUall(), _part[i]->getNOP(), sample);
-        this->output_adaptor.write("/particles/species_" + ii.str() +
-                                       "/u/cycle_" + cc.str(),
-                                   PSK::Dimens(U.size()), U);
-      }
-    } else if (tag.find("velocity", 0) != string::npos & sample != 0) {
-      for (const int i : species) {
-        stringstream ii;
-        ii << i;
-        const int nop = _part[i]->getNOP();
-        const std::vector<double> U =
-            everyNth(_part[i]->getUall(), nop, sample);
-        const std::vector<double> V =
-            everyNth(_part[i]->getVall(), nop, sample);
-        const std::vector<double> W =
-            everyNth(_part[i]->getWall(), nop, sample);
-        this->output_adaptor.write("/particles/species_" + ii.str() +
-                                       "/u/cycle_" + cc.str(),
-                                   PSK::Dimens(U.size()), U);
-        this->output_adaptor.write("/particles/species_" + ii.str() +
-                                       "/v/cycle_" + cc.str(),
-                                   PSK::Dimens(V.size()), V);
-        this->output_adaptor.write("/particles/species_" + ii.str() +
-                                       "/w/cycle_" + cc.str(),
-                                   PSK::Dimens(W.size()), W);
-      }
+private:
+  /** The arrays of p that arrays names: <group><name>/cycle_<cycle>. */
+  void writeArrays(const string& group, int cycle, const ParticleView& p,
+                   const ParticleOutputArrays& arrays) {
+    const string suffix = "/cycle_" + std::to_string(cycle);
+    const PSK::Dimens n((int)p.nop);
+    auto write = [&](const char* name, const auto* data) {
+      this->output_adaptor.write(group + name + suffix, n,
+                                 nonNull(data, p.nop));
+    };
+    if (arrays.position) {
+      write("x", p.x);
+      write("y", p.y);
+      write("z", p.z);
     }
-
-    // Particle charge
-    if (tag.find("q", 0) != string::npos & sample == 0) {
-      for (const int i : species) {
-        stringstream ii;
-        ii << i;
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/q/cycle_" + cc.str(),
-            PSK::Dimens(_part[i]->getNOP()), _part[i]->getQall());
-      }
+    if (arrays.velocity) {
+      write("u", p.u);
+      write("v", p.v);
+      write("w", p.w);
     }
-    // Test Particle charge
-    else if (tag.find("testpartcharge", 0) != string::npos & sample == 0) {
-      for (int i = 0; i < nstestpart; ++i) {
-        stringstream ii;
-        ii << (_part[i + ns]->get_species_num());
-        this->output_adaptor.write(
-            "/testparticles/species_" + ii.str() + "/q/cycle_" + cc.str(),
-            PSK::Dimens(_part[i + ns]->getNOP()), _part[i + ns]->getQall());
-      }
-    } else if (tag.find("q", 0) != string::npos & sample != 0) {
-      for (const int i : species) {
-        stringstream ii;
-        ii << i;
-        const std::vector<double> Q =
-            everyNth(_part[i]->getQall(), _part[i]->getNOP(), sample);
-        this->output_adaptor.write("/particles/species_" + ii.str() +
-                                       "/q/cycle_" + cc.str(),
-                                   PSK::Dimens(Q.size()), Q);
-      }
-    }
-
-    // Particle ID
-    if (tag.find("ID", 0) != string::npos & sample == 0) {
-      for (const int i : species) {
-        if (!_part[i]->tracksParticleID())
-          continue;
-        stringstream ii;
-        ii << i;
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/ID/cycle_" + cc.str(),
-            PSK::Dimens(_part[i]->getNOP()), _part[i]->getParticleIDall());
-      }
-    }
-    // Test Particle ID
-    else if (tag.find("testparttag", 0) != string::npos & sample == 0) {
-      for (int i = 0; i < nstestpart; ++i) {
-        if (!_part[i + ns]->tracksParticleID())
-          continue;
-        stringstream ii;
-        ii << (_part[i + ns]->get_species_num());
-        this->output_adaptor.write("/testparticles/species_" + ii.str() +
-                                       "/ID/cycle_" + cc.str(),
-                                   PSK::Dimens(_part[i + ns]->getNOP()),
-                                   _part[i + ns]->getParticleIDall());
-      }
-    } else if (tag.find("ID", 0) != string::npos & sample != 0) {
-      for (const int i : species) {
-        if (!_part[i]->tracksParticleID())
-          continue;
-        stringstream ii;
-        ii << i;
-        const std::vector<cudaPclType_ID> ID =
-            everyNth(_part[i]->getParticleIDall(), _part[i]->getNOP(), sample);
-        this->output_adaptor.write(
-            "/particles/species_" + ii.str() + "/ID/cycle_" + cc.str(),
-            PSK::Dimens(ID.size()), ID.empty() ? nullptr : ID.data());
-      }
-    }
+    if (arrays.charge)
+      write("q", p.q);
+    if (arrays.id && p.hasID)
+      write("ID", p.id);
   }
 };
 

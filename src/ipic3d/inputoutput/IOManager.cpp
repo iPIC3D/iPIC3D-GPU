@@ -41,8 +41,8 @@ namespace {
 
 // The host buffers that the deferred outputs read (AsyncOutput.h): the next
 // GPU copy into them waits for those outputs.
-/** The host particle buffers and the cell metadata of a checkpoint
- *  (outputCopyAsync). */
+/** The host particle buffers, the particle samples and the cell metadata of
+ *  a checkpoint (outputCopyAsync). */
 constexpr HostBuffers kParticleBuffers = 1u << 0;
 /** The host field arrays of EMfields3D (gpuSolverSyncD2H) and its heat flux
  *  (ScheduleHeatFlux). */
@@ -51,6 +51,14 @@ constexpr HostBuffers kFieldBuffers = 1u << 1;
 /** The lane of the writes of a particle or checkpoint backend. */
 OutputLane laneOf(bool adios2) {
   return adios2 ? OutputLane::Adios2 : OutputLane::Hdf5;
+}
+
+/** The arrays of ParticlesOutputTag that the particle output writes of
+ *  species s: no ID for a species without IDs. */
+ParticleOutputArrays outputArraysOf(const Collective& col, int s) {
+  ParticleOutputArrays arrays = col.getParticlesOutputArrays();
+  arrays.id = arrays.id && col.getTrackParticleID(s);
+  return arrays;
 }
 
 /** An output that one function writes, complete once written. */
@@ -209,6 +217,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
   testpart_ = testpart;
   ns_ = ns;
   nstestpart_ = nstestpart;
+  samples_.assign(ns, ParticleSample());
   async_ = std::make_unique<AsyncOutput>(col->getAsyncOutput());
   first_cycle_ = first_cycle;
   restart_cycle_ = col->getRestartOutputCycle();
@@ -309,7 +318,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
                                    : ""s;
 
     adiosManager_ = new ADIOS2IO::ADIOS2Manager();
-    adiosManager_->initOutputFiles(""s, particleTag, 0, col, vct, grid, EMf,
+    adiosManager_->initOutputFiles(""s, particleTag, col, vct, grid, EMf,
                                    outputPart, ns, testpart, nstestpart);
   }
 #endif
@@ -476,21 +485,31 @@ void IOManager::writeParticles(int cycle) {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return;
 
+  // the particles of each species written: those that
+  // ParticlesOutputTrackedFraction or ParticlesOutputMaxPerCell selects, else
+  // all of them
+  std::vector<ParticleView> views(ns_);
+  for (const int s : col_->getParticlesOutputSpecies())
+    views[s] = col_->particleOutputSelected(s) ? samples_[s].view()
+                                               : viewOf(*outputPart_[s]);
   std::function<void()> write;
   switch (particleBackend_) {
 
   case ParticleBackend::ADIOS2:
 #ifdef USE_ADIOS2
-    write = [this, cycle] { adiosManager_->appendParticleOutput(cycle); };
+    write = [this, cycle, views] {
+      adiosManager_->appendParticleOutput(cycle, views);
+    };
 #endif
     break;
 
   case ParticleBackend::SHDF5:
 #ifndef NO_HDF5
     if (outputWrapperFPP_)
-      write = [this, cycle] {
-        outputWrapperFPP_->append_particles(col_->getPclOutputTag(), cycle,
-                                            col_->getParticlesOutputSpecies());
+      write = [this, cycle, views] {
+        outputWrapperFPP_->append_particles(
+            col_->getParticlesOutputArrays(), cycle,
+            col_->getParticlesOutputSpecies(), views);
       };
 #endif
     break;
@@ -498,7 +517,8 @@ void IOManager::writeParticles(int cycle) {
   case ParticleBackend::NONE:
     break;
   }
-  // from the host particle buffers, which keep the data until written
+  // from the host particle buffers (and samples), which keep the data until
+  // written
   if (write)
     async_->submit(laneOf(particleBackend_ == ParticleBackend::ADIOS2),
                    std::make_unique<WriteJob>("particle output of cycle " +
@@ -522,8 +542,10 @@ void IOManager::writeTestParticles(int cycle) {
 #ifndef NO_HDF5
   if (outputWrapperFPP_) {
     async_->waitLane(OutputLane::Hdf5); // HDF5 is used by one thread
-    outputWrapperFPP_->append_output("testpartpos + testpartvel+ testparttag",
-                                     cycle, 0);
+    // positions, velocities and IDs (the species with IDs)
+    ParticleOutputArrays arrays = ParticleOutputArrays::all();
+    arrays.charge = false;
+    outputWrapperFPP_->append_test_particles(arrays, cycle);
   }
 #endif
 }
@@ -718,11 +740,21 @@ FieldOutputArrays IOManager::hostFields(int cycle) const {
 
 std::vector<ParticleOutputArrays> IOManager::hostParticles(int cycle) const {
   if (needsRestartParticleSync(cycle))
-    return std::vector<ParticleOutputArrays>(ns_, {true, true, true, true});
+    return std::vector<ParticleOutputArrays>(ns_, ParticleOutputArrays::all());
+  return particleOutputArrays(cycle, false);
+}
+
+std::vector<ParticleOutputArrays> IOManager::sampledParticles(int cycle) const {
+  return particleOutputArrays(cycle, true);
+}
+
+std::vector<ParticleOutputArrays>
+IOManager::particleOutputArrays(int cycle, bool selected) const {
   std::vector<ParticleOutputArrays> arrays(ns_);
   if (needsParticleOutput(cycle))
     for (const int s : col_->getParticlesOutputSpecies())
-      arrays[s] |= col_->getParticlesOutputArrays();
+      if (col_->particleOutputSelected(s) == selected)
+        arrays[s] = outputArraysOf(*col_, s);
   return arrays;
 }
 

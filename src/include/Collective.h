@@ -277,25 +277,41 @@ public:
   const std::vector<int>& getParticlesOutputSpecies() const {
     return ParticlesOutputSpecies;
   }
+  /** ParticlesOutputTrackedFraction selects the particles of species that
+   *  the particle output writes: a value from 0 to 1 for a species with IDs
+   *  (TrackParticleID). -1 is off; a species without IDs ignores it. */
+  bool particleOutputFractionOn(int species) const {
+    return getTrackParticleID(species) &&
+           ParticlesOutputTrackedFraction[species] >= 0.0;
+  }
+  /** The fraction of the particles of species that the particle output
+   *  writes, those of u < fraction (particleOutputSelect.cuh), with
+   *  particleOutputFractionOn; else 1. */
+  double particleOutputFraction(int species) const {
+    return particleOutputFractionOn(species)
+               ? ParticlesOutputTrackedFraction[species]
+               : 1.0;
+  }
+  /** The most particles of species the particle output writes in a cell,
+   *  0: no cap. ParticlesOutputMaxPerCell, ignored (0) with
+   *  particleOutputFractionOn. */
+  int particleOutputMaxPerCell(int species) const {
+    return particleOutputFractionOn(species)
+               ? 0
+               : ParticlesOutputMaxPerCell[species];
+  }
+  /** The particle output writes some of the particles of species only
+   *  (particleOutputFraction below 1 or particleOutputMaxPerCell). */
+  bool particleOutputSelected(int species) const {
+    return particleOutputFraction(species) < 1.0 ||
+           particleOutputMaxPerCell(species) > 0;
+  }
   /** Every species, 0, ..., ns - 1: those of a checkpoint. */
   const std::vector<int>& getAllSpecies() const { return AllSpecies; }
   bool getTrackParticleID(int species) const {
     return species >= 0 && species < static_cast<int>(TrackParticleID.size())
                ? TrackParticleID[species] != 0
                : false;
-  }
-  bool anyRegularParticleID() const {
-    for (int s = 0; s < ns && s < static_cast<int>(TrackParticleID.size()); ++s)
-      if (TrackParticleID[s])
-        return true;
-    return false;
-  }
-  bool anyTestParticleID() const {
-    const int total = static_cast<int>(TrackParticleID.size());
-    for (int s = ns; s < total; ++s)
-      if (TrackParticleID[s])
-        return true;
-    return false;
   }
   string getPoissonCorrection() const { return (PoissonCorrection); }
   int getPoissonCorrectionCycle() const { return (PoissonCorrectionCycle); }
@@ -695,6 +711,10 @@ private:
   ParticleOutputArrays ParticlesOutputArrays;
   string ParticlesWriteMethod;
   std::vector<int> ParticlesOutputSpecies;
+  /*! ParticlesOutputMaxPerCell, per species */
+  std::vector<int> ParticlesOutputMaxPerCell;
+  /*! ParticlesOutputTrackedFraction, per species */
+  std::vector<double> ParticlesOutputTrackedFraction;
   std::vector<int> AllSpecies;
   /*! Output for test particles */
   int TestParticlesOutputCycle;

@@ -5,12 +5,14 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
 #include "Collective.h"
 #include "EMfields3D.h"
 #include "Grid3DCU.h"
+#include "ParticleSample.h"
 #include "ParticleSoAHost.h"
 #include "RestartParticleCellMetadata.h"
 #include "VCtopology3D.h"
@@ -24,12 +26,14 @@ using std::string;
 
 namespace ADIOS2IO {
 
-/** Writes the data of a tag into a step: of the given species for the
- *  particle data (the particle output writes those of
- *  ParticlesOutputSpecies, a restart every species); the other tags write
- *  every species (std::bind discards the argument). */
-using optionFuncType = std::function<void(adios2::IO&, adios2::Engine&,
-                                          const std::vector<int>& species)>;
+/** Writes the data of a tag into a step: of the given species, from their
+ *  views, for the particle data (the particle output writes those of
+ *  ParticlesOutputSpecies, the particles it keeps of each; a restart all the
+ *  particles of every species); the other tags write every species
+ *  (std::bind discards the arguments). */
+using optionFuncType = std::function<void(
+    adios2::IO&, adios2::Engine&, const std::vector<int>& species,
+    const std::vector<ParticleView>& views)>;
 
 class ADIOS2Manager {
 
@@ -56,16 +60,13 @@ private:
   string saveDirName;
   string restartDirName;
 
-  bool open = false;   // open flag
-  int lastCycle = -1;  // last output simulation cycle
-  int outputCount = 0; // output times count
+  bool open = false; // open flag
 
   // field
   string fieldTag;
 
   // particle
   string particleTag;
-  int sample;
 
   // restart
   string restartTag;
@@ -101,16 +102,16 @@ public:
         // particle
         {"position", std::bind(&ADIOS2Manager::_particlePosition, this,
                                std::placeholders::_1, std::placeholders::_2,
-                               std::placeholders::_3)},
+                               std::placeholders::_3, std::placeholders::_4)},
         {"velocity", std::bind(&ADIOS2Manager::_particleVelocity, this,
                                std::placeholders::_1, std::placeholders::_2,
-                               std::placeholders::_3)},
-        {"q",
-         std::bind(&ADIOS2Manager::_particleCharge, this, std::placeholders::_1,
-                   std::placeholders::_2, std::placeholders::_3)},
-        {"ID",
-         std::bind(&ADIOS2Manager::_particleID, this, std::placeholders::_1,
-                   std::placeholders::_2, std::placeholders::_3)},
+                               std::placeholders::_3, std::placeholders::_4)},
+        {"q", std::bind(&ADIOS2Manager::_particleCharge, this,
+                        std::placeholders::_1, std::placeholders::_2,
+                        std::placeholders::_3, std::placeholders::_4)},
+        {"ID", std::bind(&ADIOS2Manager::_particleID, this,
+                         std::placeholders::_1, std::placeholders::_2,
+                         std::placeholders::_3, std::placeholders::_4)},
         {"particle_cell_metadata",
          std::bind(&ADIOS2Manager::_particleCellMetadata, this,
                    std::placeholders::_1, std::placeholders::_2)},
@@ -138,7 +139,6 @@ public:
    * layout, and opens the files needed by subsequent append calls.
    * @param fieldTag Base tag for field-output variables.
    * @param particleTag Base tag for particle-output variables.
-   * @param sample Output sampling stride used by the backend.
    * @param col Solver collective/configuration object.
    * @param vct MPI topology for rank-local domain information.
    * @param grid Local grid descriptor.
@@ -148,17 +148,10 @@ public:
    * @param testpart Test-particle species to serialize.
    * @param nstestpart Number of test-particle species.
    */
-  void initOutputFiles(string fieldTag, string particleTag, int sample,
-                       Collective* col, VCtopology3D* vct, Grid3DCU* grid,
-                       EMfields3D* EMf, ParticleSoAHost** outputPart, int ns,
+  void initOutputFiles(string fieldTag, string particleTag, Collective* col,
+                       VCtopology3D* vct, Grid3DCU* grid, EMfields3D* EMf,
+                       ParticleSoAHost** outputPart, int ns,
                        ParticleSoAHost** testpart, int nstestpart);
-
-  /**
-   * @brief Append the output data to the output files, the interface
-   *
-   * @param cycle simulation cycle
-   */
-  void appendOutput(int cycle);
 
   void closeOutputFiles();
 
@@ -174,8 +167,10 @@ public:
   /**
    * @brief Append one particle-output step to the ADIOS2 stream.
    * @param cycle Simulation cycle being written.
+   * @param views The particles written of each species (of every species,
+   * those of ParticlesOutputSpecies read).
    */
-  void appendParticleOutput(int cycle);
+  void appendParticleOutput(int cycle, const std::vector<ParticleView>& views);
 
   /**
    * @brief Write one restart/checkpoint into the selected slot directory.
@@ -412,77 +407,78 @@ private:
       q -> particle charge
       ID -> particle ID for tracked species
   */
+  // RestartReader reads these variables of a checkpoint as cudaCommonType
+  static_assert(std::is_same_v<cudaPclType_X, cudaCommonType> &&
+                    std::is_same_v<cudaPclType_Y, cudaCommonType> &&
+                    std::is_same_v<cudaPclType_Z, cudaCommonType> &&
+                    std::is_same_v<cudaPclType_U, cudaCommonType> &&
+                    std::is_same_v<cudaPclType_V, cudaCommonType> &&
+                    std::is_same_v<cudaPclType_W, cudaCommonType> &&
+                    std::is_same_v<cudaPclType_Q, cudaCommonType>,
+                "the particle variables have the type the restart reads");
+
   void _particlePosition(adios2::IO& io, adios2::Engine& engine,
-                         const std::vector<int>& species) {
+                         const std::vector<int>& species,
+                         const std::vector<ParticleView>& views) {
     for (const int i : species) {
-      const unsigned long sizeNOP =
-          static_cast<unsigned long>(part[i]->getNOP());
-
-      auto x = _variableHelper<cudaCommonType>(
-          io, "part" + std::to_string(i) + "PositionX", {sizeNOP}, {0},
-          {sizeNOP});
-      auto y = _variableHelper<cudaCommonType>(
-          io, "part" + std::to_string(i) + "PositionY", {sizeNOP}, {0},
-          {sizeNOP});
-      auto z = _variableHelper<cudaCommonType>(
-          io, "part" + std::to_string(i) + "PositionZ", {sizeNOP}, {0},
-          {sizeNOP});
-
-      engine.Put<cudaCommonType>(x, part[i]->getXall(), adios2::Mode::Deferred);
-      engine.Put<cudaCommonType>(y, part[i]->getYall(), adios2::Mode::Deferred);
-      engine.Put<cudaCommonType>(z, part[i]->getZall(), adios2::Mode::Deferred);
+      const ParticleView& p = views[i];
+      const adios2::Dims n = {p.nop};
+      const string name = "part" + std::to_string(i);
+      auto x =
+          _variableHelper<cudaPclType_X>(io, name + "PositionX", n, {0}, n);
+      auto y =
+          _variableHelper<cudaPclType_Y>(io, name + "PositionY", n, {0}, n);
+      auto z =
+          _variableHelper<cudaPclType_Z>(io, name + "PositionZ", n, {0}, n);
+      engine.Put<cudaPclType_X>(x, nonNull(p.x, p.nop), adios2::Mode::Deferred);
+      engine.Put<cudaPclType_Y>(y, nonNull(p.y, p.nop), adios2::Mode::Deferred);
+      engine.Put<cudaPclType_Z>(z, nonNull(p.z, p.nop), adios2::Mode::Deferred);
     }
   }
 
   void _particleVelocity(adios2::IO& io, adios2::Engine& engine,
-                         const std::vector<int>& species) {
+                         const std::vector<int>& species,
+                         const std::vector<ParticleView>& views) {
     for (const int i : species) {
-      const unsigned long sizeNOP =
-          static_cast<unsigned long>(part[i]->getNOP());
-
-      auto u = _variableHelper<cudaCommonType>(
-          io, "part" + std::to_string(i) + "VelocityU", {sizeNOP}, {0},
-          {sizeNOP});
-      auto v = _variableHelper<cudaCommonType>(
-          io, "part" + std::to_string(i) + "VelocityV", {sizeNOP}, {0},
-          {sizeNOP});
-      auto w = _variableHelper<cudaCommonType>(
-          io, "part" + std::to_string(i) + "VelocityW", {sizeNOP}, {0},
-          {sizeNOP});
-
-      engine.Put<cudaCommonType>(u, part[i]->getUall(), adios2::Mode::Deferred);
-      engine.Put<cudaCommonType>(v, part[i]->getVall(), adios2::Mode::Deferred);
-      engine.Put<cudaCommonType>(w, part[i]->getWall(), adios2::Mode::Deferred);
+      const ParticleView& p = views[i];
+      const adios2::Dims n = {p.nop};
+      const string name = "part" + std::to_string(i);
+      auto u =
+          _variableHelper<cudaPclType_U>(io, name + "VelocityU", n, {0}, n);
+      auto v =
+          _variableHelper<cudaPclType_V>(io, name + "VelocityV", n, {0}, n);
+      auto w =
+          _variableHelper<cudaPclType_W>(io, name + "VelocityW", n, {0}, n);
+      engine.Put<cudaPclType_U>(u, nonNull(p.u, p.nop), adios2::Mode::Deferred);
+      engine.Put<cudaPclType_V>(v, nonNull(p.v, p.nop), adios2::Mode::Deferred);
+      engine.Put<cudaPclType_W>(w, nonNull(p.w, p.nop), adios2::Mode::Deferred);
     }
   }
 
   void _particleCharge(adios2::IO& io, adios2::Engine& engine,
-                       const std::vector<int>& species) {
+                       const std::vector<int>& species,
+                       const std::vector<ParticleView>& views) {
     for (const int i : species) {
-      const unsigned long sizeNOP =
-          static_cast<unsigned long>(part[i]->getNOP());
-
-      auto var = _variableHelper<cudaCommonType>(
-          io, "part" + std::to_string(i) + "charge", {sizeNOP}, {0}, {sizeNOP});
-
-      engine.Put<cudaCommonType>(var, part[i]->getQall(),
-                                 adios2::Mode::Deferred);
+      const ParticleView& p = views[i];
+      const adios2::Dims n = {p.nop};
+      auto var = _variableHelper<cudaPclType_Q>(
+          io, "part" + std::to_string(i) + "charge", n, {0}, n);
+      engine.Put<cudaPclType_Q>(var, nonNull(p.q, p.nop),
+                                adios2::Mode::Deferred);
     }
   }
 
   void _particleID(adios2::IO& io, adios2::Engine& engine,
-                   const std::vector<int>& species) {
+                   const std::vector<int>& species,
+                   const std::vector<ParticleView>& views) {
     for (const int i : species) {
-      if (!part[i]->tracksParticleID())
+      const ParticleView& p = views[i];
+      if (!p.hasID)
         continue;
-
-      const unsigned long sizeNOP =
-          static_cast<unsigned long>(part[i]->getNOP());
-
+      const adios2::Dims n = {p.nop};
       auto var = _variableHelper<cudaPclType_ID>(
-          io, "part" + std::to_string(i) + "ID", {sizeNOP}, {0}, {sizeNOP});
-
-      engine.Put<cudaPclType_ID>(var, part[i]->getParticleIDall(),
+          io, "part" + std::to_string(i) + "ID", n, {0}, n);
+      engine.Put<cudaPclType_ID>(var, nonNull(p.id, p.nop),
                                  adios2::Mode::Deferred);
     }
   }

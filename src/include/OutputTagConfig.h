@@ -402,13 +402,8 @@ struct ParticleOutputArrays {
   bool position = false, velocity = false, charge = false, id = false;
 
   bool any() const { return position || velocity || charge || id; }
-  ParticleOutputArrays& operator|=(const ParticleOutputArrays& other) {
-    position |= other.position;
-    velocity |= other.velocity;
-    charge |= other.charge;
-    id |= other.id;
-    return *this;
-  }
+  /** Every array: a checkpoint. */
+  static ParticleOutputArrays all() { return {true, true, true, true}; }
 };
 
 /** The arrays of a ParticlesOutputTag; false, the first token that names

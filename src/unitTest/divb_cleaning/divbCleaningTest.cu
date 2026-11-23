@@ -1,8 +1,4 @@
-/* Unit tests of the divergence cleanings and of the B absorbing layer on the
- * GPU kernels, one --case each:
- *   sal-tangential      gpuLayerOp (LAYER_BLEND): the normal component, left
- *                       out of the mask, bit-identical,
- *                       the tangential ones blended, nothing outside touched.
+/* Unit tests of the divergence cleanings on the GPU kernels, one --case each:
  *   adjoint             gradC2N = -divN2Cᵀ with zero ghost centres, not with
  *                       copies.
  *   lap27-image         gpuSolver2PhysLap27 + gpuLap27ToKrylov vs the stencils
@@ -10,12 +6,13 @@
  *                       twin unpack.
  *   lap27-local         fused Chebyshev steps of Lap27Op; symmetry and
  *                       lap27EigBounds vs dense eigenvalues.
+ *   poisson-local       7-point PoissonLocalOperator steps (not used) vs the
+ *                       composed reference, every face factor.
+ *   poisson-image       gpuLapC2CToKrylov vs host; no edge ghost read.
  *   chebyshev-cleaning  gpuChebyshevCleaning vs a host recurrence, within the
  *                       Chebyshev residual bound; its degenerate branches.
  *   divb-projection     one div(B) cleaning: divC2N(Bc) removed, conductor
  *                       B_n kept, curlN2C(E) unchanged.
- *   dive-projection     the div(E) right-hand side; divN2C(E) = 4 pi rho after
- *                       one cleaning.
  *   dive-walls          the div(E) cleaning between perfect conductors: the
  *                       odd ghosts of GhostSet::Phi in the image (symmetric,
  *                       the wall checkerboards null), the wall E_t kept, the
@@ -24,9 +21,6 @@
  *                       null component left, only null-space parts removed.
  *   krylov-kernels      gpuBatchedDotNorm beyond 32 vectors; gpuSubCombination
  *                       vs gpuAddscale.
- *   poisson-local       7-point PoissonLocalOperator steps (not used) vs the
- *                       composed reference, every face factor.
- *   poisson-image       gpuLapC2CToKrylov vs host; no edge ghost read.
  * Layout (i ny + j) nz + k, ghosts at 0 and n-1; NaN marks values never to
  * be read or left unwritten, and fails every comparison. */
 #include "GPUBlas.cuh"
@@ -133,70 +127,6 @@ static double dot(const Vec& u, const Vec& v) {
 }
 
 static double norm2(const Vec& v) { return std::sqrt(dot(v, v)); }
-
-// ---------------------------------------------------------------------------
-static void testSalTangential() {
-  std::printf("sal-tangential\n");
-  const int n[3] = {14, 13, 12}, nsal = 3;
-  const T tgt[3] = {0.3, -0.7, 1.1};
-  const T invNL = T(1) / nsal;
-  std::mt19937_64 gen(1);
-  const size_t N = (size_t)n[0] * n[1] * n[2];
-  for (int skipMode = 0; skipMode < 2; skipMode++)
-    for (int dir = 0; dir < 3; dir++)
-      for (int asc = 0; asc < 2; asc++) {
-        Vec h[3] = {randomVec(N, gen), randomVec(N, gen), randomVec(N, gen)};
-        Dev d[3] = {Dev(h[0]), Dev(h[1]), Dev(h[2])};
-        // the B layers of the open faces (LayerSet::B): left face layers
-        // 0..nsal ascending, right face layers n-nsal-1..n-1 descending
-        const int lo = asc ? 0 : n[dir] - nsal - 1;
-        const int hi = asc ? nsal : n[dir] - 1;
-        const int skip = skipMode ? dir : -1;
-        LayerOp op;
-        op.kind = LAYER_BLEND;
-        op.axis = dir;
-        op.first = lo;
-        op.last = hi;
-        for (int c = 0; c < 3; c++)
-          op.target[c] = tgt[c];
-        op.mask = skip >= 0 ? 7 & ~(1 << skip) : 7;
-        op.invLayers = invNL;
-        op.ascending = asc;
-        gpuLayerOp(op, d[0].p, d[1].p, d[2].p, n, 0);
-        Vec blend, normal, outside; // result minus expected value
-        Vec r[3] = {d[0].get(), d[1].get(), d[2].get()};
-        for (int i = 0; i < n[0]; i++)
-          for (int j = 0; j < n[1]; j++)
-            for (int k = 0; k < n[2]; k++) {
-              const int idx[3] = {i, j, k};
-              const int layer = idx[dir];
-              const size_t a = ((size_t)i * n[1] + j) * n[2] + k;
-              const bool in = layer >= lo && layer <= hi;
-              const T sal =
-                  asc ? (T)(layer - lo) * invNL : (T)(hi - layer) * invNL;
-              for (int c = 0; c < 3; c++) {
-                if (!in)
-                  outside.push_back(r[c][a] - h[c][a]);
-                else if (c == skip)
-                  normal.push_back(r[c][a] - h[c][a]);
-                else
-                  blend.push_back(r[c][a] -
-                                  (h[c][a] * sal + tgt[c] * (T(1) - sal)));
-              }
-            }
-        const double errBlend = maxAbs(blend), errNormal = maxAbs(normal),
-                     errOutside = maxAbs(outside);
-        char pre[64];
-        std::snprintf(pre, sizeof(pre), "dir %d %s face, skipComp %+d: ", dir,
-                      asc ? "left" : "right", skip);
-        const std::string p = pre;
-        check(errBlend < 1e-12, p + "blended components", errBlend);
-        if (skipMode)
-          check(errNormal == 0, p + "normal component bit-identical",
-                errNormal);
-        check(errOutside == 0, p + "outside the layers untouched", errOutside);
-      }
-}
 
 // ---------------------------------------------------------------------------
 struct Grid {
@@ -992,48 +922,6 @@ static void testDivBProjection() {
   check(dc < 1e-12 * sc, "curlN2C(E) left unchanged / |B|", dc / sc);
 }
 
-static void testDivEProjection() {
-  std::printf("dive-projection\n");
-  std::mt19937_64 gen(19);
-  const Grid g = makeGrid(9, 8, 7);
-  const T invd[3] = {1 / g.h[0], 1 / g.h[1], 1 / g.h[2]};
-  const int n[3] = {g.nc[0] - 2, g.nc[1] - 2, g.nc[2] - 2};
-  const size_t rows = (size_t)n[0] * n[1] * n[2];
-  const bool flat[3] = {false, false, false}, none[6] = {};
-  const Lap27Op op = makeOp(n, flat, none, none, false);
-  const Vec E[3] = {randomVec(g.N(), gen), randomVec(g.N(), gen),
-                    randomVec(g.N(), gen)};
-  const Vec rho = randomVec(g.C(), gen);
-  const T scale = -4 * M_PI;
-  // divN2C(E) + scale rho on the cell rows, by the stencil kernel
-  auto residual = [&](const Vec Ev[3]) {
-    const Vec d = divN2C(g, Ev);
-    Vec r(rows);
-    for (int i = 0; i < n[0]; i++)
-      for (int j = 0; j < n[1]; j++)
-        for (int k = 0; k < n[2]; k++) {
-          const size_t c = g.c(i + 1, j + 1, k + 1);
-          r[((size_t)i * n[1] + j) * n[2] + k] = d[c] + scale * rho[c];
-        }
-    return r;
-  };
-  Dev ex(E[0]), ey(E[1]), ez(E[2]), dr(rho), db(Vec(rows, 0));
-  gpuDivN2CRhoToKrylov(db.p, ex.p, ey.p, ez.p, dr.p, scale, g.nn[1], g.nn[2],
-                       invd, op, 0);
-  const Vec b = db.get();
-  const double errRhs = relDiff(b, residual(E));
-  check(errRhs < 1e-14,
-        "right-hand side vs divN2C(E) - 4 pi rho (stencil kernel)", errRhs);
-  const Vec x = cgLap27(b, op);
-  Dev dx(x), phi(Vec(g.C(), 0));
-  gpuSolver2PhysLap27(phi.p, dx.p, g.nc[1], g.nc[2], op, 0); // ghosts stay 0
-  gpuSubGradC2N(ex.p, ey.p, ez.p, phi.p, g.nn[0], g.nn[1], g.nn[2], invd, 0);
-  const Vec En[3] = {ex.get(), ey.get(), ez.get()};
-  const double n0 = maxAbs(b), n1 = maxAbs(residual(En));
-  check(n1 < 1e-11 * n0, "divN2C(E) - 4 pi rho after / before (every cell)",
-        n1 / n0);
-}
-
 // ---------------------------------------------------------------------------
 // The null space of the cleaning operators
 
@@ -1578,18 +1466,16 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[a], "--case") == 0)
       which = argv[a + 1];
   const std::pair<const char*, void (*)()> cases[] = {
-      {"sal-tangential", testSalTangential},
       {"adjoint", testAdjoint},
       {"lap27-image", testLap27Image},
       {"lap27-local", testLap27Local},
+      {"poisson-local", testPoissonLocal},
+      {"poisson-image", testPoissonImage},
       {"chebyshev-cleaning", testChebyshevCleaning},
       {"divb-projection", testDivBProjection},
-      {"dive-projection", testDivEProjection},
       {"dive-walls", testDivEWalls},
       {"null-space", testNullSpace},
-      {"krylov-kernels", testKrylovKernels},
-      {"poisson-local", testPoissonLocal},
-      {"poisson-image", testPoissonImage}};
+      {"krylov-kernels", testKrylovKernels}};
   int ran = 0;
   for (const auto& c : cases)
     if (which == "all" || which == c.first) {

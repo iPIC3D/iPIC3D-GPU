@@ -23,5 +23,5 @@ target_link_libraries(restartOutputFilesTest PRIVATE ${HDF5_C_HL_TARGET}
                                                      ${HDF5_C_TARGET} MPI::MPI_CXX)
 
 enable_testing()
-add_test(NAME restartOutputFiles COMMAND restartOutputFilesTest)
-set_tests_properties(restartOutputFiles PROPERTIES TIMEOUT 60)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(restart_output_files TARGET restartOutputFilesTest TIMEOUT 60)

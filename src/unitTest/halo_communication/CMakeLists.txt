@@ -92,53 +92,22 @@ endif()
 
 enable_testing()
 
-function(add_halo_communication_test name mpi_ranks exchange_case suite backend)
-  add_test(
-    NAME ${name}
-    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${mpi_ranks}
-            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:haloCommunicationTest>
-            ${MPIEXEC_POSTFLAGS}
-            --case ${exchange_case} --suite ${suite} --backend ${backend})
-  set_tests_properties(
-    ${name}
-    PROPERTIES
-      PROCESSORS ${mpi_ranks}
-      RUN_SERIAL TRUE
-      TIMEOUT 90
-      SKIP_RETURN_CODE 77
-  )
+# halo_<suite>: the conventional and additive exchanges, on the CPU and the
+# GPU.  Both need a device (the host field arrays are page-locked) and report
+# CTest's skip code 77 without one.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+function(add_halo_communication_test suite mpi_ranks)
+  add_unit_test(halo_${suite} TARGET haloCommunicationTest TIMEOUT 90
+                RANKS ${mpi_ranks} GPU ARGS --suite ${suite})
+  set_tests_properties(halo_${suite} PROPERTIES SKIP_RETURN_CODE 77)
 endfunction()
 
-# CPU and GPU exchanges are registered separately. Both need a device (the
-# host field arrays are page-locked) and report CTest's skip code 77 without
-# one.
-add_halo_communication_test(
-  haloCommunicationConventionalDistributedCPU 8 conventional distributed cpu)
-add_halo_communication_test(
-  haloCommunicationConventionalDistributedGPU 8 conventional distributed gpu)
-add_halo_communication_test(
-  haloCommunicationAdditiveDistributedCPU 8 additive distributed cpu)
-add_halo_communication_test(
-  haloCommunicationAdditiveDistributedGPU 8 additive distributed gpu)
-add_halo_communication_test(
-  haloCommunicationConventionalSelfCPU 1 conventional self cpu)
-add_halo_communication_test(
-  haloCommunicationConventionalSelfGPU 1 conventional self gpu)
-add_halo_communication_test(
-  haloCommunicationAdditiveSelfCPU 1 additive self cpu)
-add_halo_communication_test(
-  haloCommunicationAdditiveSelfGPU 1 additive self gpu)
+add_halo_communication_test(distributed 8)
+add_halo_communication_test(self 1)
 
 # 3x3x3 ranks: 26 distinct neighbours on the centre rank.  Registered only
 # where MPI has 27 slots; elsewhere run by hand, e.g. with Open MPI
 #   mpirun -np 27 --oversubscribe haloCommunicationTest --suite distributed27
 if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL 27)
-  add_halo_communication_test(haloCommunicationConventionalDistributed27CPU 27
-                               conventional distributed27 cpu)
-  add_halo_communication_test(haloCommunicationConventionalDistributed27GPU 27
-                               conventional distributed27 gpu)
-  add_halo_communication_test(
-    haloCommunicationAdditiveDistributed27CPU 27 additive distributed27 cpu)
-  add_halo_communication_test(
-    haloCommunicationAdditiveDistributed27GPU 27 additive distributed27 gpu)
+  add_halo_communication_test(distributed27 27)
 endif()

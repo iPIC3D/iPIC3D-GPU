@@ -135,6 +135,19 @@ srun --nodes=4 --ntasks=16 --ntasks-per-node=4 ./iPIC3D ../share/benchmark/GEM3D
 srun --nodes=4 --ntasks=32 --ntasks-per-node=8 ./iPIC3D ../share/benchmark/GEM3Dsmall_4x4x2_100/testGEM3Dsmall.inp  
 ```
 
+### Unit tests
+
+Configure with `-DBUILD_UTESTS=ON` and run `ctest --output-on-failure` in the build directory. The tests that use the GPU run one at a time, also with `ctest -j`; they need about 3 GB of GPU memory.
+
+On a Slurm cluster, run `ctest` inside an allocation. Every test then starts as a job step on the allocated nodes with its own number of ranks (at most 8), sharing the CPUs and GPUs of the allocation, so one node with one GPU is enough:
+
+``` shell
+salloc --nodes=1 --ntasks=8 --gpus=1 --time=00:30:00
+ctest --output-on-failure
+```
+
+Options your site needs for `srun` go in `IPIC3D_SRUN_FLAGS`, for example `export IPIC3D_SRUN_FLAGS="--mpi=pmix"`. The 27-rank halo test is registered only when `MPIEXEC_MAX_NUMPROCS` is at least 27 at configure time.
+
 
 ### Result
 

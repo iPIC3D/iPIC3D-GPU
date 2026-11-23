@@ -20,5 +20,5 @@ target_include_directories(asyncOutputTest PUBLIC ${PROJECT_ROOT}/src/include)
 target_link_libraries(asyncOutputTest PRIVATE Threads::Threads)
 
 enable_testing()
-add_test(NAME asyncOutput COMMAND asyncOutputTest)
-set_tests_properties(asyncOutput PROPERTIES TIMEOUT 60)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(async_output TARGET asyncOutputTest TIMEOUT 60)

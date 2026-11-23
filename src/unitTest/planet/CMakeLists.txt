@@ -125,9 +125,5 @@ target_compile_definitions(planetTest PUBLIC NO_HDF5)
 enable_testing()
 
 # Test cases
-add_test(
-  NAME planetTest1
-  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1
-          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:planetTest>
-          ${MPIEXEC_POSTFLAGS})
-set_tests_properties(planetTest1 PROPERTIES TIMEOUT 30) # Timeout in seconds
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(planet TARGET planetTest TIMEOUT 60 GPU)

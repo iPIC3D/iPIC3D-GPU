@@ -51,5 +51,5 @@ else()
 endif()
 
 enable_testing()
-add_test(NAME particleOutputSelect COMMAND particleOutputSelectTest)
-set_tests_properties(particleOutputSelect PROPERTIES TIMEOUT 120)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(particle_output_select TARGET particleOutputSelectTest TIMEOUT 120 GPU)

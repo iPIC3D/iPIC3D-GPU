@@ -56,10 +56,5 @@ endif()
 
 enable_testing()
 
-foreach(test_case merge-conservation merge-host merge-frame merge-chain
-                  merge-nodes split split-merge)
-  string(REPLACE "-" "_" test_name ${test_case})
-  add_test(NAME particleControl_${test_name}
-           COMMAND $<TARGET_FILE:particleControlTest> --case ${test_case})
-  set_tests_properties(particleControl_${test_name} PROPERTIES TIMEOUT 120)
-endforeach()
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(particle_control TARGET particleControlTest TIMEOUT 120 GPU)

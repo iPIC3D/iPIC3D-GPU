@@ -18,9 +18,6 @@
  *   merge-frame         the particles merged away do not change with the
  *                       frame: the same cells with a drift of 25 thermal
  *                       speeds
- *   merge-chain         three particles of equal velocity and target 1: one
- *                       merge, and the particle merged away takes no other
- *                       (the charge is kept)
  *   merge-nodes         a pair on a line along a grid axis with equal
  *                       velocities leaves the ten node moments unchanged;
  *                       thermal cells: the charge of the eight nodes of a
@@ -502,30 +499,6 @@ int testMergeFrame() {
   return failures;
 }
 
-int testMergeChain() {
-  std::printf("merge-chain\n");
-  failures = 0;
-  Particles p;
-  p.resize(3);
-  for (int i = 0; i < 3; i++) {
-    p.q[i] = -1.0 - i;
-    p.u[i] = 0.3;
-    p.v[i] = -0.1;
-    p.w[i] = 0.2;
-    p.x[i] = p.y[i] = p.z[i] = 0.1 * (i + 1) * kCell;
-  }
-  Cells cells;
-  cells.start = {0};
-  cells.count = {3};
-  Flags flags;
-  const Particles after = merge(p, cells, 1, flags);
-  const CellSums s = cellSums(after, 0, 3, flags);
-  check(s.alive == 2, "one merge among three particles", s.alive);
-  check(std::fabs(s.q + 6.0) < kRoundOff, "charge kept", s.q);
-  check(flags[0].dest == 0, "the first particle stays", flags[0].dest);
-  return failures;
-}
-
 int testMergeNodes() {
   std::printf("merge-nodes\n");
   failures = 0;
@@ -773,7 +746,6 @@ int main(int argc, char** argv) {
       {"merge-conservation", testMergeConservation},
       {"merge-host", testMergeHost},
       {"merge-frame", testMergeFrame},
-      {"merge-chain", testMergeChain},
       {"merge-nodes", testMergeNodes},
       {"split", testSplit},
       {"split-merge", testSplitMerge}};

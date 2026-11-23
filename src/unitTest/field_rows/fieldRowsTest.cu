@@ -7,6 +7,10 @@
  *                          conductor's E_t = 0 and identity rows with its
  *                          normal row left to the operator, on the face rows
  *                          only.
+ *   --case layer-blend     gpuLayerOp (LAYER_BLEND), the B absorbing layer: the
+ *                          normal component, left out of the mask,
+ *                          bit-identical, the tangential ones blended,
+ *                          nothing outside touched.
  *   --case mudot           gpuMUdot (all species in one kernel) against a host
  *                          per-species MUdot and the per-species kernel
  *                          gpuMUdotSpecies, for 1..6, 16, 17 and 33 species
@@ -52,6 +56,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -234,6 +239,79 @@ static void testOpenRows() {
                     faceName(dir, high));
       check(errRows == 0.0, what, errRows);
     }
+}
+
+// ---------------------------------------------------------------------------
+static void testLayerBlend() {
+  std::printf("layer-blend\n");
+  const int n[3] = {14, 13, 12}, nsal = 3;
+  const T tgt[3] = {0.3, -0.7, 1.1};
+  const T invNL = T(1) / nsal;
+  std::mt19937_64 gen(1);
+  const size_t size = (size_t)n[0] * n[1] * n[2];
+  // max |error|; +infinity for an error that is not finite
+  const auto worse = [](double m, double e) {
+    return std::isfinite(e) ? std::max(m, std::fabs(e))
+                            : std::numeric_limits<double>::infinity();
+  };
+  for (int skipMode = 0; skipMode < 2; skipMode++)
+    for (int dir = 0; dir < 3; dir++)
+      for (int asc = 0; asc < 2; asc++) {
+        const Vec h[3] = {randomVec(size, gen), randomVec(size, gen),
+                          randomVec(size, gen)};
+        Dev d0(h[0]), d1(h[1]), d2(h[2]);
+        // the B layers of the open faces (LayerSet::B): left face layers
+        // 0..nsal ascending, right face layers n-nsal-1..n-1 descending
+        const int lo = asc ? 0 : n[dir] - nsal - 1;
+        const int hi = asc ? nsal : n[dir] - 1;
+        const int skip = skipMode ? dir : -1;
+        LayerOp op;
+        op.kind = LAYER_BLEND;
+        op.axis = dir;
+        op.first = lo;
+        op.last = hi;
+        for (int c = 0; c < 3; c++)
+          op.target[c] = tgt[c];
+        op.mask = skip >= 0 ? 7 & ~(1 << skip) : 7;
+        op.invLayers = invNL;
+        op.ascending = asc;
+        gpuLayerOp(op, d0.p, d1.p, d2.p, n, 0);
+        const Vec r[3] = {d0.get(), d1.get(), d2.get()};
+        double errBlend = 0, errNormal = 0, errOutside = 0;
+        for (int i = 0; i < n[0]; i++)
+          for (int j = 0; j < n[1]; j++)
+            for (int k = 0; k < n[2]; k++) {
+              const int idx[3] = {i, j, k};
+              const int layer = idx[dir];
+              const size_t a = ((size_t)i * n[1] + j) * n[2] + k;
+              const bool in = layer >= lo && layer <= hi;
+              const T sal =
+                  asc ? (T)(layer - lo) * invNL : (T)(hi - layer) * invNL;
+              for (int c = 0; c < 3; c++) {
+                if (!in)
+                  errOutside = worse(errOutside, r[c][a] - h[c][a]);
+                else if (c == skip)
+                  errNormal = worse(errNormal, r[c][a] - h[c][a]);
+                else
+                  errBlend =
+                      worse(errBlend, r[c][a] - (h[c][a] * sal +
+                                                 tgt[c] * (T(1) - sal)));
+              }
+            }
+        char what[96];
+        const char* const face = faceName(dir, !asc);
+        std::snprintf(what, sizeof(what), "%s, skip %+d: blended components",
+                      face, skip);
+        check(errBlend < 1e-12, what, errBlend);
+        if (skipMode) {
+          std::snprintf(what, sizeof(what), "%s: normal component bit-identical",
+                        face);
+          check(errNormal == 0, what, errNormal);
+        }
+        std::snprintf(what, sizeof(what),
+                      "%s, skip %+d: outside the layers untouched", face, skip);
+        check(errOutside == 0, what, errOutside);
+      }
 }
 
 // ---------------------------------------------------------------------------
@@ -805,6 +883,8 @@ int main(int argc, char** argv) {
       which = argv[a + 1];
   if (which == "all" || which == "open-rows")
     testOpenRows();
+  if (which == "all" || which == "layer-blend")
+    testLayerBlend();
   if (which == "all" || which == "mudot")
     testMUdot();
   if (which == "all" || which == "point-list")

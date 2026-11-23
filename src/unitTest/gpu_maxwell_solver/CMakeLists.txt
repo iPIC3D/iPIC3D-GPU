@@ -93,53 +93,18 @@ endif()
 
 enable_testing()
 
-# gpuMaxwellSolver<name>: the test case test_case on GPU_MAXWELL_MPI_PROCS
-# ranks, with the extra arguments in ARGN; the oblique-wave convergence study
-# runs alone (its levels use the whole GPU)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+# maxwell_<name>: one case of the test on GPU_MAXWELL_MPI_PROCS ranks
 function(add_solver_test name test_case timeout)
-  add_test(
-    NAME gpuMaxwellSolver${name}
-    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${GPU_MAXWELL_MPI_PROCS}
-            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:gpuMaxwellSolverTest>
-            --case ${test_case} ${ARGN} ${MPIEXEC_POSTFLAGS})
-  set_tests_properties(gpuMaxwellSolver${name} PROPERTIES TIMEOUT ${timeout})
-  if(test_case STREQUAL "oblique-wave")
-    set_tests_properties(
-      gpuMaxwellSolver${name}
-      PROPERTIES PROCESSORS ${GPU_MAXWELL_MPI_PROCS} RUN_SERIAL TRUE)
-  endif()
+  add_unit_test(maxwell_${name} TARGET gpuMaxwellSolverTest TIMEOUT ${timeout}
+                RANKS ${GPU_MAXWELL_MPI_PROCS} GPU ARGS --case ${test_case})
 endfunction()
 
-# name, case, timeout (s)
-set(solver_tests
-    Periodic periodic 90
-    Reflective reflective 90
-    Manufactured manufactured 90
-    BoundaryRows boundary-rows 90
-    SmoothedFaces smoothed-faces 90
-    InflowLayers inflow-layers 90
-    ConductorWall conductor-wall 90
-    ConductorEdges conductor-edges 90
-    LocalImage local-image 90
-    GhostFill ghost-fill 90
-    ConductorModes conductor-modes 120
-    ImageReference image-reference 90
-    ObliqueWaveConvergence oblique-wave 300)
-# the cases also run with HaloOverlap = 1 (image-reference runs both modes)
-set(overlap_cases periodic reflective manufactured boundary-rows smoothed-faces
-                  inflow-layers conductor-wall conductor-modes oblique-wave)
-list(LENGTH solver_tests n_items)
-math(EXPR last "${n_items} - 1")
-foreach(i RANGE 0 ${last} 3)
-  math(EXPR i_case "${i} + 1")
-  math(EXPR i_timeout "${i} + 2")
-  list(GET solver_tests ${i} name)
-  list(GET solver_tests ${i_case} test_case)
-  list(GET solver_tests ${i_timeout} timeout)
-  add_solver_test(${name} ${test_case} ${timeout})
-  if(test_case IN_LIST overlap_cases)
-    string(REPLACE "-" "_" overlap_name ${test_case})
-    add_solver_test(Overlap_${overlap_name} ${test_case} ${timeout}
-                    --halo-overlap)
-  endif()
-endforeach()
+add_solver_test(image image-reference 90)
+add_solver_test(manufactured manufactured 90)
+add_solver_test(wave oblique-wave 300)
+add_solver_test(inflow inflow-layers 90)
+add_solver_test(conductor_wall conductor-wall 120)
+add_solver_test(closed_box closed-box 90)
+add_solver_test(conductor_modes conductor-modes 120)
+add_solver_test(ghost_fill ghost-fill 90)

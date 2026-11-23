@@ -49,5 +49,5 @@ endif()
 enable_testing()
 
 # all the cases in one run: they share one GMM object, as the analysis does
-add_test(NAME gmm COMMAND $<TARGET_FILE:gmmTest>)
-set_tests_properties(gmm PROPERTIES TIMEOUT 300)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(gmm TARGET gmmTest TIMEOUT 300 GPU)

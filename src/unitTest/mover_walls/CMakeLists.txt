@@ -49,10 +49,5 @@ endif()
 
 enable_testing()
 
-foreach(test_case invariants box corner turned-back narrow wall-time no-wall
-                  relativistic stopped)
-  string(REPLACE "-" "_" test_name ${test_case})
-  add_test(NAME moverWalls_${test_name}
-           COMMAND $<TARGET_FILE:moverWallsTest> --case ${test_case})
-  set_tests_properties(moverWalls_${test_name} PROPERTIES TIMEOUT 120)
-endforeach()
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(mover_walls TARGET moverWallsTest TIMEOUT 120 GPU)

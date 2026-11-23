@@ -1,11 +1,13 @@
 /**
- * @file histogram3DTest.cu
- * @brief Unit test of the velocity histograms of a rank (velocityHistogram3D)
- *        and of its macrocells (macrocellHistogram3D, the tiling and its
+ * @file histogramTest.cu
+ * @brief Unit test of the velocity histograms: the 2D one, and those of a rank
+ *        (velocityHistogram3D) and of its macrocells (macrocellHistogram3D, the tiling and its
  *        slices): against a CPU reference, their reproducibility, and the
  *        compacted non-empty bins.
  *
- * The histograms run on a non-blocking stream, as in the analysis. Cases:
+ * The 3D histograms run on a non-blocking stream, as in the analysis. Cases:
+ *   - the 2D histogram: a sample in every bin, one on the upper corner (the
+ *     last bin) and two out of range (in no bin), weighted by |q|;
  *   - a small set, then two Gaussian populations of 5e6 particles (more than
  *     a batch of the accumulation; the buffers grow), against the CPU, bit
  *     for bit against the integer sums of the CPU, run twice and in another
@@ -123,6 +125,16 @@ constexpr int kTinyMacrocell = 2;
 constexpr int kDenseCell =
     2 + (kRank3DInterior[0] + 2) * (2 + (kRank3DInterior[1] + 2) * 1);
 static_assert(kLargeParticles > kBatchParticles, "two batches");
+/** The 2D histogram: bins per axis, one sample per bin and one on the upper
+ *  corner and two out of range; the charge of a sample and its weight scale
+ *  (one sample weighs 1). */
+constexpr int kBins2D = 200;
+constexpr int kBinCount2D = kBins2D * kBins2D;
+constexpr int kSamples2D = kBinCount2D + 3;
+constexpr int kBlockSize2D = 256;
+constexpr double kTolerance2D = 1e-6;
+constexpr histogramTypeIn kCharge2D = 1e-6;
+constexpr histogramTypeIn kWeightScale2D = 1 / kCharge2D;
 
 /** The stream of the histograms: non-blocking, as in the analysis. */
 cudaStream_t stream;
@@ -1237,17 +1249,119 @@ int runMacrocellTest() {
   return pass ? 0 : 1;
 }
 
+/** The bins of the 2D samples, weighted by |q|. */
+__global__ void fillHistogram2D(const int sampleCount, const histogramTypeIn* u,
+                                const histogramTypeIn* v,
+                                const histogramTypeIn* q,
+                                velocityHistogramCUDA2D* histogram) {
+  const int tid = threadIdx.x + blockIdx.x * blockDim.x;
+  const int stride = gridDim.x * blockDim.x;
+  auto* histogramBuffer = histogram->getHistogramCUDA();
+
+  for (int sample = tid; sample < sampleCount; sample += stride) {
+    histogramTypeIn data[2] = {u[sample], v[sample]};
+    const int bin = histogram->getIndex(data);
+    if (bin >= 0) {
+      atomicAdd(&histogramBuffer[bin],
+                static_cast<histogramTypeOut>(fabs(q[sample] * kWeightScale2D)));
+    }
+  }
+}
+
+/** 0 if the 2D histogram holds the expected weight in every bin. */
+int run2DTest() {
+  histogramTypeIn minRange[2] = {static_cast<histogramTypeIn>(kVmin),
+                                 static_cast<histogramTypeIn>(kVmin)};
+  histogramTypeIn maxRange[2] = {static_cast<histogramTypeIn>(kVmax),
+                                 static_cast<histogramTypeIn>(kVmax)};
+  int binsPerDim[2] = {kBins2D, kBins2D};
+
+  // the histogram object and the particles in page-locked memory: they are
+  // copied to the device
+  velocityHistogramCUDA2D* const histogram =
+      newHostPinnedObject<velocityHistogramCUDA2D>(kBinCount2D);
+  histogram->setHistogram(minRange, maxRange, binsPerDim);
+  cudaErrChk(cudaMemset(histogram->getHistogramCUDA(), 0,
+                        kBinCount2D * sizeof(histogramTypeOut)));
+
+  PinnedVector<histogramTypeIn> u(kSamples2D), v(kSamples2D);
+  PinnedVector<histogramTypeIn> q(kSamples2D, kCharge2D);
+  std::vector<histogramTypeOut> expected(kBinCount2D, 1.0);
+
+  const histogramTypeIn resolution = (maxRange[0] - minRange[0]) / kBins2D;
+  for (int iy = 0; iy < kBins2D; ++iy) {
+    for (int ix = 0; ix < kBins2D; ++ix) {
+      const int sample = iy * kBins2D + ix;
+      u[sample] = minRange[0] + (ix + 0.5) * resolution;
+      v[sample] = minRange[1] + (iy + 0.5) * resolution;
+    }
+  }
+  u[kBinCount2D] = maxRange[0];
+  v[kBinCount2D] = maxRange[1];
+  q[kBinCount2D] = 2e-6;
+  expected.back() += 2.0;
+  u[kBinCount2D + 1] = minRange[0] - resolution;
+  v[kBinCount2D + 1] = minRange[1];
+  q[kBinCount2D + 1] = 100e-6;
+  u[kBinCount2D + 2] = minRange[0];
+  v[kBinCount2D + 2] = maxRange[1] + resolution;
+  q[kBinCount2D + 2] = 100e-6;
+
+  const size_t bytes = kSamples2D * sizeof(histogramTypeIn);
+  histogramTypeIn* uDevice = nullptr;
+  histogramTypeIn* vDevice = nullptr;
+  histogramTypeIn* qDevice = nullptr;
+  velocityHistogramCUDA2D* histogramDevice = nullptr;
+  cudaErrChk(cudaMalloc(&uDevice, bytes));
+  cudaErrChk(cudaMalloc(&vDevice, bytes));
+  cudaErrChk(cudaMalloc(&qDevice, bytes));
+  cudaErrChk(cudaMalloc(&histogramDevice, sizeof(velocityHistogramCUDA2D)));
+  cudaErrChk(cudaMemcpy(uDevice, u.data(), bytes, cudaMemcpyHostToDevice));
+  cudaErrChk(cudaMemcpy(vDevice, v.data(), bytes, cudaMemcpyHostToDevice));
+  cudaErrChk(cudaMemcpy(qDevice, q.data(), bytes, cudaMemcpyHostToDevice));
+  cudaErrChk(cudaMemcpy(histogramDevice, histogram,
+                        sizeof(velocityHistogramCUDA2D),
+                        cudaMemcpyHostToDevice));
+
+  fillHistogram2D<<<getGridSize(kSamples2D, kBlockSize2D), kBlockSize2D>>>(
+      kSamples2D, uDevice, vDevice, qDevice, histogramDevice);
+  cudaErrChk(cudaGetLastError());
+  cudaErrChk(cudaDeviceSynchronize());
+  histogram->copyHistogramAsync(0);
+  cudaErrChk(cudaDeviceSynchronize());
+
+  const auto* actual = histogram->getHistogram();
+  bool pass = true;
+  for (int i = 0; i < kBinCount2D && pass; ++i) {
+    if (std::fabs(static_cast<double>(actual[i] - expected[i])) > kTolerance2D) {
+      std::cout << "Mismatch in 2D histogram at bin " << i
+                << ": GPU = " << actual[i] << ", CPU = " << expected[i] << "\n";
+      pass = false;
+    }
+  }
+
+  deleteHostPinnedObject(histogram);
+  cudaErrChk(cudaFree(histogramDevice));
+  cudaErrChk(cudaFree(qDevice));
+  cudaErrChk(cudaFree(vDevice));
+  cudaErrChk(cudaFree(uDevice));
+  std::cout << "Test " << (pass ? "passed" : "failed")
+            << ": 2D histogram bins match expected counts.\n";
+  return pass ? 0 : 1;
+}
+
 } // namespace
 
 int main() {
   stream = createPriorityStream(StreamPriority::Diagnostic);
   int failed = EXIT_FAILURE;
   try {
+    const int twoD = run2DTest();
     const int rank = runTest();
     const int macrocells = runMacrocellTest();
-    failed = rank || macrocells;
+    failed = twoD || rank || macrocells;
   } catch (const std::exception& error) {
-    std::cerr << "histogram3DTest failed: " << error.what() << "\n";
+    std::cerr << "histogramTest failed: " << error.what() << "\n";
   }
   cudaErrChk(cudaStreamDestroy(stream));
   return failed;

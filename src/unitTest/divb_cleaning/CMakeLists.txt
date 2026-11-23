@@ -59,11 +59,5 @@ endif()
 
 enable_testing()
 
-foreach(test_case sal-tangential adjoint lap27-image lap27-local
-                  chebyshev-cleaning divb-projection dive-projection dive-walls null-space
-                  krylov-kernels poisson-local poisson-image)
-  string(REPLACE "-" "_" test_name ${test_case})
-  add_test(NAME divbCleaning_${test_name}
-           COMMAND $<TARGET_FILE:divbCleaningTest> --case ${test_case})
-  set_tests_properties(divbCleaning_${test_name} PROPERTIES TIMEOUT 60)
-endforeach()
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(cleaning TARGET divbCleaningTest TIMEOUT 120 GPU)

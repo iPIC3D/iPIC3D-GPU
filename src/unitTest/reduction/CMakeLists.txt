@@ -117,9 +117,5 @@ endif()
 enable_testing()
 
 # Test cases
-add_test(
-  NAME reductionTest1
-  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1
-          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:reductionTest>
-          ${MPIEXEC_POSTFLAGS})
-set_tests_properties(reductionTest1 PROPERTIES TIMEOUT 10) # Timeout in seconds
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(reduction TARGET reductionTest TIMEOUT 60 GPU)

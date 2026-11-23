@@ -20,5 +20,5 @@ target_include_directories(analysisRecordsTest
                            PUBLIC ${PROJECT_ROOT}/src/include)
 
 enable_testing()
-add_test(NAME analysisRecords COMMAND analysisRecordsTest)
-set_tests_properties(analysisRecords PROPERTIES TIMEOUT 60)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(analysis_records TARGET analysisRecordsTest TIMEOUT 60)

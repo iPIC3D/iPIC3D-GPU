@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21) # HIP requires 3.21
-project(histogram3DTest LANGUAGES CXX)
+project(histogramTest LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,7 +31,7 @@ endif()
 
 find_package(MPI REQUIRED COMPONENTS CXX)
 
-set(PROJECT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../..)
+set(PROJECT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 set(SOURCE_CODE_DIR ${PROJECT_ROOT}/src/ipic3d)
 set(INCLUDE_CODE_DIR ${PROJECT_ROOT}/src/include)
 
@@ -63,7 +63,7 @@ if(HIP_ON)
 endif()
 list(APPEND src_files ${cuda_src_files})
 
-add_executable(histogram3DTest ${src_files})
+add_executable(histogramTest ${src_files})
 
 # include
 set(include_path ${INCLUDE_CODE_DIR})
@@ -79,41 +79,41 @@ else()
 endif()
 
 target_include_directories(
-  histogram3DTest
+  histogramTest
   PUBLIC ${include_path}
   )
 
 set(linkLibraries MPI::MPI_CXX)  
 
-target_link_libraries(histogram3DTest PRIVATE ${linkLibraries})
+target_link_libraries(histogramTest PRIVATE ${linkLibraries})
 
 # configure GPU
 if(NOT HIP_ON) # CUDA
 
-  set_target_properties(histogram3DTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-  set_property(TARGET histogram3DTest PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
-  set_property(TARGET histogram3DTest PROPERTY CUDA_STANDARD 17)
-  set_property(TARGET histogram3DTest PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
-  set_property(TARGET histogram3DTest PROPERTY LINK_OPTIONS -fno-lto)
+  set_target_properties(histogramTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  set_property(TARGET histogramTest PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+  set_property(TARGET histogramTest PROPERTY CUDA_STANDARD 17)
+  set_property(TARGET histogramTest PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+  set_property(TARGET histogramTest PROPERTY LINK_OPTIONS -fno-lto)
 
 else() # HIP
 
-  target_link_libraries(histogram3DTest PRIVATE hip::device)
-  target_link_libraries(histogram3DTest PRIVATE hip::host)
+  target_link_libraries(histogramTest PRIVATE hip::device)
+  target_link_libraries(histogramTest PRIVATE hip::host)
 
-  target_compile_options(histogram3DTest PUBLIC -fgpu-rdc)
-  target_link_options(histogram3DTest PUBLIC  -fgpu-rdc --hip-link)
+  target_compile_options(histogramTest PUBLIC -fgpu-rdc)
+  target_link_options(histogramTest PUBLIC  -fgpu-rdc --hip-link)
 
-  set_property(TARGET histogram3DTest PROPERTY HIP_ARCHITECTURES ${HIP_ARCH})
+  set_property(TARGET histogramTest PROPERTY HIP_ARCHITECTURES ${HIP_ARCH})
 
 endif()
 
 
 if(HIP_ON)
-target_compile_definitions(histogram3DTest PUBLIC HIPIFLY)
+target_compile_definitions(histogramTest PUBLIC HIPIFLY)
 endif()
 
-target_compile_definitions(histogram3DTest PUBLIC NO_HDF5)
+target_compile_definitions(histogramTest PUBLIC NO_HDF5)
 
 
 # TEST
@@ -121,9 +121,5 @@ target_compile_definitions(histogram3DTest PUBLIC NO_HDF5)
 enable_testing()
 
 # Test cases
-add_test(
-  NAME histogram3DTest
-  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1
-          ${MPIEXEC_PREFLAGS} $<TARGET_FILE:histogram3DTest>
-          ${MPIEXEC_POSTFLAGS})
-set_tests_properties(histogram3DTest PROPERTIES TIMEOUT 60) # Timeout in seconds
+include(${CMAKE_CURRENT_SOURCE_DIR}/../unitTestLaunch.cmake)
+add_unit_test(histogram TARGET histogramTest TIMEOUT 120 GPU)

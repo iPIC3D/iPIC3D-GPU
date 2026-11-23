@@ -64,8 +64,8 @@ public:
    * @param ns Number of particle species.
    * @param testpart Array of host test-particle containers.
    * @param nstestpart Number of test-particle species.
-   * @param first_cycle First simulation cycle to consider for output
-   * scheduling.
+   * @param first_cycle First simulation cycle: for output scheduling, and
+   * on a restart the cycle from which the serial-HDF5 rank files are cut.
    */
   void init(Collective* col, VCtopology3D* vct, Grid3DCU* grid, EMfields3D* EMf,
             ParticleSoAHost** outputPart, int ns, ParticleSoAHost** testpart,

@@ -224,7 +224,9 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
 
   const string writeMethod = col->getFieldWriteMethod();
 
-  // Step 1: the field backend, FieldWriteMethod.
+  // Step 1: the field backend, FieldWriteMethod. The input checks
+  // (Collective::ReadInput) admit only the backends of this build; adios2,
+  // whose field output is not implemented, never reaches this.
   if (writeMethod == "shdf5")
     fieldBackend_ = FieldBackend::SHDF5;
   else if (writeMethod == "pvtk")
@@ -238,7 +240,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
   else {
     // Fatal: carrying on would silently drop all field output.
     eprintf("Unknown FieldWriteMethod '%s' in the input file. "
-            "Valid options: shdf5, pvtk, nbcvtk, phdf5, adios2",
+            "Valid options: shdf5, phdf5, pvtk, nbcvtk",
             writeMethod.c_str());
   }
 
@@ -253,15 +255,6 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
       chooseFileBackend("RestartWriteMethod", col->getRestartWriteMethod(),
                         rank0 && restart_cycle_ > 0, "checkpoints"));
 
-  // Step 4: validate backend availability against compile flags.
-#ifdef NO_HDF5
-  if (fieldBackend_ == FieldBackend::SHDF5 ||
-      fieldBackend_ == FieldBackend::PARALLEL_HDF5) {
-    eprintf("FieldWriteMethod '%s' requires HDF5 (compile with USE_HDF5=ON)",
-            writeMethod.c_str());
-  }
-#endif
-
   if (restartBackend_ != RestartBackend::NONE &&
       (restart_cycle_ > 0 || col->getCallFinalize())) {
     const RestartMeshMetadata restartMesh =
@@ -275,35 +268,31 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
                        restartMesh, col->getRestartReadSlot());
     MPI_Comm_dup(MPIdata::get_PicGlobalComm(), &checkpointComm_);
   }
-#ifndef USE_ADIOS2
-  if (fieldBackend_ == FieldBackend::ADIOS2) {
-    eprintf("FieldWriteMethod 'adios2' requires ADIOS2 (compile with "
-            "USE_ADIOS2=ON)");
-  }
-#endif
 
   // ======= HDF5 backend setup =======
+  // test particles are written with serial HDF5 only, into the rank files
+  const bool testParticleOutput =
+      nstestpart > 0 && !col->testparticle_output_is_off();
 #ifndef NO_HDF5
   {
-    bool needHDF5 = false;
-    if (fieldBackend_ == FieldBackend::SHDF5)
-      needHDF5 = true;
-    if (particleBackend_ == ParticleBackend::SHDF5)
-      needHDF5 = true;
-    if (restartBackend_ == RestartBackend::SHDF5)
-      needHDF5 = true;
+    // the rank files: serial-HDF5 fields, particles or test particles
+    const bool rankFiles = fieldBackend_ == FieldBackend::SHDF5 ||
+                           (particleBackend_ == ParticleBackend::SHDF5 &&
+                            col->particle_output_requested()) ||
+                           testParticleOutput;
     // PHDF5 uses free functions; no OutputWrapperFPP is needed.
-
-    if (needHDF5) {
+    if (rankFiles || restartBackend_ == RestartBackend::SHDF5) {
       outputWrapperFPP_ = new OutputWrapperFPP;
       outputWrapperFPP_->init_output_files(
-          col, vct, grid, EMf, outputPart, ns, testpart, nstestpart,
-          fieldBackend_ == FieldBackend::SHDF5 ||
-              (particleBackend_ == ParticleBackend::SHDF5 &&
-               col->particle_output_requested()),
-          restartBackend_ == RestartBackend::SHDF5);
+          col, vct, grid, EMf, outputPart, ns, testpart, nstestpart, rankFiles,
+          restartBackend_ == RestartBackend::SHDF5, first_cycle_);
     }
   }
+#else
+  if (rank0 && testParticleOutput)
+    warning_printf("test particles are written with serial HDF5 only, which "
+                   "this build lacks (compile with USE_HDF5=ON): they are not "
+                   "written");
 #endif
 
   // ======= ADIOS2 backend setup =======

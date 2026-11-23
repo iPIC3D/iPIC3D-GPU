@@ -559,8 +559,7 @@ private:
   string RestartReadSlot;
   /*! rank 0: why slots were passed over while selecting the restart */
   string RestartSelectionReport;
-  /*! restart_status 0 --> no restart; 1--> restart, create new; 2--> restart,
-   * append; */
+  /*! restart_status 0 --> no restart; 1 --> restart */
   int restart_status;
   /*! last cycle */
   int last_cycle;

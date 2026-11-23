@@ -138,7 +138,7 @@ srun --nodes=4 --ntasks=32 --ntasks-per-node=8 ./iPIC3D ../share/benchmark/GEM3D
 
 ### Result
 
-This iPIC3D-GPU will create folder (usually named `data`) for the output results if it doesn't exist. On a **fresh start**, existing contents of the output folder, and of `RestartDirName` if it differs, are deleted. On a **restart**, the output folder is left intact and new data is appended. What is written, how often and in which format is set in the input file, see [Output Control](#output-control).
+This iPIC3D-GPU will create folder (usually named `data`) for the output results if it doesn't exist. On a **fresh start**, existing contents of the output folder, and of `RestartDirName` if it differs, are deleted. On a **restart**, the output folder is kept and new data is appended; the serial-HDF5 rank files lose the outputs the restart writes again, or are kept aside when they come from another decomposition (see [Output files](#output-files)). What is written, how often and in which format is set in the input file, see [Output Control](#output-control).
 
 
 ## Build Options
@@ -249,7 +249,7 @@ The restart reader can load a checkpoint onto a different MPI topology when all 
 - The destination topology refines the source topology by powers of two in each direction; coarsening and arbitrary factors are not supported.
 - The checkpoint contains active-node fields and active-cell particle metadata, as every checkpoint written by this code does.
 
-`RestartRemapPlan` maps each destination rank to overlapping source active boxes. Fields are copied into guarded arrays at `[1][1][1]`; particles are read as the sorted spans belonging to the destination rank. The data-analysis records are per rank: a remapped restart keeps the records files of the old decomposition of the analyses that run as `*_before_cycle<N>.*` and starts them again; those of the analyses switched off stay as they are (see Data analysis).
+`RestartRemapPlan` maps each destination rank to overlapping source active boxes. Fields are copied into guarded arrays at `[1][1][1]`; particles are read as the sorted spans belonging to the destination rank. The data-analysis records are per rank: a remapped restart keeps the records files of the old decomposition of the analyses that run as `*_before_cycle<N>.*` and starts them again; those of the analyses switched off stay as they are (see Data analysis). The serial-HDF5 output files `proc<rank>.hdf` and `settings.hdf` are kept aside the same way (see [Output files](#output-files)).
 
 ### Particle restart loading
 
@@ -302,7 +302,7 @@ For a final checkpoint, the payload is written after the last cycle has complete
 1. **Input file is read** — all simulation parameters (grid, species, BCs, etc.) are taken from the input file, same as a fresh start.
 2. **Fields** — the case initialiser runs (for `Dipole`/`Dipole2D` it sets the external dipole field; the other cases only read the checkpoint), then `read_field_restart()` loads B, E and the species densities, remapping active-node boxes when needed. For `Dipole`/`Dipole2D` the planet charge is reset (`ConstantChargePlanet`) and for `TaylorGreen` `ConstantChargeOpenBC` is applied; ghost nodes and center fields are rebuilt.
 3. **Particles** — `restartLoad()` reads positions, velocities, charges and, for species with `TrackParticleID`, IDs from the selected slot. With remapping, active-cell metadata selects the source spans for this destination rank.
-4. **Output directory** — the output folder is **not** cleared on restart. Output files are opened in append mode.
+4. **Output directory** — the output folder is **not** cleared on restart. Output files are opened in append mode; the serial-HDF5 rank files `proc<rank>.hdf` first lose their datasets of the restart cycle and later, or are kept aside on another decomposition (see [Output files](#output-files)).
 
 ### Requirements
 
@@ -570,6 +570,26 @@ Case = GEM
 
 The `Case` string is **case-sensitive** and must match one of the names in the table above exactly.
 
+### Species parameters
+
+The per-species lists of the input file take one value per species, in species order:
+
+| Keys | Values |
+|---|---|
+| `rhoINIT`, `rhoINJECT`, `uth`, `vth`, `wth`, `u0`, `v0`, `w0` | `ns` |
+| `npcelx`, `npcely`, `npcelz`, `qom` | `ns + nsTestPart`: the test-particle species after the others |
+| `pitch_angle`, `energy` | `nsTestPart` (with test particles) |
+| `NeutralSurfaceDensity`, `ExosphericScaleHeight`, `PhotoionizationFrequency`, `MacroParticleWeightRatio` | `ns_planetary` (with planetary species) |
+
+The run stops at startup, naming the key, for:
+- a list with another number of values, or a value that is not a number of the list's type (a whole number for `npcelx`, `npcely` and `npcelz`), or values written together without a space (`1.0.5`, `3+4`);
+- `ns` below 1 or `nsTestPart` below 0;
+- an `ns_solar_wind` outside 0 to `ns` or a negative `ns_planetary`, and with `AddExosphereInjection = 1` an `ns_planetary` other than `ns - ns_solar_wind`: the exosphere injects into the species from `ns_solar_wind` on; and, with it and planetary species, `npcelx * npcely * npcelz = 0` for species 0, by which the exosphere sizes the particles it injects;
+- a negative `npcelx`, `npcely` or `npcelz`, or a negative `rhoINIT` or `rhoINJECT`;
+- a species with `rhoINIT` or `rhoINJECT` above 0 but `npcelx * npcely * npcelz = 0`, which would load or inject no particles. A species with neither density may load none: the planetary species of an exosphere start empty and ionisation fills them.
+
+A `qom` of 0 is allowed with a warning. The charge sign qom/|qom| and the mass q/qom of a species divide by it: its particles, or the charge held fixed for it on a planet (`Dipole`, `Dipole2D`) or on the open faces of a `TaylorGreen` restart, make the field solve non-finite at the first cycle, which stops the run; with neither, its bulk-flow energy in `ConservedQuantities.txt` is `nan`. A test-particle species with `qom` 0 gets an undefined (`nan`) charge, which only the checkpoints hold.
+
 ### Case-specific input parameters
 
 Some cases use additional input-file parameters beyond the common ones:
@@ -637,7 +657,7 @@ How these keys act:
 - **When.** An output of cycle `N > 0` is written at the cycles that are multiples of `N`, cycle 0 included; the field output also at the first cycle of a restart. `N <= 0` switches that output off.
 - **What.** A tag joins tokens with `+`; spaces around a token are ignored. An empty tag writes nothing: the field output needs a token in `FieldOutputTag` or `MomentsOutputTag`, the particle output one in `ParticlesOutputTag`. An unknown field or moment token is ignored with a warning; an unknown particle token stops the run.
 - **Where.** `FieldWriteMethod` is required in every input file, also with the field output off. `ParticlesWriteMethod` and `RestartWriteMethod` may be left out, which takes ADIOS2 if the build has it, else serial HDF5. A backend the build lacks is replaced by the other one, with a warning; with neither, those data are not written, a warning is printed and the run goes on (see [I/O Backends](#io-backends)).
-- **Checked at startup.** The run stops before the first cycle, naming the key, for: the old key `WriteMethod`; a missing or unknown `FieldWriteMethod`; a `ParticlesWriteMethod` or `RestartWriteMethod` other than `adios2` or `shdf5`; an unknown particle token; a `ParticlesOutputSpecies` with neither one nor `ns` values, or with no species while particles are written; a `ParticlesOutputTrackedFraction` with neither one nor `ns` values, or one neither `-1` nor from 0 to 1; a `ParticlesOutputMaxPerCell` with neither one nor `ns` values, or a negative one. Two settings without effect only print a warning, for a species whose particles are written: a `ParticlesOutputTrackedFraction` other than `-1` for a species without `TrackParticleID`, and a `ParticlesOutputMaxPerCell` for a species whose `ParticlesOutputTrackedFraction` is on.
+- **Checked at startup.** The run stops before the first cycle, naming the key, for: the old key `WriteMethod`; a missing `FieldWriteMethod`, one other than `shdf5`, `phdf5`, `pvtk` or `nbcvtk`, or an HDF5 one the build lacks (`shdf5` and `phdf5` need `USE_HDF5=ON`, `phdf5` also `USE_PHDF5=ON`); a `ParticlesWriteMethod` or `RestartWriteMethod` other than `adios2` or `shdf5`; an unknown particle token; a `ParticlesOutputSpecies` with neither one nor `ns` values, or with no species while particles are written; a `ParticlesOutputTrackedFraction` with neither one nor `ns` values, or one neither `-1` nor from 0 to 1; a `ParticlesOutputMaxPerCell` with neither one nor `ns` values, or a negative one. Two settings without effect only print a warning, for a species whose particles are written: a `ParticlesOutputTrackedFraction` other than `-1` for a species without `TrackParticleID`, and a `ParticlesOutputMaxPerCell` for a species whose `ParticlesOutputTrackedFraction` is on.
 
 ### Output files
 
@@ -650,16 +670,19 @@ How these keys act:
 | | `shdf5` | `proc<rank>.hdf`, with `settings.hdf`: datasets `/particles/species_<s>/{x,y,z,u,v,w,q,ID}/cycle_<N>` |
 | Restart checkpoints | `adios2`, `shdf5` | `RestartDirName/restart_A/`, `restart_B/` and `latest_restart.json`, see [Restart files](#restart-files) |
 | Energy diagnostics | | `ConservedQuantities.txt` |
-| Test particles | `shdf5` | `proc<rank>.hdf`: datasets `/testparticles/species_<s>/...` |
+| Test particles | `shdf5` (always; a build without HDF5 warns and does not write them) | `proc<rank>.hdf`: datasets `/testparticles/species_<s>/...` |
 | Run record | | `SimulationData.txt` (the parameters, at the start), `particleNum<rank>.csv` (the particles of each species, every cycle) |
 
-A species not in `ParticlesOutputSpecies` has no particle variables or datasets; `ID` is written for the species with `TrackParticleID` only. A restart appends to the files of the run it continues.
+A species not in `ParticlesOutputSpecies` has no particle variables or datasets; `ID` is written for the species with `TrackParticleID` only. A restart appends to the files of the run it continues. It runs again from the cycle of its checkpoint, so it writes the outputs of that cycle and later again:
+- `proc<rank>.hdf` (serial HDF5), with `FieldWriteMethod = shdf5` or when the restart writes serial-HDF5 particles or test particles: before the first cycle, every rank removes from its file the datasets `cycle_<N>` with `N` at or after the restart cycle, those the run writes again and those it no longer writes (another output cycle, fewer cycles, an output switched off); each file thus holds one history. To keep the earlier outputs, restart into another `SaveDirName`. HDF5 may keep the space the removed datasets took (`h5repack` frees it). On another decomposition or periodicity (a remapped restart, recognised from `settings.hdf` when it can be read, from a rank file of a rank this run lacks, and from the `/topology` of each rank file; a rank file without it counts as another one), the files of the earlier run, `settings.hdf` among them, are kept as `*_before_cycle<N>.hdf` (`_2`, `_3`, ... added when such a file exists) and new files start; rank 0 warns. A rank file that the run would continue but cannot open or rewrite (held by another program, damaged, read-only) stops the run before any cycle, once every rank has closed its own file; among files kept aside, it is kept aside like the others.
+- `particle_<rank>.bp` (ADIOS2): the cycles written again are appended as further steps; the last step of a cycle is the one of the restart.
+- The VTK and parallel-HDF5 files, one per cycle, are written again.
 
 ### Fields and moments
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `FieldWriteMethod` | — | Field backend: `shdf5`, `phdf5`, `pvtk` or `nbcvtk` (`adios2` is not implemented), see [I/O Backends](#io-backends); required. `WriteMethod`, its old name, is an input error |
+| `FieldWriteMethod` | — | Field backend: `shdf5`, `phdf5`, `pvtk` or `nbcvtk` (`adios2` is not implemented: an input error), see [I/O Backends](#io-backends); required. `WriteMethod`, its old name, is an input error |
 | `FieldOutputCycle` | `100` | Write the fields and moments every N cycles and at the first cycle of a run. `<= 0` disables field output |
 | `FieldOutputTag` | empty | Fields, tokens below |
 | `MomentsOutputTag` | empty | Moments, tokens below |
@@ -787,7 +810,7 @@ The cycle of such an output waits only for the copy of its data from the GPU to 
 |-----------|---------|-------------|
 | `DiagnosticsOutputCycle` | `FieldOutputCycle` | Append to `ConservedQuantities.txt` every N cycles the total, electric, magnetic and kinetic energies, the momentum and the charge, and per species the kinetic and bulk-flow energies, the momentum and the charge. `<= 0` disables them |
 | `PlanetDiagnosticsCycle` | `DiagnosticsOutputCycle` | Append the planet surface balance to `PlanetBC.txt` every N cycles and at the end of the run (`Dipole`, `Dipole2D`). `<= 0` disables. |
-| `TestPartOutputCycle` | `0` | Write test-particle trajectory data every N cycles. Test particles are written by the serial-HDF5 writer only: one of `FieldWriteMethod`, `ParticlesWriteMethod` and `RestartWriteMethod` must be `shdf5`, or the build must lack ADIOS2 |
+| `TestPartOutputCycle` | `0` | Write test-particle trajectory data every N cycles. Test particles are written by the serial-HDF5 writer only, into `proc<rank>.hdf` whatever the write methods; a build without HDF5 warns and does not write them |
 | `SaveDirName` | `data` | Output directory. **Warning:** existing contents are deleted on a fresh start. |
 | `ParaviewScriptPath` | `""` | Path to ParaView Catalyst Python script (requires `USE_CATALYST`) |
 
@@ -849,13 +872,13 @@ The `FieldWriteMethod` parameter in the input file controls the **field output**
 
 | `FieldWriteMethod` | Field backend | Description |
 |---------------|---------------|-------------|
-| `shdf5` | Serial HDF5 | One HDF5 file per MPI rank (file-per-process) |
+| `shdf5` | Serial HDF5 | One HDF5 file per MPI rank (file-per-process) (requires `USE_HDF5=ON`) |
 | `phdf5` | Parallel HDF5 | All ranks write collectively into a single HDF5 file (requires `USE_PHDF5=ON`) |
 | `pvtk` | Blocking VTK | Collective MPI-IO into VTK files |
 | `nbcvtk` | Non-blocking VTK | Non-blocking collective MPI-IO into VTK files; writes overlap with computation of the next cycle |
-| `adios2` | ADIOS2 | **Not implemented yet**: a build with ADIOS2 stops at the first field output, a build without it at startup |
+| `adios2` | ADIOS2 | **Not implemented**: stops the run at startup |
 
-Any other value stops the run at startup with an error.
+Any other value, or an HDF5 backend the build lacks, stops the run at startup with an error, before anything runs, also with the field output off.
 
 ### Particle and checkpoint backends
 

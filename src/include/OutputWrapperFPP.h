@@ -53,13 +53,16 @@ private:
   string restart_file;
 
 public:
-  /** With outputFiles (fields or particles in HDF5), also start the output
-   *  file of the rank and, on rank 0, settings.hdf; with restartFiles (HDF5
+  /** With outputFiles (fields, particles or test particles in HDF5), also
+   *  start the output file of the rank and, on rank 0, settings.hdf; a
+   *  restart from firstCycle continues the files of its folder without
+   *  their datasets of firstCycle and later, which it writes again, or keeps
+   *  the files of another decomposition aside. With restartFiles (HDF5
    *  checkpoints), rank 0 writes settings.hdf in the restart root too. */
   void init_output_files(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
                          EMfields3D* EMf, ParticleSoAHost** part, int ns,
                          ParticleSoAHost** testpart, int nstestpart,
-                         bool outputFiles, bool restartFiles);
+                         bool outputFiles, bool restartFiles, int firstCycle);
   /** The particle arrays of arrays of the given species at a cycle, from
    *  their views (the particles the output writes), into the output file of
    *  the rank. */

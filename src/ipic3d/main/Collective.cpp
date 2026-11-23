@@ -28,7 +28,6 @@
 #include "asserts.h" // for assert_ge
 #include "dataAnalysisConfig.cuh"
 #include "debug.h"
-#include "input_array.h"
 #include "limits.h" // for INT_MAX
 #include "string.h"
 #include <algorithm>
@@ -42,6 +41,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <vector>
+
+// The HDF5 field backends of this build (FieldWriteMethod): shdf5 needs
+// HDF5, phdf5 parallel HDF5.
+#ifdef NO_HDF5
+constexpr bool kBuildHasHDF5 = false;
+#else
+constexpr bool kBuildHasHDF5 = true;
+#endif
+#ifdef PHDF5
+constexpr bool kBuildHasParallelHDF5 = true;
+#else
+constexpr bool kBuildHasParallelHDF5 = false;
+#endif
+// The GPU field solver's sizes in the memory estimate (Print): the GMRES
+// restart length and the fields of a halo batch per direction.
+constexpr double kGmresM = 20.0;      // EMfields3D::GMRES_M
+constexpr double kHaloMaxBatch = 64.0; // EMfields3D::HALO_MAX_BATCH
 
 // order must agree with Enum in Collective.h
 static const char* enumNames[] = {
@@ -89,6 +105,23 @@ std::vector<unsigned char> parseTrackParticleIDMask(const ConfigFile& config,
   return mask;
 }
 
+/** The values of the input list text, "a b c ..." (none if empty), into
+ *  read. @return false for a value that is not a number of the type (out of
+ *  its range too), or not followed by a space or the end ("1.0.5" and "3+4"
+ *  are no lists of two). */
+template <typename T>
+bool readList(const std::string& text, std::vector<T>& read) {
+  std::istringstream iss(text);
+  read.clear();
+  while (!(iss >> std::ws).eof()) {
+    T value;
+    if (!(iss >> value) || !(iss.eof() || std::isspace(iss.peek())))
+      return false;
+    read.push_back(value);
+  }
+  return true;
+}
+
 /** Per-species values of an optional input list "a b c ...": absent, it
  *  keeps `values`; one value goes to every species, otherwise one value per
  *  species. @return false for another number of values or a value that is
@@ -96,14 +129,9 @@ std::vector<unsigned char> parseTrackParticleIDMask(const ConfigFile& config,
 template <typename T>
 bool readSpeciesList(const ConfigFile& config, const char* key,
                      std::vector<T>& values) {
-  std::istringstream iss(config.read<std::string>(key, std::string()));
   std::vector<T> read;
-  while (!(iss >> std::ws).eof()) {
-    T value;
-    if (!(iss >> value))
-      return false;
-    read.push_back(value);
-  }
+  if (!readList(config.read<std::string>(key, std::string()), read))
+    return false;
   if (read.size() > 1 && read.size() != values.size())
     return false;
   for (size_t s = 0; s < values.size() && !read.empty(); s++)
@@ -179,6 +207,22 @@ void Collective::ReadInput(string inputfile) {
 void Collective::ReadInput(const ConfigFile& config) {
   using namespace std;
   int test_verbose;
+  // A list of a required key of exactly count values, one per species in
+  // order (of `whose`: species, test-particle species, ...), into values; a
+  // missing key, another number of values, or a value that is not a number
+  // of the type stops the run.
+  const auto readExactList = [&](const char* key, int count, const char* whose,
+                                 auto& values) {
+    using T = typename std::decay_t<decltype(values)>::element_type;
+    // a missing key reads as an empty list (count is at least 1)
+    const string text = config.read<string>(key, "");
+    std::vector<T> read;
+    requireInput(readList(text, read) && (int)read.size() == count,
+                 "%s needs %d value%s, one per %s, not \"%s\"", key, count,
+                 count == 1 ? "" : "s", whose, text.c_str());
+    values = std::make_unique<T[]>(count);
+    std::copy(read.begin(), read.end(), values.get());
+  };
   // the following variables are ALWAYS taken from inputfile, even if restarting
   {
 
@@ -209,6 +253,10 @@ void Collective::ReadInput(const ConfigFile& config) {
     RestartReadDirName = RestartDirName;
     ns = config.read<int>("ns");
     nstestpart = config.read<int>("nsTestPart", 0);
+    requireInput(ns >= 1 && nstestpart >= 0,
+                 "ns must be at least 1 and nsTestPart at least 0, not %d "
+                 "and %d",
+                 ns, nstestpart);
     TrackParticleID = parseTrackParticleIDMask(config, ns + nstestpart);
     NpMaxNpRatio = config.read<double>("NpMaxNpRatio", 1.5);
     assert_ge(NpMaxNpRatio, 1.);
@@ -273,6 +321,23 @@ void Collective::ReadInput(const ConfigFile& config) {
                  "adios2 or shdf5) and RestartWriteMethod (checkpoints: adios2 "
                  "or shdf5)");
     fieldWriteMethod = config.read<string>("FieldWriteMethod");
+    // one of this build, also with the field output off (the key is
+    // required): an output would otherwise stop the run at its first cycle
+    const bool hdf5Fields =
+        fieldWriteMethod == "shdf5" || fieldWriteMethod == "phdf5";
+    requireInput(hdf5Fields || fieldWriteMethod == "pvtk" ||
+                     fieldWriteMethod == "nbcvtk",
+                 "FieldWriteMethod must be shdf5, phdf5, pvtk or nbcvtk, not "
+                 "%s",
+                 fieldWriteMethod.c_str());
+    requireInput(!hdf5Fields || kBuildHasHDF5,
+                 "FieldWriteMethod = %s needs a build with HDF5 "
+                 "(USE_HDF5=ON); pvtk and nbcvtk write VTK files",
+                 fieldWriteMethod.c_str());
+    requireInput(fieldWriteMethod != "phdf5" || kBuildHasParallelHDF5,
+                 "FieldWriteMethod = phdf5 needs a build with parallel HDF5 "
+                 "(USE_PHDF5=ON); shdf5 writes the fields with serial HDF5, "
+                 "one file per rank");
     SimName = config.read<string>("SimulationName");
     PoissonCorrection = config.read<string>("PoissonCorrection", "no");
     PoissonCorrectionCycle = config.read<int>("PoissonCorrectionCycle", 10);
@@ -286,33 +351,8 @@ void Collective::ReadInput(const ConfigFile& config) {
                  "divBCorrectionCycle must be at least 1, not %d",
                  divBCorrectionCycle);
 
-    rhoINIT = std::make_unique<double[]>(ns);
-    array_double rhoINIT0 = config.read<array_double>("rhoINIT");
-    rhoINIT[0] = rhoINIT0.a;
-    if (ns > 1)
-      rhoINIT[1] = rhoINIT0.b;
-    if (ns > 2)
-      rhoINIT[2] = rhoINIT0.c;
-    if (ns > 3)
-      rhoINIT[3] = rhoINIT0.d;
-    if (ns > 4)
-      rhoINIT[4] = rhoINIT0.e;
-    if (ns > 5)
-      rhoINIT[5] = rhoINIT0.f;
-
-    rhoINJECT = std::make_unique<double[]>(ns);
-    array_double rhoINJECT0 = config.read<array_double>("rhoINJECT");
-    rhoINJECT[0] = rhoINJECT0.a;
-    if (ns > 1)
-      rhoINJECT[1] = rhoINJECT0.b;
-    if (ns > 2)
-      rhoINJECT[2] = rhoINJECT0.c;
-    if (ns > 3)
-      rhoINJECT[3] = rhoINJECT0.d;
-    if (ns > 4)
-      rhoINJECT[4] = rhoINJECT0.e;
-    if (ns > 5)
-      rhoINJECT[5] = rhoINJECT0.f;
+    readExactList("rhoINIT", ns, "species", rhoINIT);
+    readExactList("rhoINJECT", ns, "species", rhoINJECT);
 
     // solver tolerances (CGtol: host CG, not used currently)
     CGtol = config.read<double>("CGtol", 1e-3);
@@ -513,247 +553,87 @@ void Collective::ReadInput(const ConfigFile& config) {
   maxInjectionRadius = config.read<double>("RmaxExosphereInjection", 3.0);
   maxExosphereParticlesPerSpecies =
       config.read<int>("MaxExosphereParticlesPerSpecies", 0); // 0 = unlimited
+  // the solver injects into the species from ns_solar_wind on, whose
+  // neutral parameters (below) are ns_planetary
+  requireInput(numSolarWindSpecies >= 0 && numSolarWindSpecies <= ns &&
+                   numPlanetarySpecies >= 0,
+               "ns_solar_wind must be from 0 to ns (%d) and ns_planetary at "
+               "least 0, not %d and %d",
+               ns, numSolarWindSpecies, numPlanetarySpecies);
+  requireInput(!enableExosphereInjection ||
+                   numPlanetarySpecies == ns - numSolarWindSpecies,
+               "AddExosphereInjection = 1 needs ns_planetary = ns - "
+               "ns_solar_wind = %d, not %d",
+               ns - numSolarWindSpecies, numPlanetarySpecies);
 
-  // Allocate arrays for planetary neutral species parameters (at least 1 to
-  // avoid null)
-  const int numNeutralSpecies = std::max(numPlanetarySpecies, 1);
-  neutralSurfaceDensity = std::make_unique<double[]>(numNeutralSpecies);
-  exosphericScaleHeight = std::make_unique<double[]>(numNeutralSpecies);
-  photoionizationFrequency = std::make_unique<double[]>(numNeutralSpecies);
-  macroParticleWeightRatio = std::make_unique<double[]>(numNeutralSpecies);
-
-  // Initialize to safe defaults
-  for (int i = 0; i < numNeutralSpecies; i++) {
-    neutralSurfaceDensity[i] = 0.0;
-    exosphericScaleHeight[i] = 1.0;
-    photoionizationFrequency[i] = 0.0;
-    macroParticleWeightRatio[i] = 1.0;
-  }
-
-  if (numPlanetarySpecies > 0) {
-    array_double NeutralSurfaceDensity0 =
-        config.read<array_double>("NeutralSurfaceDensity");
-    array_double ExosphericScaleHeight0 =
-        config.read<array_double>("ExosphericScaleHeight");
-    array_double PhotoionizationFrequency0 =
-        config.read<array_double>("PhotoionizationFrequency");
-    array_double MacroParticleWeightRatio0 =
-        config.read<array_double>("MacroParticleWeightRatio");
-    neutralSurfaceDensity[0] = NeutralSurfaceDensity0.a;
-    exosphericScaleHeight[0] = ExosphericScaleHeight0.a;
-    photoionizationFrequency[0] = PhotoionizationFrequency0.a;
-    macroParticleWeightRatio[0] = MacroParticleWeightRatio0.a;
-    if (numPlanetarySpecies > 1) {
-      neutralSurfaceDensity[1] = NeutralSurfaceDensity0.b;
-      exosphericScaleHeight[1] = ExosphericScaleHeight0.b;
-      photoionizationFrequency[1] = PhotoionizationFrequency0.b;
-      macroParticleWeightRatio[1] = MacroParticleWeightRatio0.b;
-    }
-    if (numPlanetarySpecies > 2) {
-      neutralSurfaceDensity[2] = NeutralSurfaceDensity0.c;
-      exosphericScaleHeight[2] = ExosphericScaleHeight0.c;
-      photoionizationFrequency[2] = PhotoionizationFrequency0.c;
-      macroParticleWeightRatio[2] = MacroParticleWeightRatio0.c;
-    }
-    if (numPlanetarySpecies > 3) {
-      neutralSurfaceDensity[3] = NeutralSurfaceDensity0.d;
-      exosphericScaleHeight[3] = ExosphericScaleHeight0.d;
-      photoionizationFrequency[3] = PhotoionizationFrequency0.d;
-      macroParticleWeightRatio[3] = MacroParticleWeightRatio0.d;
-    }
-    if (numPlanetarySpecies > 4) {
-      neutralSurfaceDensity[4] = NeutralSurfaceDensity0.e;
-      exosphericScaleHeight[4] = ExosphericScaleHeight0.e;
-      photoionizationFrequency[4] = PhotoionizationFrequency0.e;
-      macroParticleWeightRatio[4] = MacroParticleWeightRatio0.e;
-    }
-    if (numPlanetarySpecies > 5) {
-      neutralSurfaceDensity[5] = NeutralSurfaceDensity0.f;
-      exosphericScaleHeight[5] = ExosphericScaleHeight0.f;
-      photoionizationFrequency[5] = PhotoionizationFrequency0.f;
-      macroParticleWeightRatio[5] = MacroParticleWeightRatio0.f;
-    }
+  // the neutral parameters of the planetary species, one value each; without
+  // planetary species one entry of defaults (the arrays are never null)
+  if (numPlanetarySpecies == 0) {
+    neutralSurfaceDensity = std::make_unique<double[]>(1);
+    exosphericScaleHeight = std::make_unique<double[]>(1);
+    photoionizationFrequency = std::make_unique<double[]>(1);
+    macroParticleWeightRatio = std::make_unique<double[]>(1);
+    exosphericScaleHeight[0] = 1.0;
+    macroParticleWeightRatio[0] = 1.0;
+  } else {
+    const char* planetary = "planetary species";
+    readExactList("NeutralSurfaceDensity", numPlanetarySpecies, planetary,
+                  neutralSurfaceDensity);
+    readExactList("ExosphericScaleHeight", numPlanetarySpecies, planetary,
+                  exosphericScaleHeight);
+    readExactList("PhotoionizationFrequency", numPlanetarySpecies, planetary,
+                  photoionizationFrequency);
+    readExactList("MacroParticleWeightRatio", numPlanetarySpecies, planetary,
+                  macroParticleWeightRatio);
   }
 
-  uth = std::make_unique<double[]>(ns);
-  vth = std::make_unique<double[]>(ns);
-  wth = std::make_unique<double[]>(ns);
-  u0 = std::make_unique<double[]>(ns);
-  v0 = std::make_unique<double[]>(ns);
-  w0 = std::make_unique<double[]>(ns);
-
-  array_double uth0 = config.read<array_double>("uth");
-  array_double vth0 = config.read<array_double>("vth");
-  array_double wth0 = config.read<array_double>("wth");
-  array_double u00 = config.read<array_double>("u0");
-  array_double v00 = config.read<array_double>("v0");
-  array_double w00 = config.read<array_double>("w0");
-
-  uth[0] = uth0.a;
-  vth[0] = vth0.a;
-  wth[0] = wth0.a;
-  u0[0] = u00.a;
-  v0[0] = v00.a;
-  w0[0] = w00.a;
-  if (ns > 1) {
-    uth[1] = uth0.b;
-    vth[1] = vth0.b;
-    wth[1] = wth0.b;
-    u0[1] = u00.b;
-    v0[1] = v00.b;
-    w0[1] = w00.b;
-  }
-  if (ns > 2) {
-    uth[2] = uth0.c;
-    vth[2] = vth0.c;
-    wth[2] = wth0.c;
-    u0[2] = u00.c;
-    v0[2] = v00.c;
-    w0[2] = w00.c;
-  }
-  if (ns > 3) {
-    uth[3] = uth0.d;
-    vth[3] = vth0.d;
-    wth[3] = wth0.d;
-    u0[3] = u00.d;
-    v0[3] = v00.d;
-    w0[3] = w00.d;
-  }
-  if (ns > 4) {
-    uth[4] = uth0.e;
-    vth[4] = vth0.e;
-    wth[4] = wth0.e;
-    u0[4] = u00.e;
-    v0[4] = v00.e;
-    w0[4] = w00.e;
-  }
-  if (ns > 5) {
-    uth[5] = uth0.f;
-    vth[5] = vth0.f;
-    wth[5] = wth0.f;
-    u0[5] = u00.f;
-    v0[5] = v00.f;
-    w0[5] = w00.f;
-  }
+  readExactList("uth", ns, "species", uth);
+  readExactList("vth", ns, "species", vth);
+  readExactList("wth", ns, "species", wth);
+  readExactList("u0", ns, "species", u0);
+  readExactList("v0", ns, "species", v0);
+  readExactList("w0", ns, "species", w0);
 
   if (nstestpart > 0) {
-    array_double pitch_angle0 = config.read<array_double>("pitch_angle");
-    array_double energy0 = config.read<array_double>("energy");
-    pitch_angle = std::make_unique<double[]>(nstestpart);
-    energy = std::make_unique<double[]>(nstestpart);
-    if (nstestpart > 0) {
-      pitch_angle[0] = pitch_angle0.a;
-      energy[0] = energy0.a;
-    }
-    if (nstestpart > 1) {
-      pitch_angle[1] = pitch_angle0.b;
-      energy[1] = energy0.b;
-    }
-    if (nstestpart > 2) {
-      pitch_angle[2] = pitch_angle0.c;
-      energy[2] = energy0.c;
-    }
-    if (nstestpart > 3) {
-      pitch_angle[3] = pitch_angle0.d;
-      energy[3] = energy0.d;
-    }
-    if (nstestpart > 4) {
-      pitch_angle[4] = pitch_angle0.e;
-      energy[4] = energy0.e;
-    }
-    if (nstestpart > 5) {
-      pitch_angle[5] = pitch_angle0.f;
-      energy[5] = energy0.f;
-    }
-    if (nstestpart > 6) {
-      pitch_angle[6] = pitch_angle0.g;
-      energy[6] = energy0.g;
-    }
-    if (nstestpart > 7) {
-      pitch_angle[7] = pitch_angle0.h;
-      energy[7] = energy0.h;
-    }
+    readExactList("pitch_angle", nstestpart, "test-particle species",
+                  pitch_angle);
+    readExactList("energy", nstestpart, "test-particle species", energy);
   }
 
-  npcelx = std::make_unique<int[]>(ns + nstestpart);
-  npcely = std::make_unique<int[]>(ns + nstestpart);
-  npcelz = std::make_unique<int[]>(ns + nstestpart);
-  qom = std::make_unique<double[]>(ns + nstestpart);
-  array_int npcelx0 = config.read<array_int>("npcelx");
-  array_int npcely0 = config.read<array_int>("npcely");
-  array_int npcelz0 = config.read<array_int>("npcelz");
-  array_double qom0 = config.read<array_double>("qom");
-  npcelx[0] = npcelx0.a;
-  npcely[0] = npcely0.a;
-  npcelz[0] = npcelz0.a;
-  qom[0] = qom0.a;
-  int ns_tot = ns + nstestpart;
-  if (ns_tot > 1) {
-    npcelx[1] = npcelx0.b;
-    npcely[1] = npcely0.b;
-    npcelz[1] = npcelz0.b;
-    qom[1] = qom0.b;
+  const char* all = "species and test-particle species";
+  readExactList("npcelx", ns + nstestpart, all, npcelx);
+  readExactList("npcely", ns + nstestpart, all, npcely);
+  readExactList("npcelz", ns + nstestpart, all, npcelz);
+  readExactList("qom", ns + nstestpart, all, qom);
+  // a species with density loads and injects npcelx npcely npcelz particles
+  // per cell (planetary species start empty: no density, no particles); a
+  // qom of 0 is warned of (Print)
+  for (int is = 0; is < ns + nstestpart; is++) {
+    requireInput(npcelx[is] >= 0 && npcely[is] >= 0 && npcelz[is] >= 0,
+                 "npcelx, npcely and npcelz of species %d must be at least 0, "
+                 "not %d %d %d",
+                 is, npcelx[is], npcely[is], npcelz[is]);
   }
-  if (ns_tot > 2) {
-    npcelx[2] = npcelx0.c;
-    npcely[2] = npcely0.c;
-    npcelz[2] = npcelz0.c;
-    qom[2] = qom0.c;
+  for (int is = 0; is < ns; is++) {
+    requireInput(rhoINIT[is] >= 0.0 && rhoINJECT[is] >= 0.0,
+                 "rhoINIT and rhoINJECT of species %d must be at least 0, "
+                 "not %g and %g",
+                 is, rhoINIT[is], rhoINJECT[is]);
+    // each factor, not the product, which may overflow
+    requireInput((rhoINIT[is] == 0.0 && rhoINJECT[is] == 0.0) ||
+                     (npcelx[is] > 0 && npcely[is] > 0 && npcelz[is] > 0),
+                 "species %d has rhoINIT = %g and rhoINJECT = %g but "
+                 "npcelx * npcely * npcelz = 0: it would load or inject no "
+                 "particles",
+                 is, rhoINIT[is], rhoINJECT[is]);
   }
-  if (ns_tot > 3) {
-    npcelx[3] = npcelx0.d;
-    npcely[3] = npcely0.d;
-    npcelz[3] = npcelz0.d;
-    qom[3] = qom0.d;
-  }
-  if (ns_tot > 4) {
-    npcelx[4] = npcelx0.e;
-    npcely[4] = npcely0.e;
-    npcelz[4] = npcelz0.e;
-    qom[4] = qom0.e;
-  }
-  if (ns_tot > 5) {
-    npcelx[5] = npcelx0.f;
-    npcely[5] = npcely0.f;
-    npcelz[5] = npcelz0.f;
-    qom[5] = qom0.f;
-  }
-  if (ns_tot > 6) {
-    npcelx[6] = npcelx0.g;
-    npcely[6] = npcely0.g;
-    npcelz[6] = npcelz0.g;
-    qom[6] = qom0.g;
-  }
-  if (ns_tot > 7) {
-    npcelx[7] = npcelx0.h;
-    npcely[7] = npcely0.h;
-    npcelz[7] = npcelz0.h;
-    qom[7] = qom0.h;
-  }
-  if (ns_tot > 8) {
-    npcelx[8] = npcelx0.i;
-    npcely[8] = npcely0.i;
-    npcelz[8] = npcelz0.i;
-    qom[8] = qom0.i;
-  }
-  if (ns_tot > 9) {
-    npcelx[9] = npcelx0.j;
-    npcely[9] = npcely0.j;
-    npcelz[9] = npcelz0.j;
-    qom[9] = qom0.j;
-  }
-  if (ns_tot > 10) {
-    npcelx[10] = npcelx0.k;
-    npcely[10] = npcely0.k;
-    npcelz[10] = npcelz0.k;
-    qom[10] = qom0.k;
-  }
-  if (ns_tot > 11) {
-    npcelx[11] = npcelx0.l;
-    npcely[11] = npcely0.l;
-    npcelz[11] = npcelz0.l;
-    qom[11] = qom0.l;
-  }
+  // the exosphere sizes its particles by those per cell of species 0
+  // (ExosphereIonization)
+  requireInput(!enableExosphereInjection || numPlanetarySpecies == 0 ||
+                   (npcelx[0] > 0 && npcely[0] > 0 && npcelz[0] > 0),
+               "AddExosphereInjection = 1 sizes the injected particles by "
+               "npcelx * npcely * npcelz of species 0, which is 0: it would "
+               "inject none");
 
   // verbose = config.read < bool > ("verbose",false);
 
@@ -1266,6 +1146,26 @@ void Collective::Print() {
          << " is not below ParticleMergingThreshold = "
          << ParticleMergingThreshold
          << ": splitting and merging undo each other" << endl;
+  // a qom of 0: allowed. The charge sign qom/|qom| and the mass q/qom divide
+  // by it: the charge of the particles, the charge held fixed (the planet,
+  // the open faces of a TaylorGreen restart) and the bulk-flow energy
+  for (int is = 0; is < ns + nstestpart; is++) {
+    if (qom[is] != 0.0)
+      continue;
+    if (is < ns)
+      cout << "WARNING: qom of species " << is
+           << " is 0: its charge sign and mass (q/qom) are not defined: its "
+              "particles, or a charge held fixed for it (a Dipole or Dipole2D "
+              "planet, the open faces of a TaylorGreen restart), make the "
+              "field solve non-finite; with neither, its bulk-flow energy in "
+              "ConservedQuantities.txt is nan"
+           << endl;
+    else
+      cout << "WARNING: qom of species " << is
+           << " (a test-particle species) is 0: the charge of its particles "
+              "is not defined (nan in the checkpoints)"
+           << endl;
+  }
   // the particles written per species (ParticlesOutputTrackedFraction,
   // ParticlesOutputMaxPerCell)
   bool anySet = false;
@@ -1720,12 +1620,10 @@ void Collective::Print() {
   // with the div(B) cleaning), plus the smoothed E(n+theta) the mover samples
   // when E is smoothed, the 10 node moments of each species, 16 cell arrays,
   // the Krylov vectors (Maxwell x and b, x and b of each cleaning that is
-  // on), the GMRES basis V (GMRES_M + 1 vectors) and w, the lazily allocated
+  // on), the GMRES basis V (kGmresM + 1 vectors) and w, the lazily allocated
   // FGMRES basis Z and Chebyshev-solver / block-Jacobi vectors, the two
   // Chebyshev iterates of the cleaning preconditioner, and the halo send and
-  // receive buffers (64 fields per direction).
-  constexpr double GMRES_M = 20.0;      // EMfields3D::GMRES_M
-  constexpr double HALO_MAX_BATCH = 64; // EMfields3D::HALO_MAX_BATCH
+  // receive buffers (kHaloMaxBatch fields per direction).
   const bool smoothE = Smooth != 1.0 && SmoothNiter > 0; // smoothingOn()
   const double intN = (double)(nxn_loc - 2) * (nyn_loc - 2) * (nzn_loc - 2);
   const double nMaxwell = 3.0 * intN;
@@ -1740,16 +1638,16 @@ void Collective::Print() {
   double devSolver =
       (35.0 + (divB ? 1.0 : 0.0) + (smoothE ? 3.0 : 0.0) + 10.0 * ns) * gridN +
       16.0 * gridC + 2.0 * nMaxwell + (divE ? 2.0 * intC : 0.0) +
-      (divB ? 2.0 * intB : 0.0) + (GMRES_M + 2.0) * nKrylov;
+      (divB ? 2.0 * intB : 0.0) + (kGmresM + 2.0) * nKrylov;
   if (cleaning || SolverType == "FGMRESBlockJacobi")
-    devSolver += GMRES_M * nKrylov;
+    devSolver += kGmresM * nKrylov;
   if (SolverType == "Chebyshev")
     devSolver += 4.0 * nMaxwell;
   if (cleaning)
     devSolver += 2.0 * std::max(divE ? intC : 0.0, divB ? intB : 0.0);
   if (SolverType == "FGMRESBlockJacobi")
     devSolver += 2.0 * nMaxwell;
-  devSolver += 2.0 * HALO_MAX_BATCH * 2.0 *
+  devSolver += 2.0 * kHaloMaxBatch * 2.0 *
                ((double)nyn_loc * nzn_loc + (double)nxn_loc * nzn_loc +
                 (double)nxn_loc * nyn_loc);
   devSolver *= 8;
@@ -1794,7 +1692,7 @@ void Collective::save(const std::string& header) {
 
   my_file << "Number of species    = " << ns << endl;
   for (int i = 0; i < ns; i++)
-    my_file << "qom[%d] = " << qom[i] << endl;
+    my_file << "qom[" << i << "] = " << qom[i] << endl;
   my_file << "---------------------------" << endl;
   my_file << "x-Length                 = " << Lx << endl;
   my_file << "y-Length                 = " << Ly << endl;

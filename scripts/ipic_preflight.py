@@ -10,6 +10,13 @@ from pathlib import Path
 
 
 HEAT_FLUX_COMPONENTS = 10
+# the numbers that the input lists of Collective::ReadInput read (a C++
+# stream): no nan, inf, hexadecimal or digit separators
+INT_TOKEN = re.compile(r"[+-]?[0-9]+")
+REAL_TOKEN = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
+INT_RANGE = (-2**31, 2**31 - 1)
+# the whitespace of a C++ stream in the C locale
+STREAM_SPACE = re.compile(r"[ \t\n\v\f\r]+")
 
 
 def cxx(x):
@@ -50,6 +57,8 @@ def parse_config(path):
         # ConfigFile supports continuation lines until the next key line.
         extra = []
         while i < len(lines):
+            if not lines[i].strip():
+                break  # a blank line ends the value, a comment line does not
             nxt = lines[i].split("#", 1)[0]
             stripped = nxt.strip()
             if not stripped:
@@ -95,19 +104,24 @@ class Input:
             return raw
         return as_bool(str(raw))
 
-    def array_real(self, key: str, n: int, default=None):
-        raw = self.raw(key, default)
-        vals = [float(v) for v in str(raw).replace("\n", " ").split()]
-        if len(vals) < n:
-            raise SystemExit(f"{key} has {len(vals)} values, needs at least {n}")
-        return vals[:n]
-
-    def array_int(self, key: str, n: int, default=None):
-        raw = self.raw(key, default)
-        vals = [int(float(v)) for v in str(raw).replace("\n", " ").split()]
-        if len(vals) < n:
-            raise SystemExit(f"{key} has {len(vals)} values, needs at least {n}")
-        return vals[:n]
+    def species_list(self, key: str, n: int, whose: str, kind=float):
+        """The n values of a per-species list, one per species in order (of
+        whose); a missing key, another number of values, or a value that is
+        not a number of the kind stops, as in Collective::ReadInput."""
+        raw = str(self.values.get(key, ""))
+        token = INT_TOKEN if kind is int else REAL_TOKEN
+        tokens = [v for v in STREAM_SPACE.split(raw) if v]
+        ok = len(tokens) == n and all(token.fullmatch(v) for v in tokens)
+        vals = [kind(v) for v in tokens] if ok else []
+        # out of the range of the type (3000000000, 1e400): the stream fails
+        if kind is int:
+            ok = ok and all(INT_RANGE[0] <= v <= INT_RANGE[1] for v in vals)
+        else:
+            ok = ok and all(math.isfinite(v) for v in vals)
+        if not ok:
+            raise SystemExit(f'{key} needs {n} value{"" if n == 1 else "s"}, '
+                             f'one per {whose}, not "{raw}"')
+        return vals
 
 
 def bc_em_name(code: int) -> str:
@@ -185,6 +199,10 @@ def print_report(cfg: Input) -> None:
     halo_overlap = cfg.integer("HaloOverlap", 0) != 0
     save_dir = cfg.string("SaveDirName", "data")
     ns = cfg.integer("ns")
+    ns_test = cfg.integer("nsTestPart", 0)
+    if ns < 1 or ns_test < 0:  # same rejection as Collective::ReadInput
+        raise SystemExit(f"ns must be at least 1 and nsTestPart at least 0, "
+                         f"not {ns} and {ns_test}")
 
     b0x = cfg.real("B0x", 0.0)
     b0y = cfg.real("B0y", 0.0)
@@ -193,6 +211,12 @@ def print_report(cfg: Input) -> None:
 
     case = cfg.string("Case")
     sim_name = cfg.string("SimulationName")
+    # same rejection as Collective::ReadInput (the HDF5 ones also need a build
+    # with them, which this script cannot tell)
+    field_method = cfg.string("FieldWriteMethod")
+    if field_method not in ("shdf5", "phdf5", "pvtk", "nbcvtk"):
+        raise SystemExit(f"FieldWriteMethod must be shdf5, phdf5, pvtk or nbcvtk, "
+                         f"not {field_method}")
     poisson = cfg.string("PoissonCorrection", "no")
     poisson_cycle = cfg.integer("PoissonCorrectionCycle", 10)
     divb = cfg.string("divBCorrection", "no")
@@ -262,16 +286,51 @@ def print_report(cfg: Input) -> None:
     max_injection_radius = cfg.real("RmaxExosphereInjection", 3.0)
     l_square = cfg.real("L_square", 5.0)
 
-    qom = cfg.array_real("qom", ns)
-    rho_init = cfg.array_real("rhoINIT", ns)
-    rho_inject = cfg.array_real("rhoINJECT", ns)
-    uth = cfg.array_real("uth", ns)
-    vth = cfg.array_real("vth", ns)
-    wth = cfg.array_real("wth", ns)
-    npcelx = cfg.array_int("npcelx", ns)
-    npcely = cfg.array_int("npcely", ns)
-    npcelz = cfg.array_int("npcelz", ns)
-    npcel = [npcelx[i] * npcely[i] * npcelz[i] for i in range(ns)]
+    # same rejections as Collective::ReadInput: one value per species
+    rho_init = cfg.species_list("rhoINIT", ns, "species")
+    rho_inject = cfg.species_list("rhoINJECT", ns, "species")
+    uth = cfg.species_list("uth", ns, "species")
+    vth = cfg.species_list("vth", ns, "species")
+    wth = cfg.species_list("wth", ns, "species")
+    for key in ("u0", "v0", "w0"):  # read, not printed
+        cfg.species_list(key, ns, "species")
+    if ns_test > 0:
+        for key in ("pitch_angle", "energy"):
+            cfg.species_list(key, ns_test, "test-particle species")
+    all_species = "species and test-particle species"
+    npcelx = cfg.species_list("npcelx", ns + ns_test, all_species, int)
+    npcely = cfg.species_list("npcely", ns + ns_test, all_species, int)
+    npcelz = cfg.species_list("npcelz", ns + ns_test, all_species, int)
+    qom = cfg.species_list("qom", ns + ns_test, all_species)
+    npcel = [npcelx[i] * npcely[i] * npcelz[i] for i in range(ns + ns_test)]
+    for i in range(ns + ns_test):
+        if min(npcelx[i], npcely[i], npcelz[i]) < 0:
+            raise SystemExit(f"npcelx, npcely and npcelz of species {i} must be at "
+                             f"least 0, not {npcelx[i]} {npcely[i]} {npcelz[i]}")
+    for i in range(ns):
+        if rho_init[i] < 0.0 or rho_inject[i] < 0.0:
+            raise SystemExit(f"rhoINIT and rhoINJECT of species {i} must be at least "
+                             f"0, not {cxx(rho_init[i])} and {cxx(rho_inject[i])}")
+        if (rho_init[i] > 0.0 or rho_inject[i] > 0.0) and npcel[i] == 0:
+            raise SystemExit(f"species {i} has rhoINIT = {cxx(rho_init[i])} and "
+                             f"rhoINJECT = {cxx(rho_inject[i])} but npcelx * npcely * "
+                             f"npcelz = 0: it would load or inject no particles")
+    if not (0 <= ns_solar <= ns and ns_planetary >= 0):
+        raise SystemExit(f"ns_solar_wind must be from 0 to ns ({ns}) and ns_planetary "
+                         f"at least 0, not {ns_solar} and {ns_planetary}")
+    if exosphere_enabled and ns_planetary != ns - ns_solar:
+        raise SystemExit(f"AddExosphereInjection = 1 needs ns_planetary = ns - "
+                         f"ns_solar_wind = {ns - ns_solar}, not {ns_planetary}")
+    if exosphere_enabled and ns_planetary > 0 and npcel[0] == 0:
+        raise SystemExit("AddExosphereInjection = 1 sizes the injected particles by "
+                         "npcelx * npcely * npcelz of species 0, which is 0: it would "
+                         "inject none")
+    if ns_planetary > 0:
+        planetary = "planetary species"
+        neutral_density = cfg.species_list("NeutralSurfaceDensity", ns_planetary, planetary)
+        scale_height = cfg.species_list("ExosphericScaleHeight", ns_planetary, planetary)
+        photo_freq = cfg.species_list("PhotoionizationFrequency", ns_planetary, planetary)
+        weight_ratio = cfg.species_list("MacroParticleWeightRatio", ns_planetary, planetary)
     track_id = track_particle_id_mask(cfg, ns)
     heat_flux = heat_flux_requested(cfg)
     restart_output_cycle = cfg.integer("RestartOutputCycle", 5000)
@@ -307,6 +366,19 @@ def print_report(cfg: Input) -> None:
     print(f"Number of species    = {ns}")
     for i in range(ns):
         print(f"qom[{i}] = {cxx(qom[i])}")
+    # as Collective::Print: a qom of 0 is allowed, warned of
+    for i in range(ns + ns_test):
+        if qom[i] != 0.0:
+            continue
+        if i < ns:
+            print(f"WARNING: qom of species {i} is 0: its charge sign and mass (q/qom) "
+                  f"are not defined: its particles, or a charge held fixed for it "
+                  f"(a Dipole or Dipole2D planet, the open faces of a TaylorGreen "
+                  f"restart), make the field solve non-finite; with neither, its "
+                  f"bulk-flow energy in ConservedQuantities.txt is nan")
+        else:
+            print(f"WARNING: qom of species {i} (a test-particle species) is 0: the "
+                  f"charge of its particles is not defined (nan in the checkpoints)")
     print(f"x-Length                 = {cxx(lx)}")
     print(f"y-Length                 = {cxx(ly)}")
     print(f"z-Length                 = {cxx(lz)}")
@@ -405,10 +477,6 @@ def print_report(cfg: Input) -> None:
     print("Exosphere Ionization")
     print("---------------------")
     if exosphere_enabled and ns_planetary > 0:
-        neutral_density = cfg.array_real("NeutralSurfaceDensity", ns_planetary)
-        scale_height = cfg.array_real("ExosphericScaleHeight", ns_planetary)
-        photo_freq = cfg.array_real("PhotoionizationFrequency", ns_planetary)
-        weight_ratio = cfg.array_real("MacroParticleWeightRatio", ns_planetary)
         print("Status                     : enabled")
         print(f"Solar wind species         : {ns_solar} (indices 0..{ns_solar - 1})")
         print(f"Planetary species          : {ns_planetary} (indices {ns_solar}..{ns - 1})")
@@ -609,7 +677,7 @@ def print_report(cfg: Input) -> None:
     print(f"COMBINED = {cxx(combined)} MB ({cxx(combined / 1024.0)} GB)")
     print("---------------------")
 
-    _ = th, delta, rho_inject
+    _ = th, delta
 
 
 def usage() -> None:

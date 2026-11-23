@@ -52,8 +52,6 @@ namespace {
 
 constexpr int kFieldCount = 3;
 constexpr int kSkipReturnCode = 77;
-constexpr const char* kZeros12 = "0 0 0 0 0 0 0 0 0 0 0 0";
-constexpr const char* kOnes12 = "1 1 1 1 1 1 1 1 1 1 1 1";
 
 constexpr std::array<const char*, 8> kZeroSpeciesKeys = {
     "rhoINIT", "rhoINJECT", "uth", "vth", "wth", "u0", "v0", "w0"};
@@ -158,7 +156,7 @@ ConfigFile makeConfig(const Scenario& scenario, bool haloOverlap) {
   cfg.add("Case", "Default");
   cfg.add("PoissonCorrection", "no");
   cfg.add("divBCorrection", "no");
-  cfg.add("FieldWriteMethod", "default");
+  cfg.add("FieldWriteMethod", "pvtk");
   cfg.add("SimulationName", "halo_communication");
 
   cfg.add("B0x", 0.0);
@@ -190,9 +188,10 @@ ConfigFile makeConfig(const Scenario& scenario, bool haloOverlap) {
 
   cfg.add("NiterMover", 1);
   cfg.add("ns", 1);
-  cfg.add("qom", "-1 0 0 0 0 0 0 0 0 0 0 0");
-  addConfigValues(cfg, kZeroSpeciesKeys, kZeros12);
-  addConfigValues(cfg, kUnitParticleKeys, kOnes12);
+  cfg.add("qom", "-1");
+  // one species: one value in each per-species list
+  addConfigValues(cfg, kZeroSpeciesKeys, 0);
+  addConfigValues(cfg, kUnitParticleKeys, 1);
   addConfigValues(cfg, kPhiBoundaryKeys, 1);
   addConfigValues(cfg, kEmBoundaryKeys, 0);
   addConfigValues(cfg, kParticleBoundaryKeys, 1);

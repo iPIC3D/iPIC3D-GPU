@@ -6,6 +6,7 @@
 #include <cstring>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 /** Binary records of the data analysis (RecordFile): the bytes of the
@@ -25,6 +26,12 @@ void ensureOutputFolder(const std::string& relativePath);
  *  same suffix for all (a JSON and its binary): records that a restart does
  *  not continue are kept, never overwritten. @return whether one existed. */
 bool keepAside(const std::vector<std::string>& paths, int cycle);
+/** The files in folder whose names match pattern, a regular expression
+ *  whose first group is a rank (at most 9 digits, an int), as (rank, path)
+ *  sorted by rank; none if folder is missing, filesystem_error if it cannot
+ *  be listed. */
+std::vector<std::pair<int, std::string>> filesByRank(const std::string& folder,
+                                                     const std::string& pattern);
 /** The records file of a rank in folder, without its extension (.json,
  *  .bin): <folder>/subDomain<rank>_<name>. */
 std::string recordsStem(const std::string& folder, const std::string& name,

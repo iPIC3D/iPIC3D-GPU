@@ -121,8 +121,6 @@
 namespace {
 
 constexpr double kPi = 3.141592653589793238462643383279502884;
-constexpr const char* kZeros12 = "0 0 0 0 0 0 0 0 0 0 0 0";
-constexpr const char* kOnes12 = "1 1 1 1 1 1 1 1 1 1 1 1";
 // At th=1 the coupled Maxwell update is backward Euler.  The two references
 // below separate its second-order spatial error from the first-order temporal
 // error of a fixed-final-time dt ~ h refinement.
@@ -360,7 +358,7 @@ struct TestInput {
             testCase == TestCase::ConductorWall ? "yes" : "no");
     cfg.add("PoissonCorrectionCycle", 1);
     cfg.add("divBCorrection", "no");
-    cfg.add("FieldWriteMethod", "default");
+    cfg.add("FieldWriteMethod", "pvtk");
     cfg.add("SimulationName", "gpu_maxwell_solver");
 
     cfg.add("B0x", 0.0);
@@ -389,11 +387,10 @@ struct TestInput {
 
     cfg.add("NiterMover", 1);
     cfg.add("ns", 1);
-    std::ostringstream qomValues;
-    qomValues << qom << " 0 0 0 0 0 0 0 0 0 0 0";
-    cfg.add("qom", qomValues.str());
-    addConfigValues(cfg, kZeroSpeciesKeys, kZeros12);
-    addConfigValues(cfg, kUnitParticleKeys, kOnes12);
+    cfg.add("qom", qom);
+    // one species: one value in each per-species list
+    addConfigValues(cfg, kZeroSpeciesKeys, 0);
+    addConfigValues(cfg, kUnitParticleKeys, 1);
 
     addConfigValues(cfg, kPhiBoundaryKeys, 1);
     addConfigValues(cfg, kEmBoundaryKeys, 0);
@@ -439,9 +436,7 @@ struct TestInput {
       cfg.add("B0x", backgroundB[0]);
       cfg.add("B0y", backgroundB[1]);
       cfg.add("B0z", backgroundB[2]);
-      std::ostringstream u0Values;
-      u0Values << driftX << " 0 0 0 0 0 0 0 0 0 0 0";
-      cfg.add("u0", u0Values.str());
+      cfg.add("u0", driftX);
     }
 
     cfg.add("CGtol", gmresTolerance);

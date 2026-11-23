@@ -70,20 +70,30 @@ std::string recordsStem(const std::string& folder, const std::string& name,
       .string();
 }
 
-int keepAsideRecords(const std::string& folder, const std::string& name,
-                     int cycle) {
+std::vector<std::pair<int, std::string>>
+filesByRank(const std::string& folder, const std::string& pattern) {
+  std::vector<std::pair<int, std::string>> files;
   std::error_code error;
   if (!fs::is_directory(folder, error))
-    return 0;
-  // a rank of at most 9 digits, an int
-  const std::regex records("subDomain([0-9]{1,9})_" + name + "\\.(json|bin)");
-  std::set<int> ranks;
-  for (const auto& entry : fs::directory_iterator(folder)) {
+    return files;
+  const std::regex name(pattern);
+  std::smatch match;
+  // a folder that cannot be listed throws: the run ends with its message
+  for (const fs::directory_entry& entry : fs::directory_iterator(folder)) {
     const std::string file = entry.path().filename().string();
-    std::smatch match;
-    if (std::regex_match(file, match, records))
-      ranks.insert(std::stoi(match[1]));
+    if (std::regex_match(file, match, name))
+      files.emplace_back(std::stoi(match[1].str()), entry.path().string());
   }
+  std::sort(files.begin(), files.end());
+  return files;
+}
+
+int keepAsideRecords(const std::string& folder, const std::string& name,
+                     int cycle) {
+  std::set<int> ranks; // a rank's .json and .bin together
+  for (const auto& [rank, path] : filesByRank(
+           folder, "subDomain([0-9]{1,9})_" + name + "\\.(json|bin)"))
+    ranks.insert(rank);
   int kept = 0;
   for (const int rank : ranks) {
     const std::string stem = recordsStem(folder, name, rank);

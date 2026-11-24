@@ -1,5 +1,7 @@
 build/
 build*
+!Documentation/building.md
+*.o
 __pycache__/
 .cproject
 .project

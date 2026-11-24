@@ -225,7 +225,7 @@ find_package(OpenMP REQUIRED COMPONENTS CXX)
 endif()
 
 if (USE_ADIOS2)
-  set(CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/thirdparty/adios2")
+  list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/thirdparty/adios2")
   find_package(ADIOS2 REQUIRED)
 endif()
 

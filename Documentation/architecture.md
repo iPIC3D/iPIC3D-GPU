@@ -65,5 +65,6 @@ E(n) stays in its array through steps 5 to 9, so the output of cycle n holds E, 
 ## Memory
 
 - The host side of every GPU transfer is page-locked for the whole run: host field, moment and particle arrays count in the rank's physical memory.
-- Device particle arrays start at 1.4 times the particle count. When the count times 1.2 reaches the capacity, they grow to 1.5 times the count.
+- Device particle arrays start at `PARTICLE_ARRAY_HEADROOM` (default 1.2) times the particle count. When the count times `PARTICLE_ARRAY_RESIZE_THRESHOLD` (1.2) reaches the capacity, at the particle exchange, they grow to `PARTICLE_ARRAY_RESIZE_FACTOR` (1.4) times the count; the exchange buffers grow by that factor too. These are [CMake options](building.md#cmake-options).
+- The spare room holds the open-outflow copies the mover appends; a mover that finds it full stops the run. A [split](particles.md#particle-count-control-splitting-and-merging) stops at the capacity divided by `PARTICLE_ARRAY_RESIZE_THRESHOLD`.
 - The run prints its estimated device and host memory at startup.

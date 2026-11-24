@@ -44,6 +44,9 @@ cmake -DBENCHMARK_MODE=2 -DTIME_TASKS=ON ..         # core solver timing, no out
 | `BUILD_UTESTS` | `OFF` | Build the [unit tests](testing.md) |
 | `TIME_TASKS` | `OFF` | Print per-cycle and cumulative task timings |
 | `BENCHMARK_MODE` | `0` | See [below](#benchmark-modes) |
+| `PARTICLE_ARRAY_HEADROOM` | `1.2` | Initial capacity of the device particle arrays, times the particle count; at least 1. See [Memory](architecture.md#memory) |
+| `PARTICLE_ARRAY_RESIZE_THRESHOLD` | `1.2` | The arrays grow when the particle count times this reaches their capacity; at least 1 |
+| `PARTICLE_ARRAY_RESIZE_FACTOR` | `1.4` | Capacity of a grown array, times the particle count; above `PARTICLE_ARRAY_RESIZE_THRESHOLD` |
 | `GPU_CYCLE_DIAGNOSTICS` | `OFF` | Instrument one GPU timestep and the Maxwell right-hand side that consumes it |
 | `GPU_DIAGNOSTIC_CYCLE` | `1` | Cycle instrumented by `GPU_CYCLE_DIAGNOSTICS`; `-1` for every cycle |
 | `BUILD_SHARED_LIBS` | `ON` | Shared libraries; `OFF` for static |

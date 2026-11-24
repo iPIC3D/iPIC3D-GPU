@@ -4,7 +4,7 @@
 
 ## Input check
 
-`python3 scripts/ipic_preflight.py <input file>` prints most of the startup report of a run (parameters, memory estimate, warnings) without MPI or a GPU, and stops at the first error among the checks it shares with the run. It does not check the write-method, particle-selection, `AsyncOutput` and data-analysis keys, nor whether the build has the backend asked for.
+`python3 scripts/ipic_preflight.py <input file>` prints most of the startup report of a run (parameters, memory estimate, warnings) without MPI or a GPU, and stops at the first error among the checks it shares with the run. It does not check the write-method, particle-selection, `AsyncOutput` and data-analysis keys, nor whether the build has the backend asked for. Its memory estimate assumes the default [`PARTICLE_ARRAY_HEADROOM`](building.md#cmake-options).
 
 `scripts/` also holds unmaintained helpers of the original iPIC3D (`ipic`, `ipic-setinp`, `ipic-setjob`, ...), written for its old build.
 

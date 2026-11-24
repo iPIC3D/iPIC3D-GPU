@@ -10,6 +10,10 @@ from pathlib import Path
 
 
 HEAT_FLUX_COMPONENTS = 10
+# the default of the CMake option of the same name (initial capacity of the
+# device particle arrays, times the particle count); a build with another
+# value needs proportionally more particle memory than estimated here
+PARTICLE_ARRAY_HEADROOM = 1.2
 # the numbers that the input lists of Collective::ReadInput read (a C++
 # stream): no nan, inf, hexadecimal or digit separators
 INT_TOKEN = re.compile(r"[+-]?[0-9]+")
@@ -628,7 +632,7 @@ def print_report(cfg: Input) -> None:
     print(line)
     print(f"        TOTAL = {cxx(host_total)} MB ({cxx(host_total / 1024.0)} GB)  (+ ~250 MB runtime and libraries)")
 
-    cap_factor = 1.4
+    cap_factor = PARTICLE_ARRAY_HEADROOM
     aux_frac = 0.1
     planet_frac = 0.05
     is_dipole = case in {"Dipole", "Dipole2D"}

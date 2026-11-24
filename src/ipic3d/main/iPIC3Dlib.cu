@@ -27,6 +27,7 @@
 #include "IOManager.h"
 #include "MPIdata.h"
 #include "Parameters.h"
+#include "ParticleArrayConfig.h"
 #include "ParticleCommInjection.h"
 #include "TimeTasks.h"
 #include "Timing.h"
@@ -78,16 +79,10 @@
 #endif
 
 // ======= Solver Constants =======
-constexpr double INITIAL_CAPACITY_FACTOR =
-    1.4; // SoA array initial over-allocation
 constexpr double AUX_BUFFER_FRACTION =
     0.1; // exiting/filler/staging as fraction of NOP
 constexpr double PLANET_BUFFER_FRACTION =
     0.05; // planet array initial fraction of NOP
-constexpr double EXPAND_GROWTH_FACTOR =
-    1.5; // growth factor when expanding arrays
-constexpr double EXPAND_THRESHOLD_FACTOR =
-    1.2; // trigger expand when NOP * this >= capacity
 // Shift per cycle of the parents the particle splitting takes: 2^32 over the
 // golden ratio, so that the shifts of successive cycles are far apart.
 constexpr uint32_t SPLIT_PARENT_STRIDE = 2654435761u;
@@ -754,7 +749,7 @@ int c_Solver::initCUDA() {
     for (int i = 0; i < ns; i++) {
       // particleArrayCUDA performs the initial SoA H2D copy in its constructor
       pclsArrayHostPtr[i] = newHostPinnedObject<particleArrayCUDA>(
-          particlesHost[i], INITIAL_CAPACITY_FACTOR, streams[i]);
+          particlesHost[i], ParticleArrayConfig::HEADROOM, streams[i]);
       pclsArrayCUDAPtr[i] = pclsArrayHostPtr[i]->copyToDevice();
 
       departureArrayHostPtr[i] = newHostPinnedObject<departureArrayType>(
@@ -1656,7 +1651,8 @@ void c_Solver::initParticleControl() {
  * A particle is split once per cycle at most, so a species below half its
  * reference count doubles every cycle at most. The particle arrays keep the
  * room the mover's open-boundary copies need: a split stops at capacity /
- * EXPAND_THRESHOLD_FACTOR, the count at which the exchange grows them.
+ * ParticleArrayConfig::RESIZE_THRESHOLD, the count at which the exchange grows
+ * them.
  *
  * Runs on the species' stream, before the mover. The species merged in this
  * cycle is not split: the merge has flagged particles for deletion, and the
@@ -1672,8 +1668,8 @@ void c_Solver::splitParticles(int species, int cycle) {
       nop >= col->getParticleSplittingThreshold() * reference ||
       splitGeometry_[species].axisCount == 0 || species == mergeSpecies_)
     return;
-  const uint32_t room =
-      static_cast<uint32_t>(pcls->getCapacity() / EXPAND_THRESHOLD_FACTOR);
+  const uint32_t room = static_cast<uint32_t>(
+      pcls->getCapacity() / ParticleArrayConfig::RESIZE_THRESHOLD);
   if (room <= nop)
     return;
   const uint32_t count = std::min({reference - nop, nop, room - nop});
@@ -1931,7 +1927,8 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
   // }
   if (count_exiting > exitingArrayHostPtr[species]->getSize()) {
     // Expand the exiting AoS buffer before extracting particles into it.
-    exitingArrayHostPtr[species]->expand(count_exiting * EXPAND_GROWTH_FACTOR,
+    exitingArrayHostPtr[species]->expand(count_exiting *
+                                             ParticleArrayConfig::RESIZE_FACTOR,
                                          streams[species + ns]);
     cudaErrChk(cudaMemcpyAsync(
         exitingArrayCUDAPtr[species], exitingArrayHostPtr[species],
@@ -1947,7 +1944,8 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
           : hole;
   if (fillerNeeded > fillerBufferArrayHostPtr[species]->getSize()) {
     fillerBufferArrayHostPtr[species]->expand(
-        fillerNeeded * EXPAND_GROWTH_FACTOR, streams[species + ns]);
+        fillerNeeded * ParticleArrayConfig::RESIZE_FACTOR,
+        streams[species + ns]);
     cudaErrChk(cudaMemcpyAsync(
         fillerBufferArrayCUDAPtr[species], fillerBufferArrayHostPtr[species],
         sizeof(fillerBuffer), cudaMemcpyDefault, streams[species + ns]));
@@ -1964,7 +1962,8 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
     if ((uint32_t)count_removed_planet >
         planetArrayHostPtr[species]->getSize()) {
       planetArrayHostPtr[species]->expand(
-          count_removed_planet * EXPAND_GROWTH_FACTOR, streams[species + ns]);
+          count_removed_planet * ParticleArrayConfig::RESIZE_FACTOR,
+          streams[species + ns]);
       cudaErrChk(cudaMemcpyAsync(
           planetArrayCUDAPtr[species], planetArrayHostPtr[species],
           sizeof(planetArray), cudaMemcpyDefault, streams[species + ns]));
@@ -2460,10 +2459,11 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
           (uint32_t)stayedParticle[i] + injectedBCS[i] + estimatedMPI;
 
       // Pre-expand SoA if needed (one allocation, before any kernel launch).
-      if ((estimatedTotal * EXPAND_THRESHOLD_FACTOR) >=
+      if ((estimatedTotal * ParticleArrayConfig::RESIZE_THRESHOLD) >=
           pclsArrayHostPtr[i]->getSize()) {
         pclsArrayHostPtr[i]->expand(
-            static_cast<uint32_t>(estimatedTotal * EXPAND_GROWTH_FACTOR),
+            static_cast<uint32_t>(estimatedTotal *
+                                  ParticleArrayConfig::RESIZE_FACTOR),
             streams[i]);
         departureArrayHostPtr[i]->expand(pclsArrayHostPtr[i]->getSize(),
                                          streams[i]);
@@ -2611,9 +2611,10 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
 
     // Expand SoA arrays if needed.
     // Safe point: Phase 3F guarantees no kernels are using these buffers.
-    if ((newPclNum * EXPAND_THRESHOLD_FACTOR) >=
+    if ((newPclNum * ParticleArrayConfig::RESIZE_THRESHOLD) >=
         pclsArrayHostPtr[i]->getSize()) {
-      pclsArrayHostPtr[i]->expand(newPclNum * EXPAND_GROWTH_FACTOR, streams[i]);
+      pclsArrayHostPtr[i]->expand(
+          newPclNum * ParticleArrayConfig::RESIZE_FACTOR, streams[i]);
       departureArrayHostPtr[i]->expand(pclsArrayHostPtr[i]->getSize(),
                                        streams[i]);
       cudaErrChk(cudaMemcpyAsync(
@@ -2626,8 +2627,8 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
     if (incomingCount > 0) {
       if (static_cast<uint32_t>(incomingCount) >
           incomingStagingHostPtr[i]->getSize()) {
-        incomingStagingHostPtr[i]->expand(incomingCount * EXPAND_GROWTH_FACTOR,
-                                          streams[i]);
+        incomingStagingHostPtr[i]->expand(
+            incomingCount * ParticleArrayConfig::RESIZE_FACTOR, streams[i]);
         cudaErrChk(cudaMemcpyAsync(
             incomingStagingCUDAPtr[i], incomingStagingHostPtr[i],
             sizeof(arrayCUDA<SpeciesParticle>), cudaMemcpyDefault, streams[i]));

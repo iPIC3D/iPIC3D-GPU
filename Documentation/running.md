@@ -46,7 +46,7 @@ Add the GPU request your site needs, such as `--gpus-per-node=4`. With Cray MPIC
 
 ## Build and run record
 
-Every build records its **version**, `git describe` plus `-dirty` when the tree has uncommitted or untracked non-ignored files, and its **build signature**: the full commit hash, a hash of the uncommitted changes, the build type, the GPU architecture, the options `BENCHMARK_MODE`, `USE_*`, `TIME_TASKS` and `GPU_CYCLE_DIAGNOSTICS`, and the compiler versions. A build from a modified tree warns at configure time, at every build and in the run log. Builds outside git record `unknown`.
+Every build records its **version**, `git describe` plus `-dirty` when the tree has uncommitted or untracked non-ignored files, and its **build signature**: the full commit hash, a hash of the uncommitted changes, the build type, the GPU architecture, the options `BENCHMARK_MODE`, `USE_*`, `TIME_TASKS`, `GPU_CYCLE_DIAGNOSTICS` and `PARTICLE_ARRAY_*`, and the compiler versions. A build from a modified tree warns at configure time, at every build and in the run log. Builds outside git record `unknown`.
 
 | Where | What |
 |---|---|

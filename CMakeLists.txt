@@ -75,6 +75,37 @@ if(NOT "${BENCHMARK_MODE}" MATCHES "^[012]$")
   message(FATAL_ERROR
           "BENCHMARK_MODE must be 0, 1, or 2; got '${BENCHMARK_MODE}'")
 endif()
+# Sizing of the device particle arrays: they start at PARTICLE_ARRAY_HEADROOM
+# times the particle count; when the count times
+# PARTICLE_ARRAY_RESIZE_THRESHOLD reaches the capacity, they grow to the count
+# times PARTICLE_ARRAY_RESIZE_FACTOR (the exchange buffers grow by that factor
+# too). The spare room holds the mover's open-outflow copies, and a split stops
+# at capacity / PARTICLE_ARRAY_RESIZE_THRESHOLD.
+set(PARTICLE_ARRAY_HEADROOM "1.2" CACHE STRING
+    "Initial capacity of the device particle arrays, times the particle count (at least 1)")
+set(PARTICLE_ARRAY_RESIZE_THRESHOLD "1.2" CACHE STRING
+    "The particle arrays grow when the particle count times this reaches their capacity (at least 1)")
+set(PARTICLE_ARRAY_RESIZE_FACTOR "1.4" CACHE STRING
+    "Capacity of a grown particle array, times the particle count (above PARTICLE_ARRAY_RESIZE_THRESHOLD)")
+foreach(opt PARTICLE_ARRAY_HEADROOM PARTICLE_ARRAY_RESIZE_THRESHOLD
+            PARTICLE_ARRAY_RESIZE_FACTOR)
+  if(NOT "${${opt}}" MATCHES "^[0-9]+(\\.[0-9]*)?$")
+    message(FATAL_ERROR "${opt} must be a decimal number such as 1.5; got '${${opt}}'")
+  endif()
+endforeach()
+# below 1 the arrays would be smaller than the particles they hold; a factor
+# not above the threshold would grow them again at every exchange
+if(PARTICLE_ARRAY_HEADROOM LESS 1 OR PARTICLE_ARRAY_RESIZE_THRESHOLD LESS 1 OR
+   NOT PARTICLE_ARRAY_RESIZE_FACTOR GREATER PARTICLE_ARRAY_RESIZE_THRESHOLD)
+  message(FATAL_ERROR
+          "Need PARTICLE_ARRAY_HEADROOM >= 1, PARTICLE_ARRAY_RESIZE_THRESHOLD >= 1 and PARTICLE_ARRAY_RESIZE_FACTOR > PARTICLE_ARRAY_RESIZE_THRESHOLD; got ${PARTICLE_ARRAY_HEADROOM}, ${PARTICLE_ARRAY_RESIZE_THRESHOLD} and ${PARTICLE_ARRAY_RESIZE_FACTOR}")
+endif()
+# as constexpr values, for the library and the unit tests that compile its
+# sources (hence a directory include, before any target)
+set(IPIC3D_CONFIG_DIR "${CMAKE_BINARY_DIR}/config")
+configure_file("${CMAKE_SOURCE_DIR}/cmake/ParticleArrayConfig.h.in"
+               "${IPIC3D_CONFIG_DIR}/ParticleArrayConfig.h" @ONLY)
+include_directories("${IPIC3D_CONFIG_DIR}")
 option(USE_OPENMP "Use OpenMP in supported loops" ON) # must delete all cmake cache if you change this option
 option(GPU_CYCLE_DIAGNOSTICS
        "Instrument one GPU timestep and the Maxwell RHS that consumes it"
@@ -434,7 +465,8 @@ endif()
 set(ipic3d_build_options "${ipic3d_device_option}")
 foreach(opt BENCHMARK_MODE USE_OPENMP USE_HDF5
             USE_PHDF5 USE_ADIOS2 USE_CATALYST USE_BATSRUS TIME_TASKS
-            GPU_CYCLE_DIAGNOSTICS)
+            GPU_CYCLE_DIAGNOSTICS PARTICLE_ARRAY_HEADROOM
+            PARTICLE_ARRAY_RESIZE_THRESHOLD PARTICLE_ARRAY_RESIZE_FACTOR)
   string(APPEND ipic3d_build_options " ${opt}=${${opt}}")
 endforeach()
 set(ipic3d_build_info_args
@@ -563,6 +595,7 @@ message(STATUS "  Catalyst (in-situ)          : ${USE_CATALYST}")
 message(STATUS "  BATSRUS coupling            : ${USE_BATSRUS}")
 message(STATUS "  Task timing output          : ${TIME_TASKS}  (LOG_TASKS_TOTAL_TIME macro)")
 message(STATUS "  Benchmark mode              : ${BENCHMARK_MODE}  (0=normal, 1=no output, 2=no output/analysis/heat flux)")
+message(STATUS "  Particle arrays             : ${PARTICLE_ARRAY_HEADROOM} x count, grown to ${PARTICLE_ARRAY_RESIZE_FACTOR} x count when ${PARTICLE_ARRAY_RESIZE_THRESHOLD} x count reaches the capacity")
 message(STATUS "  Unit tests                  : ${BUILD_UTESTS}")
 message(STATUS "==========================================")
 message(STATUS "")

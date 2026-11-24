@@ -63,10 +63,10 @@ public:
   /**
    * @brief Construct from ParticleSoAHost — direct SoA H→D.
    * @param pSoA Source host-side SoA container.
-   * @param expand Capacity growth factor applied to the initial allocation.
+   * @param expand Initial capacity, times the particle count (at least 1).
    * @param deviceStream CUDA stream used for the initial H2D copies.
    */
-  __host__ particleArrayCUDA(ParticleSoAHost* pSoA, cudaTypeSingle expand = 1.2,
+  __host__ particleArrayCUDA(ParticleSoAHost* pSoA, cudaTypeSingle expand,
                              cudaStream_t deviceStream = 0)
       : soa{}, stream(deviceStream) {
     const uint32_t nop = pSoA->getNOP();

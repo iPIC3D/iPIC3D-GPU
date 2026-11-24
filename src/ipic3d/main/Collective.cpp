@@ -24,6 +24,7 @@
 #include "ConfigFile.h"
 #include "HeatFluxComponents.h"
 #include "MPIdata.h"
+#include "ParticleArrayConfig.h"
 #include "RestartReader.h"
 #include "asserts.h" // for assert_ge
 #include "dataAnalysisConfig.cuh"
@@ -1643,7 +1644,7 @@ void Collective::Print() {
   // --- DEVICE ---
   // GPU allocations use actual NOP from maxwellian (interior cells only, no
   // ghosts)
-  const double CAP_FACTOR = 1.4, AUX_FRAC = 0.1, PLANET_FRAC = 0.05;
+  const double AUX_FRAC = 0.1, PLANET_FRAC = 0.05;
   bool isDipole = (Case == "Dipole" || Case == "Dipole2D");
 
   double devFieldBuf = fieldSize * 24.0 * 8;
@@ -1653,7 +1654,7 @@ void Collective::Print() {
   for (int i = 0; i < ns; i++) {
     long long nop_i = (long long)npcel[i] * nxc_r * nyc_r *
                       nzc_r; // actual NOP (interior cells)
-    long long cap_i = (long long)(nop_i * CAP_FACTOR);
+    long long cap_i = (long long)(nop_i * ParticleArrayConfig::HEADROOM);
 
     devPcl += cap_i * soaArrays(i) * 8;
     devBuf +=

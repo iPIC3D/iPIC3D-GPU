@@ -456,7 +456,7 @@ moverSubcyclesWallsKernel(moverParameter* moverParam,
 
 /**
  * @brief Delete particles that end the push in the repopulation layers, the 3
- * cells before a REEMISSION face.
+ * cells before an open-inflow face.
  *
  * Applies to every species: the particles leave the domain there, and
  * injectionKernel refills the layers with the species that have rhoINJECT > 0.

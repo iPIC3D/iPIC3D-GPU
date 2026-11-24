@@ -119,7 +119,7 @@ struct FieldBoundarySpec {
     return face[f].open() && face[f].bcP == 2 && f != FACE_XR;
   }
   /** The B layers of open face f are treated: the local cell count along
-   *  its normal is above 10 (an inherited gate). */
+   *  its normal, ghosts included, is above 10 (an inherited gate). */
   bool openBLayers(int f) const {
     return face[f].open() && cells[faceAxis(f)] > 10;
   }

@@ -143,7 +143,7 @@ ParticleCommInjection::ParticleCommInjection(ParticleSoAHost& hostParticles)
 
   cVERBOSE_ = vct_->getcVERBOSE();
 
-  // Seed BC reemission RNG (single-thread, few particles per cycle)
+  // Seed the open-inflow BC RNG (single-thread, few particles per cycle)
   bcRng_.seed(static_cast<uint64_t>(MPIdata::get_rank()) * 31 +
               static_cast<uint64_t>(speciesNumber_) * 127 + 9973);
 
@@ -394,7 +394,7 @@ void ParticleCommInjection::applyBCsLocally(vector_SpeciesParticle& pclList,
 // 6 face BC methods (virtual, operating on AoS blocks from BlockCommunicator)
 // ========================================================================
 
-void ParticleCommInjection::reemissionVelocity(double vel[3], int axis,
+void ParticleCommInjection::openInflowVelocity(double vel[3], int axis,
                                                double inward) {
   sample_maxwellian(vel[0], vel[1], vel[2], thermalVelocityX_,
                     thermalVelocityY_, thermalVelocityZ_, bcRng_);
@@ -420,21 +420,19 @@ void ParticleCommInjection::apply_Xleft_BC(vector_SpeciesParticle& pcls,
       pcls[pidx].fetch_u() *= -1;
     }
     break;
-  case BCparticles::REEMISSION:
+  case BCparticles::OPEN_INFLOW:
     for (int pidx = start; pidx < size; pidx++) {
       SpeciesParticle& pcl = pcls[pidx];
       pcl.fetch_x() *= -1;
       double vel[3];
-      reemissionVelocity(vel, 0, 1.0);
+      openInflowVelocity(vel, 0, 1.0);
       pcl.set_u(vel);
     }
     break;
   case BCparticles::EXIT:
     pcls.resize(start);
     break;
-  case BCparticles::OPENBCIn:
-    break;
-  case BCparticles::OPENBCOut:
+  case BCparticles::OPEN_OUTFLOW:
     break;
   }
 }
@@ -452,21 +450,19 @@ void ParticleCommInjection::apply_Yleft_BC(vector_SpeciesParticle& pcls,
       pcls[pidx].fetch_v() *= -1;
     }
     break;
-  case BCparticles::REEMISSION:
+  case BCparticles::OPEN_INFLOW:
     for (int pidx = start; pidx < size; pidx++) {
       SpeciesParticle& pcl = pcls[pidx];
       pcl.fetch_y() *= -1;
       double vel[3];
-      reemissionVelocity(vel, 1, 1.0);
+      openInflowVelocity(vel, 1, 1.0);
       pcl.set_u(vel);
     }
     break;
   case BCparticles::EXIT:
     pcls.resize(start);
     break;
-  case BCparticles::OPENBCIn:
-    break;
-  case BCparticles::OPENBCOut:
+  case BCparticles::OPEN_OUTFLOW:
     break;
   }
 }
@@ -484,21 +480,19 @@ void ParticleCommInjection::apply_Zleft_BC(vector_SpeciesParticle& pcls,
       pcls[pidx].fetch_w() *= -1;
     }
     break;
-  case BCparticles::REEMISSION:
+  case BCparticles::OPEN_INFLOW:
     for (int pidx = start; pidx < size; pidx++) {
       SpeciesParticle& pcl = pcls[pidx];
       pcl.fetch_z() *= -1;
       double vel[3];
-      reemissionVelocity(vel, 2, 1.0);
+      openInflowVelocity(vel, 2, 1.0);
       pcl.set_u(vel);
     }
     break;
   case BCparticles::EXIT:
     pcls.resize(start);
     break;
-  case BCparticles::OPENBCIn:
-    break;
-  case BCparticles::OPENBCOut:
+  case BCparticles::OPEN_OUTFLOW:
     break;
   }
 }
@@ -517,22 +511,20 @@ void ParticleCommInjection::apply_Xrght_BC(vector_SpeciesParticle& pcls,
       pcls[pidx].fetch_u() *= -1;
     }
     break;
-  case BCparticles::REEMISSION:
+  case BCparticles::OPEN_INFLOW:
     for (int pidx = start; pidx < size; pidx++) {
       SpeciesParticle& pcl = pcls[pidx];
       cudaParticleType& posX = pcl.fetch_x();
       posX = 2 * domainLengthX_ - posX;
       double vel[3];
-      reemissionVelocity(vel, 0, -1.0);
+      openInflowVelocity(vel, 0, -1.0);
       pcl.set_u(vel);
     }
     break;
   case BCparticles::EXIT:
     pcls.resize(start);
     break;
-  case BCparticles::OPENBCIn:
-    break;
-  case BCparticles::OPENBCOut:
+  case BCparticles::OPEN_OUTFLOW:
     break;
   }
 }
@@ -551,22 +543,20 @@ void ParticleCommInjection::apply_Yrght_BC(vector_SpeciesParticle& pcls,
       pcls[pidx].fetch_v() *= -1;
     }
     break;
-  case BCparticles::REEMISSION:
+  case BCparticles::OPEN_INFLOW:
     for (int pidx = start; pidx < size; pidx++) {
       SpeciesParticle& pcl = pcls[pidx];
       cudaParticleType& posY = pcl.fetch_y();
       posY = 2 * domainLengthY_ - posY;
       double vel[3];
-      reemissionVelocity(vel, 1, -1.0);
+      openInflowVelocity(vel, 1, -1.0);
       pcl.set_u(vel);
     }
     break;
   case BCparticles::EXIT:
     pcls.resize(start);
     break;
-  case BCparticles::OPENBCIn:
-    break;
-  case BCparticles::OPENBCOut:
+  case BCparticles::OPEN_OUTFLOW:
     break;
   }
 }
@@ -585,22 +575,20 @@ void ParticleCommInjection::apply_Zrght_BC(vector_SpeciesParticle& pcls,
       pcls[pidx].fetch_w() *= -1;
     }
     break;
-  case BCparticles::REEMISSION:
+  case BCparticles::OPEN_INFLOW:
     for (int pidx = start; pidx < size; pidx++) {
       SpeciesParticle& pcl = pcls[pidx];
       cudaParticleType& posZ = pcl.fetch_z();
       posZ = 2 * domainLengthZ_ - posZ;
       double vel[3];
-      reemissionVelocity(vel, 2, -1.0);
+      openInflowVelocity(vel, 2, -1.0);
       pcl.set_u(vel);
     }
     break;
   case BCparticles::EXIT:
     pcls.resize(start);
     break;
-  case BCparticles::OPENBCIn:
-    break;
-  case BCparticles::OPENBCOut:
+  case BCparticles::OPEN_OUTFLOW:
     break;
   }
 }
@@ -869,17 +857,17 @@ int ParticleCommInjection::computeInjectionCountImpl() const {
     return 0;
 
   const bool repopXleft =
-      (vct_->noXleftNeighbor_P() && bcPfaceXleft_ == REEMISSION);
+      (vct_->noXleftNeighbor_P() && bcPfaceXleft_ == OPEN_INFLOW);
   const bool repopYleft =
-      (vct_->noYleftNeighbor_P() && bcPfaceYleft_ == REEMISSION);
+      (vct_->noYleftNeighbor_P() && bcPfaceYleft_ == OPEN_INFLOW);
   const bool repopZleft =
-      (vct_->noZleftNeighbor_P() && bcPfaceZleft_ == REEMISSION);
+      (vct_->noZleftNeighbor_P() && bcPfaceZleft_ == OPEN_INFLOW);
   const bool repopXrght =
-      (vct_->noXrghtNeighbor_P() && bcPfaceXright_ == REEMISSION);
+      (vct_->noXrghtNeighbor_P() && bcPfaceXright_ == OPEN_INFLOW);
   const bool repopYrght =
-      (vct_->noYrghtNeighbor_P() && bcPfaceYright_ == REEMISSION);
+      (vct_->noYrghtNeighbor_P() && bcPfaceYright_ == OPEN_INFLOW);
   const bool repopZrght =
-      (vct_->noZrghtNeighbor_P() && bcPfaceZright_ == REEMISSION);
+      (vct_->noZrghtNeighbor_P() && bcPfaceZright_ == OPEN_INFLOW);
 
   if (!(repopXleft || repopYleft || repopZleft || repopXrght || repopYrght ||
         repopZrght))
@@ -954,17 +942,17 @@ void ParticleCommInjection::fillInjectionParameter(
     return;
 
   const bool repopXleft =
-      (vct_->noXleftNeighbor_P() && bcPfaceXleft_ == REEMISSION);
+      (vct_->noXleftNeighbor_P() && bcPfaceXleft_ == OPEN_INFLOW);
   const bool repopYleft =
-      (vct_->noYleftNeighbor_P() && bcPfaceYleft_ == REEMISSION);
+      (vct_->noYleftNeighbor_P() && bcPfaceYleft_ == OPEN_INFLOW);
   const bool repopZleft =
-      (vct_->noZleftNeighbor_P() && bcPfaceZleft_ == REEMISSION);
+      (vct_->noZleftNeighbor_P() && bcPfaceZleft_ == OPEN_INFLOW);
   const bool repopXrght =
-      (vct_->noXrghtNeighbor_P() && bcPfaceXright_ == REEMISSION);
+      (vct_->noXrghtNeighbor_P() && bcPfaceXright_ == OPEN_INFLOW);
   const bool repopYrght =
-      (vct_->noYrghtNeighbor_P() && bcPfaceYright_ == REEMISSION);
+      (vct_->noYrghtNeighbor_P() && bcPfaceYright_ == OPEN_INFLOW);
   const bool repopZrght =
-      (vct_->noZrghtNeighbor_P() && bcPfaceZright_ == REEMISSION);
+      (vct_->noZrghtNeighbor_P() && bcPfaceZright_ == OPEN_INFLOW);
 
   if (!(repopXleft || repopYleft || repopZleft || repopXrght || repopYrght ||
         repopZrght))

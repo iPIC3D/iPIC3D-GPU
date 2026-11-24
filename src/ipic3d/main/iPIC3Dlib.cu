@@ -1605,8 +1605,8 @@ static int cellsOutsidePlanet(const Grid3DCU& grid,
  * The control keeps the particle count of a species on this rank close to its
  * reference count: the particles per cell of the species times the cells of
  * the rank outside the planet, which is what the input file loads there and
- * the planet leaves. A species the input file does not load (a planetary
- * species) is not controlled.
+ * the planet leaves. The species from ns_solar_wind on (planetary) are not
+ * controlled.
  */
 void c_Solver::initParticleControl() {
   pclControlReference_.assign(ns, 0);
@@ -2290,8 +2290,8 @@ void c_Solver::processPlanetParticles() {
   // directly.
 
   // ======= Step 7: Reflect and compact surviving electrons =======
-  // Specular by default; diffuse: Lambert (cosine-law) direction on the
-  // outward hemisphere, speed kept.
+  // Diffuse by default (planetReflectionType = 1): Lambert (cosine-law)
+  // direction on the outward hemisphere, speed kept; specular with 0.
   PlanetReflection reflection;
   reflection.originX = moverParamHostPtr[0]->sphereOrigin[0];
   reflection.originY = moverParamHostPtr[0]->sphereOrigin[1];
@@ -2337,8 +2337,10 @@ void c_Solver::processPlanetParticles() {
   // straddle ranks, and the electron is placed up to 2R from the centre): the
   // exchange in MoverAwaitAndPclExchange() forwards it to its owner rank like
   // any exiting particle. One placed beyond a domain face gets that face's
-  // particle boundary condition: an exit face deletes it; an open face leaves
-  // it outside, and the exchange then removes it as unrecoverable, with a
+  // particle boundary condition: exit (0) deletes it; mirror (1) mirrors its
+  // position and normal velocity; open inflow (2) mirrors its position and
+  // draws a thermal velocity into the domain; open outflow (3) leaves it
+  // outside, and the exchange then removes it as unrecoverable, with a
   // warning.
   for (int e = 0; e < planetElecSpeciesCount; e++) {
     if (planetSurvivorCount[e] == 0)
@@ -2440,8 +2442,8 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
   // Pre-expand the SoA for stayed + injected + estimated MPI incoming, set
   // NOP, and launch the GPU injection kernels, which write the SoA tail.
 
-  // Per-species injection count (cached; 0 unless this rank owns a
-  // REEMISSION face and the species has rhoINJECT > 0).
+  // Per-species injection count (cached; 0 unless this rank owns an
+  // open-inflow face and the species has rhoINJECT > 0).
   // Declared at function scope so Phase 3G can also use it.
   std::vector<int> injectedBCS(ns, 0);
   for (int i = 0; i < ns; i++)

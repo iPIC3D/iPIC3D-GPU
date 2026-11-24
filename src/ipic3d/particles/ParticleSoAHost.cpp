@@ -914,29 +914,29 @@ void ParticleSoAHost::repopulate_particlesInfo(
 
   const bool repopBndryX =
       !vct_->getPERIODICX_P() &&
-      (bcPfaceXleft_ == REEMISSION || bcPfaceXright_ == REEMISSION);
+      (bcPfaceXleft_ == OPEN_INFLOW || bcPfaceXright_ == OPEN_INFLOW);
   const bool repopBndryY =
       !vct_->getPERIODICY_P() &&
-      (bcPfaceYleft_ == REEMISSION || bcPfaceYright_ == REEMISSION);
+      (bcPfaceYleft_ == OPEN_INFLOW || bcPfaceYright_ == OPEN_INFLOW);
   const bool repopBndryZ =
       !vct_->getPERIODICZ_P() &&
-      (bcPfaceZleft_ == REEMISSION || bcPfaceZright_ == REEMISSION);
+      (bcPfaceZleft_ == OPEN_INFLOW || bcPfaceZright_ == OPEN_INFLOW);
 
   if (!(repopBndryX || repopBndryY || repopBndryZ))
     return;
 
   const bool repopXleft =
-      (vct_->noXleftNeighbor_P() && bcPfaceXleft_ == REEMISSION);
+      (vct_->noXleftNeighbor_P() && bcPfaceXleft_ == OPEN_INFLOW);
   const bool repopYleft =
-      (vct_->noYleftNeighbor_P() && bcPfaceYleft_ == REEMISSION);
+      (vct_->noYleftNeighbor_P() && bcPfaceYleft_ == OPEN_INFLOW);
   const bool repopZleft =
-      (vct_->noZleftNeighbor_P() && bcPfaceZleft_ == REEMISSION);
+      (vct_->noZleftNeighbor_P() && bcPfaceZleft_ == OPEN_INFLOW);
   const bool repopXrght =
-      (vct_->noXrghtNeighbor_P() && bcPfaceXright_ == REEMISSION);
+      (vct_->noXrghtNeighbor_P() && bcPfaceXright_ == OPEN_INFLOW);
   const bool repopYrght =
-      (vct_->noYrghtNeighbor_P() && bcPfaceYright_ == REEMISSION);
+      (vct_->noYrghtNeighbor_P() && bcPfaceYright_ == OPEN_INFLOW);
   const bool repopZrght =
-      (vct_->noZrghtNeighbor_P() && bcPfaceZright_ == REEMISSION);
+      (vct_->noZrghtNeighbor_P() && bcPfaceZright_ == OPEN_INFLOW);
 
   if (!(repopXleft || repopYleft || repopZleft || repopXrght || repopYrght ||
         repopZrght))
@@ -986,20 +986,20 @@ void ParticleSoAHost::openbc_particles_outflowInfo(
     return;
 
   const bool openXleft = !vct_->getPERIODICX_P() && vct_->noXleftNeighbor_P() &&
-                         bcPfaceXleft_ == OPENBCOut;
+                         bcPfaceXleft_ == OPEN_OUTFLOW;
   const bool openYleft = !vct_->getPERIODICY_P() && vct_->noYleftNeighbor_P() &&
-                         bcPfaceYleft_ == OPENBCOut;
+                         bcPfaceYleft_ == OPEN_OUTFLOW;
   const bool openZleft = !vct_->getPERIODICZ_P() && vct_->noZleftNeighbor_P() &&
-                         bcPfaceZleft_ == OPENBCOut;
+                         bcPfaceZleft_ == OPEN_OUTFLOW;
   const bool openXright = !vct_->getPERIODICX_P() &&
                           vct_->noXrghtNeighbor_P() &&
-                          bcPfaceXright_ == OPENBCOut;
+                          bcPfaceXright_ == OPEN_OUTFLOW;
   const bool openYright = !vct_->getPERIODICY_P() &&
                           vct_->noYrghtNeighbor_P() &&
-                          bcPfaceYright_ == OPENBCOut;
+                          bcPfaceYright_ == OPEN_OUTFLOW;
   const bool openZright = !vct_->getPERIODICZ_P() &&
                           vct_->noZrghtNeighbor_P() &&
-                          bcPfaceZright_ == OPENBCOut;
+                          bcPfaceZright_ == OPEN_OUTFLOW;
 
   if (!(openXleft || openYleft || openZleft || openXright || openYright ||
         openZright))

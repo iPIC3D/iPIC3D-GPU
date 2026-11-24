@@ -127,8 +127,8 @@ class Input:
 def bc_em_name(code: int) -> str:
     return {
         0: "perfect conductor",
-        1: "Dirichlet (first order)",
-        2: "open/inflow (Neumann)",
+        1: "perfect magnetic conductor (first order)",
+        2: "open",
     }.get(code, "unknown")
 
 
@@ -136,9 +136,8 @@ def bc_p_name(code: int) -> str:
     return {
         0: "exit",
         1: "perfect mirror",
-        2: "reemission",
-        3: "open BC outflow",
-        4: "open BC inflow",
+        2: "open inflow",
+        3: "open outflow",
     }.get(code, "unknown")
 
 
@@ -189,10 +188,13 @@ def print_topology(xlen: int, ylen: int, zlen: int,
 
 
 def print_report(cfg: Input) -> None:
+    """Print the startup report of Collective::Print. The input checks shared with
+    Collective::ReadInput run in its order and with its messages, so a deck with
+    several errors stops at the same first one."""
     dt = cfg.real("dt")
     ncycles = cfg.integer("ncycles")
     th = cfg.real("th", 1.0)
-    if not th >= 0.5:  # same rejection as Collective::ReadInput
+    if not th >= 0.5:
         raise SystemExit(f"th must be at least 0.5, not {cxx(th)}")
     smooth = cfg.real("Smooth", 1.0)
     smooth_niter = cfg.integer("SmoothNiter", 6)
@@ -200,7 +202,7 @@ def print_report(cfg: Input) -> None:
     save_dir = cfg.string("SaveDirName", "data")
     ns = cfg.integer("ns")
     ns_test = cfg.integer("nsTestPart", 0)
-    if ns < 1 or ns_test < 0:  # same rejection as Collective::ReadInput
+    if ns < 1 or ns_test < 0:
         raise SystemExit(f"ns must be at least 1 and nsTestPart at least 0, "
                          f"not {ns} and {ns_test}")
 
@@ -210,32 +212,9 @@ def print_report(cfg: Input) -> None:
     delta = cfg.real("delta", 0.5)
 
     case = cfg.string("Case")
-    sim_name = cfg.string("SimulationName")
-    # same rejection as Collective::ReadInput (the HDF5 ones also need a build
-    # with them, which this script cannot tell)
-    field_method = cfg.string("FieldWriteMethod")
-    if field_method not in ("shdf5", "phdf5", "pvtk", "nbcvtk"):
-        raise SystemExit(f"FieldWriteMethod must be shdf5, phdf5, pvtk or nbcvtk, "
-                         f"not {field_method}")
-    poisson = cfg.string("PoissonCorrection", "no")
-    poisson_cycle = cfg.integer("PoissonCorrectionCycle", 10)
-    divb = cfg.string("divBCorrection", "no")
-    divb_cycle = cfg.integer("divBCorrectionCycle", 10)
-    niter_mover = cfg.integer("NiterMover", 3)
-    if niter_mover < 1:  # same rejection as Collective::ReadInput
-        raise SystemExit(f"NiterMover must be at least 1, not {niter_mover}")
-    # same rejections as Collective::ReadInput
-    for name, on, every in (("PoissonCorrectionCycle", poisson == "yes", poisson_cycle),
-                            ("divBCorrectionCycle", divb == "yes", divb_cycle)):
-        if on and every < 1:
-            raise SystemExit(f"{name} must be at least 1, not {every}")
-    div_cleaning_tol = cfg.real("DivCleaningTol", 1e-6)
-    if (poisson == "yes" or divb == "yes") and not 0.0 < div_cleaning_tol < 1.0:
-        raise SystemExit(f"DivCleaningTol must be in (0, 1), not {cxx(div_cleaning_tol)}")
-    solver_type = cfg.string("SolverType", "GMRES")
-    # same rejections as Collective::ReadInput: the Harris pressure law on the
-    # perturbed flux function; the GEM perturbation current, which fills the
-    # box, cannot be carried by the sheet electrons
+    # the Harris pressure law on the perturbed flux function; the GEM
+    # perturbation current, which fills the box, cannot be carried by the
+    # sheet electrons
     ampere = cfg.integer("currentFromAmpere", 0)
     if cfg.integer("spatiallyVaryingThermal", 0) and not (
             case == "GEMHarris" and ampere and b0x != 0.0 and b0y == 0.0):
@@ -245,6 +224,32 @@ def print_report(cfg: Input) -> None:
         raise SystemExit("pertGEM needs currentFromAmpere = 0: its current fills "
                          "the box, where the sheet electrons that would carry it "
                          "have no density")
+    # the HDF5 methods also need a build with them, which this script cannot tell
+    field_method = cfg.string("FieldWriteMethod")
+    if field_method not in ("shdf5", "phdf5", "pvtk", "nbcvtk"):
+        raise SystemExit(f"FieldWriteMethod must be shdf5, phdf5, pvtk or nbcvtk, "
+                         f"not {field_method}")
+    sim_name = cfg.string("SimulationName")
+    poisson = cfg.string("PoissonCorrection", "no")
+    poisson_cycle = cfg.integer("PoissonCorrectionCycle", 10)
+    divb = cfg.string("divBCorrection", "no")
+    divb_cycle = cfg.integer("divBCorrectionCycle", 10)
+    for name, on, every in (("PoissonCorrectionCycle", poisson == "yes", poisson_cycle),
+                            ("divBCorrectionCycle", divb == "yes", divb_cycle)):
+        if on and every < 1:
+            raise SystemExit(f"{name} must be at least 1, not {every}")
+    # one value per species
+    rho_init = cfg.species_list("rhoINIT", ns, "species")
+    rho_inject = cfg.species_list("rhoINJECT", ns, "species")
+    div_cleaning_tol = cfg.real("DivCleaningTol", 1e-6)
+    if (poisson == "yes" or divb == "yes") and not 0.0 < div_cleaning_tol < 1.0:
+        raise SystemExit(f"DivCleaningTol must be in (0, 1), not {cxx(div_cleaning_tol)}")
+    niter_mover = cfg.integer("NiterMover", 3)
+    if niter_mover < 1:
+        raise SystemExit(f"NiterMover must be at least 1, not {niter_mover}")
+    solver_type = cfg.string("SolverType", "GMRES")
+    if solver_type not in ("GMRES", "FGMRESBlockJacobi", "Chebyshev"):
+        raise SystemExit(f"SolverType must be GMRES, FGMRESBlockJacobi or Chebyshev, not {solver_type}")
 
     c = cfg.real("c", 1.0)
     if not c > 0.0:
@@ -258,10 +263,22 @@ def print_report(cfg: Input) -> None:
     xlen = cfg.integer("XLEN", 1)
     ylen = cfg.integer("YLEN", 1)
     zlen = cfg.integer("ZLEN", 1)
+    # every rank along an axis gets ceil(cells / ranks) cells and the last
+    # one the rest, at least one
+    for cell_key, cells, rank_key, ranks in (("nxc", nxc, "XLEN", xlen),
+                                             ("nyc", nyc, "YLEN", ylen),
+                                             ("nzc", nzc, "ZLEN", zlen)):
+        if cells < 1 or ranks < 1:
+            raise SystemExit(f"{cell_key} and {rank_key} must be positive, not {cells} and {ranks}")
+        regular = ceil_div(cells, ranks)
+        if cells - regular * (ranks - 1) < 1:
+            raise SystemExit(f"{cell_key} = {cells} over {rank_key} = {ranks} ranks of {regular} cells "
+                             f"each leaves the last rank no cells; choose values that leave it at "
+                             f"least one, for example with {rank_key} dividing {cell_key}")
     periodic_x = cfg.boolean("PERIODICX", True)
     periodic_y = cfg.boolean("PERIODICY", True)
     periodic_z = cfg.boolean("PERIODICZ", True)
-    # same rejection as Collective::ReadInput: outside [0, 1] some mode grows
+    # outside [0, 1] some mode grows
     if not 0.0 <= smooth <= 1.0:
         raise SystemExit(f"Smooth must be in [0, 1], not {cxx(smooth)}")
     # Collective::smoothFlipBound: the filter's response is negative below
@@ -269,26 +286,35 @@ def print_report(cfg: Input) -> None:
     dims = sum(not (n == 1 and p) for n, p in
                ((nxc, periodic_x), (nyc, periodic_y), (nzc, periodic_z)))
     smooth_flip = (2 * dims - 3) / (2 * dims) if dims > 1 else 0.0
-    # same rejection as Collective::ReadInput: the div(B) face rules take the
-    # next inner node
+    # the div(B) face rules take the next inner node
     if divb == "yes" and any(n < 2 and not p for n, p in
                              ((nxc, periodic_x), (nyc, periodic_y), (nzc, periodic_z))):
         raise SystemExit("divBCorrection needs at least 2 cells along every non-periodic "
                          "direction (a single-cell direction must be periodic)")
-    outflow_layer_fields = cfg.string("OutflowLayerFields", "solved")
-    if outflow_layer_fields not in ("copy", "solved"):  # as Collective::ReadInput
-        raise SystemExit(f"OutflowLayerFields must be copy or solved, not {outflow_layer_fields}")
 
-    planet_reflection = cfg.integer("planetReflectionType", 0)
+    planet_reflection = cfg.integer("planetReflectionType", 1)
+    if planet_reflection not in (0, 1):
+        raise SystemExit(f"planetReflectionType must be 0 (specular) or 1 (diffuse), "
+                         f"not {planet_reflection}")
     ns_solar = cfg.integer("ns_solar_wind", ns)
     ns_planetary = cfg.integer("ns_planetary", 0)
     exosphere_enabled = cfg.integer("AddExosphereInjection", 0)
     max_injection_radius = cfg.real("RmaxExosphereInjection", 3.0)
     l_square = cfg.real("L_square", 5.0)
+    if not (0 <= ns_solar <= ns and ns_planetary >= 0):
+        raise SystemExit(f"ns_solar_wind must be from 0 to ns ({ns}) and ns_planetary "
+                         f"at least 0, not {ns_solar} and {ns_planetary}")
+    if exosphere_enabled and ns_planetary != ns - ns_solar:
+        raise SystemExit(f"AddExosphereInjection = 1 needs ns_planetary = ns - "
+                         f"ns_solar_wind = {ns - ns_solar}, not {ns_planetary}")
+    if ns_planetary > 0:
+        planetary = "planetary species"
+        neutral_density = cfg.species_list("NeutralSurfaceDensity", ns_planetary, planetary)
+        scale_height = cfg.species_list("ExosphericScaleHeight", ns_planetary, planetary)
+        photo_freq = cfg.species_list("PhotoionizationFrequency", ns_planetary, planetary)
+        weight_ratio = cfg.species_list("MacroParticleWeightRatio", ns_planetary, planetary)
 
-    # same rejections as Collective::ReadInput: one value per species
-    rho_init = cfg.species_list("rhoINIT", ns, "species")
-    rho_inject = cfg.species_list("rhoINJECT", ns, "species")
+    # one value per species
     uth = cfg.species_list("uth", ns, "species")
     vth = cfg.species_list("vth", ns, "species")
     wth = cfg.species_list("wth", ns, "species")
@@ -315,42 +341,37 @@ def print_report(cfg: Input) -> None:
             raise SystemExit(f"species {i} has rhoINIT = {cxx(rho_init[i])} and "
                              f"rhoINJECT = {cxx(rho_inject[i])} but npcelx * npcely * "
                              f"npcelz = 0: it would load or inject no particles")
-    if not (0 <= ns_solar <= ns and ns_planetary >= 0):
-        raise SystemExit(f"ns_solar_wind must be from 0 to ns ({ns}) and ns_planetary "
-                         f"at least 0, not {ns_solar} and {ns_planetary}")
-    if exosphere_enabled and ns_planetary != ns - ns_solar:
-        raise SystemExit(f"AddExosphereInjection = 1 needs ns_planetary = ns - "
-                         f"ns_solar_wind = {ns - ns_solar}, not {ns_planetary}")
     if exosphere_enabled and ns_planetary > 0 and npcel[0] == 0:
         raise SystemExit("AddExosphereInjection = 1 sizes the injected particles by "
                          "npcelx * npcely * npcelz of species 0, which is 0: it would "
                          "inject none")
-    if ns_planetary > 0:
-        planetary = "planetary species"
-        neutral_density = cfg.species_list("NeutralSurfaceDensity", ns_planetary, planetary)
-        scale_height = cfg.species_list("ExosphericScaleHeight", ns_planetary, planetary)
-        photo_freq = cfg.species_list("PhotoionizationFrequency", ns_planetary, planetary)
-        weight_ratio = cfg.species_list("MacroParticleWeightRatio", ns_planetary, planetary)
     track_id = track_particle_id_mask(cfg, ns)
     heat_flux = heat_flux_requested(cfg)
     restart_output_cycle = cfg.integer("RestartOutputCycle", 5000)
 
-    bc_em_xr = cfg.integer("bcEMfaceXright")
-    bc_em_xl = cfg.integer("bcEMfaceXleft")
-    bc_em_yr = cfg.integer("bcEMfaceYright")
-    bc_em_yl = cfg.integer("bcEMfaceYleft")
-    bc_em_zr = cfg.integer("bcEMfaceZright")
-    bc_em_zl = cfg.integer("bcEMfaceZleft")
+    def bc_em(face):
+        code = cfg.integer(f"bcEMface{face}")
+        if not 0 <= code <= 2:
+            raise SystemExit(f"bcEMface{face} must be 0 (perfect conductor), 1 (perfect magnetic "
+                             f"conductor) or 2 (open), not {code}")
+        return code
+    bc_em_xr, bc_em_xl, bc_em_yr, bc_em_yl, bc_em_zr, bc_em_zl = (
+        bc_em(face) for face in ("Xright", "Xleft", "Yright", "Yleft", "Zright", "Zleft"))
     yes_sal = cfg.integer("yes_sal", 1)
     sal_tangential_b = cfg.integer("sal_tangential_B", 1)
     n_layers_sal = cfg.integer("n_layers_sal", 3)
 
-    bc_p_xr = cfg.integer("bcPfaceXright", 1)
-    bc_p_xl = cfg.integer("bcPfaceXleft", 1)
-    bc_p_yr = cfg.integer("bcPfaceYright", 1)
-    bc_p_yl = cfg.integer("bcPfaceYleft", 1)
-    bc_p_zr = cfg.integer("bcPfaceZright", 1)
-    bc_p_zl = cfg.integer("bcPfaceZleft", 1)
+    def bc_p(face):
+        code = cfg.integer(f"bcPface{face}", 1)
+        if not 0 <= code <= 3:
+            raise SystemExit(f"bcPface{face} must be 0 (exit), 1 (mirror), 2 (open inflow) "
+                             f"or 3 (open outflow), not {code}")
+        return code
+    bc_p_xr, bc_p_xl, bc_p_yr, bc_p_yl, bc_p_zr, bc_p_zl = (
+        bc_p(face) for face in ("Xright", "Xleft", "Yright", "Yleft", "Zright", "Zleft"))
+    outflow_layer_fields = cfg.string("OutflowLayerFields", "solved")
+    if outflow_layer_fields not in ("copy", "solved"):
+        raise SystemExit(f"OutflowLayerFields must be copy or solved, not {outflow_layer_fields}")
     apply_inflow = cfg.integer("ApplyInflowBcsEImage", 1)
     sorting_cycle = cfg.integer("SortingCycle", 0)
 
@@ -378,7 +399,7 @@ def print_report(cfg: Input) -> None:
                   f"bulk-flow energy in ConservedQuantities.txt is nan")
         else:
             print(f"WARNING: qom of species {i} (a test-particle species) is 0: the "
-                  f"charge of its particles is not defined (nan in the checkpoints)")
+                  f"charge of its particles is not defined (nan in the serial-HDF5 checkpoints)")
     print(f"x-Length                 = {cxx(lx)}")
     print(f"y-Length                 = {cxx(ly)}")
     print(f"z-Length                 = {cxx(lz)}")
@@ -390,6 +411,9 @@ def print_report(cfg: Input) -> None:
     print(f"Results saved in  : {save_dir}")
     print(f"Case type         : {case}")
     print(f"Simulation name   : {sim_name}")
+    print(f"Maxwell solver    : {solver_type}")
+    if solver_type != "GMRES":
+        print(f"WARNING: SolverType = {solver_type} is experimental; GMRES is the tested Maxwell solver")
     print(f"Smoothing         : {'off' if smooth == 1.0 else 'on'} (alpha={cxx(smooth)}, Niter={smooth_niter})")
     if smooth != 1.0 and smooth_niter % 2 == 1 and smooth < smooth_flip:
         print(f"WARNING: Smooth = {cxx(smooth)} is below {cxx(smooth_flip)} on this grid: the filter's response "
@@ -422,7 +446,7 @@ def print_report(cfg: Input) -> None:
         if bc == 2 and not periodic and cells > 1 and local <= 8:
             print(f"WARNING: open face {face} has {local} cells per rank along "
                   f"{axis}: the open-face B treatment needs at least 9 and is "
-                  f"skipped; use fewer ranks along {axis} (at least 9 cells per wall rank)")
+                  f"skipped; use fewer ranks along {axis} (at least 9 cells per rank on that face)")
     print("---------------------")
     print("Particle Boundary Conditions")
     print("---------------------")
@@ -432,7 +456,7 @@ def print_report(cfg: Input) -> None:
     print(f"Yright : {bc_p_yr} ({bc_p_name(bc_p_yr)})")
     print(f"Zleft  : {bc_p_zl} ({bc_p_name(bc_p_zl)})")
     print(f"Zright : {bc_p_zr} ({bc_p_name(bc_p_zr)})")
-    print(f"E inflow BCs in Maxwell image : {'yes' if apply_inflow else 'no'} (applied per-face where bcPface == 2)")
+    print(f"E inflow BCs in Maxwell image : {'yes' if apply_inflow else 'no'} (on faces with bcEMface = 2 and bcPface = 2, not X-right)")
     force_wall_b = cfg.integer("ForceWallB", 0)
     print(f"B forced on the y walls (ForceWallB) : {'yes (GEM/ForceFree equilibrium layers)' if force_wall_b else 'no'}")
     print("---------------------")
@@ -471,7 +495,7 @@ def print_report(cfg: Input) -> None:
     print("---------------------")
     print("Planet Boundary")
     print("---------------------")
-    refl = " (specular)" if planet_reflection == 0 else " (diffuse/isotropic)"
+    refl = " (specular)" if planet_reflection == 0 else " (diffuse, Lambert cosine law)"
     print(f"Reflection type            : {planet_reflection}{refl}")
     print("---------------------")
     print("Exosphere Ionization")

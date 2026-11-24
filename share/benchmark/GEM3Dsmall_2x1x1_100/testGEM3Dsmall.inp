@@ -58,7 +58,7 @@ PERIODICY = 0
 PERIODICZ = 1
 
 # mover
-NiterMover = 3   # number of predictor-corrector iterations for electrons
+NiterMover = 3   # predictor-corrector iterations at most, every species
 
 # %%%%%%%%%%%%%% PARTICLES %%%%%%%%%%%%%%%%%
 #    ns = number of species
@@ -98,9 +98,7 @@ v0 = 0.0 0.0 0.0 0.0
 w0 = 0.0065 -0.0325 0.0 0.0 
 
 # &&&&&&&&&&&& boundary conditions &&&&&&&&&&&&&&&
-# PHI Electrostatic Potential     
-# 0,1 = Dirichilet boundary condition      
-# 2   = Neumann boundary condition
+# PHI Electrostatic Potential: no effect (only copied into the HDF5 output settings)
 bcPHIfaceXright = 1
 bcPHIfaceXleft  = 1
 bcPHIfaceYright = 1
@@ -110,7 +108,8 @@ bcPHIfaceZleft  = 1
     
 #    EM field boundary condition
 #    0 = perfect conductor
-#    1 = magnetic mirror
+#    1 = perfect magnetic conductor
+#    2 = open
 
     bcEMfaceXright = 0
     bcEMfaceXleft =  0
@@ -121,7 +120,8 @@ bcPHIfaceZleft  = 1
 #    Particles Boundary condition
 #    0 = exit
 #    1 = perfect mirror
-#    2 = riemission
+#    2 = open inflow
+#    3 = open outflow
 #    Caveat: if your processor topology is set to be periodic in a direction automatically the boundary condition in that direction will be periodic*/
     bcPfaceXright = 1
     bcPfaceXleft =  1
@@ -130,10 +130,10 @@ bcPHIfaceZleft  = 1
     bcPfaceZright = 1
     bcPfaceZleft =  1
 
-#  print to video results */
+#  verbose: no effect
     verbose = 1
 
-# velocity of the injection from the wall 
+# Vinj: no effect
     Vinj= 0.0
     
 # CG solver stopping criterium tolerance 

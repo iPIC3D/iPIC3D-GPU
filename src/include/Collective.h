@@ -437,7 +437,8 @@ private:
   /*! planet radius */
   double Planet_radius;
 
-  /*! planet reflection type: 0=specular, 1=diffuse (Lambert cosine law) */
+  /*! planet reflection type: 0=specular, 1=diffuse (Lambert cosine law,
+   *  default) */
   int planetReflectionType;
 
   // ── Exosphere / planet species parameters ──
@@ -564,8 +565,8 @@ private:
   /*! last cycle */
   int last_cycle;
 
-  /*! Boundary condition on particles 0 = exit 1 = perfect mirror 2 = riemission
-   */
+  // Particle boundary condition (BCparticles): 0 = exit, 1 = perfect mirror,
+  // 2 = open inflow, 3 = open outflow
   /*! Boundary Condition Particles: FaceXright */
   int bcPfaceXright;
   /*! Boundary Condition Particles: FaceXleft */
@@ -574,13 +575,13 @@ private:
   int bcPfaceYright;
   /*! Boundary Condition Particles: FaceYleft */
   int bcPfaceYleft;
-  /*! Boundary Condition Particles: FaceYright */
+  /*! Boundary Condition Particles: FaceZright */
   int bcPfaceZright;
-  /*! Boundary Condition Particles: FaceYleft */
+  /*! Boundary Condition Particles: FaceZleft */
   int bcPfaceZleft;
 
-  /*! Apply inflow E field BCs in GMRes image iterations (default true).
-   *  Inflow BCs are applied per-face only where bcPface == 2 (reemission). */
+  /*! Inflow rows in the Maxwell image (default true), on the faces with
+   *  bcEMface = 2 and bcPface = 2 but X-right (FieldBoundarySpec::inflow) */
   bool applyInflowBcsEImage;
 
   /*! ForceWallB (default false): with Case GEM, GEMnoPert, GEMDoubleHarris or
@@ -595,10 +596,8 @@ private:
    *  copied from the reference plane after every solve. */
   bool outflowLayerSolved;
 
-  /*! Field Boundary Condition 0 = Dirichlet Boundary Condition: specifies the
-   * valueto take pn the boundary of the domain 1 = Neumann Boundary Condition:
-   * specifies the value of derivative to take on the boundary of the domain 2 =
-   * Periodic Condition */
+  // Electrostatic potential boundary condition: unused, only copied into the
+  // HDF5 output settings
   /*! Boundary Condition Electrostatic Potential: FaceXright */
   int bcPHIfaceXright;
   /*! Boundary Condition Electrostatic Potential:FaceXleft */
@@ -612,6 +611,8 @@ private:
   /*! Boundary Condition Electrostatic Potential:FaceZleft */
   int bcPHIfaceZleft;
 
+  // Field boundary condition: 0 = perfect conductor, 1 = perfect magnetic
+  // conductor, 2 = open
   /*! Boundary Condition EM Field: FaceXright */
   int bcEMfaceXright;
   /*! Boundary Condition EM Field: FaceXleft */
@@ -661,7 +662,7 @@ private:
   /*! RESTART */
   bool RESTART1;
 
-  /*! velocity of the injection from the wall */
+  /*! Vinj: read, unused */
   double Vinj;
 
   /*! CG solver stopping criterium tolerance */
@@ -673,7 +674,7 @@ private:
   /*! mover predictor correcto iteration */
   int NiterMover;
 
-  /*! Solver type for Maxwell: "GMRES" (default) or "Chebyshev" */
+  /*! Maxwell solver: "GMRES" (default), "FGMRESBlockJacobi" or "Chebyshev" */
   string SolverType;
   /*! Chebyshev solver: max iterations (polynomial degree) */
   int ChebyshevMaxIter;
@@ -687,7 +688,8 @@ private:
   /*! Block-Jacobi preconditioner: damping factor omega (default 1.0) */
   double BlockJacobiOmega;
 
-  /*! Poisson Chebyshev preconditioner: polynomial degree (default 10) */
+  /*! Chebyshev preconditioner of the cleanings: operator applications
+   *  (default 20) */
   int PoissonChebMaxIter;
   /*! Poisson Chebyshev preconditioner: rescale factor for min eigenvalue
    * (default 1.0) */
@@ -696,7 +698,7 @@ private:
    * (default 1.0) */
   double PoissonChebRescaleEigMax;
   /*! Poisson Chebyshev preconditioner: eigMin is at least eigMax / this ratio
-   * (default 1000; <= 0 keeps the exact minimum) */
+   * (default 300; <= 0 keeps the exact minimum) */
   double PoissonChebEigRatio;
 
   /*! Output for field */
@@ -717,7 +719,7 @@ private:
   std::vector<int> AllSpecies;
   /*! Output for test particles */
   int TestParticlesOutputCycle;
-  /*! test particles are flushed to disk every testPartFlushCycle  */
+  /*! TestParticlesOutputCycle: read, unused */
   int testPartFlushCycle;
   /*! restart cycle */
   int RestartOutputCycle;

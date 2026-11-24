@@ -105,7 +105,7 @@ SortingCycle = 1                        # GPU cell-sort interval; 0 disables [de
 
 # %%%%%%%%%%%%%%%%%%%% DATA ANALYSIS %%%%%%%%%%%%%%%%%%%%
 # Velocity histograms, their GMM fit and the macrocell (v_par, v_perp) spectra,
-# every DataAnalysisCycle cycles. Ranges and GMM settings: README, "Data analysis".
+# every DataAnalysisCycle cycles. Ranges and GMM settings: Documentation/data-analysis.md.
 DataAnalysisCycle      = 50             # Analysis interval; 0 disables [default: 50]
 DataAnalysisOutputDir  = ./             # Parent folder of the outputs [default: ./]
 VelocityHistogram      = 0              # 3D velocity histograms [default: 0]
@@ -131,7 +131,7 @@ bcPHIfaceYleft  = 1                     # [default: 1]
 bcPHIfaceZright = 1                     # [default: 1]
 bcPHIfaceZleft  = 1                     # [default: 1]
 
-# EM BC: 0=conductor, 1=magnetic mirror, 2=open/inflow.
+# EM BC: 0=perfect conductor, 1=perfect magnetic conductor, 2=open.
 bcEMfaceXright = 0                      # [required]
 bcEMfaceXleft  = 0                      # [required]
 bcEMfaceYright = 0                      # [required]
@@ -142,7 +142,7 @@ bcEMfaceZleft  = 0                      # [required]
 yes_sal      = 0                        # Enable absorbing layers [default: 1]
 n_layers_sal = 3                        # Layer thickness in cells [default: 3]
 
-# Particle BC: 0=exit, 1=mirror, 2=reemit, 3=open outflow, 4=open inflow.
+# Particle BC: 0=exit, 1=mirror, 2=open inflow, 3=open outflow.
 bcPfaceXright = 1                       # [default: 1]
 bcPfaceXleft  = 1                       # [default: 1]
 bcPfaceYright = 1                       # [default: 1]

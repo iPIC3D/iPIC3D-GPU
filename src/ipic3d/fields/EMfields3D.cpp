@@ -2251,7 +2251,7 @@ void EMfields3D::initForceFree() {
       grid->interpN2C(rhocs, is, rhons);
 
     // J = (c/4pi) curl(B) of the sheet and its perturbation, split among the
-    // species by u0/v0/w0 as in GEMHarris with currentFromAmpere = 1
+    // species by u0/v0/w0
     initSpeciesCurrents(true);
   } else {
     init(); // use the fields from restart file

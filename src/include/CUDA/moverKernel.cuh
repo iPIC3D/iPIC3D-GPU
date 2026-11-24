@@ -58,7 +58,7 @@ public: // common parameter
   OpenBCAppendCounters openBCAppendCounters;
   ParticleIDGenerator particleIDGenerator;
 
-  // Repopulation layers of the REEMISSION faces (deleteRepopulateInjection);
+  // Repopulation layers of the open-inflow faces (deleteRepopulateInjection);
   // XLeft, XRight, YLeft, YRight, ZLeft, ZRight
   bool doRepopulateInjection;
   bool doRepopulateInjectionSide[6];

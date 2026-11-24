@@ -1,6 +1,4 @@
-build/
-build*
-!Documentation/building.md
+build*/
 *.o
 __pycache__/
 .cproject

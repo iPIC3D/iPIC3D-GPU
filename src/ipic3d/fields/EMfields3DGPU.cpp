@@ -2982,7 +2982,8 @@ void EMfields3D::gpuCleaningPrecond(cudaSolverType* d_x, cudaSolverType* d_b) {
 // eigMax] the residual of the polynomial is about 1/cosh(2k sqrt(eigMin /
 // eigMax)), so with the exact minimum of a large block it does almost
 // nothing; with the floor it clusters the upper spectrum, and FGMRES takes the
-// modes below it (README, "Solves of the ∇·E and ∇·B corrections").
+// modes below it (Documentation/field-solver.md, "Solves of the ∇·E and ∇·B
+// corrections").
 EMfields3D::ChebBounds EMfields3D::cleaningChebBounds(const Lap27Op& op,
                                                       const char* label) {
   const Lap27Eig e = lap27EigBounds(op);

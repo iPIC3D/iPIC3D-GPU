@@ -44,9 +44,8 @@ namespace BCparticles {
 enum Enum {
   EXIT = 0,
   PERFECT_MIRROR = 1,
-  REEMISSION = 2,
-  OPENBCOut = 3,
-  OPENBCIn = 4
+  OPEN_INFLOW = 2,
+  OPEN_OUTFLOW = 3,
 };
 }
 
@@ -433,7 +432,7 @@ public:
 
   /**
    * @brief Fill the repopulation layers of the GPU mover: the 3 cells before
-   * each REEMISSION face of this rank (deleteRepopulateInjection).
+   * each open-inflow face of this rank (deleteRepopulateInjection).
    *
    * @param doRepopulateInjection Output flag that enables the deletion.
    * @param doRepopulateInjectionSide Output per-face enable flags.

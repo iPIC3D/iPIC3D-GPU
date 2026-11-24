@@ -139,6 +139,10 @@ bool readSpeciesList(const ConfigFile& config, const char* key,
   return true;
 }
 
+// The cells of every rank along an axis but the last: Grid3DCU's
+// ceiling_of_ratio (ipicmath.h, which needs the CUDA types)
+int ceilDiv(int cells, int ranks) { return (cells + ranks - 1) / ranks; }
+
 } // namespace
 
 int Collective::read_enum_parameter(const char* option_name,
@@ -366,7 +370,14 @@ void Collective::ReadInput(const ConfigFile& config) {
     requireInput(NiterMover >= 1, "NiterMover must be at least 1, not %d",
                  NiterMover);
     // Maxwell solver: "GMRES" (default), "FGMRESBlockJacobi" or "Chebyshev"
+    // (the other two experimental, warned in Print); the solve compares the
+    // names exactly, so a misspelt one would run GMRES unnoticed
     SolverType = config.read<string>("SolverType", "GMRES");
+    requireInput(SolverType == "GMRES" || SolverType == "FGMRESBlockJacobi" ||
+                     SolverType == "Chebyshev",
+                 "SolverType must be GMRES, FGMRESBlockJacobi or Chebyshev, "
+                 "not %s",
+                 SolverType.c_str());
     ChebyshevMaxIter = config.read<int>("ChebyshevMaxIter", 20);
     ChebyshevEigMin = config.read<double>("ChebyshevEigMin", 0.0);
     ChebyshevEigMax = config.read<double>("ChebyshevEigMax", 0.0);
@@ -498,6 +509,23 @@ void Collective::ReadInput(const ConfigFile& config) {
   XLEN = config.read<int>("XLEN", 1);
   YLEN = config.read<int>("YLEN", 1);
   ZLEN = config.read<int>("ZLEN", 1);
+  // Grid3DCU gives every rank along an axis ceil(cells / ranks) cells and the
+  // last one the rest, which must be at least one cell
+  auto requireSplit = [&](const char* cellKey, int cells, const char* rankKey,
+                          int ranks) {
+    requireInput(cells >= 1 && ranks >= 1,
+                 "%s and %s must be positive, not %d and %d", cellKey, rankKey,
+                 cells, ranks);
+    const int regular = ceilDiv(cells, ranks);
+    requireInput(cells - regular * (ranks - 1) >= 1,
+                 "%s = %d over %s = %d ranks of %d cells each leaves the last "
+                 "rank no cells; choose values that leave it at least one, "
+                 "for example with %s dividing %s",
+                 cellKey, cells, rankKey, ranks, regular, rankKey, cellKey);
+  };
+  requireSplit("nxc", nxc, "XLEN", XLEN);
+  requireSplit("nyc", nyc, "YLEN", YLEN);
+  requireSplit("nzc", nzc, "ZLEN", ZLEN);
   PERIODICX = config.read<bool>("PERIODICX", true);
   PERIODICY = config.read<bool>("PERIODICY", true);
   PERIODICZ = config.read<bool>("PERIODICZ", true);
@@ -540,8 +568,12 @@ void Collective::ReadInput(const ConfigFile& config) {
     }
   }
 
-  // ── Planet reflection model: 0=specular (default), 1=diffuse (Lambert) ──
-  planetReflectionType = config.read<int>("planetReflectionType", 0);
+  // ── Planet reflection model: 0=specular, 1=diffuse (Lambert, default) ──
+  planetReflectionType = config.read<int>("planetReflectionType", 1);
+  requireInput(planetReflectionType == 0 || planetReflectionType == 1,
+               "planetReflectionType must be 0 (specular) or 1 (diffuse), "
+               "not %d",
+               planetReflectionType);
 
   // ── Exosphere / planet species parameters ──
   numSolarWindSpecies =
@@ -645,20 +677,29 @@ void Collective::ReadInput(const ConfigFile& config) {
   bcPHIfaceZright = config.read<int>("bcPHIfaceZright", 1);
   bcPHIfaceZleft = config.read<int>("bcPHIfaceZleft", 1);
 
-  // EM field boundary condition
-  bcEMfaceXright = config.read<int>("bcEMfaceXright");
-  bcEMfaceXleft = config.read<int>("bcEMfaceXleft");
-  bcEMfaceYright = config.read<int>("bcEMfaceYright");
-  bcEMfaceYleft = config.read<int>("bcEMfaceYleft");
-  bcEMfaceZright = config.read<int>("bcEMfaceZright");
-  bcEMfaceZleft = config.read<int>("bcEMfaceZleft");
+  // EM field boundary condition (required keys)
+  auto readBcEM = [&](const char* key) {
+    const int code = config.read<int>(key);
+    requireInput(code >= 0 && code <= 2,
+                 "%s must be 0 (perfect conductor), 1 (perfect magnetic "
+                 "conductor) or 2 (open), not %d",
+                 key, code);
+    return code;
+  };
+  bcEMfaceXright = readBcEM("bcEMfaceXright");
+  bcEMfaceXleft = readBcEM("bcEMfaceXleft");
+  bcEMfaceYright = readBcEM("bcEMfaceYright");
+  bcEMfaceYleft = readBcEM("bcEMfaceYleft");
+  bcEMfaceZright = readBcEM("bcEMfaceZright");
+  bcEMfaceZleft = readBcEM("bcEMfaceZleft");
 
   // EM field absorbing boundary condition parameters (SAL on by default; it
   // acts only on open faces, bcEMface = 2)
   yes_sal = config.read<int>("yes_sal", 1);
   n_layers_sal = config.read<int>("n_layers_sal", 3);
-  // B SAL on the components tangential to the face only (see README):
-  // the global div(B) correction is consistent only with this choice
+  // B SAL on the components tangential to the face only: the global div(B)
+  // correction is consistent only with this choice (see
+  // Documentation/boundary-conditions.md)
   sal_tangential_B = config.read<int>("sal_tangential_B", 1);
 
   /*  ------------------------------------------------------------------- */
@@ -679,7 +720,8 @@ void Collective::ReadInput(const ConfigFile& config) {
   /*    (GhostSet::ENode, BNode), and E_t = 0 on the wall                 */
   /*    (FieldBoundary::zeroTangential).  The GPU rules:                  */
   /*    FieldBoundary.cpp.                                                */
-  /*  bcEM* != 0 : Perfect Magnetic Conductor (PMC, "perfect mirror")     */
+  /*  bcEM* != 0 : Perfect Magnetic Conductor (PMC) codes, for code 1     */
+  /*    and for the open faces (2), whose GPU rules are their own         */
   /*    - E_tangential = free (Neumann,  bc=2)                            */
   /*    - E_normal     = 0   (Dirichlet, bc=1)                            */
   /*    - B_tangential = 0   (Dirichlet, bc=1)                            */
@@ -735,13 +777,21 @@ void Collective::ReadInput(const ConfigFile& config) {
   bcEz[5] = bcEMfaceZleft == 0 ? 2 : 1;
   bcBz[5] = bcEMfaceZleft == 0 ? 1 : 2;
 
-  // Particles Boundary condition
-  bcPfaceXright = config.read<int>("bcPfaceXright", 1);
-  bcPfaceXleft = config.read<int>("bcPfaceXleft", 1);
-  bcPfaceYright = config.read<int>("bcPfaceYright", 1);
-  bcPfaceYleft = config.read<int>("bcPfaceYleft", 1);
-  bcPfaceZright = config.read<int>("bcPfaceZright", 1);
-  bcPfaceZleft = config.read<int>("bcPfaceZleft", 1);
+  // Particles Boundary condition: a code of BCparticles (ParticleSoAHost.h)
+  auto readBcP = [&](const char* key) {
+    const int code = config.read<int>(key, 1);
+    requireInput(code >= 0 && code <= 3,
+                 "%s must be 0 (exit), 1 (mirror), 2 (open inflow) or 3 "
+                 "(open outflow), not %d",
+                 key, code);
+    return code;
+  };
+  bcPfaceXright = readBcP("bcPfaceXright");
+  bcPfaceXleft = readBcP("bcPfaceXleft");
+  bcPfaceYright = readBcP("bcPfaceYright");
+  bcPfaceYleft = readBcP("bcPfaceYleft");
+  bcPfaceZright = readBcP("bcPfaceZright");
+  bcPfaceZleft = readBcP("bcPfaceZleft");
 
   // E field inflow BC: master switch for the inflow rows of the Maxwell image
   applyInflowBcsEImage = config.read<int>("ApplyInflowBcsEImage", 1);
@@ -873,8 +923,8 @@ void Collective::readDataAnalysisInput(const ConfigFile& config) {
   // species too
   readSwitch(config, "VelocitySpectra", in.velocitySpectra);
   const char* axes[3] = {"Nx", "Ny", "Nz"};
-  const int cells[3] = {(nxc + XLEN - 1) / XLEN, (nyc + YLEN - 1) / YLEN,
-                        (nzc + ZLEN - 1) / ZLEN};
+  const int cells[3] = {ceilDiv(nxc, XLEN), ceilDiv(nyc, YLEN),
+                        ceilDiv(nzc, ZLEN)};
   for (int a = 0; a < 3; a++) {
     const std::string commonKey = std::string("Macrocell") + axes[a];
     const int common = config.read<int>(commonKey, 0);
@@ -1090,7 +1140,6 @@ void Collective::init_derived_parameters() {
 
 /*! Print Simulation Parameters */
 void Collective::Print() {
-  auto ceilDiv = [](int a, int b) { return (a + b - 1) / b; };
   cout << endl;
   cout << "Simulation Parameters" << endl;
   cout << "---------------------" << endl;
@@ -1108,6 +1157,10 @@ void Collective::Print() {
   cout << "Results saved in  : " << SaveDirName << endl;
   cout << "Case type         : " << Case << endl;
   cout << "Simulation name   : " << SimName << endl;
+  cout << "Maxwell solver    : " << SolverType << endl;
+  if (SolverType != "GMRES")
+    cout << "WARNING: SolverType = " << SolverType
+         << " is experimental; GMRES is the tested Maxwell solver" << endl;
   cout << "Smoothing         : " << (Smooth == 1.0 ? "off" : "on")
        << " (alpha=" << Smooth << ", Niter=" << SmoothNiter << ")" << endl;
   if (Smooth != 1.0 && SmoothNiter % 2 == 1 && Smooth < smoothFlipBound())
@@ -1163,7 +1216,7 @@ void Collective::Print() {
     else
       cout << "WARNING: qom of species " << is
            << " (a test-particle species) is 0: the charge of its particles "
-              "is not defined (nan in the checkpoints)"
+              "is not defined (nan in the serial-HDF5 checkpoints)"
            << endl;
   }
   // the particles written per species (ParticlesOutputTrackedFraction,
@@ -1233,15 +1286,15 @@ void Collective::Print() {
   cout << "---------------------" << endl;
   cout << "EM Field Boundary Conditions" << endl;
   cout << "---------------------" << endl;
-  // helper lambda to decode bcEMface codes: 0=perfect conductor, 2=open/inflow
+  // helper lambda to decode bcEMface codes
   auto bcName = [](int code) -> const char* {
     switch (code) {
     case 0:
       return "perfect conductor";
     case 1:
-      return "Dirichlet (first order)";
+      return "perfect magnetic conductor (first order)";
     case 2:
-      return "open/inflow (Neumann)";
+      return "open";
     default:
       return "unknown";
     }
@@ -1276,7 +1329,7 @@ void Collective::Print() {
            << " cells per rank along " << axis
            << ": the open-face B treatment needs at least 9 and is skipped; "
               "use fewer ranks along "
-           << axis << " (at least 9 cells per wall rank)" << endl;
+           << axis << " (at least 9 cells per rank on that face)" << endl;
   };
   warnThinOpenFace("Xleft", bcEMfaceXleft, PERIODICX, nxc, XLEN, false, 'x');
   warnThinOpenFace("Xright", bcEMfaceXright, PERIODICX, nxc, XLEN, true, 'x');
@@ -1294,11 +1347,9 @@ void Collective::Print() {
     case 1:
       return "perfect mirror";
     case 2:
-      return "reemission";
+      return "open inflow";
     case 3:
-      return "open BC outflow";
-    case 4:
-      return "open BC inflow";
+      return "open outflow";
     default:
       return "unknown";
     }
@@ -1317,7 +1368,7 @@ void Collective::Print() {
        << endl;
   cout << "E inflow BCs in Maxwell image : "
        << (applyInflowBcsEImage ? "yes" : "no")
-       << " (applied per-face where bcPface == 2)" << endl;
+       << " (on faces with bcEMface = 2 and bcPface = 2, not X-right)" << endl;
   cout << "B forced on the y walls (ForceWallB) : "
        << (forceWallB ? "yes (GEM/ForceFree equilibrium layers)" : "no")
        << endl;

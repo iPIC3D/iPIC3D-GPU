@@ -1189,8 +1189,7 @@ private:
   double GMREStol;
   /*! tolerance of the div(E) and div(B) cleaning solves (FGMRES) */
   double divCleaningTol;
-  /*! Maxwell solver: "GMRES" (default, also any unknown value),
-   * "FGMRESBlockJacobi" or "Chebyshev" */
+  /*! Maxwell solver: "GMRES" (default), "FGMRESBlockJacobi" or "Chebyshev" */
   std::string SolverType;
 
   // MPI Derived Datatype for Center Halo Exchange

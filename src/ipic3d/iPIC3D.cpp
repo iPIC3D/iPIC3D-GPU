@@ -22,10 +22,9 @@
 #include "iPic3D.h"
 #include "BenchmarkMode.h"
 #include "MPIdata.h"
-#include "TimeTasks.h"
+#include "Profiler.h"
 #include "Timing.h"
 #include "debug.h"
-#include <chrono>
 #include <stdio.h>
 
 #if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
@@ -34,111 +33,135 @@
 
 using namespace iPic3D;
 
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
+using Analysis = dataAnalysis::dataAnalysisPipeline;
+#else
+/** The data analysis when it is not compiled (BENCHMARK_MODE 2). */
+struct Analysis {};
+#endif
+
+/**
+ * One cycle of the time loop: its stages in turn, each a profiler region that
+ * the cycle timer opens and times, from its start to the start of the next
+ * (Timing::stage).
+ */
+static void runCycle(c_Solver& KCode, Analysis& DA, Timing& timing, int i) {
+  using profiling::Region;
+  if (KCode.get_myrank() == 0)
+    printf(" ======= Cycle %d ======= \n", i);
+  timing.startCycle(i);
+
+#if IPIC3D_COMPILE_DISK_OUTPUT
+  timing.stage(Region::ParticleCountLog);
+  KCode.writeParticleNum(i);
+#endif
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
+  // The macrocell analyses need the particles sorted by cell (the spectra
+  // B packed too)
+  timing.stage(Region::AnalysisPrepare);
+  DA.prepareAnalysis(i);
+  timing.stage(Region::HeatFlux);
+  KCode.ScheduleHeatFlux(i);
+  // DA analysis runs on its own host thread and GPU stream, of the lowest
+  // priority, while CalculateField runs the field solve on the solver
+  // stream, of high priority. The mover, which changes the particles the
+  // analysis reads, starts after DA.waitForAnalysis().
+  timing.stage(Region::AnalysisStart);
+  DA.startAnalysis(i);
+#else
+  (void)DA;
+#endif
+
+  timing.stage(Region::FieldSolveE);
+  KCode.CalculateField(i);
+
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
+  timing.stage(Region::AnalysisWait);
+  DA.waitForAnalysis();
+#endif
+
+  // Launch the mover kernels (moments: in the launcher, or after the sort
+  // on sorting cycles).
+  timing.stage(Region::MoverLaunch);
+  KCode.ParticlesMoverMomentAsync(i);
+
+#if IPIC3D_COMPILE_DISK_OUTPUT
+  // Use otherwise-idle CPU time for output while the GPU mover runs.
+  timing.stage(Region::Output);
+  KCode.WriteOutput(i);
+#endif
+
+  timing.stage(Region::ParticleExchange);
+  KCode.MoverAwaitAndPclExchange(i); // includes sort + moments
+
+  timing.stage(Region::FieldSolveB);
+  KCode.CalculateB(i);
+
+  timing.stage(Region::MomentsAwait);
+  KCode.MomentsAwait(i);
+
+#if IPIC3D_COMPILE_DISK_OUTPUT
+  // There is no future cycle after the final loop iteration.  Avoid
+  // predicting and copying output for a cycle that will never be written.
+  if (i + 1 < KCode.LastCycle()) {
+    timing.stage(Region::OutputCopy);
+    KCode.outputCopyAsync(i); // copy output data for the next cycle
+  }
+#endif
+
+  timing.endCycle();
+}
+
+/**
+ * The time loop with the data analysis it runs: the analysis set-up, the
+ * initial moments, the cycles and, on return, the release of the analysis
+ * (its thread, GPU buffers and record files), before the finalisation.
+ */
+static void runLoop(c_Solver& KCode, Timing& timing) {
+#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
+  Analysis DA(KCode); // has to be created after KCode.Init()
+#else
+  Analysis DA;
+#endif
+
+  KCode.CalculateMoments();
+  timing.markLoopStart();
+
+  // The steady state: the cycles after the first (warm-up) one, which the
+  // profiler records apart (CrayPat records only them)
+  const int firstCycle = KCode.FirstCycle();
+  const int lastCycle = KCode.LastCycle();
+  for (int i = firstCycle; i < lastCycle; i++) {
+    runCycle(KCode, DA, timing, i);
+    if (i == firstCycle && i + 1 < lastCycle)
+      timing.startSteadyState();
+  }
+  timing.endLoop();
+}
+
 static int runSimulation(int argc, char** argv) {
-  Timing::markProgramStart();
+  Timing timing;
+  timing.markProgramStart();
 
   iPic3D::c_Solver KCode;
-  const int initStatus =
-      KCode.Init(argc, argv); //! load param from file, init the grid, fields
+  //! load param from file, init the grid, fields
+  const int initStatus = KCode.Init(argc, argv);
   if (initStatus != 0)
     return initStatus;
-  Timing::markInitEnd();
+  timing.markInitEnd();
 
-#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
-  dataAnalysis::dataAnalysisPipeline DA(
-      KCode); // has to be created after KCode.Init()
-#endif
+  runLoop(KCode, timing);
 
-  timeTasks.resetCycle(); // reset timer
-  KCode.CalculateMoments();
-  Timing::markLoopStart();
-
-  for (int i = KCode.FirstCycle(); i < KCode.LastCycle(); i++) {
-
-    if (KCode.get_myrank() == 0)
-      printf(" ======= Cycle %d ======= \n", i);
-
-    auto start = std::chrono::high_resolution_clock::now();
-    timeTasks.resetCycle();
-
-#if IPIC3D_COMPILE_DISK_OUTPUT
-    KCode.writeParticleNum(i);
-#endif
-
-#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
-    // The macrocell analyses need the particles sorted by cell (the spectra
-    // B packed too)
-    DA.prepareAnalysis(i);
-#endif
-    auto t_sort = std::chrono::high_resolution_clock::now();
-
-#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
-    KCode.ScheduleHeatFlux(i);
-#endif
-
-    // DA analysis runs on its own host thread and GPU stream, of the lowest
-    // priority, while CalculateField runs the field solve on the solver
-    // stream, of high priority. The mover, which changes the particles the
-    // analysis reads, starts after DA.waitForAnalysis().
-    // t_field is sampled *before* DA.waitForAnalysis() so that field=
-    // reflects only the field solver and not particle-count-dependent
-    // analysis wait time.
-#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
-    DA.startAnalysis(i);
-#endif
-    KCode.CalculateField(i); // E field
-    auto t_field = std::chrono::high_resolution_clock::now();
-#if IPIC3D_COMPILE_DIAGNOSTIC_CALCULATIONS
-    DA.waitForAnalysis();
-#endif
-    auto t_da_wait = std::chrono::high_resolution_clock::now();
-
-    // Launch the mover kernels (moments: in the launcher, or after the sort
-    // on sorting cycles).
-    KCode.ParticlesMoverMomentAsync(i);
-#if IPIC3D_COMPILE_DISK_OUTPUT
-    // Use otherwise-idle CPU time for output while the GPU mover runs.
-    KCode.WriteOutput(i);
-#endif
-    auto t_mover = std::chrono::high_resolution_clock::now();
-
-    KCode.MoverAwaitAndPclExchange(i); // includes sort + moments
-    auto t_exchange = std::chrono::high_resolution_clock::now();
-
-    KCode.CalculateB(i);
-    auto t_bfield = std::chrono::high_resolution_clock::now();
-
-    KCode.MomentsAwait(i);
-    auto t_moments = std::chrono::high_resolution_clock::now();
-
-#if IPIC3D_COMPILE_DISK_OUTPUT
-    // There is no future cycle after the final loop iteration.  Avoid
-    // predicting and copying output for a cycle that will never be written.
-    if (i + 1 < KCode.LastCycle())
-      KCode.outputCopyAsync(i); // copy output data for the next cycle
-#endif
-    auto end = std::chrono::high_resolution_clock::now();
-
-    Timing::recordCycle(KCode.get_myrank(), start, t_sort, t_field, t_da_wait,
-                        t_mover, t_exchange, t_bfield, t_moments, end);
-
-#ifdef LOG_TASKS_TOTAL_TIME
-    timeTasks.print_cycle_times(i); // print out total time for all tasks
-#endif
-  }
-
-#ifdef LOG_TASKS_TOTAL_TIME
-  timeTasks.print_tasks_total_times();
-#endif
-
-  Timing::markLoopEnd();
-  // Finalize() ends with my_clock->stopTiming(), which prints the
-  // simulation time together with the phase breakdown.
   KCode.Finalize();
+  timing.markEnd();
+  timing.printSummary();
+  profiling::reportStageTimers(timing.steadyCycles());
   return 0;
 }
 
 int main(int argc, char** argv) {
+  // CrayPat records only the steady-state cycles (runSimulation)
+  profiling::initRecording();
   MPIdata::init(&argc, &argv);
   const int status = runSimulation(argc, argv);
 

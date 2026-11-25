@@ -27,8 +27,6 @@
 #ifndef IPIC3D_H
 #define IPIC3D_H
 
-class Timing;
-
 #ifndef NO_MPI
 #include "mpi.h"
 #endif
@@ -293,6 +291,9 @@ private:
   /** @brief Convert guarded sorter cell metadata to active-cell restart
    * metadata. */
   void prepareActiveRestartParticleCellMetadata();
+  /** @brief Wait on the host for the copies and sums of the last
+   * outputCopyAsync (eventOutputCopy). */
+  void awaitOutputCopy();
   /** Selects the GPU of this rank (cudaDeviceOnNode), before the first
    *  page-locked host allocation; nonzero when a rank of the run cannot be
    *  mapped to a device. */
@@ -337,7 +338,6 @@ private:
   double* Qtot;       // total charge per species (sum of particle weights)
   double* Qremoved;   // array of double, with species length, removed charges
                       // from the depopulation area
-  Timing* my_clock;
   std::ofstream pclNumCSV;
 
   IOManager* ioManager; // modular I/O manager (owns backends)

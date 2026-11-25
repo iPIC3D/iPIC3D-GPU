@@ -5,6 +5,7 @@
  */
 
 #include "AsyncOutput.h"
+#include "Profiler.h"
 #include "threadPool.hpp"
 
 #include <chrono>
@@ -23,6 +24,18 @@ double secondsSince(std::chrono::steady_clock::time_point start) {
       .count();
 }
 
+/** The write of a job, on its writer thread or in submit. */
+void writeJob(OutputJob& job) {
+  profiling::Range range(profiling::Region::OutputJob);
+  job.write();
+}
+
+/** The blocking completion of a written job, on the main thread. */
+void finishJob(OutputJob& job) {
+  profiling::Range range(profiling::Region::OutputFinish);
+  job.finish(true);
+}
+
 } // namespace
 
 AsyncOutput::AsyncOutput(bool async)
@@ -36,13 +49,13 @@ AsyncOutput::~AsyncOutput() {
 void AsyncOutput::submit(OutputLane lane, std::unique_ptr<OutputJob> job,
                          HostBuffers reads) {
   if (!async_) {
-    job->write();
-    job->finish(true);
+    writeJob(*job);
+    finishJob(*job);
     return;
   }
   std::unique_ptr<ThreadPool>& thread = lanes_[(size_t)lane];
   if (!thread) {
-    thread = std::make_unique<ThreadPool>(1);
+    thread = std::make_unique<ThreadPool>(1, "iPIC3D output");
     // a failure leaves the default priority
     thread->enqueue([] {
       setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), kWriterNiceness);
@@ -50,7 +63,7 @@ void AsyncOutput::submit(OutputLane lane, std::unique_ptr<OutputJob> job,
   }
   OutputJob* const writer = job.get();
   std::shared_future<void> written =
-      thread->enqueue([writer] { writer->write(); }).share();
+      thread->enqueue([writer] { writeJob(*writer); }).share();
   pending_.push_back({lane, reads, std::move(job), std::move(written)});
 }
 
@@ -60,7 +73,7 @@ void AsyncOutput::poll() {
     if (front.written.wait_for(std::chrono::seconds(0)) !=
         std::future_status::ready)
       return;
-    await(front); // its error, if any
+    awaitTask(front.written, front.job->name()); // its error, if any
     if (!front.job->finish(false))
       return;
     pending_.pop_front();
@@ -84,13 +97,14 @@ void AsyncOutput::drain() {
     Pending& front = pending_.front();
     await(front);
     const auto start = std::chrono::steady_clock::now();
-    front.job->finish(true);
+    finishJob(*front.job);
     waited_ += secondsSince(start);
     pending_.pop_front();
   }
 }
 
 void AsyncOutput::await(const Pending& entry) {
+  profiling::Range range(profiling::Region::OutputWait);
   const auto start = std::chrono::steady_clock::now();
   awaitTask(entry.written, entry.job->name());
   waited_ += secondsSince(start);

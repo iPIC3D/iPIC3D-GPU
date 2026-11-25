@@ -17,7 +17,7 @@ iPIC3D-GPU is an implicit particle-in-cell code. The field solver, particle move
 | `src/ipic3d/inputoutput/` | `IOManager`, writers, `AsyncOutput` (deferred output), restart reader and slots |
 | `src/ipic3d/communication/`, `grids/` | Cartesian MPI topology and grid |
 | `src/ipic3d/solvers/`, `mathlib/`, `bc/` | Host solvers, math library and field boundary routines, mostly unused by the GPU time loop |
-| `src/ipic3d/utility/`, `performances/`, `ConfigFile/`, `PSKOutput3D/` | MPI wrapper and helpers, timing, input parser, HDF5 adaptor |
+| `src/ipic3d/utility/`, `performances/`, `ConfigFile/`, `PSKOutput3D/` | MPI wrapper and helpers, timing and [profiler](profiling.md), input parser, HDF5 adaptor |
 | `src/include/` | Headers; `CUDA/` for device code, `dataAnalysis/` for the analyses, `hip/` for the CUDA-to-HIP mapping |
 | `src/unitTest/` | [Unit tests](testing.md) |
 | `share/`, `scripts/`, `postprocessing_tools/` | Decks, benchmarks and [tools](tools.md) |
@@ -65,6 +65,6 @@ E(n) stays in its array through steps 5 to 9, so the output of cycle n holds E, 
 ## Memory
 
 - The host side of every GPU transfer is page-locked for the whole run: host field, moment and particle arrays count in the rank's physical memory.
-- Device particle arrays start at `PARTICLE_ARRAY_HEADROOM` (default 1.2) times the particle count. When the count times `PARTICLE_ARRAY_RESIZE_THRESHOLD` (1.2) reaches the capacity, at the particle exchange, they grow to `PARTICLE_ARRAY_RESIZE_FACTOR` (1.4) times the count; the exchange buffers grow by that factor too. These are [CMake options](building.md#cmake-options).
+- Device particle arrays start at `PARTICLE_ARRAY_HEADROOM` (default 1.3) times the particle count. When the count times `PARTICLE_ARRAY_RESIZE_THRESHOLD` (1.2) reaches the capacity, at the particle exchange, they grow to `PARTICLE_ARRAY_RESIZE_FACTOR` (1.3) times the count; the exchange buffers grow by that factor too. The factor must exceed the threshold, or the arrays would grow at every exchange; the headroom may be below it, and the arrays then grow at the first exchange. These are [CMake options](building.md#cmake-options).
 - The spare room holds the open-outflow copies the mover appends; a mover that finds it full stops the run. A [split](particles.md#particle-count-control-splitting-and-merging) stops at the capacity divided by `PARTICLE_ARRAY_RESIZE_THRESHOLD`.
 - The run prints its estimated device and host memory at startup.

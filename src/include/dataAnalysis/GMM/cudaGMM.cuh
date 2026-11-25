@@ -1,6 +1,7 @@
 #ifndef CUDA_GMM_CUH
 #define CUDA_GMM_CUH
 
+#include "Profiler.h"
 #include "cudaGMMUtility.cuh"
 #include "cudaGMMkernel.cuh"
 #include "cudaTypeDef.cuh"
@@ -319,6 +320,7 @@ public:
       if (std::all_of(phase.get(), phase.get() + numFits,
                       [](int p) { return p == cudaGMMWeightKernel::kFitDone; }))
         break;
+      profiling::Range step(profiling::Region::GMMIteration, steps);
       emStep();
       cudaErrChk(cudaMemcpyAsync(phase.get(), phaseCUDA.get(),
                                  sizeof(int) * numFits, cudaMemcpyDeviceToHost,

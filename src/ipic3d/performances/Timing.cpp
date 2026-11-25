@@ -21,167 +21,195 @@
 
 #include "Timing.h"
 #include "MPIdata.h"
-#include "ipicdefs.h"
-#include "stdio.h"
-#include <chrono>
+#include "cudaTypeDef.cuh"
+
+#include <algorithm>
+#include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <mpi.h>
 
-double Timing::tProgStart = 0.0;
-double Timing::tInitEnd = 0.0;
-double Timing::tLoopStart = 0.0;
-double Timing::tLoopEnd = 0.0;
-double Timing::cycleMsSum = 0.0;
-double Timing::cycleMsSumSq = 0.0;
-int Timing::nCycles = 0;
+/** Cycle stages per line of the summary. */
+inline constexpr int kStagesPerSummaryLine = 3;
+/** Seconds per hour, milliseconds per second. */
+inline constexpr double kSecondsPerHour = 3600.0;
+inline constexpr double kMsPerSecond = 1.0e3;
 
-void Timing::markProgramStart() { tProgStart = MPI_Wtime(); }
-void Timing::markInitEnd() { tInitEnd = MPI_Wtime(); }
-void Timing::markLoopStart() { tLoopStart = MPI_Wtime(); }
-void Timing::markLoopEnd() { tLoopEnd = MPI_Wtime(); }
+namespace {
 
-void Timing::recordCycle(int rank, TimePoint start, TimePoint sort,
-                         TimePoint field, TimePoint daWait, TimePoint mover,
-                         TimePoint exchange, TimePoint bField,
-                         TimePoint moments, TimePoint end) {
-  const auto ms = [](TimePoint a, TimePoint b) {
-    return std::chrono::duration<double, std::milli>(b - a).count();
+double seconds(Timing::Clock::time_point a, Timing::Clock::time_point b) {
+  return std::chrono::duration<double>(b - a).count();
+}
+
+double milliseconds(Timing::Clock::time_point a, Timing::Clock::time_point b) {
+  return std::chrono::duration<double, std::milli>(b - a).count();
+}
+
+/** Sample standard deviation of n values from their sum and sum of squares. */
+double stddev(int n, double sum, double sumSq) {
+  if (n < 2)
+    return 0.0;
+  const double var = (sumSq - sum * sum / n) / (n - 1);
+  return var > 0.0 ? std::sqrt(var) : 0.0;
+}
+
+/** Name of the cycle stage of the given index: its region's. */
+const char* stageName(int stage) {
+  return profiling::regionName(static_cast<profiling::Region>(
+      static_cast<int>(kFirstCycleStage) + stage));
+}
+
+} // namespace
+
+void Timing::boundary() {
+  cudaErrChk(cudaDeviceSynchronize());
+  MPI_Barrier(MPIdata::get_PicGlobalComm());
+}
+
+void Timing::startCycle(int cycle) {
+  cycleRegion_.start(profiling::Region::Cycle, cycle);
+  std::fill(std::begin(stageMs_), std::end(stageMs_), 0.0);
+  cycleStart_ = stageStart_ = Clock::now();
+}
+
+void Timing::stage(profiling::Region region) {
+  const int index =
+      static_cast<int>(region) - static_cast<int>(kFirstCycleStage);
+  assert(index >= 0 && index < kCycleStages && "not a cycle stage");
+  endStage(Clock::now());
+  stage_ = index;
+  stageRegion_.start(region);
+}
+
+void Timing::endStage(Clock::time_point now) {
+  stageRegion_.stop();
+  // each stage ends where the next starts: the stages add up to the cycle
+  if (stage_ >= 0) {
+    stageMs_[stage_] += milliseconds(stageStart_, now);
+    stageStart_ = now;
+  }
+  stage_ = -1;
+}
+
+void Timing::endCycle() {
+  const Clock::time_point now = Clock::now();
+  endStage(now);
+  cycleRegion_.stop();
+  const double totalMs = milliseconds(cycleStart_, now);
+  cycles_++;
+  cycleMsSum_ += totalMs;
+  cycleMsSumSq_ += totalMs * totalMs;
+  if (inSteadyState_) {
+    profiling::endSteadyCycle();
+    steadyMsMin_ =
+        steadyCycles_ == 0 ? totalMs : std::min(steadyMsMin_, totalMs);
+    steadyMsMax_ =
+        steadyCycles_ == 0 ? totalMs : std::max(steadyMsMax_, totalMs);
+    steadyCycles_++;
+    steadyMsSum_ += totalMs;
+    steadyMsSumSq_ += totalMs * totalMs;
+    for (int s = 0; s < kCycleStages; s++)
+      steadyStageMsSum_[s] += stageMs_[s];
+  }
+
+  if (MPIdata::get_rank() == 0) {
+    std::printf("Execution time cycle: %g ms  [", totalMs);
+    for (int s = 0; s < kCycleStages; s++)
+      std::printf("%s%s=%g", s == 0 ? "" : " ", stageName(s), stageMs_[s]);
+    std::printf("]\n");
+  }
+}
+
+void Timing::startSteadyState() {
+  boundary();
+  profiling::recordSteadyState(true);
+  steadyRegion_.start(profiling::Region::SteadyState);
+  inSteadyState_ = true;
+  steadyStart_ = Clock::now();
+}
+
+void Timing::endLoop() {
+  // the GPU work of the last cycle belongs to the loop
+  boundary();
+  loopEnd_ = Clock::now();
+  if (inSteadyState_) {
+    steadyEnd_ = loopEnd_;
+    inSteadyState_ = false;
+    steadyRegion_.stop();
+    profiling::recordSteadyState(false);
+  }
+}
+
+void Timing::printSummary() const {
+  enum Span {
+    Total,
+    Init,
+    PreCycle,
+    Loop,
+    Steady,
+    Finalize,
+    Simulation,
+    Spans
   };
+  const double local[Spans] = {
+      seconds(programStart_, end_),
+      seconds(programStart_, initEnd_),
+      seconds(initEnd_, loopStart_),
+      seconds(loopStart_, loopEnd_),
+      steadyCycles_ > 0 ? seconds(steadyStart_, steadyEnd_) : 0.0,
+      seconds(loopEnd_, end_),
+      seconds(initEnd_, end_)};
+  double stageMs[kCycleStages];
+  for (int s = 0; s < kCycleStages; s++)
+    stageMs[s] = steadyCycles_ > 0 ? steadyStageMsSum_[s] / steadyCycles_ : 0.0;
 
-  const double totalMs = ms(start, end);
-  cycleMsSum += totalMs;
-  cycleMsSumSq += totalMs * totalMs;
-  nCycles++;
+  const MPI_Comm comm = MPIdata::get_PicGlobalComm();
+  double maxSpan[Spans], stageSum[kCycleStages], stageMax[kCycleStages];
+  MPI_Reduce(local, maxSpan, Spans, MPI_DOUBLE, MPI_MAX, 0, comm);
+  MPI_Reduce(stageMs, stageSum, kCycleStages, MPI_DOUBLE, MPI_SUM, 0, comm);
+  MPI_Reduce(stageMs, stageMax, kCycleStages, MPI_DOUBLE, MPI_MAX, 0, comm);
+  if (MPIdata::get_rank() != 0)
+    return;
 
-  if (rank == 0) {
-    printf("Execution time cycle: %g ms  [sort=%g field=%g da_wait=%g "
-           "mover+out=%g exchange+sort+moments=%g B=%g momentsAwait=%g "
-           "outCopy=%g]\n",
-           totalMs, ms(start, sort), ms(sort, field), ms(field, daWait),
-           ms(daWait, mover), ms(mover, exchange), ms(exchange, bField),
-           ms(bField, moments), ms(moments, end));
+  const int nprocs = MPIdata::get_nprocs();
+  std::printf("\n\n*** SIMULATION ENDED SUCESSFULLY ***\n");
+  std::printf(
+      " Total execution    : %g sec (%g hours)\n"
+      " Initialization     : %g sec\n"
+      " Pre-cycle setup    : %g sec (data-analysis setup + initial moments)\n"
+      " Cycle loop         : %g sec over %d cycles\n"
+      "                      avg = %g ms/cycle, stddev = %g ms\n",
+      maxSpan[Total], maxSpan[Total] / kSecondsPerHour, maxSpan[Init],
+      maxSpan[PreCycle], maxSpan[Loop], cycles_,
+      cycles_ > 0 ? cycleMsSum_ / cycles_ : 0.0,
+      stddev(cycles_, cycleMsSum_, cycleMsSumSq_));
+  if (steadyCycles_ > 0) {
+    std::printf(
+        " Steady state       : %g sec over %d cycles (all but the first)\n"
+        "                      avg = %g ms/cycle; rank 0: stddev = %g "
+        "ms, min = %g ms, max = %g ms\n"
+        "                      stages, ms/cycle, mean (max) over the "
+        "ranks:",
+        maxSpan[Steady], steadyCycles_,
+        kMsPerSecond * maxSpan[Steady] / steadyCycles_,
+        stddev(steadyCycles_, steadyMsSum_, steadyMsSumSq_), steadyMsMin_,
+        steadyMsMax_);
+    for (int s = 0; s < kCycleStages; s++)
+      std::printf("%s%s %.3g (%.3g)",
+                  s % kStagesPerSummaryLine == 0 ? "\n                      "
+                                                 : ", ",
+                  stageName(s), stageSum[s] / nprocs, stageMax[s]);
+    std::printf("\n");
+  } else {
+    std::printf(" Steady state       : none (one cycle or less)\n");
   }
-}
-/**
- *
- * series of methods for timing and profiling
- * @date Fri Jun 4 2007
- * @author Stefano Markidis, Giovanni Lapenta
- * @version 2.0
- *
- */
-
-/** default constructor */
-Timing::Timing() {}
-
-/** constructor with the initialization of the log file */
-Timing::Timing(int my_rank) {
-  rank_id = my_rank;
-  // initialize the logger
-  // MPE_Init_log();
-  // start the timer
-  startTiming();
-  // get event ID, from MPE
-  // event1a = MPE_Log_get_event_number();
-  // event1b = MPE_Log_get_event_number();
-  // event2a = MPE_Log_get_event_number();
-  // event2b = MPE_Log_get_event_number();
-  // event3a = MPE_Log_get_event_number();
-  // event3b = MPE_Log_get_event_number();
-  // described the events
-  // if (my_rank==0){
-  // MPE_Describe_state(event1a,event1b,"Mover","red"); // the mover is red in
-  // the visualizer MPE_Describe_state(event2a,event2b,"Field","blue"); // the
-  // mover is blue in the visualizer MPE_Describe_state(event3a,event3b,"Interp
-  // P->G","yellow"); // the interpolation particle->Grid is yellow in the
-  // visualizer
-  // }
-  former_MPI_Barrier(MPIdata::get_PicGlobalComm());
-  // start the log
-  // MPE_Start_log();
-}
-
-/** start the timer */
-void Timing::startTiming() {
-  ttick = MPI_Wtick();
-  former_MPI_Barrier(MPIdata::get_PicGlobalComm());
-  tstart = MPI_Wtime();
-}
-/** stop the timer */
-void Timing::stopTiming() {
-  former_MPI_Barrier(MPIdata::get_PicGlobalComm());
-  tend = MPI_Wtime();
-  texecution = tend - tstart;
-  if (rank_id == 0) {
-    // replace %g with %11.3e?
-    printf("\n\n*** SIMULATION ENDED SUCESSFULLY ***\n");
-    // Phase breakdown, available when main() set the program-phase marks.
-    // Note: stopTiming() runs at the tail of Finalize(), so tend also closes
-    // the finalize span.
-    if (tProgStart > 0.0 && tInitEnd > 0.0 && tLoopStart > 0.0 &&
-        tLoopEnd > 0.0) {
-      const double totalSec = tend - tProgStart;
-      const double avgMs = nCycles > 0 ? cycleMsSum / nCycles : 0.0;
-      double stddevMs = 0.0;
-      if (nCycles > 1) {
-        const double var =
-            (cycleMsSumSq - cycleMsSum * cycleMsSum / nCycles) / (nCycles - 1);
-        stddevMs = var > 0.0 ? std::sqrt(var) : 0.0;
-      }
-      printf(" Total execution    : %g sec (%g hours)\n"
-             " Initialization     : %g sec\n"
-             " Pre-cycle setup    : %g sec (runtime setup + initial moments)\n"
-             " Cycle loop         : %g sec over %d cycles\n"
-             "                      avg = %g ms/cycle, stddev = %g ms\n"
-             " Finalize           : %g sec\n",
-             totalSec, totalSec / 3600, tInitEnd - tProgStart,
-             tLoopStart - tInitEnd, tLoopEnd - tLoopStart, nCycles, avgMs,
-             stddevMs, tend - tLoopEnd);
-    }
-    printf(" Simulation Time    : %g sec (%g hours) [end of Init -> end of "
-           "Finalize, i.e. pre-cycle setup + cycle loop + finalize]\n",
-           texecution, texecution / 3600);
-    printf("***\n\n");
-  }
-  // close the log file
-  // MPE_Finish_log("iPIC3D_LOG");
-}
-
-/** start timing the mover */
-void Timing::start_mover() {
-  // MPE_Log_event(event1a,0,"start mover");
-}
-/** stop timing the mover */
-void Timing::stop_mover() {
-  // MPE_Log_event(event1b,0,"end mover");
-}
-/** start timing the field solver */
-void Timing::start_field() {
-  // MPE_Log_event(event2a,0,"start Field solver");
-}
-/** stop timing the field solver */
-void Timing::stop_field() {
-  // MPE_Log_event(event2b,0,"stop Field solver");
-}
-/** start timing the interpolation Particle -> Grid */
-void Timing::start_interpP2G() {
-  // MPE_Log_event(event3a,0,"start interpolation");
-}
-/** stop timing the interpolation Particle -> Grid*/
-void Timing::stop_interpP2G() {
-  // MPE_Log_event(event3b,0,"stop interpolation");
-}
-/** get the elapsed time from start_timng and stop_timing */
-double Timing::getExecutionTime() { return (texecution); }
-/** print to screen the elapsed time */
-void Timing::Print() {
-  printf("Execution Time: %g sec (%g hours)\n", texecution, texecution / 3600);
-  // cout << "Execution Time: " << texecution << " sec" << " (" << texecution /
-  // 3600 << " hours)" << endl;
-}
-/** print to screen the elapsed time from t_start to the call to print
- * function*/
-void Timing::Print_OnAir() {
-  printf("Execution Time: %g sec\n", MPI_Wtime() - tstart);
-  // cout << "Execution Time: " << MPI_Wtime() - tstart << " sec" << endl;
+  std::printf(" Finalize           : %g sec\n"
+              " Simulation Time    : %g sec (%g hours) [end of Init -> end of "
+              "Finalize, i.e. pre-cycle setup + cycle loop + finalize]\n"
+              " Times are the maximum over the %d ranks; the cycle lines and "
+              "their statistics are those of rank 0.\n"
+              "***\n\n",
+              maxSpan[Finalize], maxSpan[Simulation],
+              maxSpan[Simulation] / kSecondsPerHour, nprocs);
+  std::fflush(stdout);
 }

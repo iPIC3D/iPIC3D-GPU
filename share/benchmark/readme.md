@@ -11,7 +11,13 @@
 The benchmark build uses `BENCHMARK_MODE=2`: simulation output and its
 device-to-host copies are disabled, as are optional diagnostic calculations
 (data analysis, macrocell spectra, and heat flux).
-Task timing remains enabled and is printed to standard output. Use
+The [stage timers](../../Documentation/profiling.md#stage-timers), on in
+the benchmark modes, are printed at the end of each log; `outputCSV.sh` sums
+their whole-run times into the columns of the summary: fields =
+`FieldSolveE` + `FieldSolveB`, particles = `MoverLaunch` +
+`ParticleExchange`, moments = `MomentsAwait`. The particles column of logs
+from before the stage timers held the mover launch only, as in
+`GH200_release_baseline.csv`. Use
 `BENCHMARK_MODE=1` instead when those calculations should remain part of the
 measured workload; heat-flux D2H and writing still remain disabled at level 1.
 

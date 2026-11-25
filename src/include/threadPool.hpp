@@ -1,6 +1,8 @@
 #ifndef THREAD_POOL_HPP
 #define THREAD_POOL_HPP
 
+#include "Profiler.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -14,9 +16,14 @@
 
 class ThreadPool {
 public:
-  explicit ThreadPool(size_t threadCount) : stop(false) {
+  /** threadCount workers; a name names them in the tracing tools
+   *  (profiling::nameThread). */
+  explicit ThreadPool(size_t threadCount, const char* name = nullptr)
+      : stop(false) {
     for (size_t i = 0; i < threadCount; ++i) {
-      workers.emplace_back([this] {
+      workers.emplace_back([this, name] {
+        if (name != nullptr)
+          profiling::nameThread(name);
         while (true) {
           std::function<void()> task;
           {

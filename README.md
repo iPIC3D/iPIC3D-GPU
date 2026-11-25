@@ -81,6 +81,7 @@ Results go to the folder `SaveDirName` of the input file (`data` here), relative
 | [Data analysis](Documentation/data-analysis.md) | Velocity histograms, Gaussian mixtures, spectra, record files |
 | [Units](Documentation/units.md) | Normalisation, internal storage, written quantities, derived formulas |
 | [Testing](Documentation/testing.md) | Unit tests, on a workstation and on Slurm |
+| [Profiling](Documentation/profiling.md) | Cycle timing in the run log, profiler regions, Nsight, rocprofv3, CrayPat, stage timers |
 | [Tools](Documentation/tools.md) | Input check, benchmarks, scaling, post-processing, code formatting |
 
 ## Citation

@@ -6,7 +6,7 @@ mkdir build
 
 cd build
 
-cmake -DBENCHMARK_MODE=2 -DTIME_TASKS=ON ../../..
+cmake -DBENCHMARK_MODE=2 ../../..
 make -j
 
 exit $?

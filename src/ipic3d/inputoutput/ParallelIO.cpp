@@ -31,7 +31,6 @@
 #include "OutputTagConfig.h"
 #include "ParallelIO.h"
 #include "ParticleSoAHost.h"
-#include "TimeTasks.h"
 #include "VCtopology3D.h"
 #include "debug.h"
 #include "math.h"
@@ -49,8 +48,6 @@ void WriteOutputParallel(Grid3DCU* grid, EMfields3D* EMf, CollectiveIO* col,
                          const OutputTagConfig& cfg) {
 
 #ifdef PHDF5
-  timeTasks_set_task(TimeTasks::WRITE_FIELDS);
-
   stringstream filenmbr;
   string filename;
 

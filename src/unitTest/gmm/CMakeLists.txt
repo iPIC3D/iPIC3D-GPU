@@ -30,7 +30,10 @@ endif()
 
 add_executable(gmmTest ${src_files})
 
-set(include_path ${INCLUDE_CODE_DIR}/CUDA ${INCLUDE_CODE_DIR}/dataAnalysis/GMM)
+# the GMM headers, and Profiler.h of src/include (its regions compile to
+# nothing here: no profiler option is set)
+set(include_path ${INCLUDE_CODE_DIR}/CUDA ${INCLUDE_CODE_DIR}/dataAnalysis/GMM
+                 ${INCLUDE_CODE_DIR})
 if(NOT HIP_ON)
   list(APPEND include_path ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 else()

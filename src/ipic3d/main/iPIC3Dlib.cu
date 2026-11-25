@@ -29,8 +29,7 @@
 #include "Parameters.h"
 #include "ParticleArrayConfig.h"
 #include "ParticleCommInjection.h"
-#include "TimeTasks.h"
-#include "Timing.h"
+#include "Profiler.h"
 #include "VCtopology3D.h"
 #include "debug.h"
 #include "iPic3D.h"
@@ -42,7 +41,6 @@
 #include "GPUFieldPacking.cuh"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -55,11 +53,6 @@
 #include <string>
 #include <unistd.h>
 #include <vector>
-
-// ======= Timing Debugging =======
-// Set to 1 to enable per-phase timing printfs
-// (launcher, await, MPI, planet, exchange total).
-#define ENABLE_SOA_TIMING 0
 
 #include "ExosphereIonization.h"
 
@@ -232,7 +225,7 @@ c_Solver::c_Solver()
       heatFluxStream(nullptr), heatFluxReadDoneEvt(nullptr),
       heatFluxHostDoneEvt(nullptr), heatFluxCUDAPtr(nullptr),
       heatFluxBulkCUDAPtr(nullptr), Ke(0), BulkEnergy(0), momentum(0), Qtot(0),
-      Qremoved(0), my_clock(0) {}
+      Qremoved(0) {}
 
 /**
  * @brief Destroy the solver and release host-side runtime objects.
@@ -274,7 +267,6 @@ c_Solver::~c_Solver() {
   delete[] momentum;
   delete[] Qtot;
   delete[] Qremoved;
-  delete my_clock;
 
   // EMfields3D::freeDataType() dereferences its borrowed configuration, grid,
   // and topology references; keep those owners alive through field teardown.
@@ -296,6 +288,10 @@ c_Solver::~c_Solver() {
  * @return `0` on success, nonzero on initialization failure.
  */
 int c_Solver::Init(int argc, char** argv) {
+  profiling::Range range(profiling::Region::Init);
+  // the phases of the initialisation: each start closes the previous one
+  profiling::Phase phase;
+  phase.start(profiling::Region::InitInput);
 #if defined(__MIC__)
   assert_eq(DVECWIDTH, 8);
 #endif
@@ -400,8 +396,10 @@ int c_Solver::Init(int argc, char** argv) {
 #endif
   // The GPU of this rank, before the host arrays that are copied to and from
   // it are allocated (EMfields3D, the particles)
+  phase.start(profiling::Region::InitSelectDevice);
   if (selectDevice() != 0)
     return 1;
+  phase.start(profiling::Region::InitFields);
   // Create the local grid
   grid = new Grid3DCU(col, vct);        // Create the local grid
   EMf = new EMfields3D(col, grid, vct); // Create Electromagnetic Fields Object
@@ -470,6 +468,7 @@ int c_Solver::Init(int argc, char** argv) {
   }
 
   // ======= Allocate particlesHost[]: lightweight SoA host mirrors =======
+  phase.start(profiling::Region::InitParticles);
   particlesHost = new ParticleSoAHost*[ns];
   for (int i = 0; i < ns; i++) {
     particlesHost[i] = new ParticleSoAHost(i, col, vct, grid);
@@ -544,6 +543,7 @@ int c_Solver::Init(int argc, char** argv) {
   }
 
   // ======= Initialize modular I/O manager =======
+  phase.start(profiling::Region::InitOutput);
 #if IPIC3D_COMPILE_DISK_OUTPUT
   ioManager = new IOManager;
   if (Parameters::get_doWriteOutput() || restart_cycle > 0 ||
@@ -595,6 +595,7 @@ int c_Solver::Init(int argc, char** argv) {
   }
   pclNumCSV << "species" << ns - 1 << std::endl;
 #endif
+  phase.stop();
 
   if (initCUDA() != 0)
     return 1;
@@ -607,11 +608,9 @@ int c_Solver::Init(int argc, char** argv) {
   if (ioManager->needsParticleSync(first_cycle) ||
       col->diagnostics_due(first_cycle)) {
     outputCopyAsync(first_cycle - 1);
-    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    awaitOutputCopy();
   }
 #endif
-
-  my_clock = new Timing(myrank);
 
   return 0;
 }
@@ -683,6 +682,7 @@ int c_Solver::selectDevice() {
  * pinned host registrations, sorting buffers, and planet-boundary workspaces.
  */
 int c_Solver::initCUDA() {
+  profiling::Range range(profiling::Region::InitDevice);
   const bool heatFluxRequested = Parameters::get_doWriteOutput() &&
                                  !col->field_output_is_off() &&
                                  col->getOutputConfig().needsAnyHeatFlux();
@@ -925,7 +925,7 @@ int c_Solver::initCUDA() {
   if (heatFluxOutputEnabled_)
     EMf->allocateHeatFlux();
 
-  threadPoolPtr = new ThreadPool(ns);
+  threadPoolPtr = new ThreadPool(ns, "iPIC3D mover");
   cudaErrChk(cudaEventCreateWithFlags(&event0, cudaEventDisableTiming));
   cudaErrChk(cudaEventCreateWithFlags(
       &eventOutputCopy, cudaEventDisableTiming | cudaEventBlockingSync));
@@ -1379,8 +1379,7 @@ void c_Solver::copyHeatFluxD2H(int species, cudaStream_t stream) {
  * arrays, and then waits for completion via MomentsAwait().
  */
 void c_Solver::CalculateMoments() {
-
-  // timeTasks_set_main_task(TimeTasks::MOMENTS);
+  profiling::Range range(profiling::Region::InitialMoments);
 
   // With sorting enabled, cell-sort first and use the cell-aware moment
   // kernel
@@ -1430,8 +1429,6 @@ void c_Solver::CalculateMoments() {
  * @param cycle Simulation cycle being advanced.
  */
 void c_Solver::CalculateField(int cycle) {
-  timeTasks_set_main_task(TimeTasks::FIELDS);
-
   // E(n+theta) in d_Exth (Faraday) and, smoothed, in gpuExForPcls() (mover);
   // d_Ex keeps E^n until CalculateB
   EMf->gpuCalculateE(cycle);
@@ -1508,7 +1505,7 @@ void c_Solver::finishHeatFluxForOutput(int cycle) {
   if (!heatFluxOutputEnabled_ || heatFluxScheduledCycle_ != cycle)
     return;
 
-  timeTasks_set_main_task(TimeTasks::MOMENTS);
+  profiling::Range range(profiling::Region::HeatFluxHalo);
 
   for (int s = 0; s < ns; ++s)
     cudaErrChk(cudaEventSynchronize(heatFluxHostDoneEvt[s]));
@@ -1532,6 +1529,7 @@ void c_Solver::finishHeatFluxForOutput(int cycle) {
  * can request a host-side wait when the buffer must be ready immediately.
  */
 void c_Solver::refreshFieldForPclsDeviceBuffer(bool synchronize) {
+  profiling::Range range(profiling::Region::FieldPack);
   // The mover samples E(n+theta) (gpuExForPcls: smoothed when smoothing is
   // on) and B^n at the nodes plus the external field.
   //
@@ -1672,6 +1670,7 @@ void c_Solver::splitParticles(int species, int cycle) {
       pcls->getCapacity() / ParticleArrayConfig::RESIZE_THRESHOLD);
   if (room <= nop)
     return;
+  profiling::Range range(profiling::Region::ParticleSplit, species);
   const uint32_t count = std::min({reference - nop, nop, room - nop});
 
   std::cout << "Particle splitting: rank " << MPIdata::get_rank() << " species "
@@ -1714,6 +1713,7 @@ void c_Solver::scheduleMerging() {
  * that follows skips them and its compaction removes them.
  */
 void c_Solver::mergeParticles(int species, bool waitForHeatFlux) {
+  profiling::Range range(profiling::Region::ParticleMerge, species);
   particleArrayCUDA* pcls = pclsArrayHostPtr[species];
   cudaStream_t stream = streams[species];
   std::cout << "Particle merging: rank " << MPIdata::get_rank() << " species "
@@ -1758,9 +1758,7 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
                                 const bool waitForHeatFlux) {
   cudaSetDevice(
       cudaDeviceOnNode); // Required when multiple MPI ranks share a node.
-#if ENABLE_SOA_TIMING
-  auto _tL0 = std::chrono::high_resolution_clock::now();
-#endif
+  profiling::Range range(profiling::Region::Mover, species);
 
   // Explicit edge: gate every SoA-mutating kernel on this species' stream
   // behind the previous cycle's output D->H drain. Required because output
@@ -1790,10 +1788,6 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
     splitParticles(species, cycle);
 
   // ======= Launch mover kernels after field data is available =======
-#if ENABLE_SOA_TIMING
-  auto _tL1 = std::chrono::high_resolution_clock::now(); // after splitting,
-                                                         // before mover launch
-#endif
   cudaErrChk(cudaStreamWaitEvent(streams[species], event0, 0));
   // Empty species (e.g. planetary species before exosphere injection has
   // populated them) have NOP=0. Skip kernels that iterate per-particle;
@@ -1864,6 +1858,11 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
           sizeof(hashedSum),
       cudaMemcpyDefault, streams[species + ns]));
 
+  // The host waits for the mover's counts: with open boundaries first in the
+  // append accounting below
+  profiling::Phase counts;
+  counts.start(profiling::Region::MoverCounts, species);
+
   // Copy OpenBC append accounting to host.
   if (moverParamHostPtr[species]->doOpenBC) {
     // This D->H read is non-destructive; it only needs mover ordering (event1
@@ -1898,14 +1897,10 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
   }
 
   // ======= Host-side accounting after mover completion =======
-#if ENABLE_SOA_TIMING
-  auto _tL2 =
-      std::chrono::high_resolution_clock::now(); // before hashedSum sync
-#endif
   cudaErrChk(cudaStreamSynchronize(streams[species + ns]));
-#if ENABLE_SOA_TIMING
-  auto _tL3 = std::chrono::high_resolution_clock::now(); // after hashedSum sync
-#endif
+  counts.stop();
+  // the rest of the task: buffers, extraction, compaction, exiting D->H
+  profiling::Range extract(profiling::Region::ParticleExtract, species);
   // cudaErrChk(cudaStreamSynchronize(streams[species]));
   int count_exiting = 0; // exiting particle number
   for (int i = 0; i < departureArrayElementType::DELETE_HASHEDSUM_INDEX; i++)
@@ -1976,9 +1971,6 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
         planetArrayCUDAPtr[species], hashedSumArrayCUDAPtr[species]);
   }
 
-#if ENABLE_SOA_TIMING
-  auto _tL4 = std::chrono::high_resolution_clock::now(); // before exitingKernel
-#endif
   // Re-read NOP: the OpenBC block above may have grown it via setNOE().
   const uint32_t nopAfterOBC = pclsArrayHostPtr[species]->getNOP();
   if (nopAfterOBC > 0)
@@ -2026,24 +2018,6 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
   cudaErrChk(cudaStreamSynchronize(
       streams[species + ns])); // exiting D→H complete, comm buffer ready
 
-#if ENABLE_SOA_TIMING
-  auto _tL5 = std::chrono::high_resolution_clock::now();
-  if (MPIdata::get_rank() == 0) {
-    printf("  [SoA launcher s%d: split=%.2f moverLaunch=%.2f hashedSync=%.2f "
-           "expand+planet=%.2f exitKernel+D2H=%.2f total=%.2f ms  "
-           "nop=%u exit=%d del=%d planet=%d]\n",
-           species,
-           std::chrono::duration<double, std::milli>(_tL1 - _tL0).count(),
-           std::chrono::duration<double, std::milli>(_tL2 - _tL1).count(),
-           std::chrono::duration<double, std::milli>(_tL3 - _tL2).count(),
-           std::chrono::duration<double, std::milli>(_tL4 - _tL3).count(),
-           std::chrono::duration<double, std::milli>(_tL5 - _tL4).count(),
-           std::chrono::duration<double, std::milli>(_tL5 - _tL0).count(),
-           pclsArrayHostPtr[species]->getNOP(), count_exiting, count_deleted,
-           count_removed_planet);
-  }
-#endif
-
   return hole; // Number of exiting + deleted + planet particles
 }
 
@@ -2057,8 +2031,6 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
  * @return Always false.
  */
 bool c_Solver::ParticlesMoverMomentAsync(int cycle) {
-  timeTasks_set_main_task(TimeTasks::PARTICLES);
-
   // ======= Decide whether to use the sorted particle pipeline this cycle
   // =======
   sortThisCycle_ = (sortingCycle_ > 0) && (cycle % sortingCycle_ == 0);
@@ -2104,9 +2076,6 @@ bool c_Solver::ParticlesMoverMomentAsync(int cycle) {
  * reflected-particle counts.
  */
 void c_Solver::processPlanetParticles() {
-#if ENABLE_SOA_TIMING
-  auto _tP0 = std::chrono::high_resolution_clock::now();
-#endif
   const bool doDiag = planetDiagCycle > 0;
   if (doDiag)
     planetDiagCyclesAccumulated++;
@@ -2124,15 +2093,9 @@ void c_Solver::processPlanetParticles() {
   }
   // Nothing hit the surface: the carried charge is unchanged.
   if (totalIonPlanet == 0 && totalElecPlanet == 0) {
-#if ENABLE_SOA_TIMING
-    if (MPIdata::get_rank() == 0)
-      printf("  [SoA planet: skip (no hits) %.2f ms]\n",
-             std::chrono::duration<double, std::milli>(
-                 std::chrono::high_resolution_clock::now() - _tP0)
-                 .count());
-#endif
     return;
   }
+  profiling::Range range(profiling::Region::PlanetAbsorption);
 
   if (doDiag) {
     planetDiagRankCycles += 1.0;
@@ -2151,9 +2114,6 @@ void c_Solver::processPlanetParticles() {
   cudaParticleType* const diagAbsorbedElecChargeDevice =
       doDiag ? planetDiagChargeDevice + ns : nullptr;
 
-#if ENABLE_SOA_TIMING
-  auto _tP1 = std::chrono::high_resolution_clock::now();
-#endif
   // ======= Step 2: Reduce removed ion charge on the GPU =======
   // ionChargeCycle is zero here: chargeCutoffKernel consumes and clears it.
   for (int i = 0; i < ns; i++) {
@@ -2223,14 +2183,6 @@ void c_Solver::processPlanetParticles() {
     // No host sync on this path: the next cycle's planet extraction waits on
     // this event before overwriting the planet buffers.
     cudaErrChk(cudaEventRecord(planetDoneEvent, planetStream));
-#if ENABLE_SOA_TIMING
-    if (MPIdata::get_rank() == 0)
-      printf("  [SoA planet: ions only, charge carried %.2f ms  ions=%d]\n",
-             std::chrono::duration<double, std::milli>(
-                 std::chrono::high_resolution_clock::now() - _tP0)
-                 .count(),
-             totalIonPlanet);
-#endif
     return;
   }
 
@@ -2319,9 +2271,6 @@ void c_Solver::processPlanetParticles() {
   cudaErrChk(
       cudaStreamSynchronize(planetStream)); // Counts are needed on host for
                                             // buffer growth and D2H copies.
-#if ENABLE_SOA_TIMING
-  auto _tP2 = std::chrono::high_resolution_clock::now();
-#endif
   if (doDiag) {
     for (int e = 0; e < planetElecSpeciesCount; e++) {
       const int specIdx = planetElecSpeciesMap[e];
@@ -2359,18 +2308,6 @@ void c_Solver::processPlanetParticles() {
 
   // Complete all reflected-particle D2H copies before MPI exchange starts.
   cudaErrChk(cudaStreamSynchronize(planetStream));
-#if ENABLE_SOA_TIMING
-  auto _tP3 = std::chrono::high_resolution_clock::now();
-  if (MPIdata::get_rank() == 0) {
-    printf("  [SoA planet: setup=%.2f GPU(sort+reflect+sync)=%.2f D2H=%.2f "
-           "total=%.2f ms  ions=%d elec=%d]\n",
-           std::chrono::duration<double, std::milli>(_tP1 - _tP0).count(),
-           std::chrono::duration<double, std::milli>(_tP2 - _tP1).count(),
-           std::chrono::duration<double, std::milli>(_tP3 - _tP2).count(),
-           std::chrono::duration<double, std::milli>(_tP3 - _tP0).count(),
-           totalIonPlanet, totalElecPlanet);
-  }
-#endif
 }
 
 /**
@@ -2384,40 +2321,27 @@ void c_Solver::processPlanetParticles() {
  * @return Always false.
  */
 bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
-#if ENABLE_SOA_TIMING
-  auto _t0 = std::chrono::high_resolution_clock::now();
-#endif
-
   // ======= Phase 3A: await mover and compaction futures =======
   bool openBCAppendRejected = false;
-  for (int i = 0; i < ns; i++) {
-#if ENABLE_SOA_TIMING
-    auto _ta = std::chrono::high_resolution_clock::now();
-#endif
-    const int x = awaitTask(exitingResults[i], // holes
-                            "particle mover of species " + std::to_string(i));
-    const auto& appendCounters = moverParamHostPtr[i]->openBCAppendCounters;
-    if (appendCounters.rejected != 0) {
-      openBCAppendRejected = true;
-      const uint32_t postAppendNOP = pclsArrayHostPtr[i]->getNOP();
-      const uint32_t appendBase = postAppendNOP - appendCounters.accepted;
-      std::cerr << "[OpenBC append overflow] rank=" << MPIdata::get_rank()
-                << " cycle=" << cycle << " species=" << i
-                << " base_nop=" << appendBase
-                << " capacity=" << pclsArrayHostPtr[i]->getCapacity()
-                << " accepted=" << appendCounters.accepted
-                << " rejected=" << appendCounters.rejected << std::endl;
+  {
+    profiling::Range wait(profiling::Region::MoverWait);
+    for (int i = 0; i < ns; i++) {
+      const int x = awaitTask(exitingResults[i], // holes
+                              "particle mover of species " + std::to_string(i));
+      const auto& appendCounters = moverParamHostPtr[i]->openBCAppendCounters;
+      if (appendCounters.rejected != 0) {
+        openBCAppendRejected = true;
+        const uint32_t postAppendNOP = pclsArrayHostPtr[i]->getNOP();
+        const uint32_t appendBase = postAppendNOP - appendCounters.accepted;
+        std::cerr << "[OpenBC append overflow] rank=" << MPIdata::get_rank()
+                  << " cycle=" << cycle << " species=" << i
+                  << " base_nop=" << appendBase
+                  << " capacity=" << pclsArrayHostPtr[i]->getCapacity()
+                  << " accepted=" << appendCounters.accepted
+                  << " rejected=" << appendCounters.rejected << std::endl;
+      }
+      stayedParticle[i] = pclsArrayHostPtr[i]->getNOP() - x;
     }
-#if ENABLE_SOA_TIMING
-    auto _tb = std::chrono::high_resolution_clock::now();
-#endif
-    stayedParticle[i] = pclsArrayHostPtr[i]->getNOP() - x;
-#if ENABLE_SOA_TIMING
-    if (MPIdata::get_rank() == 0)
-      printf("  [SoA await s%d: %.2f ms  holes=%d stayed=%d]\n", i,
-             std::chrono::duration<double, std::milli>(_tb - _ta).count(), x,
-             stayedParticle[i]);
-#endif
   }
 
   if (openBCAppendRejected) {
@@ -2426,16 +2350,10 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
 #endif
     std::abort();
   }
-#if ENABLE_SOA_TIMING
-  auto _t1 = std::chrono::high_resolution_clock::now();
-#endif
 
   // ======= Planet processing on the dedicated planet stream =======
   if (doPlanet_)
     processPlanetParticles();
-#if ENABLE_SOA_TIMING
-  auto _t2 = std::chrono::high_resolution_clock::now();
-#endif
 
   // ======= Phase 3B: sync, pre-expand SoA, update NOP, prepare sort =======
   // Pre-expand the SoA for stayed + injected + estimated MPI incoming, set
@@ -2448,10 +2366,14 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
   for (int i = 0; i < ns; i++)
     injectedBCS[i] = particlesCommInj[i]->computeInjectionCount();
   {
+    profiling::Range injection(profiling::Region::ParticleInjection);
 
     for (int i = 0; i < ns; i++) {
       // Sync compaction kernels so expand() can safely realloc.
-      cudaErrChk(cudaStreamSynchronize(streams[i]));
+      {
+        profiling::Range wait(profiling::Region::CompactionWait, i);
+        cudaErrChk(cudaStreamSynchronize(streams[i]));
+      }
 
       // Estimate: stayed + injected + exiting-as-proxy-for-incoming.
       const uint32_t estimatedMPI = particlesCommInj[i]->getCommNOP();
@@ -2498,66 +2420,40 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
             (uint32_t)stayedParticle[i], rngSeed);
       }
     }
+  }
 
-    if (sortThisCycle_) {
-      for (int i = 0; i < ns; i++) {
-        cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
-      }
+  if (sortThisCycle_) {
+    profiling::Range sortStart(profiling::Region::SortStart);
+    for (int i = 0; i < ns; i++) {
+      cellSorters[i].prepareBuffers(pclsArrayHostPtr[i], streams[i]);
+    }
 
-      // ======= Phase 3C: enqueue sort stages 1-3 for all species =======
-      // Histogram, prefix sum, and sorted-index generation overlap with MPI
-      // below.
-      for (int i = 0; i < ns; i++) {
-        cellSorters[i].enqueueSortAsync(
-            pclsArrayHostPtr[i], grid3DCUDACUDAPtr,
-            stayedParticle[i] + injectedBCS[i], // sort stayed + injected
-            streams[i]);
-      }
+    // ======= Phase 3C: enqueue sort stages 1-3 for all species =======
+    // Histogram, prefix sum, and sorted-index generation overlap with MPI
+    // below.
+    for (int i = 0; i < ns; i++) {
+      cellSorters[i].enqueueSortAsync(
+          pclsArrayHostPtr[i], grid3DCUDACUDAPtr,
+          stayedParticle[i] + injectedBCS[i], // sort stayed + injected
+          streams[i]);
     }
   }
-#if ENABLE_SOA_TIMING
-  auto _t2b = std::chrono::high_resolution_clock::now();
-#endif
 
   // ======= Phase 3D: perform MPI exchange while sort stages 1-3 run =======
   for (int i = 0; i < ns; i++) {
-#if ENABLE_SOA_TIMING
-    auto _mpi0 = std::chrono::high_resolution_clock::now();
-#endif
+    profiling::Range mpi(profiling::Region::ParticleMPI, i);
     particlesCommInj[i]->separateAndSendParticles();
-#if ENABLE_SOA_TIMING
-    auto _mpi1 = std::chrono::high_resolution_clock::now();
-#endif
     particlesCommInj[i]->recommunicateParticlesUntilDone(1);
-#if ENABLE_SOA_TIMING
-    auto _mpi2 = std::chrono::high_resolution_clock::now();
-    if (MPIdata::get_rank() == 0)
-      printf("  [SoA MPI s%d: separate=%.2f recomm=%.2f total=%.2f ms  "
-             "commNOP=%d]\n",
-             i,
-             std::chrono::duration<double, std::milli>(_mpi1 - _mpi0).count(),
-             std::chrono::duration<double, std::milli>(_mpi2 - _mpi1).count(),
-             std::chrono::duration<double, std::milli>(_mpi2 - _mpi0).count(),
-             particlesCommInj[i]->getCommNOP());
-#endif
   }
-#if ENABLE_SOA_TIMING
-  auto _t3 = std::chrono::high_resolution_clock::now();
-#endif
 
   // ======= Exosphere ionization =======
   injectExosphereParticles();
-#if ENABLE_SOA_TIMING
-  auto _t4 = std::chrono::high_resolution_clock::now();
-  if (MPIdata::get_rank() == 0)
-    printf("  [SoA exosphere: %.2f ms]\n",
-           std::chrono::duration<double, std::milli>(_t4 - _t3).count());
-#endif
 
   // ======= Phase 3E: finish sorting for all species =======
   // After this, the host particleArrayCUDA objects contain the sorted SoA
   // pointers.
   if (sortThisCycle_) {
+    profiling::Range sortFinish(profiling::Region::SortFinish);
     for (int i = 0; i < ns; i++) {
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
       // Stages 1-3 have completed logically on this stream, and all their
@@ -2592,18 +2488,18 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
 
   // Unsorted pipeline: wait for mover/compaction kernels before any expand() or
   // tail moments.
-  for (int i = 0; i < ns; i++)
-    cudaErrChk(cudaStreamSynchronize(streams[i]));
-
-#if ENABLE_SOA_TIMING
-  auto _t4b = std::chrono::high_resolution_clock::now();
-#endif
+  {
+    profiling::Range sync(profiling::Region::ParticleSync);
+    for (int i = 0; i < ns; i++)
+      cudaErrChk(cudaStreamSynchronize(streams[i]));
+  }
 
   // ======= Phase 3G: expand, append incoming particles, and finalize moments
   // =======
   const auto momentGridSize = grid->getNXN() * grid->getNYN() * grid->getNZN();
 
   for (int i = 0; i < ns; i++) {
+    profiling::Range append(profiling::Region::ParticleAppend, i);
 
     // Total particles = stayed + GPU-injected + MPI incoming.
     const int sortedCount = stayedParticle[i] + injectedBCS[i];
@@ -2679,6 +2575,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
 #endif
 
     // Finalize moments according to the active sorted/unsorted pipeline.
+    profiling::Range deposit(profiling::Region::MomentDeposit, i);
     if (sortThisCycle_) {
       // Sorted path: cell-aware moments for the stayed prefix, flat kernel for
       // the incoming tail.
@@ -2728,9 +2625,8 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
                                streams[i]));
   }
 
-#if ENABLE_SOA_TIMING
-  auto _t5a = std::chrono::high_resolution_clock::now();
-#endif
+  // the rest: the moment scatter of every species
+  profiling::Range scatter(profiling::Region::MomentScatter);
   for (int i = 0; i < ns; i++) {
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
     if (gpuCycleDiagnosticsStateCycle(cycle)) {
@@ -2775,25 +2671,6 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
     cudaErrChk(cudaEventRecord(cycleEndEvent[i], streams[i]));
   }
 
-#if ENABLE_SOA_TIMING
-  auto _t5 = std::chrono::high_resolution_clock::now();
-  if (MPIdata::get_rank() == 0) {
-    printf("  [SoA exchange TOTAL: await=%.2f planet=%.2f "
-           "sort_prep+enqueue=%.2f MPI=%.2f "
-           "exosphere=%.2f sort_finish+sync=%.2f expand+H2D+moments=%.2f "
-           "momD2H=%.2f total=%.2f ms]\n",
-           std::chrono::duration<double, std::milli>(_t1 - _t0).count(),
-           std::chrono::duration<double, std::milli>(_t2 - _t1).count(),
-           std::chrono::duration<double, std::milli>(_t2b - _t2).count(),
-           std::chrono::duration<double, std::milli>(_t3 - _t2b).count(),
-           std::chrono::duration<double, std::milli>(_t4 - _t3).count(),
-           std::chrono::duration<double, std::milli>(_t4b - _t4).count(),
-           std::chrono::duration<double, std::milli>(_t5a - _t4b).count(),
-           std::chrono::duration<double, std::milli>(_t5 - _t5a).count(),
-           std::chrono::duration<double, std::milli>(_t5 - _t0).count());
-  }
-#endif
-
   return (false);
 }
 
@@ -2804,8 +2681,6 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
  * @param cycle Simulation cycle being advanced.
  */
 void c_Solver::CalculateB(int cycle) {
-  timeTasks_set_main_task(TimeTasks::FIELDS);
-
   // B(n+1) in d_Bxc, d_Bxn, ..., then E^n -> E(n+1) in d_Ex
   EMf->gpuCalculateB(cycle);
 }
@@ -2820,9 +2695,6 @@ void c_Solver::CalculateB(int cycle) {
  * field-solver derived moment quantities.
  */
 void c_Solver::MomentsAwait(int cycle) {
-
-  timeTasks_set_main_task(TimeTasks::MOMENTS);
-
   // Wait for all per-species moment kernels and scatters to finish.
   // cycleEndEvent[i] is recorded on streams[i] right after the scatter,
   // so a per-species cudaEventSynchronize is sufficient and avoids a global
@@ -2830,8 +2702,11 @@ void c_Solver::MomentsAwait(int cycle) {
   // already host-synced inside processPlanetParticles; outputStream of the
   // previous cycle, if any, must NOT be waited on here — the next cycle's
   // mover/sort already explicitly waits on eventOutputCopy).
-  for (int i = 0; i < ns; ++i)
-    cudaErrChk(cudaEventSynchronize(cycleEndEvent[i]));
+  {
+    profiling::Range wait(profiling::Region::MomentKernelsWait);
+    for (int i = 0; i < ns; ++i)
+      cudaErrChk(cudaEventSynchronize(cycleEndEvent[i]));
+  }
 
   // Not in the pre-loop call (cycle -1): before the first mover a planet rank
   // still holds the particles loaded inside the planet.
@@ -2844,21 +2719,24 @@ void c_Solver::MomentsAwait(int cycle) {
 
   // Phase 2: zero derived quantities, planet charge fix, outflow-layer
   // neutralization, sum over species, interp N→C
-  EMf->gpuSetZeroDerivedMoments();
-  // Enforce constant charge inside planet BEFORE summing over species,
-  // so that rhon (and downstream rhoc, rhoh) includes the planet fix.
-  if (doPlanet_)
-    EMf->gpuConstantChargePlanet();
-  // Neutral charge, and the reference plane's current and second moments, on
-  // the X-right outflow layer: the field solve sees a neutral layer, whether
-  // its field is then copied from the reference plane or kept as solved
-  // (OutflowLayerFields).
-  EMf->gpuNeutralizeOutflowLayer();
-  EMf->gpuCopyOutflowLayerMoments();
-  EMf->gpuSumOverSpecies();
-  if (col->getOutputConfig().needsJTotComputation())
-    EMf->gpuSumOverSpeciesJ();
-  EMf->gpuInterpDensitiesN2C();
+  {
+    profiling::Range derived(profiling::Region::DerivedMoments);
+    EMf->gpuSetZeroDerivedMoments();
+    // Enforce constant charge inside planet BEFORE summing over species,
+    // so that rhon (and downstream rhoc, rhoh) includes the planet fix.
+    if (doPlanet_)
+      EMf->gpuConstantChargePlanet();
+    // Neutral charge, and the reference plane's current and second moments,
+    // on the X-right outflow layer: the field solve sees a neutral layer,
+    // whether its field is then copied from the reference plane or kept as
+    // solved (OutflowLayerFields).
+    EMf->gpuNeutralizeOutflowLayer();
+    EMf->gpuCopyOutflowLayerMoments();
+    EMf->gpuSumOverSpecies();
+    if (col->getOutputConfig().needsJTotComputation())
+      EMf->gpuSumOverSpeciesJ();
+    EMf->gpuInterpDensitiesN2C();
+  }
 
   // Phase 3: hat functions (Jhat, rhohat)
   EMf->gpuCalculateHatFunctions(cycle);
@@ -2909,9 +2787,11 @@ void c_Solver::writeParticleNum(int cycle) {
  */
 void c_Solver::WriteOutput(int cycle) {
 #if IPIC3D_COMPILE_DISK_OUTPUT
-
   // complete the deferred outputs written since the last cycle
-  ioManager->poll();
+  {
+    profiling::Range poll(profiling::Region::OutputPoll);
+    ioManager->poll();
+  }
 
   const bool fieldOutputDue = ioManager->needsFieldOutput(cycle);
   const bool particleOutputDue = ioManager->needsParticleOutput(cycle);
@@ -2947,11 +2827,17 @@ void c_Solver::WriteOutput(int cycle) {
   // RequestDataDescription() has already decided whether the GPU host mirror
   // needed refreshing.  This consumes that exact request without asking the
   // Catalyst pipeline a second time.
-  Adaptor::CoProcess(EMf);
+  {
+    profiling::Range catalyst(profiling::Region::Catalyst);
+    Adaptor::CoProcess(EMf);
+  }
 #endif
 
-  WriteConserved(cycle);
-  WritePlanetDiagnostics(cycle);
+  {
+    profiling::Range diagnostics(profiling::Region::Diagnostics);
+    WriteConserved(cycle);
+    WritePlanetDiagnostics(cycle);
+  }
 
   // ======= Restart checkpoint =======
   if (restartOutputDue) {
@@ -2961,9 +2847,9 @@ void c_Solver::WriteOutput(int cycle) {
     // advanced only in CalculateB), B^N and the particles at N.
     // eventOutputCopy is pre-recorded once at init on outputStream and re-
     // recorded by every outputCopyAsync() that actually issues copies. The
-    // synchronize below is therefore always well-defined. First-cycle output
+    // wait below is therefore always well-defined. First-cycle output
     // is primed during Init() when host particle data is required.
-    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    awaitOutputCopy();
     prepareActiveRestartParticleCellMetadata();
     // SoA data is already in host vectors after outputCopyAsync — no conversion
     // needed
@@ -2982,7 +2868,7 @@ void c_Solver::WriteOutput(int cycle) {
   // ======= Particle output =======
   if (particleOutputDue) {
     // See comment above: the event is pre-recorded so this is always safe.
-    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    awaitOutputCopy();
     // SoA data is already in host vectors after outputCopyAsync — no conversion
     // needed
     ioManager->writeParticles(cycle);
@@ -3072,6 +2958,11 @@ void c_Solver::prepareActiveRestartParticleCellMetadata() {
   restartParticleCellMetadata_.valid = true;
 }
 
+void c_Solver::awaitOutputCopy() {
+  profiling::Range range(profiling::Region::OutputCopyWait);
+  cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+}
+
 /**
  * @brief Schedule the asynchronous GPU-to-host particle copies of the next
  * cycle's outputs, and the particle sums of its energy diagnostics.
@@ -3142,10 +3033,13 @@ void c_Solver::outputCopyAsync(int cycle, bool finalCheckpoint) {
 
   // the full copies first: queued behind the counts too (cycleEndEvent),
   // they start as soon as these end, while the host sizes the samples
-  if (diagnostics)
-    sumParticlesAsync();
-  copyParticlesToHostAsync(host);
-  copySampledParticlesAsync(sampled);
+  {
+    profiling::Range copies(profiling::Region::ParticleCopyD2H);
+    if (diagnostics)
+      sumParticlesAsync();
+    copyParticlesToHostAsync(host);
+    copySampledParticlesAsync(sampled);
+  }
   cudaErrChk(cudaEventRecord(eventOutputCopy, outputStream));
 #else
   (void)cycle;
@@ -3252,7 +3146,10 @@ void c_Solver::copySampledParticlesAsync(
   for (int s = 0; s < ns; s++) {
     if (!sampled[s].any())
       continue;
-    cudaErrChk(cudaStreamSynchronize(streams[s])); // the count
+    {
+      profiling::Range wait(profiling::Region::SampleCountWait, s);
+      cudaErrChk(cudaStreamSynchronize(streams[s])); // the count
+    }
     const std::uint32_t n = particleSampleCountHostPtr[s];
     ioManager->particleSample(s).prepare(n, sampled[s],
                                          particlesHost[s]->tracksParticleID());
@@ -3347,7 +3244,7 @@ void c_Solver::WriteConserved(int cycle) {
     // outputCopyAsync(cycle - 1) on outputStream (primed in Init for the
     // first cycle): eventOutputCopy follows them. The mover launched just
     // before WriteOutput() only waits for it on the GPU, so wait here.
-    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    awaitOutputCopy();
     std::vector<ParticleSums> sums(ns);
     MPI_Allreduce(particleSumsHostPtr, sums.data(), kParticleSumsValues * ns,
                   MPI_DOUBLE, MPI_SUM, vct->getParticleComm());
@@ -3657,13 +3554,17 @@ void c_Solver::WriteVirtualSatelliteTraces() {
  * CUDA state.
  */
 void c_Solver::Finalize() {
+  profiling::Range range(profiling::Region::Finalize);
 
 #if IPIC3D_COMPILE_DISK_OUTPUT
   pclNumCSV.close();
 
   // Planet hits processed since the last PlanetBC.txt row, the last cycle's
   // included, labelled with the resume cycle like the final checkpoint.
-  WritePlanetDiagnostics(col->getNcycles() + first_cycle, true);
+  {
+    profiling::Range diagnostics(profiling::Region::Diagnostics);
+    WritePlanetDiagnostics(col->getNcycles() + first_cycle, true);
+  }
 
   if (ioManager &&
       ioManager->getRestartBackend() != IOManager::RestartBackend::NONE &&
@@ -3674,21 +3575,21 @@ void c_Solver::Finalize() {
     EMf->gpuSolverSyncD2H(FieldOutputArrays::all(), EMf->gpuSolverStream());
 
     outputCopyAsync(LastCycle() - 1, true);
-    cudaErrChk(cudaEventSynchronize(eventOutputCopy));
+    awaitOutputCopy();
     // Final restart data is written after the last loop iteration has
     // completed, so the resume label is the next loop cycle.
     prepareActiveRestartParticleCellMetadata();
     ioManager->writeRestart(col->getNcycles() + first_cycle);
   }
 
-  if (ioManager)
+  if (ioManager) {
+    profiling::Range output(profiling::Region::FinalizeOutput);
     ioManager->finalize();
+  }
 #endif
 
+  profiling::Range device(profiling::Region::FinalizeDevice);
   deInitCUDA();
-
-  // Stop profiling after all runtime work has completed.
-  my_clock->stopTiming();
 }
 
 /**
@@ -3713,6 +3614,7 @@ void c_Solver::sortParticles() {
  * particle merging) create theirs here on first use.
  */
 void c_Solver::sortSpeciesByCell(int species) {
+  profiling::Range range(profiling::Region::ParticleSort, species);
   particleArrayCUDA* pcls = pclsArrayHostPtr[species];
   CellSorter& sorter = cellSorters[species];
   if (!sorter.initialized)
@@ -3744,6 +3646,7 @@ void c_Solver::sortSpecies(const std::vector<int>& mask) {
   }
 
   // Wait until every species has completed its full sort pipeline.
+  profiling::Range wait(profiling::Region::SortWait);
   for (int i = 0; i < ns; i++)
     if (mask[i])
       cudaErrChk(cudaStreamSynchronize(streams[i]));
@@ -3790,6 +3693,7 @@ int c_Solver::LastCycle() { return (col->getNcycles() + first_cycle); }
 void c_Solver::injectExosphereParticles() {
   if (exosphereIonization == nullptr)
     return;
+  profiling::Range range(profiling::Region::Exosphere);
 
   // ======= Compute a memory-aware per-species injection budget =======
   // Only activate a budget when GPU memory is actually scarce or a hard cap
@@ -3843,6 +3747,7 @@ void c_Solver::injectExosphereParticles() {
   for (int i = numSolarWindSpecies; i < ns; i++) {
     exosphereTaskFutures.push_back(
         threadPoolPtr->enqueue([this, i, maxParticlesPerSpecies]() {
+          profiling::Range range(profiling::Region::ExosphereSample, i);
           // sampleIonizedParticles is thread-safe for different species
           // indices: each species uses its own std::mt19937_64 RNG, particle
           // buffer, and charge accumulator (no global rand() or shared mutable

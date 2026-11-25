@@ -32,7 +32,7 @@
 #include "Grid3DCU.h"
 #include "OutputTagConfig.h" // FieldOutputArrays
 #include "Parameters.h"
-#include "TimeTasks.h"
+#include "Profiler.h"
 #include "VCtopology3D.h"
 #include "errors.h"
 #include <mpi.h>
@@ -55,6 +55,20 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+// =========================================================================
+//  The reduction of the Krylov solvers
+// =========================================================================
+
+/** Wait for the stream, whose copies fill local on the host, then sum the
+ *  count values over the ranks of comm into global. */
+static void krylovSum(const cudaSolverType* local, cudaSolverType* global,
+                      int count, cudaStream_t stream, MPI_Comm comm) {
+  profiling::Range range(profiling::Region::KrylovReduce);
+  cudaErrChk(cudaStreamSynchronize(stream));
+  MPI_Allreduce(local, global, count, mpiTypeOf<cudaSolverType>(), MPI_SUM,
+                comm);
+}
 
 // =========================================================================
 //  GPU Solver: allocation / deallocation / synchronisation
@@ -729,6 +743,7 @@ void EMfields3D::gpuSolverSyncH2D(cudaStream_t stream) {
 
 void EMfields3D::gpuSolverSyncD2H(const FieldOutputArrays& arrays,
                                   cudaStream_t stream) {
+  profiling::Range range(profiling::Region::FieldCopyD2H);
   // the groups that the host consumers of the cycle read (output,
   // diagnostics, checkpoints, Catalyst); the other host arrays keep older
   // values, read by none of them
@@ -887,6 +902,7 @@ void EMfields3D::gpuSmoothInPlace(GPUFieldArray3* const a[N], GhostSet ghosts) {
 template <EMfields3D::HaloMode M>
 void EMfields3D::gpuSmoothE(GPUFieldArray3* const src[3],
                             GPUFieldArray3* const dst[3]) {
+  profiling::Range range(profiling::Region::SmoothE);
   // Every physical face continues every component evenly about the face node
   // (GhostSet::ENodeSmooth); the values of the identity rows (conductor E_t,
   // inflow E0) are restored after each pass
@@ -933,6 +949,7 @@ void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
 template <EMfields3D::HaloMode M>
 void EMfields3D::gpuMaxwellImage(cudaSolverType* d_im,
                                  cudaSolverType* d_vector) {
+  profiling::Range range(profiling::Region::MaxwellImage);
   const Grid* grid = &get_grid();
   const double _invdx = grid->get_invdx();
   const double _invdy = grid->get_invdy();
@@ -1146,6 +1163,7 @@ cudaSolverType EMfields3D::gpuEstimateMaxEigenvalue(
     chebAlloc = n;
   }
 
+  profiling::Range range(profiling::Region::EigenvalueEstimate);
   // Initialize v = 1/sqrt(n) (uniform vector)
   gpuEqValue(d_chebY, 1.0 / sqrt((double)n), n, solverStream_);
 
@@ -1160,12 +1178,8 @@ cudaSolverType EMfields3D::gpuEstimateMaxEigenvalue(
                  solverStream_);
     gpuNorm2_async(d_chebTmp, n, d_blasScratch, &h_gmresReduceLocal[1],
                    solverStream_);
-    cudaErrChk(cudaStreamSynchronize(solverStream_));
-
-    double localBuf[2] = {h_gmresReduceLocal[0], h_gmresReduceLocal[1]};
     double globalBuf[2];
-    MPI_Allreduce(localBuf, globalBuf, 2, mpiTypeOf<cudaSolverType>(), MPI_SUM,
-                  fieldcomm);
+    krylovSum(h_gmresReduceLocal, globalBuf, 2, solverStream_, fieldcomm);
 
     double vw = globalBuf[0]; // (v, Av)
     double ww = globalBuf[1]; // ||Av||²
@@ -1232,11 +1246,8 @@ void EMfields3D::gpuChebyshevSolve(
   // ---- Print the initial residual norm ----
   gpuNorm2_async(d_chebW, n, d_blasScratch, &h_gmresReduceLocal[0],
                  solverStream_);
-  cudaErrChk(cudaStreamSynchronize(solverStream_));
-  double localNorm = h_gmresReduceLocal[0];
   double globalNorm;
-  MPI_Allreduce(&localNorm, &globalNorm, 1, mpiTypeOf<cudaSolverType>(),
-                MPI_SUM, fieldcomm);
+  krylovSum(h_gmresReduceLocal, &globalNorm, 1, solverStream_, fieldcomm);
   double initial_error = sqrt(globalNorm);
   if (vct->getCartesian_rank() == 0)
     printf("  [Chebyshev] Initial residual: %g  (eigMin=%.4g, eigMax=%.4g, %d "
@@ -1256,12 +1267,16 @@ void EMfields3D::gpuChebyshevSolve(
   double* pAy = d_chebTmp; // operator output A(.) — always this buffer
 
   // ---- Step 0+1: z = r0/theta,  y = f(r0, A(r0)) ----
-  (this->*GpuImage)(pAy, d_r0); // Ay = A(r0)
-  gpuChebyshevStep1(pY, pZ, d_r0, pAy, theta, delta, rho, n, solverStream_);
+  {
+    profiling::Range iteration(profiling::Region::KrylovIteration, 0);
+    (this->*GpuImage)(pAy, d_r0); // Ay = A(r0)
+    gpuChebyshevStep1(pY, pZ, d_r0, pAy, theta, delta, rho, n, solverStream_);
+  }
   // Now: pY = y₁,  pZ = z₀ = r0/theta
 
   // ---- Steps 2..maxIter ----
   for (int step = 2; step <= maxIter; step++) {
+    profiling::Range iteration(profiling::Region::KrylovIteration, step - 1);
     rhoOld = rho;
     rho = 1.0 / (2.0 * sigma - rhoOld);
 
@@ -1290,10 +1305,7 @@ void EMfields3D::gpuChebyshevSolve(
   gpuSubRes(d_chebW, d_b, pAy, n, solverStream_);
   gpuNorm2_async(d_chebW, n, d_blasScratch, &h_gmresReduceLocal[0],
                  solverStream_);
-  cudaErrChk(cudaStreamSynchronize(solverStream_));
-  localNorm = h_gmresReduceLocal[0];
-  MPI_Allreduce(&localNorm, &globalNorm, 1, mpiTypeOf<cudaSolverType>(),
-                MPI_SUM, fieldcomm);
+  krylovSum(h_gmresReduceLocal, &globalNorm, 1, solverStream_, fieldcomm);
   double final_error = sqrt(globalNorm);
   if (vct->getCartesian_rank() == 0)
     printf("  [Chebyshev] Final residual: %g  (reduction: %.2e)\n", final_error,
@@ -1305,6 +1317,7 @@ void EMfields3D::gpuChebyshevSolve(
 // =========================================================================
 
 void EMfields3D::gpuMaxwellSource(cudaSolverType* d_bkrylov, int cycle) {
+  profiling::Range range(profiling::Region::MaxwellSource);
   const Collective* col = &get_col();
   const VirtualTopology3D* vct = &get_vct();
   const Grid* grid = &get_grid();
@@ -1559,19 +1572,15 @@ gpuGMRES_impl(EMfields3D* field,
 
   // ||r||₂  (async D→H into pinned buffer, one sync)
   gpuNorm2_async(d_gmresV, n, d_scratch, &h_reduceLocal[0], stream);
-  cudaErrChk(cudaStreamSynchronize(stream));
   double initial_error;
-  MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1,
-                mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
+  krylovSum(&h_reduceLocal[0], &initial_error, 1, stream, fieldcomm);
   initial_error = sqrt(initial_error);
   gmresCheckFinite(initial_error, "GMRES", 0);
 
   // ||b||: printed, and returned for the field-solver guard
   gpuNorm2_async(d_b, n, d_scratch, &h_reduceLocal[0], stream);
-  cudaErrChk(cudaStreamSynchronize(stream));
   double normb;
-  MPI_Allreduce(&h_reduceLocal[0], &normb, 1, mpiTypeOf<cudaSolverType>(),
-                MPI_SUM, fieldcomm);
+  krylovSum(&h_reduceLocal[0], &normb, 1, stream, fieldcomm);
   EMfields3D::KrylovSolveStatus status;
   status.normB = sqrt(normb);
   if (initial_error < 1e-30)
@@ -1603,6 +1612,8 @@ gpuGMRES_impl(EMfields3D* field,
     int kEnd = m - 1;
 
     for (int k = 0; k < m; k++) {
+      profiling::Range iteration(profiling::Region::KrylovIteration,
+                                 restart * m + k);
       // w = A * V[k]
       (field->*GpuImage)(d_gmresW, d_gmresV + (size_t)k * n);
 
@@ -1613,9 +1624,7 @@ gpuGMRES_impl(EMfields3D* field,
       cudaErrChk(cudaMemcpyAsync(h_reduceLocal, d_scratch,
                                  (k + 2) * sizeof(cudaSolverType),
                                  cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaStreamSynchronize(stream));
-      MPI_Allreduce(h_reduceLocal, h_reduceGlobal, k + 2,
-                    mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
+      krylovSum(h_reduceLocal, h_reduceGlobal, k + 2, stream, fieldcomm);
 
       // Store H[j][k]; w -= sum_j h_jk V[j] in one pass
       for (int j = 0; j <= k; j++)
@@ -1626,10 +1635,8 @@ gpuGMRES_impl(EMfields3D* field,
       // H[k+1][k] = ||w_perp||  (post-orthogonalisation norm)
       // Async D→H, single sync
       gpuNorm2_async(d_gmresW, n, d_scratch, &h_reduceLocal[0], stream);
-      cudaErrChk(cudaStreamSynchronize(stream));
       double global_wNorm;
-      MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1,
-                    mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
+      krylovSum(&h_reduceLocal[0], &global_wNorm, 1, stream, fieldcomm);
       H[(k + 1) * m + k] = sqrt(global_wNorm);
 
       // Re-orthogonalise when the projections cancelled ||w|| down to
@@ -1640,17 +1647,13 @@ gpuGMRES_impl(EMfields3D* field,
         for (int j = 0; j <= k; j++) {
           gpuDot_async(d_gmresW, d_gmresV + (size_t)j * n, n, d_scratch,
                        &h_reduceLocal[0], stream);
-          cudaErrChk(cudaStreamSynchronize(stream));
           double htmp;
-          MPI_Allreduce(&h_reduceLocal[0], &htmp, 1,
-                        mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
+          krylovSum(&h_reduceLocal[0], &htmp, 1, stream, fieldcomm);
           H[j * m + k] += htmp;
           gpuAddscale(-htmp, d_gmresW, d_gmresV + (size_t)j * n, n, stream);
         }
         gpuNorm2_async(d_gmresW, n, d_scratch, &h_reduceLocal[0], stream);
-        cudaErrChk(cudaStreamSynchronize(stream));
-        MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1,
-                      mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
+        krylovSum(&h_reduceLocal[0], &global_wNorm, 1, stream, fieldcomm);
         H[(k + 1) * m + k] = sqrt(global_wNorm);
       }
 
@@ -1706,9 +1709,7 @@ gpuGMRES_impl(EMfields3D* field,
     gpuSub(d_gmresV, d_gmresW, n, stream);
 
     gpuNorm2_async(d_gmresV, n, d_scratch, &h_reduceLocal[0], stream);
-    cudaErrChk(cudaStreamSynchronize(stream));
-    MPI_Allreduce(&h_reduceLocal[0], &error, 1, mpiTypeOf<cudaSolverType>(),
-                  MPI_SUM, fieldcomm);
+    krylovSum(&h_reduceLocal[0], &error, 1, stream, fieldcomm);
     error = sqrt(error);
     gmresCheckFinite(error, "GMRES", restart);
 
@@ -1785,6 +1786,12 @@ gpuFGMRES_impl(EMfields3D* field,
                cudaSolverType* h_reduceLocal, cudaSolverType* h_reduceGlobal,
                cudaSolverType* H, cudaSolverType* g, cudaSolverType* cs,
                cudaSolverType* sn, cudaSolverType* y, const char* label) {
+  // the iterations of the Maxwell solve (its block-Jacobi preconditioner)
+  // apart from those of the cleaning solves
+  const profiling::Region iterationRegion =
+      GpuPrecond == &EMfields3D::gpuBlockJacobiPrecond
+          ? profiling::Region::KrylovIteration
+          : profiling::Region::CleaningIteration;
   const int mp1 = m + 1;
   const size_t requiredV = static_cast<size_t>(mp1) * n;
   const size_t requiredZ = static_cast<size_t>(m) * n;
@@ -1816,10 +1823,8 @@ gpuFGMRES_impl(EMfields3D* field,
 
   // ||r||₂
   gpuNorm2_async(d_gmresV, n, d_scratch, &h_reduceLocal[0], stream);
-  cudaErrChk(cudaStreamSynchronize(stream));
   double initial_error;
-  MPI_Allreduce(&h_reduceLocal[0], &initial_error, 1,
-                mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
+  krylovSum(&h_reduceLocal[0], &initial_error, 1, stream, fieldcomm);
   initial_error = sqrt(initial_error);
   gmresCheckFinite(initial_error, label, 0);
 
@@ -1829,10 +1834,8 @@ gpuFGMRES_impl(EMfields3D* field,
   status.normB = initial_error;
   if (!zeroGuess) {
     gpuNorm2_async(d_b, n, d_scratch, &h_reduceLocal[0], stream);
-    cudaErrChk(cudaStreamSynchronize(stream));
     double normb;
-    MPI_Allreduce(&h_reduceLocal[0], &normb, 1, mpiTypeOf<cudaSolverType>(),
-                  MPI_SUM, fieldcomm);
+    krylovSum(&h_reduceLocal[0], &normb, 1, stream, fieldcomm);
     status.normB = sqrt(normb);
   }
   if (initial_error < 1e-30)
@@ -1865,6 +1868,7 @@ gpuFGMRES_impl(EMfields3D* field,
     int kk = 0;
 
     for (int k = 0; k < m && error > rho_tol; k++) {
+      profiling::Range iteration(iterationRegion, restart * m + k);
       kk = k;
 
       // Z[k] = M⁻¹ V[k]
@@ -1879,9 +1883,7 @@ gpuFGMRES_impl(EMfields3D* field,
       cudaErrChk(cudaMemcpyAsync(h_reduceLocal, d_scratch,
                                  (k + 2) * sizeof(cudaSolverType),
                                  cudaMemcpyDeviceToHost, stream));
-      cudaErrChk(cudaStreamSynchronize(stream));
-      MPI_Allreduce(h_reduceLocal, h_reduceGlobal, k + 2,
-                    mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
+      krylovSum(h_reduceLocal, h_reduceGlobal, k + 2, stream, fieldcomm);
 
       // w -= sum_j h_jk V[j] in one pass
       for (int j = 0; j <= k; j++)
@@ -1890,10 +1892,8 @@ gpuFGMRES_impl(EMfields3D* field,
                         h_reduceGlobal, stream);
 
       gpuNorm2_async(d_gmresW, n, d_scratch, &h_reduceLocal[0], stream);
-      cudaErrChk(cudaStreamSynchronize(stream));
       double global_wNorm;
-      MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1,
-                    mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
+      krylovSum(&h_reduceLocal[0], &global_wNorm, 1, stream, fieldcomm);
       H[(k + 1) * m + k] = sqrt(global_wNorm);
 
       // Re-orthogonalise if needed
@@ -1903,17 +1903,13 @@ gpuFGMRES_impl(EMfields3D* field,
         for (int j = 0; j <= k; j++) {
           gpuDot_async(d_gmresW, d_gmresV + (size_t)j * n, n, d_scratch,
                        &h_reduceLocal[0], stream);
-          cudaErrChk(cudaStreamSynchronize(stream));
           double htmp;
-          MPI_Allreduce(&h_reduceLocal[0], &htmp, 1,
-                        mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
+          krylovSum(&h_reduceLocal[0], &htmp, 1, stream, fieldcomm);
           H[j * m + k] += htmp;
           gpuAddscale(-htmp, d_gmresW, d_gmresV + (size_t)j * n, n, stream);
         }
         gpuNorm2_async(d_gmresW, n, d_scratch, &h_reduceLocal[0], stream);
-        cudaErrChk(cudaStreamSynchronize(stream));
-        MPI_Allreduce(&h_reduceLocal[0], &global_wNorm, 1,
-                      mpiTypeOf<cudaSolverType>(), MPI_SUM, fieldcomm);
+        krylovSum(&h_reduceLocal[0], &global_wNorm, 1, stream, fieldcomm);
         H[(k + 1) * m + k] = sqrt(global_wNorm);
       }
 
@@ -1964,9 +1960,7 @@ gpuFGMRES_impl(EMfields3D* field,
     gpuSub(d_gmresV, d_gmresW, n, stream);
 
     gpuNorm2_async(d_gmresV, n, d_scratch, &h_reduceLocal[0], stream);
-    cudaErrChk(cudaStreamSynchronize(stream));
-    MPI_Allreduce(&h_reduceLocal[0], &error, 1, mpiTypeOf<cudaSolverType>(),
-                  MPI_SUM, fieldcomm);
+    krylovSum(&h_reduceLocal[0], &error, 1, stream, fieldcomm);
     error = sqrt(error);
     gmresCheckFinite(error, label, restart);
 
@@ -2002,6 +1996,7 @@ gpuFGMRES_impl(EMfields3D* field,
 
 void EMfields3D::gpuBlockJacobiPrecond(cudaSolverType* d_x,
                                        cudaSolverType* d_b) {
+  profiling::Range range(profiling::Region::Preconditioner);
   const Grid* grid = &get_grid();
   const int n = maxwellKrylovSize_;
   double invdx = grid->get_invdx();
@@ -2153,6 +2148,7 @@ void EMfields3D::gpuCalculateB(int cycle) {
 }
 
 void EMfields3D::gpuCalculateHatFunctions(int cycle) {
+  profiling::Range range(profiling::Region::HatFunctions);
   if (haloOverlap_)
     gpuCalculateHatFunctions<HaloMode::Overlap>(cycle);
   else
@@ -2217,33 +2213,36 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateE(int cycle) {
   // adds no work to it; the Chebyshev iteration reports nothing (unchecked).
   KrylovSolveStatus status;
   const char* solve = "Maxwell GMRES";
-  if (SolverType == "Chebyshev") {
-    // Chebyshev semi-iterative solver
-    double eigMin = (chebEigMin > 0.0) ? chebEigMin : 1.0;
-    double eigMax = chebEigMax;
-    if (eigMax <= 0.0) {
-      eigMax = gpuEstimateMaxEigenvalue(gpuMaxwellImageFn(), nMaxwell, 20,
-                                        fieldcomm);
+  {
+    profiling::Range maxwellSolve(profiling::Region::MaxwellSolve);
+    if (SolverType == "Chebyshev") {
+      // Chebyshev semi-iterative solver
+      double eigMin = (chebEigMin > 0.0) ? chebEigMin : 1.0;
+      double eigMax = chebEigMax;
+      if (eigMax <= 0.0) {
+        eigMax = gpuEstimateMaxEigenvalue(gpuMaxwellImageFn(), nMaxwell, 20,
+                                          fieldcomm);
+      }
+      gpuChebyshevSolve(d_xkrylovMaxwell.devPtr(), nMaxwell,
+                        d_bkrylovMaxwell.devPtr(), gpuMaxwellImageFn(),
+                        chebMaxIter, eigMin, eigMax, fieldcomm);
+    } else if (SolverType == "FGMRESBlockJacobi") {
+      // FGMRES(20) with communication-free block-Jacobi preconditioner
+      if (vct->getCartesian_rank() == 0)
+        cout << "*** MAXWELL SOLVER [GPU FGMRES+BlockJacobi] ***" << endl;
+      status = gpuFGMRES_BlockJacobiPrecond(d_xkrylovMaxwell.devPtr(), nMaxwell,
+                                            d_bkrylovMaxwell.devPtr(), 20, 200,
+                                            GMREStol, fieldcomm);
+      solve = "Maxwell FGMRES+BlockJacobi";
+    } else {
+      // Default: GMRES(20) solver
+      status = gpuGMRES_impl(
+          this, gpuMaxwellImageFn(), d_xkrylovMaxwell.devPtr(), nMaxwell,
+          d_bkrylovMaxwell.devPtr(), 20, 200, GMREStol, d_blasScratch, d_gmresV,
+          d_gmresW, gmresVAlloc, fieldcomm, solverStream_, h_gmresReduceLocal,
+          h_gmresReduceGlobal, h_gmresH, h_gmresG, h_gmresCS, h_gmresSN,
+          h_gmresY);
     }
-    gpuChebyshevSolve(d_xkrylovMaxwell.devPtr(), nMaxwell,
-                      d_bkrylovMaxwell.devPtr(), gpuMaxwellImageFn(),
-                      chebMaxIter, eigMin, eigMax, fieldcomm);
-  } else if (SolverType == "FGMRESBlockJacobi") {
-    // FGMRES(20) with communication-free block-Jacobi preconditioner
-    if (vct->getCartesian_rank() == 0)
-      cout << "*** MAXWELL SOLVER [GPU FGMRES+BlockJacobi] ***" << endl;
-    status = gpuFGMRES_BlockJacobiPrecond(d_xkrylovMaxwell.devPtr(), nMaxwell,
-                                          d_bkrylovMaxwell.devPtr(), 20, 200,
-                                          GMREStol, fieldcomm);
-    solve = "Maxwell FGMRES+BlockJacobi";
-  } else {
-    // Default: GMRES(20) solver
-    status =
-        gpuGMRES_impl(this, gpuMaxwellImageFn(), d_xkrylovMaxwell.devPtr(),
-                      nMaxwell, d_bkrylovMaxwell.devPtr(), 20, 200, GMREStol,
-                      d_blasScratch, d_gmresV, d_gmresW, gmresVAlloc, fieldcomm,
-                      solverStream_, h_gmresReduceLocal, h_gmresReduceGlobal,
-                      h_gmresH, h_gmresG, h_gmresCS, h_gmresSN, h_gmresY);
   }
   // Before the solution is unpacked: a ||b|| jump explains a failed solve,
   // so it is tested first.
@@ -2376,15 +2375,18 @@ template <EMfields3D::HaloMode M> void EMfields3D::gpuCalculateB(int cycle) {
   reportMagneticField("B_before_faraday_update");
 #endif
 
-  // curl(Eth) → tempXC/YC/ZC
-  gpuCurlN2C(d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
-             d_Exth.devPtr(), d_Eyth.devPtr(), d_Ezth.devPtr(), nxc, nyc, nzc,
-             _invdx, _invdy, _invdz, solverStream_);
+  {
+    profiling::Range faraday(profiling::Region::Faraday);
+    // curl(Eth) → tempXC/YC/ZC
+    gpuCurlN2C(d_tempXC.devPtr(), d_tempYC.devPtr(), d_tempZC.devPtr(),
+               d_Exth.devPtr(), d_Eyth.devPtr(), d_Ezth.devPtr(), nxc, nyc, nzc,
+               _invdx, _invdy, _invdz, solverStream_);
 
-  // B^{n+1} = B^n - c*dt * curl(Eth)
-  gpuAddscale3(-c * dt, d_Bxc.devPtr(), d_tempXC.devPtr(), d_Byc.devPtr(),
-               d_tempYC.devPtr(), d_Bzc.devPtr(), d_tempZC.devPtr(), centSize,
-               solverStream_);
+    // B^{n+1} = B^n - c*dt * curl(Eth)
+    gpuAddscale3(-c * dt, d_Bxc.devPtr(), d_tempXC.devPtr(), d_Byc.devPtr(),
+                 d_tempYC.devPtr(), d_Bzc.devPtr(), d_tempZC.devPtr(), centSize,
+                 solverStream_);
+  }
 
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
   reportMagneticField("B_after_faraday_update");
@@ -2688,6 +2690,7 @@ void EMfields3D::gpuScatterMomentsD2D(cudaMomentType* momentsSrc, int species,
 // =========================================================================
 
 void EMfields3D::gpuCommunicateGhostP2G_AllSpecies(int cycle) {
+  profiling::Range range(profiling::Region::MomentHalo);
   const VirtualTopology3D* vct = &get_vct();
   const int nFieldsPerSpecies = 10;
   const int speciesPerBatch = HALO_MAX_BATCH / nFieldsPerSpecies; // floor
@@ -2944,6 +2947,7 @@ void EMfields3D::gpuPoissonImageLocal(cudaSolverType* d_im,
 
 template <EMfields3D::HaloMode M>
 void EMfields3D::gpuCleaningImage(cudaSolverType* d_im, cudaSolverType* d_vec) {
+  profiling::Range range(profiling::Region::CleaningImage);
   const CleaningSolve& s = *cleaning_;
   cudaSolverType* const f[1] = {s.buf->devPtr()};
   const int* e = bc_.extents(s.ghosts);
@@ -2970,6 +2974,7 @@ void EMfields3D::gpuCleaningImage(cudaSolverType* d_im, cudaSolverType* d_vec) {
 }
 
 void EMfields3D::gpuCleaningPrecond(cudaSolverType* d_x, cudaSolverType* d_b) {
+  profiling::Range range(profiling::Region::Preconditioner);
   const CleaningSolve& s = *cleaning_;
   gpuChebyshevCleaning(d_x, d_b, s.op, s.cheb.min, s.cheb.max,
                        poissonChebMaxIter, d_cleanCheb_,
@@ -3102,6 +3107,7 @@ bool EMfields3D::cleaningAtRoundOff(const cudaSolverType* d_b, int n,
 void EMfields3D::gpuPoissonCorrection(int cycle) {
   if (!PoissonCorrection || cycle % PoissonCorrectionCycle != 0)
     return;
+  profiling::Range range(profiling::Region::PoissonCorrection);
 
   const Grid* grid = &get_grid();
   const cudaSolverType invd[3] = {grid->get_invdx(), grid->get_invdy(),
@@ -3158,6 +3164,7 @@ void EMfields3D::gpuPoissonCorrection(int cycle) {
 // =========================================================================
 
 void EMfields3D::gpuApplyDivBCleaning(int cycle) {
+  profiling::Range range(profiling::Region::DivBCleaning);
   const Grid* grid = &get_grid();
   const cudaSolverType invd[3] = {grid->get_invdx(), grid->get_invdy(),
                                   grid->get_invdz()};

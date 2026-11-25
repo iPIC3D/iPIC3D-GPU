@@ -29,7 +29,6 @@
 #include "Moments.h"
 #include "Parameters.h"
 #include "ParticleSoAHost.h"
-#include "TimeTasks.h"
 #include "VCtopology3D.h"
 #include "asserts.h"
 #include "debug.h"
@@ -539,8 +538,6 @@ void EMfields3D::allocateHeatFlux() {
 }
 
 void EMfields3D::communicateGhostHeatFlux(int is) {
-  timeTasks_set_communicating();
-
   const VirtualTopology3D* vct = &get_vct();
 
   for (int c = 0; c < HeatFlux::ComponentCount; ++c) {

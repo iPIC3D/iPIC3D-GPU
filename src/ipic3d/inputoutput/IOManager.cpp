@@ -15,6 +15,7 @@
 #include "ParallelIO.h" // free VTK/PHDF5 write functions
 #include "Parameters.h"
 #include "ParticleSoAHost.h"
+#include "Profiler.h"
 #include "RestartMeshMetadata.h"
 #include "RestartParticleCellMetadata.h"
 #include "VCtopology3D.h"
@@ -365,6 +366,7 @@ void IOManager::init(Collective* col, VCtopology3D* vct, Grid3DCU* grid,
 void IOManager::writeFields(int cycle) {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return;
+  profiling::Range range(profiling::Region::WriteFields);
 
   const OutputTagConfig& cfg = col_->getOutputConfig();
 
@@ -473,6 +475,7 @@ void IOManager::writeFields(int cycle) {
 void IOManager::writeParticles(int cycle) {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return;
+  profiling::Range range(profiling::Region::WriteParticles);
 
   // the particles of each species written: those that
   // ParticlesOutputTrackedFraction or ParticlesOutputMaxPerCell selects, else
@@ -521,6 +524,7 @@ void IOManager::writeParticles(int cycle) {
 void IOManager::writeTestParticles(int cycle) {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return;
+  profiling::Range range(profiling::Region::WriteTestParticles);
 
   if (nstestpart_ == 0)
     return;
@@ -544,6 +548,7 @@ void IOManager::writeTestParticles(int cycle) {
 void IOManager::writeRestart(int cycle) {
   if constexpr (!BenchmarkConfig::DISK_OUTPUT_ENABLED)
     return;
+  profiling::Range range(profiling::Region::WriteRestart);
 
   if (restartBackend_ == RestartBackend::NONE)
     return;

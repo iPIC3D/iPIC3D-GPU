@@ -13,7 +13,7 @@ HEAT_FLUX_COMPONENTS = 10
 # the default of the CMake option of the same name (initial capacity of the
 # device particle arrays, times the particle count); a build with another
 # value needs proportionally more particle memory than estimated here
-PARTICLE_ARRAY_HEADROOM = 1.2
+PARTICLE_ARRAY_HEADROOM = 1.3
 # the numbers that the input lists of Collective::ReadInput read (a C++
 # stream): no nan, inf, hexadecimal or digit separators
 INT_TOKEN = re.compile(r"[+-]?[0-9]+")

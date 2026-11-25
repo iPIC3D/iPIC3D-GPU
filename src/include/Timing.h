@@ -1,3 +1,6 @@
+#ifndef TIMING_H
+#define TIMING_H
+
 /* iPIC3D was originally developed by Stefano Markidis and Giovanni Lapenta.
  * This release was contributed by Alec Johnson and Ivy Bo Peng.
  * Publications that use results from iPIC3D need to properly cite
@@ -19,102 +22,95 @@
  * limitations under the License.
  */
 
-/*******************************************************************************************
-  Timing.h  -  series of methods for timing and profiling PARSEK
-  -------------------
-developers: Stefano Markidis, Enrico Camporeale, Giovanni Lapenta, David Burgess
- ********************************************************************************************/
+/**
+ * @file Timing.h
+ * @brief The run timer, always on: the phases of the program, the time of
+ * every cycle and of its stages (the `Execution time cycle` line of rank 0),
+ * the steady state, and the summary at the end of the run.
+ *
+ * Every time is host wall time on a monotonic clock (std::chrono::
+ * steady_clock). The timer opens the profiler regions of the time loop
+ * (Profiler.h): each cycle, each of its stages, and the steady state, which
+ * is the profiler's recording window. The steady state is the cycles after
+ * the first (warm-up) cycle; it starts and ends at a timing boundary
+ * (boundary(): the GPU drained, then all ranks met), so its interval holds
+ * all of its GPU work and is the same on every rank.
+ */
 
-#ifndef TIMING_H
-#define TIMING_H
+#include "Profiler.h"
 
 #include <chrono>
 
-// #include "MPIdata.h"
+/** The stages of a cycle: the profiler regions from kFirstCycleStage to
+ *  kLastCycleStage, in loop order (Profiler.h). */
+inline constexpr profiling::Region kFirstCycleStage =
+    profiling::Region::ParticleCountLog;
+inline constexpr profiling::Region kLastCycleStage =
+    profiling::Region::OutputCopy;
+/** Number of cycle stages. */
+inline constexpr int kCycleStages =
+    static_cast<int>(kLastCycleStage) - static_cast<int>(kFirstCycleStage) + 1;
 
-// #include <iostream>
-
-// using std::cout;
-// using std::endl;
-/**
- *
- * series of methods for timing and profiling PARSEK
- * @date Fri Jun 4 2007
- * @author Stefano Markidis, Giovanni Lapenta
- * @version 2.0
- *
- */
 class Timing {
 public:
-  /** default constructor */
-  Timing();
-  /** default constructor */
-  Timing(int my_rank);
-  /** start timing the mover */
-  void start_mover();
-  /** stop timing the mover */
-  void stop_mover();
-  /** start timing the field solver */
-  void start_field();
-  /** stop timing the field solver */
-  void stop_field();
-  /** start timing the interpolation Particle -> Grid */
-  void start_interpP2G();
-  /** stop timing the interpolation Particle -> Grid */
-  void stop_interpP2G();
-  /** start the timer */
-  void startTiming();
-  /** stop the timer */
-  void stopTiming();
-  /** get the execution time */
-  double getExecutionTime();
-  /** print the execution time */
-  void Print();
-  /** print the execution time without stopping the clock*/
-  void Print_OnAir();
+  using Clock = std::chrono::steady_clock;
 
-  // Program-phase marks (wall clock), set from main(). stopTiming() uses
-  // them to print the timing breakdown alongside the simulation time.
-  /** mark program start (right after MPI init) */
-  static void markProgramStart();
-  /** mark end of solver Init() */
-  static void markInitEnd();
-  /** mark start of the cycle loop (after initial moments) */
-  static void markLoopStart();
-  /** per-cycle wall-clock marks captured in the main loop */
-  using TimePoint = std::chrono::high_resolution_clock::time_point;
-  /** accumulate one cycle's stats for avg/stddev and print the rank-0
-   * per-cycle breakdown */
-  static void recordCycle(int rank, TimePoint start, TimePoint sort,
-                          TimePoint field, TimePoint daWait, TimePoint mover,
-                          TimePoint exchange, TimePoint bField,
-                          TimePoint moments, TimePoint end);
-  /** mark end of the cycle loop (before Finalize()) */
-  static void markLoopEnd();
+  void markProgramStart() { programStart_ = Clock::now(); }
+  void markInitEnd() { initEnd_ = Clock::now(); }
+  void markLoopStart() { loopStart_ = Clock::now(); }
+  void markEnd() { end_ = Clock::now(); }
+
+  /** Start a cycle: the Cycle region, indexed by its number. */
+  void startCycle(int cycle);
+  /** Start the given stage of the cycle, a region from kFirstCycleStage to
+   *  kLastCycleStage: it ends the previous stage and lasts until the next one
+   *  or the end of the cycle. */
+  void stage(profiling::Region region);
+  /** End the cycle: rank 0 prints its `Execution time cycle` line. */
+  void endCycle();
+
+  /** Start the steady state, after the first cycle: a boundary, then the
+   *  profiler's recording window and the SteadyState region (collective). */
+  void startSteadyState();
+  /** End the time loop: a boundary, then the end of the steady state if it
+   *  started (collective). */
+  void endLoop();
+
+  /** Number of steady-state cycles completed. */
+  int steadyCycles() const { return steadyCycles_; }
+
+  /** The summary of the run, printed by rank 0 (collective). */
+  void printSummary() const;
 
 private:
-  /** rank of the processor */
-  int rank_id;
-  /** wall-clock time when startTiming method is called */
-  double tstart;
-  /** wall-clock time when endTiming method is called */
-  double tend;
-  /** execution time */
-  double texecution;
-  /** time precision */
-  double ttick;
-  /** events to write the logging: particle mover, field solver. it can be
-   * extended with other events */
-  int event1a, event1b, event2a, event2b, event3a, event3b, event4a, event4b;
+  /** Drain the GPU of this rank, then wait for all ranks: the edges of the
+   *  steady state and the end of the loop (collective). */
+  static void boundary();
+  /** End the open stage, if any, at the given time, where the next one
+   *  starts. */
+  void endStage(Clock::time_point now);
 
-  /** program-phase marks (0 = never set) and per-cycle statistics */
-  static double tProgStart;
-  static double tInitEnd;
-  static double tLoopStart;
-  static double tLoopEnd;
-  static double cycleMsSum;
-  static double cycleMsSumSq;
-  static int nCycles;
+  Clock::time_point programStart_{}, initEnd_{}, loopStart_{}, loopEnd_{},
+      end_{}, steadyStart_{}, steadyEnd_{};
+  /// the start of the cycle, and of its open stage (the first one starts
+  /// with the cycle)
+  Clock::time_point cycleStart_{}, stageStart_{};
+  /// the regions of the steady state, the cycle and its stage
+  profiling::Phase steadyRegion_, cycleRegion_, stageRegion_;
+  bool inSteadyState_ = false;
+
+  /// the open stage, -1 for none, and the stages of the current cycle
+  int stage_ = -1;
+  double stageMs_[kCycleStages] = {};
+
+  // all cycles
+  int cycles_ = 0;
+  double cycleMsSum_ = 0.0, cycleMsSumSq_ = 0.0;
+  // steady-state cycles
+  int steadyCycles_ = 0;
+  double steadyMsSum_ = 0.0, steadyMsSumSq_ = 0.0;
+  double steadyMsMin_ = 0.0, steadyMsMax_ = 0.0;
+  double steadyStageMsSum_[kCycleStages] = {};
 };
 
 #endif // TIMING_H

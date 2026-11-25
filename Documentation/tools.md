@@ -12,7 +12,7 @@
 
 | Folder | Purpose |
 |---|---|
-| [`share/benchmark`](../share/benchmark/readme.md) | Local benchmark of the decks in its folders, with `BENCHMARK_MODE=2` and task timing. Its `build.sh` uses the default `CUDA_ARCH`; set yours |
+| [`share/benchmark`](../share/benchmark/readme.md) | Local benchmark of the decks in its folders, with `BENCHMARK_MODE=2` and the [stage timers](profiling.md#stage-timers). Its `build.sh` uses the default `CUDA_ARCH`; set yours |
 | [`share/scaling`](../share/scaling/README.md) | Strong- and weak-scaling campaigns of the GEM case, with decks and Slurm settings for each GPU system (MI250X on LUMI-G, A100 on MeluXina), and their plots |
 
 ## Post-processing

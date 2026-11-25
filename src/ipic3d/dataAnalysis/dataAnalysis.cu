@@ -16,6 +16,7 @@
 #include "Collective.h"
 #include "Grid3DCU.h"
 #include "MPIdata.h"
+#include "Profiler.h"
 #include "VCtopology3D.h"
 #include "iPic3D.h"
 #include "outputPrepare.h"
@@ -236,6 +237,7 @@ private:
 
 dataAnalysisPipelineImpl::dataAnalysisPipelineImpl(c_Solver& KCode)
     : solver(KCode), input(KCode.col->getDataAnalysis()) {
+  profiling::Range range(profiling::Region::AnalysisInit);
   const bool isRestart = solver.restart_status != 0;
   const int firstCycle = solver.first_cycle;
   // per folder (histograms, GMM, spectra): whether its analysis runs and, on
@@ -302,7 +304,7 @@ dataAnalysisPipelineImpl::macrocellsOf(const int size[3]) const {
  *  the GPU memory of the dense bins of its macrocells. */
 void dataAnalysisPipelineImpl::initAnalyses() {
   stream.reset(createPriorityStream(StreamPriority::Diagnostic));
-  threadPool = std::make_unique<ThreadPool>(1);
+  threadPool = std::make_unique<ThreadPool>(1, "iPIC3D analysis");
   // the dense bins of the macrocells of an analysis on rank 0
   auto printBins = [&](const char* analysis, int macrocells, size_t bytes) {
     if (solver.myrank == 0)
@@ -581,24 +583,29 @@ void dataAnalysisPipelineImpl::writeFits(int cycle, int species) {
  */
 void dataAnalysisPipelineImpl::analysisEntry(int cycle) {
   cudaErrChk(cudaSetDevice(solver.cudaDeviceOnNode));
+  profiling::Range range(profiling::Region::AnalysisRun, cycle);
 
   for (int i = 0; i < solver.ns; i++) {
     if (histograms && input.histogramSpecies[i]) {
-      // borrow the SoA pointers of the species (no copy)
-      velocitySoACUDA->borrowFrom(solver.pclsArrayHostPtr[i]);
-      if (macrocellHistogram) {
-        const CellSorter& sorter = solver.cellSorters[i];
-        macrocellHistogram->init(velocitySoACUDA.get(),
-                                 sorter.getCellStartOffsets(),
-                                 sorter.getCellCounts(), input.histogramMin[i],
-                                 input.histogramMax[i], stream.get());
-      } else {
-        rankHistogram->init(velocitySoACUDA.get(), input.histogramMin[i],
-                            input.histogramMax[i], stream.get());
+      {
+        profiling::Range histogram(profiling::Region::VelocityHistogram, i);
+        // borrow the SoA pointers of the species (no copy)
+        velocitySoACUDA->borrowFrom(solver.pclsArrayHostPtr[i]);
+        if (macrocellHistogram) {
+          const CellSorter& sorter = solver.cellSorters[i];
+          macrocellHistogram->init(
+              velocitySoACUDA.get(), sorter.getCellStartOffsets(),
+              sorter.getCellCounts(), input.histogramMin[i],
+              input.histogramMax[i], stream.get());
+        } else {
+          rankHistogram->init(velocitySoACUDA.get(), input.histogramMin[i],
+                              input.histogramMax[i], stream.get());
+        }
+        if constexpr (DAConfig::DATA_ANALYSIS_OUTPUT)
+          histograms->writeRecord(histogramRecords, i, cycle, stream.get());
       }
-      if constexpr (DAConfig::DATA_ANALYSIS_OUTPUT)
-        histograms->writeRecord(histogramRecords, i, cycle, stream.get());
       if (gmm) {
+        profiling::Range fit(profiling::Region::GMMFit, i);
         fitGMM(cycle, i);
         if constexpr (DAConfig::DATA_ANALYSIS_OUTPUT)
           writeFits(cycle, i);
@@ -606,6 +613,7 @@ void dataAnalysisPipelineImpl::analysisEntry(int cycle) {
     }
 
     if (macrocellHist && input.spectraSpecies[i]) {
+      profiling::Range spectra(profiling::Region::MacrocellSpectra, i);
       const CellSorter& sorter = solver.cellSorters[i];
       macrocellHist->launch(solver.pclsArrayHostPtr[i],
                             solver.fieldForPclCUDAPtr, solver.grid3DCUDACUDAPtr,
@@ -614,12 +622,17 @@ void dataAnalysisPipelineImpl::analysisEntry(int cycle) {
       if constexpr (DAConfig::DATA_ANALYSIS_OUTPUT)
         macrocellHist->writeRecord(spectraRecords, i, cycle, stream.get());
     }
-    cudaErrChk(cudaStreamSynchronize(stream.get()));
+    {
+      profiling::Range sync(profiling::Region::AnalysisSync, i);
+      cudaErrChk(cudaStreamSynchronize(stream.get()));
+    }
   }
   // the records of the cycle, one write per file
-  if constexpr (DAConfig::DATA_ANALYSIS_OUTPUT)
+  if constexpr (DAConfig::DATA_ANALYSIS_OUTPUT) {
+    profiling::Range write(profiling::Region::AnalysisWrite);
     for (RecordFile* file : {&histogramRecords, &gmmRecords, &spectraRecords})
       file->flush();
+  }
 }
 
 /** The macrocell analyses read the particles sorted by cell: sort the
@@ -682,6 +695,9 @@ void dataAnalysisPipeline::startAnalysis(int cycle) {
 
 void dataAnalysisPipeline::waitForAnalysis() { impl->waitForAnalysis(); }
 
-dataAnalysisPipeline::~dataAnalysisPipeline() = default;
+dataAnalysisPipeline::~dataAnalysisPipeline() {
+  profiling::Range range(profiling::Region::AnalysisFinalize);
+  impl.reset();
+}
 
 } // namespace dataAnalysis

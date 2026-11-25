@@ -66,14 +66,38 @@ option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA, ON for HIP
 set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for (minimum 75)")
 set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture to compile for, a wave64 one as WARP_SIZE is 64 on HIP (e.g. gfx90a, gfx942)")
 
-option(TIME_TASKS "Print per-cycle and cumulative task timings" OFF)
+# The profiler (src/include/Profiler.h, cmake/Profiling.cmake): each option
+# compiles one backend in; with all three off the profiler compiles to nothing
+option(PROFILING
+       "Profiler regions as NVTX ranges (CUDA build) or ROCTX ranges (HIP build)"
+       OFF)
+option(CRAYPAT "CrayPat records only the steady-state cycles (under pat_run)"
+       OFF)
+option(TIME_TASKS
+       "Host stage timers of the profiler regions, reported at the end of the run"
+       OFF)
 set(BENCHMARK_MODE "0" CACHE STRING
-  "Benchmark mode: 0=normal, 1=disable disk output and related D2H copies, 2=also disable data analysis, macrocell spectra, and heat flux"
+  "Benchmark mode: 0=normal, 1=disable disk output and related D2H copies, with the stage timers (TIME_TASKS), 2=also disable data analysis, macrocell spectra, heat flux, and the NVTX/ROCTX ranges and CrayPat (PROFILING, CRAYPAT)"
   )
 set_property(CACHE BENCHMARK_MODE PROPERTY STRINGS 0 1 2)
 if(NOT "${BENCHMARK_MODE}" MATCHES "^[012]$")
   message(FATAL_ERROR
           "BENCHMARK_MODE must be 0, 1, or 2; got '${BENCHMARK_MODE}'")
+endif()
+# The benchmark modes build with the stage timers, and mode 2 without the
+# other profiler backends, whatever the options say; their cached values stay
+# for the other modes
+if(BENCHMARK_MODE GREATER 0)
+  set(TIME_TASKS ON)
+endif()
+if(BENCHMARK_MODE EQUAL 2)
+  foreach(opt PROFILING CRAYPAT)
+    if(${opt})
+      message(WARNING
+              "${opt}=ON is ignored: BENCHMARK_MODE=2 builds with the stage timers only")
+      set(${opt} OFF)
+    endif()
+  endforeach()
 endif()
 # Sizing of the device particle arrays: they start at PARTICLE_ARRAY_HEADROOM
 # times the particle count; when the count times
@@ -81,11 +105,11 @@ endif()
 # times PARTICLE_ARRAY_RESIZE_FACTOR (the exchange buffers grow by that factor
 # too). The spare room holds the mover's open-outflow copies, and a split stops
 # at capacity / PARTICLE_ARRAY_RESIZE_THRESHOLD.
-set(PARTICLE_ARRAY_HEADROOM "1.2" CACHE STRING
+set(PARTICLE_ARRAY_HEADROOM "1.3" CACHE STRING
     "Initial capacity of the device particle arrays, times the particle count (at least 1)")
 set(PARTICLE_ARRAY_RESIZE_THRESHOLD "1.2" CACHE STRING
     "The particle arrays grow when the particle count times this reaches their capacity (at least 1)")
-set(PARTICLE_ARRAY_RESIZE_FACTOR "1.4" CACHE STRING
+set(PARTICLE_ARRAY_RESIZE_FACTOR "1.3" CACHE STRING
     "Capacity of a grown particle array, times the particle count (above PARTICLE_ARRAY_RESIZE_THRESHOLD)")
 foreach(opt PARTICLE_ARRAY_HEADROOM PARTICLE_ARRAY_RESIZE_THRESHOLD
             PARTICLE_ARRAY_RESIZE_FACTOR)
@@ -94,7 +118,9 @@ foreach(opt PARTICLE_ARRAY_HEADROOM PARTICLE_ARRAY_RESIZE_THRESHOLD
   endif()
 endforeach()
 # below 1 the arrays would be smaller than the particles they hold; a factor
-# not above the threshold would grow them again at every exchange
+# not above the threshold would grow them again at every exchange. The
+# headroom is not tied to the threshold: below it, the arrays grow at the
+# first exchange
 if(PARTICLE_ARRAY_HEADROOM LESS 1 OR PARTICLE_ARRAY_RESIZE_THRESHOLD LESS 1 OR
    NOT PARTICLE_ARRAY_RESIZE_FACTOR GREATER PARTICLE_ARRAY_RESIZE_THRESHOLD)
   message(FATAL_ERROR
@@ -351,6 +377,10 @@ else()
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
 endif()
 
+# PUBLIC: the executable opens profiler regions too (iPIC3D.cpp)
+include("${CMAKE_SOURCE_DIR}/cmake/Profiling.cmake")
+target_link_libraries(iPIC3Dlib PUBLIC ipic3d_profiling)
+
 set(include_path ${INCLUDE_CODE_DIR})
 # CUDA header files
 list(APPEND include_path ${INCLUDE_CODE_DIR}/CUDA)
@@ -464,8 +494,8 @@ else()
 endif()
 set(ipic3d_build_options "${ipic3d_device_option}")
 foreach(opt BENCHMARK_MODE USE_OPENMP USE_HDF5
-            USE_PHDF5 USE_ADIOS2 USE_CATALYST USE_BATSRUS TIME_TASKS
-            GPU_CYCLE_DIAGNOSTICS PARTICLE_ARRAY_HEADROOM
+            USE_PHDF5 USE_ADIOS2 USE_CATALYST USE_BATSRUS PROFILING CRAYPAT
+            TIME_TASKS GPU_CYCLE_DIAGNOSTICS PARTICLE_ARRAY_HEADROOM
             PARTICLE_ARRAY_RESIZE_THRESHOLD PARTICLE_ARRAY_RESIZE_FACTOR)
   string(APPEND ipic3d_build_options " ${opt}=${${opt}}")
 endforeach()
@@ -506,11 +536,6 @@ target_link_libraries(
   iPIC3Dlib
   )
 
-
-if(TIME_TASKS)
-  target_compile_definitions(iPIC3Dlib PUBLIC LOG_TASKS_TOTAL_TIME)
-  target_compile_definitions(iPIC3D PUBLIC LOG_TASKS_TOTAL_TIME)
-endif()
 
 ## to save the executable in the folder where the CMakeLists.txt file is, i.e. CMAKE_CURRENT_SOURCE_DIR
 set_target_properties(iPIC3D PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -593,8 +618,10 @@ message(STATUS "  ADIOS2 output               : ${USE_ADIOS2} (disabled if USE_A
 message(STATUS "  OpenMP                      : ${USE_OPENMP} ")
 message(STATUS "  Catalyst (in-situ)          : ${USE_CATALYST}")
 message(STATUS "  BATSRUS coupling            : ${USE_BATSRUS}")
-message(STATUS "  Task timing output          : ${TIME_TASKS}  (LOG_TASKS_TOTAL_TIME macro)")
-message(STATUS "  Benchmark mode              : ${BENCHMARK_MODE}  (0=normal, 1=no output, 2=no output/analysis/heat flux)")
+message(STATUS "  Profiler ranges             : ${PROFILING}  (${IPIC3D_PROFILER_BACKEND})")
+message(STATUS "  CrayPat steady-state window : ${CRAYPAT}")
+message(STATUS "  Stage timers                : ${TIME_TASKS}")
+message(STATUS "  Benchmark mode              : ${BENCHMARK_MODE}  (0=normal, 1=no output + stage timers, 2=no output/analysis/heat flux/ranges/CrayPat + stage timers)")
 message(STATUS "  Particle arrays             : ${PARTICLE_ARRAY_HEADROOM} x count, grown to ${PARTICLE_ARRAY_RESIZE_FACTOR} x count when ${PARTICLE_ARRAY_RESIZE_THRESHOLD} x count reaches the capacity")
 message(STATUS "  Unit tests                  : ${BUILD_UTESTS}")
 message(STATUS "==========================================")

@@ -100,7 +100,7 @@ if (( ${#decks[@]} == 0 )); then
   exit 1
 fi
 
-if [[ $kind == strong ]]; then time_limit=00:30:00; else time_limit=00:20:00; fi
+if [[ $kind == strong ]]; then time_limit=00:10:00; else time_limit=00:10:00; fi
 campaign=$deck_dir/results_$(date +%Y%m%d_%H%M%S)
 if (( dry_run )); then
   echo "Dry run: nothing is created or submitted."

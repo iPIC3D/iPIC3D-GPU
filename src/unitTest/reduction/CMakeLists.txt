@@ -74,7 +74,7 @@ if(NOT HIP_ON) # CUDA
   set_property(TARGET reductionTest PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
   set_property(TARGET reductionTest PROPERTY CUDA_STANDARD 17)
   set_property(TARGET reductionTest PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
-  set_property(TARGET reductionTest PROPERTY LINK_OPTIONS -fno-lto)
+  set_property(TARGET reductionTest PROPERTY LINK_OPTIONS "$<$<NOT:$<LINK_LANG_AND_ID:CXX,NVHPC>>:-fno-lto>")
 
 elseif(HIP_ON AND CUDA_ON) # HIP
 

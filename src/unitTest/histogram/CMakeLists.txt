@@ -94,7 +94,7 @@ if(NOT HIP_ON) # CUDA
   set_property(TARGET histogramTest PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
   set_property(TARGET histogramTest PROPERTY CUDA_STANDARD 17)
   set_property(TARGET histogramTest PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
-  set_property(TARGET histogramTest PROPERTY LINK_OPTIONS -fno-lto)
+  set_property(TARGET histogramTest PROPERTY LINK_OPTIONS "$<$<NOT:$<LINK_LANG_AND_ID:CXX,NVHPC>>:-fno-lto>")
 
 else() # HIP
 

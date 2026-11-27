@@ -41,6 +41,12 @@ target_include_directories(moverWallsTest PUBLIC ${include_path})
 
 if(NOT HIP_ON)
   set_property(TARGET moverWallsTest PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+  # no-wall compares pushWithWalls with the free push bitwise on the host: a
+  # host compiler that contracts a*b+c into FMAs (GCC does by default, also in
+  # -std=c++17, on targets with FMA such as aarch64) can contract the two
+  # inlined copies of implicitPush differently and break that equality
+  target_compile_options(moverWallsTest PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-ffp-contract=off>)
 else()
   target_link_libraries(moverWallsTest PRIVATE hip::device hip::host)
   set_property(TARGET moverWallsTest PROPERTY HIP_ARCHITECTURES ${HIP_ARCH})

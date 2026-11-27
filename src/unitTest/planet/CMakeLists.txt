@@ -9,6 +9,8 @@ set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 option(HIP_ON "Use HIP" OFF) # Set it to OFF if you want to use CUDA
+set(CUDA_ARCH "75" CACHE STRING "CUDA compute capability to compile for")
+set(HIP_ARCH "gfx90a" CACHE STRING "HIP GPU architecture")
 
 if(NOT HIP_ON) # CUDA
   enable_language(CUDA)
@@ -95,10 +97,10 @@ target_link_libraries(planetTest PRIVATE ${linkLibraries})
 if(NOT HIP_ON) # CUDA
 
   set_target_properties(planetTest PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-  set_property(TARGET planetTest PROPERTY CUDA_ARCHITECTURES 75) # required for double atomicAdd
+  set_property(TARGET planetTest PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
   set_property(TARGET planetTest PROPERTY CUDA_STANDARD 17)
   set_property(TARGET planetTest PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
-  set_property(TARGET planetTest PROPERTY LINK_OPTIONS -fno-lto)
+  set_property(TARGET planetTest PROPERTY LINK_OPTIONS "$<$<NOT:$<LINK_LANG_AND_ID:CXX,NVHPC>>:-fno-lto>")
 
 else() # HIP
 
@@ -108,7 +110,7 @@ else() # HIP
   target_compile_options(planetTest PUBLIC -fgpu-rdc)
   target_link_options(planetTest PUBLIC  -fgpu-rdc --hip-link)
 
-  set_property(TARGET planetTest PROPERTY HIP_ARCHITECTURES gfx90a)
+  set_property(TARGET planetTest PROPERTY HIP_ARCHITECTURES ${HIP_ARCH})
 
 endif()
 

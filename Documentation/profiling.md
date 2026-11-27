@@ -83,7 +83,8 @@ cmake -DHIP_ON=ON -DPROFILING=ON <other options> ..
 srun ... rocprofv3 --marker-trace --kernel-trace --output-format pftrace -- ./iPIC3D input.inp
 ```
 
-- The build takes `rocprofiler-sdk-roctx` from `ROCM_PATH` (or `/opt/rocm`). Without it, it falls back to the legacy `roctx64` of roctracer, read by `rocprof --roctx-trace`, which does not show the thread names.
+- The build takes `rocprofiler-sdk-roctx` from the ROCm of the HIP compiler (CMake's `CMAKE_HIP_COMPILER_ROCM_ROOT`). Without it, it falls back to the legacy `roctx64` of roctracer there, read by `rocprof --roctx-trace`, which does not show the thread names.
+- It looks in no other ROCm (`ROCM_PATH`, `/opt/rocm`): their include folder holds their own HIP headers, which do not compile with another ROCm's compiler. A ROCTX installed elsewhere for the same ROCm version is given with `-DIPIC3D_ROCTX_SDK_INCLUDE_DIR=<folder> -DIPIC3D_ROCTX_SDK_LIBRARY=<file>` (or the `_LEGACY_` pair).
 - ROCTX ranges have no domain, colour or payload. An indexed region leaves its index out, so that it keeps one name the tools sum over its calls.
 - The build sets no recording window on HIP. The `SteadyState` range marks the steady state.
 

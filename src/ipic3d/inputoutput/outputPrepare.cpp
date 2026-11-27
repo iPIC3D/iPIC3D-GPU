@@ -91,8 +91,8 @@ filesByRank(const std::string& folder, const std::string& pattern) {
 int keepAsideRecords(const std::string& folder, const std::string& name,
                      int cycle) {
   std::set<int> ranks; // a rank's .json and .bin together
-  for (const auto& [rank, path] : filesByRank(
-           folder, "subDomain([0-9]{1,9})_" + name + "\\.(json|bin)"))
+  for (const auto& [rank, path] :
+       filesByRank(folder, "subDomain([0-9]{1,9})_" + name + "\\.(json|bin)"))
     ranks.insert(rank);
   int kept = 0;
   for (const int rank : ranks) {

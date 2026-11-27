@@ -57,7 +57,7 @@ constexpr bool kBuildHasParallelHDF5 = false;
 #endif
 // The GPU field solver's sizes in the memory estimate (Print): the GMRES
 // restart length and the fields of a halo batch per direction.
-constexpr double kGmresM = 20.0;      // EMfields3D::GMRES_M
+constexpr double kGmresM = 20.0;       // EMfields3D::GMRES_M
 constexpr double kHaloMaxBatch = 64.0; // EMfields3D::HALO_MAX_BATCH
 
 // order must agree with Enum in Collective.h

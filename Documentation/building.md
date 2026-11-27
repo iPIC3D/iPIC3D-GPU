@@ -14,7 +14,7 @@
 | HDF5 | C and high-level libraries. The default `USE_PHDF5=ON` needs an MPI-enabled HDF5; with a serial one, set `USE_PHDF5=OFF`. With both installed, add `-DHDF5_PREFER_PARALLEL=ON`. Not needed with `USE_HDF5=OFF` |
 | ADIOS2 | Built with MPI (the build links `adios2::cxx_mpi`). Needed unless `USE_ADIOS2=OFF`. Found, in this order, through `-DADIOS2_DIR=<folder of adios2-config.cmake>`, `-DADIOS2_ROOT=<prefix>`, an install in `thirdparty/adios2`, then `CMAKE_PREFIX_PATH` (`-D` option or environment variable) |
 | ParaView | 5.7 or newer with Catalyst and Python, only with `USE_CATALYST=ON` |
-| NVTX or ROCTX | Only with `PROFILING=ON`: the NVTX3 headers of the CUDA toolkit, or ROCm's `rocprofiler-sdk-roctx` (else roctracer's `roctx64`), found through `ROCM_PATH` |
+| NVTX or ROCTX | Only with `PROFILING=ON`: the NVTX3 headers of the CUDA toolkit, or `rocprofiler-sdk-roctx` (else roctracer's `roctx64`) of the HIP compiler's ROCm ([details](profiling.md#rocprofv3-hip)) |
 | CrayPat | Only with `CRAYPAT=ON`: `perftools-base` loaded when configuring and running |
 
 ## Configure and compile
@@ -51,8 +51,8 @@ cmake -DPROFILING=ON ..                             # NVTX/ROCTX ranges for Nsig
 | `CRAYPAT` | `OFF` | CrayPat records only the steady-state cycles; needs `perftools-base` loaded. See [CrayPat](profiling.md#craypat) |
 | `TIME_TASKS` | `OFF` | Host [stage timers](profiling.md#stage-timers) of the profiler regions, printed at the end of the run; on in [benchmark modes](#benchmark-modes) 1 and 2 |
 | `BENCHMARK_MODE` | `0` | See [below](#benchmark-modes) |
-| `PARTICLE_ARRAY_HEADROOM` | `1.3` | Initial capacity of the device particle arrays, times the particle count; at least 1, and it may be below `PARTICLE_ARRAY_RESIZE_THRESHOLD`. See [Memory](architecture.md#memory) |
-| `PARTICLE_ARRAY_RESIZE_THRESHOLD` | `1.2` | The arrays grow when the particle count times this reaches their capacity; at least 1 |
+| `PARTICLE_ARRAY_HEADROOM` | `1.3` | Initial capacity of the device particle arrays, times the particle count; above 1, and it may be below `PARTICLE_ARRAY_RESIZE_THRESHOLD`. See [Memory](architecture.md#memory) |
+| `PARTICLE_ARRAY_RESIZE_THRESHOLD` | `1.2` | The arrays grow when the particle count times this reaches their capacity; above 1 |
 | `PARTICLE_ARRAY_RESIZE_FACTOR` | `1.3` | Capacity of a grown array, times the particle count; above `PARTICLE_ARRAY_RESIZE_THRESHOLD` |
 | `GPU_CYCLE_DIAGNOSTICS` | `OFF` | Instrument one GPU timestep and the Maxwell right-hand side that consumes it |
 | `GPU_DIAGNOSTIC_CYCLE` | `1` | Cycle instrumented by `GPU_CYCLE_DIAGNOSTICS`; `-1` for every cycle |

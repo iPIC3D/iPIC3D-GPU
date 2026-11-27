@@ -103,9 +103,9 @@ private:
   int nonEmpty = 0, capacity = 0;
   binType* weightCUDA = nullptr;
   int* indexCUDA = nullptr;
-  int* blockOffsetCUDA = nullptr;  // per block of bins, its first; + total
-  int* blockOffsetHost = nullptr;  // pinned copy
-  std::vector<int> regionOffsets;  // regions + 1
+  int* blockOffsetCUDA = nullptr; // per block of bins, its first; + total
+  int* blockOffsetHost = nullptr; // pinned copy
+  std::vector<int> regionOffsets; // regions + 1
   // the staging of writeRecord(), page-locked: copied from the device
   PinnedVector<binType> weightHost;
   PinnedVector<int> indexHost;

@@ -293,9 +293,8 @@ static void testLayerBlend() {
                 else if (c == skip)
                   errNormal = worse(errNormal, r[c][a] - h[c][a]);
                 else
-                  errBlend =
-                      worse(errBlend, r[c][a] - (h[c][a] * sal +
-                                                 tgt[c] * (T(1) - sal)));
+                  errBlend = worse(errBlend, r[c][a] - (h[c][a] * sal +
+                                                        tgt[c] * (T(1) - sal)));
               }
             }
         char what[96];
@@ -304,8 +303,8 @@ static void testLayerBlend() {
                       face, skip);
         check(errBlend < 1e-12, what, errBlend);
         if (skipMode) {
-          std::snprintf(what, sizeof(what), "%s: normal component bit-identical",
-                        face);
+          std::snprintf(what, sizeof(what),
+                        "%s: normal component bit-identical", face);
           check(errNormal == 0, what, errNormal);
         }
         std::snprintf(what, sizeof(what),

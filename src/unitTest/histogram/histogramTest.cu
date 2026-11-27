@@ -1,9 +1,9 @@
 /**
  * @file histogramTest.cu
  * @brief Unit test of the velocity histograms: the 2D one, and those of a rank
- *        (velocityHistogram3D) and of its macrocells (macrocellHistogram3D, the tiling and its
- *        slices): against a CPU reference, their reproducibility, and the
- *        compacted non-empty bins.
+ *        (velocityHistogram3D) and of its macrocells (macrocellHistogram3D, the
+ * tiling and its slices): against a CPU reference, their reproducibility, and
+ * the compacted non-empty bins.
  *
  * The 3D histograms run on a non-blocking stream, as in the analysis. Cases:
  *   - the 2D histogram: a sample in every bin, one on the upper corner (the
@@ -830,8 +830,8 @@ int runTest() {
  *  grid (ghost cells too, in no macrocell), as the cell sort leaves them. */
 struct SortedRank {
   macrocell::MacrocellPartition part;
-  Particles particles;                   // cell after cell
-  std::vector<int> macrocellOf;          // per particle, -1 in a ghost cell
+  Particles particles;                    // cell after cell
+  std::vector<int> macrocellOf;           // per particle, -1 in a ghost cell
   PinnedVector<int> cellStart, cellCount; // per guarded cell
 };
 
@@ -1262,8 +1262,8 @@ __global__ void fillHistogram2D(const int sampleCount, const histogramTypeIn* u,
     histogramTypeIn data[2] = {u[sample], v[sample]};
     const int bin = histogram->getIndex(data);
     if (bin >= 0) {
-      atomicAdd(&histogramBuffer[bin],
-                static_cast<histogramTypeOut>(fabs(q[sample] * kWeightScale2D)));
+      atomicAdd(&histogramBuffer[bin], static_cast<histogramTypeOut>(
+                                           fabs(q[sample] * kWeightScale2D)));
     }
   }
 }
@@ -1333,7 +1333,8 @@ int run2DTest() {
   const auto* actual = histogram->getHistogram();
   bool pass = true;
   for (int i = 0; i < kBinCount2D && pass; ++i) {
-    if (std::fabs(static_cast<double>(actual[i] - expected[i])) > kTolerance2D) {
+    if (std::fabs(static_cast<double>(actual[i] - expected[i])) >
+        kTolerance2D) {
       std::cout << "Mismatch in 2D histogram at bin " << i
                 << ": GPU = " << actual[i] << ", CPU = " << expected[i] << "\n";
       pass = false;

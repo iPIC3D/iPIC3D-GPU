@@ -109,9 +109,9 @@ endif()
 # too). The spare room holds the mover's open-outflow copies, and a split stops
 # at capacity / PARTICLE_ARRAY_RESIZE_THRESHOLD.
 set(PARTICLE_ARRAY_HEADROOM "1.3" CACHE STRING
-    "Initial capacity of the device particle arrays, times the particle count (at least 1)")
+    "Initial capacity of the device particle arrays, times the particle count (above 1)")
 set(PARTICLE_ARRAY_RESIZE_THRESHOLD "1.2" CACHE STRING
-    "The particle arrays grow when the particle count times this reaches their capacity (at least 1)")
+    "The particle arrays grow when the particle count times this reaches their capacity (above 1)")
 set(PARTICLE_ARRAY_RESIZE_FACTOR "1.3" CACHE STRING
     "Capacity of a grown particle array, times the particle count (above PARTICLE_ARRAY_RESIZE_THRESHOLD)")
 foreach(opt PARTICLE_ARRAY_HEADROOM PARTICLE_ARRAY_RESIZE_THRESHOLD
@@ -120,14 +120,17 @@ foreach(opt PARTICLE_ARRAY_HEADROOM PARTICLE_ARRAY_RESIZE_THRESHOLD
     message(FATAL_ERROR "${opt} must be a decimal number such as 1.5; got '${${opt}}'")
   endif()
 endforeach()
-# below 1 the arrays would be smaller than the particles they hold; a factor
-# not above the threshold would grow them again at every exchange. The
-# headroom is not tied to the threshold: below it, the arrays grow at the
-# first exchange
-if(PARTICLE_ARRAY_HEADROOM LESS 1 OR PARTICLE_ARRAY_RESIZE_THRESHOLD LESS 1 OR
+# The spare room the mover finds is (headroom - 1) times the particle count
+# before the first exchange, and more than (threshold - 1) times it after each
+# one: at 1 there can be none, and a deck with an open-outflow face stops at
+# the first copy. A factor not above the threshold would grow the arrays again
+# at every exchange. The headroom is not tied to the threshold: below it, the
+# arrays grow at the first exchange
+if(NOT PARTICLE_ARRAY_HEADROOM GREATER 1 OR
+   NOT PARTICLE_ARRAY_RESIZE_THRESHOLD GREATER 1 OR
    NOT PARTICLE_ARRAY_RESIZE_FACTOR GREATER PARTICLE_ARRAY_RESIZE_THRESHOLD)
   message(FATAL_ERROR
-          "Need PARTICLE_ARRAY_HEADROOM >= 1, PARTICLE_ARRAY_RESIZE_THRESHOLD >= 1 and PARTICLE_ARRAY_RESIZE_FACTOR > PARTICLE_ARRAY_RESIZE_THRESHOLD; got ${PARTICLE_ARRAY_HEADROOM}, ${PARTICLE_ARRAY_RESIZE_THRESHOLD} and ${PARTICLE_ARRAY_RESIZE_FACTOR}")
+          "Need PARTICLE_ARRAY_HEADROOM > 1, PARTICLE_ARRAY_RESIZE_THRESHOLD > 1 and PARTICLE_ARRAY_RESIZE_FACTOR > PARTICLE_ARRAY_RESIZE_THRESHOLD; got ${PARTICLE_ARRAY_HEADROOM}, ${PARTICLE_ARRAY_RESIZE_THRESHOLD} and ${PARTICLE_ARRAY_RESIZE_FACTOR}")
 endif()
 # as constexpr values, for the library and the unit tests that compile its
 # sources (hence a directory include, before any target)

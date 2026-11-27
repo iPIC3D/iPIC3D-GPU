@@ -4,7 +4,8 @@
 #   PROFILING   the profiler regions are NVTX ranges on a CUDA build (the NVTX3
 #               headers of the CUDA toolkit; cudaProfilerStart/Stop bound the
 #               steady-state cycles) and ROCTX ranges on a HIP build
-#               (rocprofiler-sdk-roctx, else the legacy roctracer roctx64)
+#               (rocprofiler-sdk-roctx, else the legacy roctracer roctx64, of
+#               the ROCm of the HIP compiler)
 #   CRAYPAT     CrayPat records only the steady-state cycles: PAT_record from
 #               pat_api.h and the API stub library of perftools
 #               (perftools-base sets CRAYPAT_ROOT); pat_run supplies the
@@ -22,44 +23,48 @@ set(IPIC3D_PROFILER_BACKEND "none")
 
 if(PROFILING)
   if(HIP_ON)
+    # ROCTX of the ROCm of the HIP compiler only: the include folder of another
+    # ROCm (ROCM_PATH, /opt/rocm) holds its own HIP headers, which would come
+    # before the compiler's and do not compile with it. A ROCTX installed
+    # elsewhere is given by the cache variables IPIC3D_ROCTX_SDK_INCLUDE_DIR
+    # and IPIC3D_ROCTX_SDK_LIBRARY (or the _LEGACY_ ones).
+    set(ipic3d_rocm "${CMAKE_HIP_COMPILER_ROCM_ROOT}")
     find_path(IPIC3D_ROCTX_SDK_INCLUDE_DIR NAMES rocprofiler-sdk-roctx/roctx.h
-              HINTS ${ROCM_PATH} ENV ROCM_PATH PATHS /opt/rocm
-              PATH_SUFFIXES include)
+              PATHS "${ipic3d_rocm}" PATH_SUFFIXES include NO_DEFAULT_PATH)
     find_library(IPIC3D_ROCTX_SDK_LIBRARY NAMES rocprofiler-sdk-roctx
-                 HINTS ${ROCM_PATH} ENV ROCM_PATH PATHS /opt/rocm
-                 PATH_SUFFIXES lib lib64)
+                 PATHS "${ipic3d_rocm}" PATH_SUFFIXES lib lib64 NO_DEFAULT_PATH)
     if(IPIC3D_ROCTX_SDK_INCLUDE_DIR AND IPIC3D_ROCTX_SDK_LIBRARY)
-      target_compile_definitions(ipic3d_profiling INTERFACE
-                                 IPIC3D_PROFILING_ROCTX)
-      target_include_directories(ipic3d_profiling INTERFACE
-                                 "${IPIC3D_ROCTX_SDK_INCLUDE_DIR}")
-      target_link_libraries(ipic3d_profiling INTERFACE
-                            "${IPIC3D_ROCTX_SDK_LIBRARY}")
-      set(IPIC3D_PROFILER_BACKEND
-          "ROCTX (rocprofiler-sdk-roctx: ${IPIC3D_ROCTX_SDK_LIBRARY})")
+      set(ipic3d_roctx SDK)
+      set(ipic3d_roctx_name "rocprofiler-sdk-roctx")
     else()
       find_path(IPIC3D_ROCTX_LEGACY_INCLUDE_DIR NAMES roctracer/roctx.h
-                HINTS ${ROCM_PATH} ENV ROCM_PATH PATHS /opt/rocm
-                PATH_SUFFIXES include)
+                PATHS "${ipic3d_rocm}" PATH_SUFFIXES include NO_DEFAULT_PATH)
       find_library(IPIC3D_ROCTX_LEGACY_LIBRARY NAMES roctx64
-                   HINTS ${ROCM_PATH} ENV ROCM_PATH PATHS /opt/rocm
-                   PATH_SUFFIXES lib lib64)
+                   PATHS "${ipic3d_rocm}" PATH_SUFFIXES lib lib64
+                   NO_DEFAULT_PATH)
       if(NOT IPIC3D_ROCTX_LEGACY_INCLUDE_DIR OR NOT IPIC3D_ROCTX_LEGACY_LIBRARY)
         message(FATAL_ERROR
-                "PROFILING=ON on a HIP build needs ROCTX: neither "
+                "PROFILING=ON on a HIP build needs the ROCTX of the HIP "
+                "compiler's ROCm, ${ipic3d_rocm}: it has neither "
                 "rocprofiler-sdk-roctx/roctx.h with librocprofiler-sdk-roctx "
-                "nor roctracer/roctx.h with libroctx64 was found; set ROCM_PATH")
+                "nor roctracer/roctx.h with libroctx64. Install one there, or "
+                "give one of that ROCm version installed elsewhere with "
+                "IPIC3D_ROCTX_SDK_INCLUDE_DIR and IPIC3D_ROCTX_SDK_LIBRARY (or "
+                "the _LEGACY_ ones)")
       endif()
+      set(ipic3d_roctx LEGACY)
+      set(ipic3d_roctx_name "legacy roctracer")
       target_compile_definitions(ipic3d_profiling INTERFACE
-                                 IPIC3D_PROFILING_ROCTX
                                  IPIC3D_PROFILING_ROCTX_LEGACY)
-      target_include_directories(ipic3d_profiling INTERFACE
-                                 "${IPIC3D_ROCTX_LEGACY_INCLUDE_DIR}")
-      target_link_libraries(ipic3d_profiling INTERFACE
-                            "${IPIC3D_ROCTX_LEGACY_LIBRARY}")
-      set(IPIC3D_PROFILER_BACKEND
-          "ROCTX (legacy roctracer: ${IPIC3D_ROCTX_LEGACY_LIBRARY})")
     endif()
+    target_compile_definitions(ipic3d_profiling INTERFACE
+                               IPIC3D_PROFILING_ROCTX)
+    target_include_directories(ipic3d_profiling INTERFACE
+                               "${IPIC3D_ROCTX_${ipic3d_roctx}_INCLUDE_DIR}")
+    target_link_libraries(ipic3d_profiling INTERFACE
+                          "${IPIC3D_ROCTX_${ipic3d_roctx}_LIBRARY}")
+    set(IPIC3D_PROFILER_BACKEND
+        "ROCTX (${ipic3d_roctx_name}: ${IPIC3D_ROCTX_${ipic3d_roctx}_LIBRARY})")
     mark_as_advanced(IPIC3D_ROCTX_SDK_INCLUDE_DIR IPIC3D_ROCTX_SDK_LIBRARY
                      IPIC3D_ROCTX_LEGACY_INCLUDE_DIR IPIC3D_ROCTX_LEGACY_LIBRARY)
   else()

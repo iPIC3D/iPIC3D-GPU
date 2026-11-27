@@ -131,7 +131,8 @@ bool runSolver(const Build& build, const fs::path& dir, const std::string& deck,
       std::to_string(ranks) + " " + quoted(build.binary) + " deck.inp" +
       (restart ? " restart" : "") + " > " + log + " 2>&1";
   const bool ok = std::system(command.c_str()) == 0;
-  check(ok, dir.filename().string() + (restart ? ": restart ends" : ": run ends"));
+  check(ok,
+        dir.filename().string() + (restart ? ": restart ends" : ": run ends"));
   if (!ok) {
     std::ifstream in(dir / log);
     std::vector<std::string> lines;
@@ -250,9 +251,12 @@ Keys gemKeys(int xlen, int ylen, int cycles) {
 }
 
 /** No output but the diagnostics of every other cycle. */
-const Keys kQuiet = {{"FieldWriteMethod", "pvtk"},   {"FieldOutputCycle", "0"},
-                     {"DiagnosticsOutputCycle", "2"}, {"ParticlesOutputCycle", "0"},
-                     {"RestartOutputCycle", "0"},    {"DataAnalysisCycle", "0"},
+const Keys kQuiet = {{"FieldWriteMethod", "pvtk"},
+                     {"FieldOutputCycle", "0"},
+                     {"DiagnosticsOutputCycle", "2"},
+                     {"ParticlesOutputCycle", "0"},
+                     {"RestartOutputCycle", "0"},
+                     {"DataAnalysisCycle", "0"},
                      {"CallFinalize", "0"}};
 
 /** The particle and restart backend: the first the build has. */
@@ -302,20 +306,25 @@ void testReconnection(const Build& build) {
             std::to_string(first.lastCycle()));
   if (first.finite()) {
     const size_t total = first.column("Total_Energy");
-    const double drift = std::fabs(first.rows.back()[total] / first.rows[0][total] - 1);
-    check(drift < kMaxEnergyDrift, "total energy bounded: change " + sci(drift));
+    const double drift =
+        std::fabs(first.rows.back()[total] / first.rows[0][total] - 1);
+    check(drift < kMaxEnergyDrift,
+          "total energy bounded: change " + sci(drift));
   }
   const fs::path data = dir / "data";
   if (build.hdf5)
     check(holdsFile(data, "proc0.hdf"), "serial-HDF5 field file");
   if (build.adios2)
     check(holdsFile(data, "particle_0.bp"), "ADIOS2 particle file");
-  for (const char* folder : {"velocityHistogram", "velocityGMM", "macrocellSpectra"})
-    check(holdsFile(dir / folder, "subDomain0"), std::string(folder) + " records");
+  for (const char* folder :
+       {"velocityHistogram", "velocityGMM", "macrocellSpectra"})
+    check(holdsFile(dir / folder, "subDomain0"),
+          std::string(folder) + " records");
   if (store.empty())
     return;
   check(holdsFile(data, "latest_restart.json"), "checkpoint manifest");
-  if (!runSolver(build, dir, kGem2D, keys + Keys{{"ncycles", "6"}}, kRanks, true))
+  if (!runSolver(build, dir, kGem2D, keys + Keys{{"ncycles", "6"}}, kRanks,
+                 true))
     return;
   const Table next = readConserved(dir);
   check(next.finite() && next.lastCycle() == 16,
@@ -378,11 +387,12 @@ void testDeposit(const Build& build) {
       worst = std::max(worst, std::fabs(bulk / kinetic - 1));
     }
     check(worst < kMaxDepositDifference,
-          label + ": bulk energy of the moments = kinetic energy: " + sci(worst));
+          label +
+              ": bulk energy of the moments = kinetic energy: " + sci(worst));
   }
   if (tables.size() == 2) {
-    const double paths = energyDifference(tables[0], tables[1], 4,
-                                          {"Total_Energy", "Benergy", "Kenergy"});
+    const double paths = energyDifference(
+        tables[0], tables[1], 4, {"Total_Energy", "Benergy", "Kenergy"});
     check(paths < kMaxDecompositionDifference,
           "the two deposits give the same run at cycle 4: " + sci(paths));
   }
@@ -471,32 +481,31 @@ void testMagnetosphere(const Build& build) {
   const fs::path dir = build.work / "magnetosphere";
   // the other backend than the reconnection run where the build has it
   const std::string store = build.hdf5 ? "shdf5" : storeBackend(build);
-  const Keys keys =
-      Keys{{"nxc", "24"},
-           {"nyc", "24"},
-           {"nzc", "24"},
-           {"XLEN", "1"},
-           {"YLEN", "2"},
-           {"ZLEN", "2"},
-           {"ncycles", "6"},
-           {"npcelx", "2 2 0 0 0 0"},
-           {"npcely", "2 2 0 0 0 0"},
-           {"npcelz", "2 2 0 0 0 0"},
-           {"TrackParticleID", "1 1 1 1 1 1"},
-           {"FieldWriteMethod", build.hdf5 ? "shdf5" : "pvtk"},
-           {"FieldOutputCycle", "2"},
-           {"DiagnosticsOutputCycle", "2"},
-           {"PlanetDiagnosticsCycle", "2"},
-           {"divBCorrectionCycle", "2"},
-           {"DataAnalysisCycle", "2"},
-           {"MacrocellNx", "4"},
-           {"MacrocellNy", "4"},
-           {"MacrocellNz", "4"},
-           {"ParticlesOutputCycle", store.empty() ? "0" : "2"},
-           {"RestartOutputCycle", store.empty() ? "0" : "3"}} +
-      (store.empty() ? Keys{{"CallFinalize", "0"}}
-                     : Keys{{"ParticlesWriteMethod", store},
-                            {"RestartWriteMethod", store}});
+  const Keys keys = Keys{{"nxc", "24"},
+                         {"nyc", "24"},
+                         {"nzc", "24"},
+                         {"XLEN", "1"},
+                         {"YLEN", "2"},
+                         {"ZLEN", "2"},
+                         {"ncycles", "6"},
+                         {"npcelx", "2 2 0 0 0 0"},
+                         {"npcely", "2 2 0 0 0 0"},
+                         {"npcelz", "2 2 0 0 0 0"},
+                         {"TrackParticleID", "1 1 1 1 1 1"},
+                         {"FieldWriteMethod", build.hdf5 ? "shdf5" : "pvtk"},
+                         {"FieldOutputCycle", "2"},
+                         {"DiagnosticsOutputCycle", "2"},
+                         {"PlanetDiagnosticsCycle", "2"},
+                         {"divBCorrectionCycle", "2"},
+                         {"DataAnalysisCycle", "2"},
+                         {"MacrocellNx", "4"},
+                         {"MacrocellNy", "4"},
+                         {"MacrocellNz", "4"},
+                         {"ParticlesOutputCycle", store.empty() ? "0" : "2"},
+                         {"RestartOutputCycle", store.empty() ? "0" : "3"}} +
+                    (store.empty() ? Keys{{"CallFinalize", "0"}}
+                                   : Keys{{"ParticlesWriteMethod", store},
+                                          {"RestartWriteMethod", store}});
   if (!runSolver(build, dir, kExosphere, keys, kRanks))
     return;
   const Table table = readConserved(dir);
@@ -523,8 +532,8 @@ void testMagnetosphere(const Build& build) {
 
 void testFieldWriters(const Build& build) {
   std::cout << "field writers\n";
-  std::vector<std::pair<std::string, std::string>> writers = {{"pvtk", ".vtk"},
-                                                              {"nbcvtk", ".vtk"}};
+  std::vector<std::pair<std::string, std::string>> writers = {
+      {"pvtk", ".vtk"}, {"nbcvtk", ".vtk"}};
   if (build.phdf5)
     writers.push_back({"phdf5", ".h5"});
   for (const auto& [method, suffix] : writers) {
@@ -542,33 +551,32 @@ void testFieldWriters(const Build& build) {
 void testCases(const Build& build) {
   std::cout << "cases\n";
   const Keys tiny2D = gemKeys(2, 2, 3) + kQuiet;
-  const Keys tiny3D = kQuiet + Keys{{"nxc", "16"},
-                                    {"nyc", "16"},
-                                    {"nzc", "16"},
-                                    {"XLEN", "2"},
-                                    {"YLEN", "2"},
-                                    {"ZLEN", "1"},
-                                    {"ncycles", "3"}};
-  const std::vector<std::pair<std::string, std::pair<std::string, Keys>>> runs = {
-      {"GEMnoPert", {kGem2D, tiny2D + Keys{{"Case", "GEMnoPert"}}}},
-      {"GEMDoubleHarris", {kGem2D, tiny2D + Keys{{"Case", "GEMDoubleHarris"}}}},
-      {"GEMHarris", {kGem2D, tiny2D + Keys{{"Case", "GEMHarris"}}}},
-      {"HumpPert", {kGem2D, tiny2D + Keys{{"Case", "HumpPert"}}}},
-      {"RandomCase", {kGem2D, tiny2D + Keys{{"Case", "RandomCase"}}}},
-      {"Default", {kGem2D, tiny2D + Keys{{"Case", "NoSuchCase"}}}},
-      {"ForceFree",
-       {"magneticReconnection/testForceFree2D.inp",
-        tiny2D + Keys{{"npcelx", "2 2"}, {"npcely", "2 2"}, {"npcelz", "2 2"}}}},
-      {"NullPoints", {"NullPoints.inp", tiny3D}},
-      {"TaylorGreen", {"turbulence/TaylorGreen.inp", tiny3D}},
-      {"Dipole2D",
-       {"magnetosphere/testMagnetosphere2Dsmall.inp",
-        kQuiet + Keys{{"nxc", "32"},
-                      {"nyc", "32"},
-                      {"XLEN", "2"},
-                      {"YLEN", "2"},
-                      {"ZLEN", "1"},
-                      {"ncycles", "3"}}}}};
+  const Keys tiny3D =
+      kQuiet + Keys{{"nxc", "16"},   {"nyc", "16"}, {"nzc", "16"},
+                    {"XLEN", "2"},   {"YLEN", "2"}, {"ZLEN", "1"},
+                    {"ncycles", "3"}};
+  const std::vector<std::pair<std::string, std::pair<std::string, Keys>>> runs =
+      {{"GEMnoPert", {kGem2D, tiny2D + Keys{{"Case", "GEMnoPert"}}}},
+       {"GEMDoubleHarris",
+        {kGem2D, tiny2D + Keys{{"Case", "GEMDoubleHarris"}}}},
+       {"GEMHarris", {kGem2D, tiny2D + Keys{{"Case", "GEMHarris"}}}},
+       {"HumpPert", {kGem2D, tiny2D + Keys{{"Case", "HumpPert"}}}},
+       {"RandomCase", {kGem2D, tiny2D + Keys{{"Case", "RandomCase"}}}},
+       {"Default", {kGem2D, tiny2D + Keys{{"Case", "NoSuchCase"}}}},
+       {"ForceFree",
+        {"magneticReconnection/testForceFree2D.inp",
+         tiny2D +
+             Keys{{"npcelx", "2 2"}, {"npcely", "2 2"}, {"npcelz", "2 2"}}}},
+       {"NullPoints", {"NullPoints.inp", tiny3D}},
+       {"TaylorGreen", {"turbulence/TaylorGreen.inp", tiny3D}},
+       {"Dipole2D",
+        {"magnetosphere/testMagnetosphere2Dsmall.inp",
+         kQuiet + Keys{{"nxc", "32"},
+                       {"nyc", "32"},
+                       {"XLEN", "2"},
+                       {"YLEN", "2"},
+                       {"ZLEN", "1"},
+                       {"ncycles", "3"}}}}};
   for (const auto& [name, run] : runs) {
     const fs::path dir = build.work / ("case_" + name);
     if (runSolver(build, dir, run.first, run.second, kRanks))
@@ -581,14 +589,11 @@ void testParticlesOfTestSpecies(const Build& build) {
     return; // written with serial HDF5 only
   std::cout << "test particles\n";
   const fs::path dir = build.work / "test_particles";
-  const Keys keys = kQuiet + Keys{{"nxc", "16"},
-                                  {"nyc", "16"},
-                                  {"nzc", "8"},
-                                  {"XLEN", "2"},
-                                  {"YLEN", "2"},
-                                  {"ZLEN", "1"},
-                                  {"ncycles", "3"},
-                                  {"TestPartOutputCycle", "1"}};
+  const Keys keys =
+      kQuiet + Keys{{"nxc", "16"},    {"nyc", "16"},
+                    {"nzc", "8"},     {"XLEN", "2"},
+                    {"YLEN", "2"},    {"ZLEN", "1"},
+                    {"ncycles", "3"}, {"TestPartOutputCycle", "1"}};
   if (runSolver(build, dir, "Ram1TestParticle.inp", keys, kRanks))
     check(holdsFile(dir / "data", "proc0.hdf"), "test particles written");
 }

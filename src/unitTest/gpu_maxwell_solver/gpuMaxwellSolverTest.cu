@@ -2660,7 +2660,9 @@ WaveLevelResult runObliqueWaveLevel(int cells, const TestInput& baseInput,
       backwardEulerWaveState(wave, input.dt, steps);
   const WaveState continuumReference =
       continuumWaveState(wave, kObliqueWaveFinalTime);
-  return {cells, steps, input.dt,
+  return {cells,
+          steps,
+          input.dt,
           measureObliqueWaveError(fields, grid, wave, backwardEulerReference),
           measureObliqueWaveError(fields, grid, wave, continuumReference),
           countNodeBMismatches(fields, grid)};

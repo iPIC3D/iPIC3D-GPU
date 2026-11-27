@@ -2275,6 +2275,15 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
   }
 
   if (openBCAppendRejected) {
+    std::cerr << "ERROR on rank " << MPIdata::get_rank()
+              << ": the device particle arrays have no room left for the "
+                 "particles that enter through the open-outflow faces; build "
+                 "with a larger PARTICLE_ARRAY_HEADROOM (now "
+              << ParticleArrayConfig::HEADROOM
+              << ", the room before the first particle exchange) or "
+                 "PARTICLE_ARRAY_RESIZE_THRESHOLD (now "
+              << ParticleArrayConfig::RESIZE_THRESHOLD << ", after each one)"
+              << std::endl;
 #ifndef NO_MPI
     MPI_Abort(MPIdata::get_PicGlobalComm(), EXIT_FAILURE);
 #endif

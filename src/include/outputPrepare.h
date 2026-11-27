@@ -30,8 +30,8 @@ bool keepAside(const std::vector<std::string>& paths, int cycle);
  *  whose first group is a rank (at most 9 digits, an int), as (rank, path)
  *  sorted by rank; none if folder is missing, filesystem_error if it cannot
  *  be listed. */
-std::vector<std::pair<int, std::string>> filesByRank(const std::string& folder,
-                                                     const std::string& pattern);
+std::vector<std::pair<int, std::string>>
+filesByRank(const std::string& folder, const std::string& pattern);
 /** The records file of a rank in folder, without its extension (.json,
  *  .bin): <folder>/subDomain<rank>_<name>. */
 std::string recordsStem(const std::string& folder, const std::string& name,

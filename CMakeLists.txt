@@ -55,6 +55,9 @@ option(USE_CATALYST "Use Catalyst adaptor" OFF)
 option(USE_BATSRUS "Use BATSRUS flag" OFF)
 option(USE_HDF5 "Use HDF5 library" ON)
 option(USE_PHDF5 "Enable parallel HDF5 output (requires HDF5 with MPI support)" ON)
+# FindHDF5's own switch, independent of BUILD_SHARED_LIBS: a static iPIC3D
+# library links the shared HDF5 libraries too
+option(HDF5_USE_STATIC_LIBRARIES "Link the static HDF5 libraries" OFF)
 option(USE_ADIOS2 "Use ADIOS2 library" ON)
 
 if(NOT USE_HDF5)
@@ -139,6 +142,9 @@ option(GPU_CYCLE_DIAGNOSTICS
 set(GPU_DIAGNOSTIC_CYCLE "1" CACHE STRING
     "Producer cycle instrumented by GPU_CYCLE_DIAGNOSTICS (-1 means every cycle)")
 option(BUILD_UTESTS "Build unit tests" OFF)
+option(BUILD_PROFILE_KERNELS
+       "Build the kernel profiles of share/profileKernels (needs BUILD_SHARED_LIBS=OFF)"
+       OFF)
 
 if(NOT "${GPU_DIAGNOSTIC_CYCLE}" MATCHES "^-?[0-9]+$")
   message(FATAL_ERROR
@@ -245,11 +251,6 @@ endif()
 
 # Find HDF5
 if (USE_HDF5)
-  if(BUILD_SHARED_LIBS)
-    set(HDF5_USE_STATIC_LIBRARIES OFF)
-  else()
-    set(HDF5_USE_STATIC_LIBRARIES ON)
-  endif()
   find_package(HDF5 COMPONENTS C HL REQUIRED)
 
 
@@ -591,6 +592,10 @@ endif()
 
 add_subdirectory(share/inputfiles)
 
+if(BUILD_PROFILE_KERNELS)
+  add_subdirectory(share/profileKernels)
+endif()
+
 message(STATUS "")
 message(STATUS "========== iPIC3D Configuration ==========")
 message("Which system am I compiling for:")
@@ -624,5 +629,6 @@ message(STATUS "  Stage timers                : ${TIME_TASKS}")
 message(STATUS "  Benchmark mode              : ${BENCHMARK_MODE}  (0=normal, 1=no output + stage timers, 2=no output/analysis/heat flux/ranges/CrayPat + stage timers)")
 message(STATUS "  Particle arrays             : ${PARTICLE_ARRAY_HEADROOM} x count, grown to ${PARTICLE_ARRAY_RESIZE_FACTOR} x count when ${PARTICLE_ARRAY_RESIZE_THRESHOLD} x count reaches the capacity")
 message(STATUS "  Unit tests                  : ${BUILD_UTESTS}")
+message(STATUS "  Kernel profiles             : ${BUILD_PROFILE_KERNELS}")
 message(STATUS "==========================================")
 message(STATUS "")

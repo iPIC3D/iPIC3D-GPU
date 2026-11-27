@@ -13,6 +13,7 @@
 | Folder | Purpose |
 |---|---|
 | [`share/benchmark`](../share/benchmark/readme.md) | Local benchmark of the decks in its folders, with `BENCHMARK_MODE=2` and the [stage timers](profiling.md#stage-timers). Its `build.sh` uses the default `CUDA_ARCH`; set yours |
+| [`share/profileKernels`](../share/profileKernels/README.md) | One executable per GPU kernel of the particle step (relativistic mover, cell-aware and unsorted moment deposits) on one GPU, for timings, rooflines and speed of light (Nsight Compute, rocprof-compute) over the particles per cell |
 | [`share/scaling`](../share/scaling/README.md) | Strong- and weak-scaling campaigns of the GEM case, with decks and Slurm settings for each GPU system (MI250X on LUMI-G, A100 on MeluXina), and their plots |
 
 ## Post-processing

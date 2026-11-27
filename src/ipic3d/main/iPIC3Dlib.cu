@@ -79,9 +79,6 @@ constexpr double PLANET_BUFFER_FRACTION =
 // Shift per cycle of the parents the particle splitting takes: 2^32 over the
 // golden ratio, so that the shifts of successive cycles are far apart.
 constexpr uint32_t SPLIT_PARENT_STRIDE = 2654435761u;
-constexpr int DEFAULT_BLOCK_SIZE = 256; // default CUDA block size
-constexpr int SMALL_BLOCK_SIZE =
-    128; // smaller CUDA block size (sorting kernels)
 constexpr int INITIAL_PLANET_BUF_CAP =
     1024; // initial planet cross-species buffer capacity
 // smallest density of the heat flux (the bulk velocity J / rho)

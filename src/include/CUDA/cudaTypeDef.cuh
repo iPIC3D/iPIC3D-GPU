@@ -22,6 +22,12 @@ using warp_mask_t = uint64_t;
 #include <type_traits>
 #include <vector>
 
+/** Threads per block of most of the solver's kernels. */
+inline constexpr int DEFAULT_BLOCK_SIZE = 256;
+/** Threads per block of the compaction (compactParticles1) and of the moment
+ *  deposit of the unsorted tail (momentKernelNew). */
+inline constexpr int SMALL_BLOCK_SIZE = 128;
+
 // ── Portable warp intrinsic helpers (defined once, used everywhere) ──
 // Only available in device compilation units (.cu files compiled by nvcc/hipcc)
 #if defined(__CUDACC__) || defined(__HIPCC__)

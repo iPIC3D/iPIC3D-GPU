@@ -40,11 +40,13 @@ cmake -DPROFILING=ON ..                             # NVTX/ROCTX ranges for Nsig
 | `HIP_ARCH` | `gfx90a` | HIP architecture: `gfx90a` (MI250X), `gfx942` (MI300A/X) |
 | `USE_HDF5` | `ON` | Serial-HDF5 backend for fields, particles and checkpoints |
 | `USE_PHDF5` | `ON` | Parallel-HDF5 field backend. Needs an MPI-enabled HDF5. `USE_HDF5=OFF` sets it `OFF` in the cache: set it `ON` again after re-enabling HDF5 |
+| `HDF5_USE_STATIC_LIBRARIES` | `OFF` | Link the static HDF5 libraries. Independent of `BUILD_SHARED_LIBS`: a static iPIC3D library links the shared HDF5 by default |
 | `USE_ADIOS2` | `ON` | ADIOS2 backend for particles and checkpoints |
 | `USE_CATALYST` | `OFF` | ParaView Catalyst in-situ visualisation |
 | `USE_BATSRUS` | `OFF` | BATS-R-US coupling, see the [`BATSRUS` case](cases.md#supported-cases) |
 | `USE_OPENMP` | `ON` | OpenMP in the host loops. **Delete the CMake cache when changing it** |
 | `BUILD_UTESTS` | `OFF` | Build the [unit tests](testing.md) |
+| `BUILD_PROFILE_KERNELS` | `OFF` | Build the [kernel profiles](../share/profileKernels/README.md); needs `BUILD_SHARED_LIBS=OFF` |
 | `PROFILING` | `OFF` | [Profiler](profiling.md#profiler) regions as NVTX ranges (CUDA) or ROCTX ranges (HIP) |
 | `CRAYPAT` | `OFF` | CrayPat records only the steady-state cycles; needs `perftools-base` loaded. See [CrayPat](profiling.md#craypat) |
 | `TIME_TASKS` | `OFF` | Host [stage timers](profiling.md#stage-timers) of the profiler regions, printed at the end of the run; on in [benchmark modes](#benchmark-modes) 1 and 2 |

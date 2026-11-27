@@ -1,0 +1,93 @@
+# Input file of the kernel profiles (README.md): a periodic box of uniform
+# plasma on one process.  The species, the time step, the cell size and the
+# field are those of the 3D magnetosphere production runs (solar wind):
+# the kernels see the particles of a production rank.  profileMover replaces
+# B by default, for 4 subcycles of the push (--subcycles).
+#
+# The profiles set XLEN = YLEN = ZLEN = 1, and override the cells
+# (--cells, keeping the cell size) and the particles per cell (--ppc).
+
+SaveDirName    = data
+RestartDirName = data
+Case           = Default
+SimulationName = profileKernels
+FieldWriteMethod = pvtk
+
+dt      = 0.1
+ncycles = 1
+th      = 1.0
+c       = 1.0
+
+# solar-wind B: 1 subcycle for both species (profileMover --subcycles 0)
+B0x = 0.0
+B0y = 0.0
+B0z = 0.00562
+
+Smooth      = 0.5
+SmoothNiter = 6
+PoissonCorrection      = no
+PoissonCorrectionCycle = 10
+divBCorrection         = no
+divBCorrectionCycle    = 10
+
+# 64^3 cells of size 0.0859375 (82.5 / 960, the production cell)
+Lx = 5.5
+Ly = 5.5
+Lz = 5.5
+nxc = 64
+nyc = 64
+nzc = 64
+XLEN = 1
+YLEN = 1
+ZLEN = 1
+PERIODICX = 1
+PERIODICY = 1
+PERIODICZ = 1
+
+# species 0: electrons, species 1: ions
+ns = 2
+rhoINIT   = 1.0  1.0
+rhoINJECT = 0.0  0.0
+npcelx = 4  4
+npcely = 4  4
+npcelz = 4  4
+qom = -100.0  1.0
+uth = 0.031   0.0031
+vth = 0.031   0.0031
+wth = 0.031   0.0031
+u0  = 0.027   0.027
+v0  = 0.0     0.0
+w0  = 0.0     0.0
+TrackParticleID = 0  0
+
+SortingCycle = 1
+
+bcPHIfaceXright = 1
+bcPHIfaceXleft  = 1
+bcPHIfaceYright = 1
+bcPHIfaceYleft  = 1
+bcPHIfaceZright = 1
+bcPHIfaceZleft  = 1
+bcEMfaceXright = 0
+bcEMfaceXleft  = 0
+bcEMfaceYright = 0
+bcEMfaceYleft  = 0
+bcEMfaceZright = 0
+bcEMfaceZleft  = 0
+bcPfaceXright = 1
+bcPfaceXleft  = 1
+bcPfaceYright = 1
+bcPfaceYleft  = 1
+bcPfaceZright = 1
+bcPfaceZleft  = 1
+
+CGtol      = 1E-3
+GMREStol   = 1E-5
+NiterMover = 5
+SolverType = GMRES
+
+FieldOutputCycle       = 0
+ParticlesOutputCycle   = 0
+DiagnosticsOutputCycle = 0
+RestartOutputCycle     = 0
+CallFinalize           = 0

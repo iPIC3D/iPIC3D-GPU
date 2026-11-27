@@ -181,6 +181,25 @@ __host__ inline cudaStream_t createPriorityStream(StreamPriority priority) {
 
 #endif
 
+/////////////////////////////////// Kernel parameters by value
+
+// KERNEL_CONSTANT marks a read-only struct that a kernel takes by value,
+// `const KERNEL_CONSTANT T` with T trivially copyable: a warp reads it once
+// from the constant bank, not each thread through the L1.  Without
+// __grid_constant__, passing its address to a function that is not inlined,
+// or indexing one of its arrays at run time, can make every thread copy it to
+// local memory.  With nvcc >= 11.7 KERNEL_CONSTANT is __grid_constant__ and
+// KERNEL_CONSTANT_BY_ADDRESS is 1; elsewhere (HIP, older nvcc) they are empty
+// and 0.
+#if !defined(HIPIFLY) && defined(__NVCC__) &&                                  \
+    (__CUDACC_VER_MAJOR__ * 100 + __CUDACC_VER_MINOR__ >= 1107)
+#define KERNEL_CONSTANT __grid_constant__
+#define KERNEL_CONSTANT_BY_ADDRESS 1
+#else
+#define KERNEL_CONSTANT
+#define KERNEL_CONSTANT_BY_ADDRESS 0
+#endif
+
 /////////////////////////////////// CUDA type copy to device
 
 /** A device copy of the numberOfElement objects on the host, which are in
@@ -189,7 +208,8 @@ template <typename T>
 __host__ inline T* copyArrayToDevice(T* objectOnHost, int numberOfElement,
                                      cudaStream_t stream = 0) {
   if (objectOnHost == nullptr)
-    throw std::runtime_error("CopyToDevice: can not copy a nullptr to device.");
+    throw std::runtime_error(
+        "copyArrayToDevice: can not copy a nullptr to device.");
   T* ptr = nullptr;
   cudaErrChk(cudaMalloc(&ptr, numberOfElement * sizeof(T)));
   cudaErrChk(cudaMemcpyAsync(ptr, objectOnHost, numberOfElement * sizeof(T),
@@ -197,12 +217,6 @@ __host__ inline T* copyArrayToDevice(T* objectOnHost, int numberOfElement,
 
   cudaErrChk(cudaStreamSynchronize(stream));
   return ptr;
-}
-
-/** A device copy of the object on the host, as copyArrayToDevice. */
-template <typename T>
-__host__ inline T* copyToDevice(T* objectOnHost, cudaStream_t stream = 0) {
-  return copyArrayToDevice(objectOnHost, 1, stream);
 }
 
 ////////////////////////////////// One dimenstion to high dim index

@@ -114,26 +114,18 @@ int main(int argc, char** argv) {
       grid.getNYN(), grid.getNZN());
   cudaErrChk(cudaGetLastError());
 
-  // the mover parameters, with the boundary flags of the species (initCUDA)
-  ParticleSoAHost& particles = profile.particlesHost();
-  moverParameter* param = newHostPinnedObject<moverParameter>(
-      &particles, profile.pclsArrayDevice(), profile.departureArrayDevice(),
-      profile.hashedSumArrayDevice());
-  particles.openbc_particles_outflowInfo(&param->doOpenBC, param->applyOpenBC,
-                                         param->deleteBoundary,
-                                         param->openBoundary);
-  particles.fillExitBCFlags(param->isExitBC);
-  particles.reflectingWalls(&param->doReflect, param->reflectLo,
-                            param->reflectHi);
-  particles.repopulate_particlesInfo(&param->doRepopulateInjection,
-                                     param->doRepopulateInjectionSide,
-                                     param->repopulateBoundary);
-  param->doSphere = 0; // no planet in the box
-  param->reflectTol = 0.0;
-  if (param->doReflect)
+  // the mover parameters of the species (initCUDA), no planet in the box and
+  // no wall list
+  MoverCounters* counters = nullptr;
+  cudaErrChk(cudaMalloc(&counters, sizeof(MoverCounters)));
+  cudaErrChk(cudaMemsetAsync(counters, 0, sizeof(MoverCounters), stream));
+  const moverParameter mover(&profile.particlesHost(),
+                             profile.pclsArrayDevice(),
+                             profile.departureArrayDevice(),
+                             profile.hashedSumArrayDevice(), nullptr, counters);
+  if (mover.doReflect)
     fail("the input file has reflecting walls, whose pass "
          "(moverSubcyclesWallsKernel) is not profiled: make the box periodic");
-  moverParameter* paramDevice = copyToDevice(param, stream);
 
   MoverInput input(profile);
   const int subcycles =
@@ -147,7 +139,7 @@ int main(int argc, char** argv) {
       [&] {
         moverSubcyclesKernel<<<getGridSize((int)n, kMoverBlockSize),
                                kMoverBlockSize, 0, stream>>>(
-            paramDevice, fieldForPcls, profile.grid3DDevice());
+            mover, fieldForPcls, profile.gridCUDA());
       });
 
   // the departures of the last launch: a particle the mover deleted had a
@@ -169,8 +161,7 @@ int main(int argc, char** argv) {
               leaving, 100.0 * leaving / n, deleted,
               deleted == 0 ? "pass" : "FAIL");
 
-  cudaFree(paramDevice);
-  deleteHostPinnedObject(param);
+  cudaFree(counters);
   cudaFree(fieldForPcls);
   return profile.finish(deleted == 0);
 }

@@ -98,14 +98,6 @@ ParticleSoAHost::ParticleSoAHost(int speciesNum, CollectiveIO* col,
   bcPfaceZleft_ = col->getBcPfaceZleft();
   bcPfaceZright_ = col->getBcPfaceZright();
 
-  // --- Velocity caps ---
-  velocityCapMaxX_ = 0.95 * domainLengthX_ / timeStep_;
-  velocityCapMaxY_ = 0.95 * domainLengthY_ / timeStep_;
-  velocityCapMaxZ_ = 0.95 * domainLengthZ_ / timeStep_;
-  velocityCapMinX_ = -velocityCapMaxX_;
-  velocityCapMinY_ = -velocityCapMaxY_;
-  velocityCapMinZ_ = -velocityCapMaxZ_;
-
   // --- Particle ID generator ---
   if (trackParticleID_) {
     particleIDGenerator_.initialize(vct_->getCartesian_rank(),
@@ -902,62 +894,32 @@ void ParticleSoAHost::sort_particles_parallel(int* cellCount, int* cellOffset) {
  * @param doRepopulateInjectionSide Output per-face repopulation flags.
  * @param repopulateBoundary Output per-face repopulation boundary positions.
  */
+void ParticleSoAHost::openInflowFaces(bool faces[6]) const {
+  using namespace BCparticles;
+  faces[0] = vct_->noXleftNeighbor_P() && bcPfaceXleft_ == OPEN_INFLOW;
+  faces[1] = vct_->noXrghtNeighbor_P() && bcPfaceXright_ == OPEN_INFLOW;
+  faces[2] = vct_->noYleftNeighbor_P() && bcPfaceYleft_ == OPEN_INFLOW;
+  faces[3] = vct_->noYrghtNeighbor_P() && bcPfaceYright_ == OPEN_INFLOW;
+  faces[4] = vct_->noZleftNeighbor_P() && bcPfaceZleft_ == OPEN_INFLOW;
+  faces[5] = vct_->noZrghtNeighbor_P() && bcPfaceZright_ == OPEN_INFLOW;
+}
+
 void ParticleSoAHost::repopulate_particlesInfo(
     bool* doRepopulateInjection, bool* doRepopulateInjectionSide,
     cudaCommonType* repopulateBoundary) const {
-  using namespace BCparticles;
-
-  *doRepopulateInjection = false;
-
-  if (!vct_->isBoundaryProcess_P())
+  openInflowFaces(doRepopulateInjectionSide);
+  *doRepopulateInjection =
+      std::any_of(doRepopulateInjectionSide, doRepopulateInjectionSide + 6,
+                  [](bool face) { return face; });
+  if (!*doRepopulateInjection)
     return;
 
-  const bool repopBndryX =
-      !vct_->getPERIODICX_P() &&
-      (bcPfaceXleft_ == OPEN_INFLOW || bcPfaceXright_ == OPEN_INFLOW);
-  const bool repopBndryY =
-      !vct_->getPERIODICY_P() &&
-      (bcPfaceYleft_ == OPEN_INFLOW || bcPfaceYright_ == OPEN_INFLOW);
-  const bool repopBndryZ =
-      !vct_->getPERIODICZ_P() &&
-      (bcPfaceZleft_ == OPEN_INFLOW || bcPfaceZright_ == OPEN_INFLOW);
-
-  if (!(repopBndryX || repopBndryY || repopBndryZ))
-    return;
-
-  const bool repopXleft =
-      (vct_->noXleftNeighbor_P() && bcPfaceXleft_ == OPEN_INFLOW);
-  const bool repopYleft =
-      (vct_->noYleftNeighbor_P() && bcPfaceYleft_ == OPEN_INFLOW);
-  const bool repopZleft =
-      (vct_->noZleftNeighbor_P() && bcPfaceZleft_ == OPEN_INFLOW);
-  const bool repopXrght =
-      (vct_->noXrghtNeighbor_P() && bcPfaceXright_ == OPEN_INFLOW);
-  const bool repopYrght =
-      (vct_->noYrghtNeighbor_P() && bcPfaceYright_ == OPEN_INFLOW);
-  const bool repopZrght =
-      (vct_->noZrghtNeighbor_P() && bcPfaceZright_ == OPEN_INFLOW);
-
-  if (!(repopXleft || repopYleft || repopZleft || repopXrght || repopYrght ||
-        repopZrght))
-    return;
-
-  *doRepopulateInjection = true;
-
-  const int numLayers = 3;
-  const double xLow = numLayers * gridSpacingX_;
-  const double yLow = numLayers * gridSpacingY_;
-  const double zLow = numLayers * gridSpacingZ_;
+  const double xLow = BCparticles::kOpenFaceLayers * gridSpacingX_;
+  const double yLow = BCparticles::kOpenFaceLayers * gridSpacingY_;
+  const double zLow = BCparticles::kOpenFaceLayers * gridSpacingZ_;
   const double xHgh = domainLengthX_ - xLow;
   const double yHgh = domainLengthY_ - yLow;
   const double zHgh = domainLengthZ_ - zLow;
-
-  doRepopulateInjectionSide[0] = repopXleft;
-  doRepopulateInjectionSide[1] = repopXrght;
-  doRepopulateInjectionSide[2] = repopYleft;
-  doRepopulateInjectionSide[3] = repopYrght;
-  doRepopulateInjectionSide[4] = repopZleft;
-  doRepopulateInjectionSide[5] = repopZrght;
 
   repopulateBoundary[0] = xLow;
   repopulateBoundary[1] = xHgh;
@@ -1014,10 +976,9 @@ void ParticleSoAHost::openbc_particles_outflowInfo(
   applyOpenBC[4] = openZleft;
   applyOpenBC[5] = openZright;
 
-  const int numLayers = 3;
-  const double xLow = numLayers * gridSpacingX_;
-  const double yLow = numLayers * gridSpacingY_;
-  const double zLow = numLayers * gridSpacingZ_;
+  const double xLow = BCparticles::kOpenFaceLayers * gridSpacingX_;
+  const double yLow = BCparticles::kOpenFaceLayers * gridSpacingY_;
+  const double zLow = BCparticles::kOpenFaceLayers * gridSpacingZ_;
   const double xHgh = domainLengthX_ - xLow;
   const double yHgh = domainLengthY_ - yLow;
   const double zHgh = domainLengthZ_ - zLow;

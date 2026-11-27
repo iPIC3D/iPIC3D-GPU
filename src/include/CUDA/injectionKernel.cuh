@@ -3,29 +3,24 @@
 
 #include "ParticleIDGenerator.cuh"
 #include "cudaTypeDef.cuh"
-#include "gridCUDA.cuh"
 #include "particleArrayCUDA.cuh"
 
 /**
- * @brief Per-face injection cell range (pre-computed, constant across cycles).
- *
- * Encodes the 3D cell index range for one of the 6 boundary faces,
- * with the same narrowing logic used on the CPU side.
+ * @brief The cells of one of the 6 boundary faces
+ * (ParticleCommInjection::injectionFaces): nCells cells from (ixBeg, iyBeg,
+ * izBeg), z fastest.
  */
 struct InjectionFaceRange {
-  int ixBeg, ixEnd;
-  int iyBeg, iyEnd;
-  int izBeg, izEnd;
-  int nY, nZ; // iyEnd-iyBeg+1, izEnd-izBeg+1
-  int nCells; // (ixEnd-ixBeg+1) * nY * nZ
-  bool active;
+  int ixBeg, iyBeg, izBeg; // the first cell
+  int nY, nZ;              // cells along y and z
+  int nCells;              // nX nY nZ, 0 if the face injects nothing
 };
 
 /**
- * @brief Device-side parameter bundle for the GPU injection kernel.
+ * @brief The parameters of the GPU injection kernel, which it takes by value
+ * (KERNEL_CONSTANT).
  *
- * One instance per species.  All fields are constant across cycles
- * (set once at initialization, copied H→D, never updated).
+ * One instance per species, built once at initialization.
  */
 struct injectionParameter {
 
@@ -37,7 +32,7 @@ struct injectionParameter {
 
   // --- Subcell grid spacing ---
   cudaParticleType dxPerPcl, dyPerPcl, dzPerPcl;
-  int numPclPerCellX, numPclPerCellY, numPclPerCellZ;
+  int numPclPerCellY, numPclPerCellZ;
   int numParticlesPerCell; // = npcelx * npcely * npcelz
 
   // --- Domain bounds (for position rejection) ---
@@ -63,9 +58,9 @@ struct injectionParameter {
   int totalInjected; // total particles across all 6 faces
 
   ParticleIDGenerator particleIDGenerator;
-
-  bool enabled; // master enable flag (false → kernel is a no-op)
 };
+static_assert(std::is_trivially_copyable_v<injectionParameter>,
+              "a kernel parameter (KERNEL_CONSTANT) is copied bytewise");
 
 // ================================================================
 // Kernel declaration
@@ -82,12 +77,12 @@ struct injectionParameter {
  *  5. Writes 8 SoA fields at soaWriteOffset + globalIdx
  *
  * @param pclsArray      Device SoA particle container
- * @param params         Constant injection parameters (faces, physics, grid)
+ * @param param          Injection parameters (faces, physics, grid)
  * @param soaWriteOffset First SoA index to write (= stayedParticle[i])
  * @param rngSeed        Per-cycle seed for Philox RNG
  */
 __global__ void injectionKernel(particleArrayCUDA* pclsArray,
-                                const injectionParameter* params,
+                                const KERNEL_CONSTANT injectionParameter param,
                                 uint32_t soaWriteOffset,
                                 unsigned long long rngSeed);
 

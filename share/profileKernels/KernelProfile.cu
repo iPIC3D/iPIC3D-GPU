@@ -344,12 +344,11 @@ void KernelProfile::buildDevice() {
   pclsArrayHost_ = newHostPinnedObject<particleArrayCUDA>(
       particlesHost_.get(), kParticleCapacityFactor, stream_);
   pclsArrayDevice_ = pclsArrayHost_->copyToDevice();
-  grid3DHost_ = newHostPinnedObject<grid3DCUDA>(grid_.get());
-  grid3DDevice_ = copyToDevice(grid3DHost_, stream_);
+  gridCUDA_ = grid3DCUDA(grid_.get());
 
   if (order_ == Order::CellSorted) {
-    cellSorter_.init(*grid3DHost_, pclsArrayHost_->getCapacity(), stream_);
-    cellSorter_.sort(pclsArrayHost_, grid3DDevice_, n, stream_);
+    cellSorter_.init(gridCUDA_, pclsArrayHost_->getCapacity(), stream_);
+    cellSorter_.sort(pclsArrayHost_, gridCUDA_, n, stream_);
     // the sort swapped the SoA pointers on the host (sortSpeciesByCell)
     cudaErrChk(cudaMemcpyAsync(pclsArrayDevice_, pclsArrayHost_,
                                sizeof(particleArrayCUDA), cudaMemcpyDefault,
@@ -371,10 +370,6 @@ KernelProfile::~KernelProfile() {
   if (departureArrayHost_) {
     deleteHostPinnedObject(departureArrayHost_);
     cudaFree(departureArrayDevice_);
-  }
-  if (grid3DHost_) {
-    deleteHostPinnedObject(grid3DHost_);
-    cudaFree(grid3DDevice_);
   }
   if (pclsArrayHost_) {
     deleteHostPinnedObject(pclsArrayHost_);

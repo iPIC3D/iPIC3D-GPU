@@ -30,7 +30,6 @@
 #define GRID_3D_CU_H
 
 #include "arraysfwd.h"
-#include "assert.h"
 #include "ipicfwd.h"
 #include "math.h" // for floor
 
@@ -208,7 +207,6 @@ private:
   //   nxc_r = number of x cells in "real"/"restricted"/proper subgrid
   //
 private:
-  const static bool suppress_runaway_particle_instability = true;
   const VirtualTopology3D& _vct;
   /** number of cells - X direction, including + 2 (guard cells) */
   int nxc;
@@ -241,11 +239,6 @@ private:
   double VOL;
   /** invol = inverse of volume*/
   double invVOL;
-  /** index of last cell including ghost cells */
-  // (precomputed for speed)
-  int cxlast; // nxc-1;
-  int cylast; // nyc-1;
-  int czlast; // nzc-1;
   // number of cells excluding guard cells
   // (i.e. restricted to proper subdomain)
   int nxc_r;
@@ -268,11 +261,6 @@ private:
   double xStart, xEnd, yStart, yEnd, zStart, zEnd;
   /** global cell index of the first proper cell (local index 1) */
   int cellOffX = 0, cellOffY = 0, cellOffZ = 0;
-  double xStart_g, yStart_g, zStart_g;
-  double epsilon;
-  double nxc_minus_epsilon;
-  double nyc_minus_epsilon;
-  double nzc_minus_epsilon;
 
 public: // accessors (inline)
   const VirtualTopology3D& get_vct() const { return _vct; }
@@ -351,139 +339,24 @@ public: // accessors (inline)
   double getVOL() const { return (VOL); }
   double getInvVOL() const { return (invVOL); }
 
-  double getEpsilon() const { return (epsilon); }
-
-  // inline methods to calculate mesh cell and weights.
-  static void get_weights(double weights[8], double w0x, double w0y, double w0z,
-                          double w1x, double w1y, double w1z) {
-    // which of the following is faster?
-    //
-    // this:
-    //
-    // const double weight00 = w0x*w0y;
-    // const double weight01 = w0x*w1y;
-    // const double weight10 = w1x*w0y;
-    // const double weight11 = w1x*w1y;
-    // weights[0] = weight00*w0z; // weight000
-    // weights[1] = weight00*w1z; // weight001
-    // weights[2] = weight01*w0z; // weight010
-    // weights[3] = weight01*w1z; // weight011
-    // weights[4] = weight10*w0z; // weight100
-    // weights[5] = weight10*w1z; // weight101
-    // weights[6] = weight11*w0z; // weight110
-    // weights[7] = weight11*w1z; // weight111
-    //
-    // or this:
-    //
-    weights[0] = w0x * w0y * w0z; // weight000
-    weights[1] = w0x * w0y * w1z; // weight001
-    weights[2] = w0x * w1y * w0z; // weight010
-    weights[3] = w0x * w1y * w1z; // weight011
-    weights[4] = w1x * w0y * w0z; // weight100
-    weights[5] = w1x * w0y * w1z; // weight101
-    weights[6] = w1x * w1y * w0z; // weight110
-    weights[7] = w1x * w1y * w1z; // weight111
-  }
-  void get_cell_coordinates(int& cx, int& cy, int& cz, double xpos, double ypos,
-                            double zpos) const {
-    // xStart marks start of domain excluding ghosts
-    const double rel_xpos = xpos - xStart;
-    const double rel_ypos = ypos - yStart;
-    const double rel_zpos = zpos - zStart;
-    // cell position minus 1 (due to ghost cells)
-    const double cxm1_pos = rel_xpos * invdx;
-    const double cym1_pos = rel_ypos * invdy;
-    const double czm1_pos = rel_zpos * invdz;
-    cx = 1 + int(floor(cxm1_pos));
-    cy = 1 + int(floor(cym1_pos));
-    cz = 1 + int(floor(czm1_pos));
-  }
-  void make_grid_position_safe(double& cx_pos, double& cy_pos,
-                               double& cz_pos) const {
-    // if the position is outside the domain, then map
-    // it to the edge of the guarded subdomain
-    //
-    if (cx_pos < epsilon)
-      cx_pos = epsilon;
-    if (cy_pos < epsilon)
-      cy_pos = epsilon;
-    if (cz_pos < epsilon)
-      cz_pos = epsilon;
-    if (cx_pos > nxc_minus_epsilon)
-      cx_pos = nxc_minus_epsilon;
-    if (cy_pos > nyc_minus_epsilon)
-      cy_pos = nyc_minus_epsilon;
-    if (cz_pos > nzc_minus_epsilon)
-      cz_pos = nzc_minus_epsilon;
-  }
-  void assert_cell_coordinates_safe(int cx, int cy, int cz) const {
-    assert(cx >= 0);
-    assert(cy >= 0);
-    assert(cz >= 0);
-    assert(cx < nxc);
-    assert(cy < nyc);
-    assert(cz < nzc);
-  }
-  void make_cell_coordinates_safe(int& cx, int& cy, int& cz) const {
-    // if the cell is outside the domain, then treat it as
-    // in the nearest ghost cell.
-    //
-    if (cx < 0)
-      cx = 0;
-    if (cy < 0)
-      cy = 0;
-    if (cz < 0)
-      cz = 0;
-    if (cx > cxlast)
-      cx = cxlast; // nxc-1;
-    if (cy > cylast)
-      cy = cylast; // nyc-1;
-    if (cz > czlast)
-      cz = czlast; // nzc-1;
-  }
+  /** The cell of position (x, y, z), cell 0 the lower ghost cell and cell 1
+   *  the first proper one: a position outside the guarded subdomain,
+   *  infinite or NaN goes to the nearest edge cell (NaN to cell 0), clamped
+   *  before the conversion to int. */
   void get_safe_cell_coordinates(int& cx, int& cy, int& cz, double x, double y,
                                  double z) const {
-    get_cell_coordinates(cx, cy, cz, x, y, z);
-    make_cell_coordinates_safe(cx, cy, cz);
+    cx = safe_cell((x - xStart) * invdx, nxc - 1);
+    cy = safe_cell((y - yStart) * invdy, nyc - 1);
+    cz = safe_cell((z - zStart) * invdz, nzc - 1);
   }
-  void get_safe_cell_and_weights(double xpos, double ypos, double zpos, int& cx,
-                                 int& cy, int& cz, double weights[8]) const {
-    // convert_xpos_to_cxpos(xpos,ypos,zpos,cx_pos,cy_pos,cz_pos);
-    //  gxStart marks start of guarded domain (including ghosts)
-    const double rel_xpos = xpos - xStart_g;
-    const double rel_ypos = ypos - yStart_g;
-    const double rel_zpos = zpos - zStart_g;
-    // cell position (in guarded array)
-    double cx_pos = rel_xpos * invdx;
-    double cy_pos = rel_ypos * invdy;
-    double cz_pos = rel_zpos * invdz;
-    //
-    if (suppress_runaway_particle_instability)
-      make_grid_position_safe(cx_pos, cy_pos, cz_pos);
-    //
-    cx = int(floor(cx_pos));
-    cy = int(floor(cy_pos));
-    cz = int(floor(cz_pos));
-    // this was the old algorithm.
-    if (!suppress_runaway_particle_instability)
-      make_cell_coordinates_safe(cx, cy, cz);
-    assert_cell_coordinates_safe(cx, cy, cz);
 
-    // fraction of distance from the left
-    const double w0x = cx_pos - cx;
-    const double w0y = cy_pos - cy;
-    const double w0z = cz_pos - cz;
-    // fraction of the distance from the right of the cell
-    const double w1x = 1. - w0x;
-    const double w1y = 1. - w0y;
-    const double w1z = 1. - w0z;
-
-    get_weights(weights, w0x, w0y, w0z, w1x, w1y, w1z);
-  }
-  void get_safe_cell_and_weights(double xpos[3], int cx[3],
-                                 double weights[8]) const {
-    get_safe_cell_and_weights(xpos[0], xpos[1], xpos[2], cx[0], cx[1], cx[2],
-                              weights);
+private:
+  /** 1 + floor(pos) in [0, last]; !(c >= 0) also catches NaN. */
+  static int safe_cell(double pos, int last) {
+    const double c = 1 + floor(pos);
+    if (!(c >= 0))
+      return 0;
+    return c > last ? last : int(c);
   }
 };
 

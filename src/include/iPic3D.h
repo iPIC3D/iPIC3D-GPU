@@ -44,7 +44,7 @@ using std::string;
 #include "cellSortBuffers.cuh"
 #include "cudaTypeDef.cuh"
 #include "gridCUDA.cuh"
-#include "momentKernel.cuh"
+#include "injectionKernel.cuh"
 #include "moverKernel.cuh"
 #include "particleArrayCUDA.cuh"
 #include "particleControlKernel.cuh"
@@ -366,11 +366,13 @@ private:
       incomingStagingHostPtr;              // per-species AoS staging for H→D
                                            // incoming particles
   fillerBuffer** fillerBufferArrayHostPtr; // species
-  grid3DCUDA* grid3DCUDAHostPtr; // one shared grid descriptor for all species
-  moverParameter** moverParamHostPtr;   // for every species
-  momentParameter** momentParamHostPtr; // for every species
-  injectionParameter**
-      injectionParamHostPtr; // for every species (GPU injection)
+  MoverCounters* moverCountersHostPtr;     // [ns] pinned: zero at init,
+                                           // then the OpenBC counts read back
+
+  // ======= Kernel parameters, which the kernels take by value =======
+  grid3DCUDA gridCUDA{};                           // all species
+  std::vector<moverParameter> moverParams;         // [ns]
+  std::vector<injectionParameter> injectionParams; // [ns] (GPU injection)
 
   CellSorter* cellSorters; // per-species GPU cell sorter (counting sort)
 
@@ -389,11 +391,7 @@ private:
   arrayCUDA<SpeciesParticle>**
       incomingStagingCUDAPtr; // per-species device copy of staging metadata
   fillerBuffer** fillerBufferArrayCUDAPtr; // species
-  grid3DCUDA* grid3DCUDACUDAPtr; // one shared grid descriptor for all species
-  moverParameter** moverParamCUDAPtr;   // for every species
-  momentParameter** momentParamCUDAPtr; // for every species
-  injectionParameter**
-      injectionParamCUDAPtr; // for every species (GPU injection)
+  MoverCounters* moverCountersCUDAPtr;     // [ns], written by the movers
 
   // ======= Shared device buffers =======
   // [10][nxn][nyn][nzn] packed moment storage per species.

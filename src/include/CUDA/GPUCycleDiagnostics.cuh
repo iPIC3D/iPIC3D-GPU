@@ -97,8 +97,7 @@ public:
    */
   void reportCellSorterBeforeScatter(int cycle, int species, CellSorter& sorter,
                                      const particleArrayCUDA& particles,
-                                     const grid3DCUDA& hostGrid,
-                                     const grid3DCUDA* deviceGrid,
+                                     const grid3DCUDA& grid,
                                      bool expectFullSort, cudaStream_t stream,
                                      MPI_Comm comm);
 
@@ -110,9 +109,8 @@ public:
   void reportCellSorterAfterScatter(int cycle, int species,
                                     const CellSorter& sorter,
                                     const particleArrayCUDA& particles,
-                                    const grid3DCUDA& hostGrid,
-                                    const grid3DCUDA* deviceGrid,
-                                    cudaStream_t stream, MPI_Comm comm);
+                                    const grid3DCUDA& grid, cudaStream_t stream,
+                                    MPI_Comm comm);
 
 private:
   struct Impl;

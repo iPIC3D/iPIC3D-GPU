@@ -616,7 +616,7 @@ void dataAnalysisPipelineImpl::analysisEntry(int cycle) {
       profiling::Range spectra(profiling::Region::MacrocellSpectra, i);
       const CellSorter& sorter = solver.cellSorters[i];
       macrocellHist->launch(solver.pclsArrayHostPtr[i],
-                            solver.fieldForPclCUDAPtr, solver.grid3DCUDACUDAPtr,
+                            solver.fieldForPclCUDAPtr, solver.gridCUDA,
                             sorter.getCellStartOffsets(),
                             sorter.getCellCounts(), i, stream.get());
       if constexpr (DAConfig::DATA_ANALYSIS_OUTPUT)

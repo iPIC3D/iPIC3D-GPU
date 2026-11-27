@@ -785,81 +785,28 @@ int c_Solver::initCUDA() {
     }
   }
 
-  // ======= Allocate one shared device grid descriptor =======
-  grid3DCUDAHostPtr = newHostPinnedObject<grid3DCUDA>(grid);
-  grid3DCUDACUDAPtr = copyToDevice(grid3DCUDAHostPtr, 0);
-
-  // ======= Build per-species mover parameters =======
-  // Scalar species parameters are copied from ParticleSoAHost.
-  moverParamHostPtr = new moverParameter*[ns];
-  moverParamCUDAPtr = new moverParameter*[ns];
+  // ======= Kernel parameters =======
+  // The grid, and per species the mover and injection parameters.
+  gridCUDA = grid3DCUDA(grid);
+  moverCountersHostPtr = newHostPinnedObjectArray<MoverCounters>(ns);
+  moverCountersCUDAPtr = copyArrayToDevice(moverCountersHostPtr, ns);
   for (int i = 0; i < ns; i++) {
-    moverParamHostPtr[i] = newHostPinnedObject<moverParameter>(
+    moverParameter& mover = moverParams.emplace_back(
         particlesHost[i], pclsArrayCUDAPtr[i], departureArrayCUDAPtr[i],
-        hashedSumArrayCUDAPtr[i]);
-
-    // Initialize mover flags for open boundaries, repopulation, and planet
-    // handling.
-    particlesHost[i]->openbc_particles_outflowInfo(
-        &moverParamHostPtr[i]->doOpenBC, moverParamHostPtr[i]->applyOpenBC,
-        moverParamHostPtr[i]->deleteBoundary,
-        moverParamHostPtr[i]->openBoundary);
-
-    // GPU-side EXIT BC: particles exiting via an EXIT face are marked DELETE
-    // on the GPU to avoid sending them through MPI exchange at all.
-    // Only applies on boundary ranks (where the neighbor is MPI_PROC_NULL).
-    particlesHost[i]->fillExitBCFlags(moverParamHostPtr[i]->isExitBC);
-
-    // Reflecting walls: the mover reflects at them inside the push
-    particlesHost[i]->reflectingWalls(&moverParamHostPtr[i]->doReflect,
-                                      moverParamHostPtr[i]->reflectLo,
-                                      moverParamHostPtr[i]->reflectHi);
-    moverParamHostPtr[i]->reflectTol =
-        kWallTolerance *
-        std::min({grid->getDX(), grid->getDY(), grid->getDZ()});
-    moverParamHostPtr[i]->wallList = fillerBufferArrayCUDAPtr[i];
-
-    // every species, also those not re-injected (deleteRepopulateInjection)
-    particlesHost[i]->repopulate_particlesInfo(
-        &moverParamHostPtr[i]->doRepopulateInjection,
-        moverParamHostPtr[i]->doRepopulateInjectionSide,
-        moverParamHostPtr[i]->repopulateBoundary);
-
-    if (caseType_ == CaseType::Dipole) {
-      moverParamHostPtr[i]->doSphere = 1;
-      moverParamHostPtr[i]->sphereOrigin[0] = col->getx_center_planet();
-      moverParamHostPtr[i]->sphereOrigin[1] = col->gety_center_planet();
-      moverParamHostPtr[i]->sphereOrigin[2] = col->getz_center_planet();
-      moverParamHostPtr[i]->sphereRadius = col->getPlanet_radius();
-    } else if (caseType_ == CaseType::Dipole2D) {
-      moverParamHostPtr[i]->doSphere = 2;
-      moverParamHostPtr[i]->sphereOrigin[0] = col->getx_center_planet();
-      moverParamHostPtr[i]->sphereOrigin[1] = 0.0;
-      moverParamHostPtr[i]->sphereOrigin[2] = col->getz_center_planet();
-      moverParamHostPtr[i]->sphereRadius = col->getPlanet_radius();
-    } else {
-      moverParamHostPtr[i]->doSphere = 0;
+        hashedSumArrayCUDAPtr[i], fillerBufferArrayCUDAPtr[i],
+        moverCountersCUDAPtr + i);
+    mover.reflectTol = kWallTolerance *
+                       std::min({grid->getDX(), grid->getDY(), grid->getDZ()});
+    if (doPlanet_) {
+      const bool sphere2D = caseType_ == CaseType::Dipole2D; // the XZ plane
+      mover.doSphere = sphere2D ? 2 : 1;
+      mover.sphereOrigin[0] = col->getx_center_planet();
+      mover.sphereOrigin[1] = sphere2D ? 0.0 : col->gety_center_planet();
+      mover.sphereOrigin[2] = col->getz_center_planet();
+      mover.sphereRadius = col->getPlanet_radius();
     }
 
-    moverParamCUDAPtr[i] = copyToDevice(moverParamHostPtr[i], streams[i]);
-  }
-
-  momentParamHostPtr = new momentParameter*[ns];
-  momentParamCUDAPtr = new momentParameter*[ns];
-  for (int i = 0; i < ns; i++) {
-    momentParamHostPtr[i] = newHostPinnedObject<momentParameter>(
-        pclsArrayCUDAPtr[i], departureArrayCUDAPtr[i]);
-    momentParamCUDAPtr[i] = copyToDevice(momentParamHostPtr[i], streams[i]);
-  }
-
-  // ======= Build per-species GPU injection parameters =======
-  injectionParamHostPtr = new injectionParameter*[ns];
-  injectionParamCUDAPtr = new injectionParameter*[ns];
-  for (int i = 0; i < ns; i++) {
-    injectionParamHostPtr[i] = newHostPinnedObject<injectionParameter>();
-    particlesCommInj[i]->fillInjectionParameter(injectionParamHostPtr[i]);
-    injectionParamCUDAPtr[i] =
-        copyToDevice(injectionParamHostPtr[i], streams[i]);
+    injectionParams.push_back(particlesCommInj[i]->makeInjectionParameter());
   }
 
   // ======= Allocate device moment buffers =======
@@ -985,8 +932,8 @@ int c_Solver::initCUDA() {
   cellSorters = new CellSorter[ns];
   if (sortingCycle_ > 0) {
     for (int i = 0; i < ns; i++) {
-      cellSorters[i].init(*grid3DCUDAHostPtr,
-                          pclsArrayHostPtr[i]->getCapacity(), streams[i]);
+      cellSorters[i].init(gridCUDA, pclsArrayHostPtr[i]->getCapacity(),
+                          streams[i]);
     }
   }
 
@@ -1179,9 +1126,6 @@ int c_Solver::deInitCUDA() {
 
   delete threadPoolPtr;
 
-  deleteHostPinnedObject(grid3DCUDAHostPtr);
-  cudaFree(grid3DCUDACUDAPtr);
-
   cudaFree(fieldForPclCUDAPtr);
 
   // ======= Release per-species host/device objects =======
@@ -1197,10 +1141,6 @@ int c_Solver::deInitCUDA() {
     deleteHostPinnedObject(fillerBufferArrayHostPtr[i]);
     deleteHostPinnedObject(incomingStagingHostPtr[i]);
 
-    deleteHostPinnedObject(moverParamHostPtr[i]);
-    deleteHostPinnedObject(momentParamHostPtr[i]);
-    deleteHostPinnedObject(injectionParamHostPtr[i]);
-
     // Release device-side object storage.
 
     cudaFree(pclsArrayCUDAPtr[i]);
@@ -1209,10 +1149,6 @@ int c_Solver::deInitCUDA() {
     cudaFree(exitingArrayCUDAPtr[i]);
     cudaFree(fillerBufferArrayCUDAPtr[i]);
     cudaFree(incomingStagingCUDAPtr[i]);
-
-    cudaFree(moverParamCUDAPtr[i]);
-    cudaFree(momentParamCUDAPtr[i]);
-    cudaFree(injectionParamCUDAPtr[i]);
 
     cudaFree(momentsCUDAPtr[i]);
     if (heatFluxCalculationEnabled_) {
@@ -1234,12 +1170,10 @@ int c_Solver::deInitCUDA() {
   delete[] fillerBufferArrayCUDAPtr;
   delete[] incomingStagingHostPtr;
   delete[] incomingStagingCUDAPtr;
-  delete[] moverParamHostPtr;
-  delete[] moverParamCUDAPtr;
-  delete[] momentParamHostPtr;
-  delete[] momentParamCUDAPtr;
-  delete[] injectionParamHostPtr;
-  delete[] injectionParamCUDAPtr;
+  deleteHostPinnedObjectArray(moverCountersHostPtr, ns);
+  cudaFree(moverCountersCUDAPtr);
+  moverParams.clear(); // they point to the device buffers freed above
+  injectionParams.clear();
   delete[] momentsCUDAPtr;
   delete[] heatFluxCUDAPtr;
   delete[] heatFluxBulkCUDAPtr;
@@ -1399,11 +1333,11 @@ void c_Solver::CalculateMoments() {
         cellAwareMomentKernel<<<getGridSize(threads, DEFAULT_BLOCK_SIZE),
                                 DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
             cellSorters[i].getCellStartOffsets(), numCells, nop,
-            pclsArrayCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i]);
+            pclsArrayCUDAPtr[i], gridCUDA, momentsCUDAPtr[i]);
       }
     } else {
       momentKernelNew<<<(nop / DEFAULT_BLOCK_SIZE + 1), DEFAULT_BLOCK_SIZE, 0,
-                        streams[i]>>>(momentParamCUDAPtr[i], grid3DCUDACUDAPtr,
+                        streams[i]>>>(pclsArrayCUDAPtr[i], gridCUDA,
                                       momentsCUDAPtr[i], 0);
     }
     // Scatter the packed moments into the field solver's per-species arrays
@@ -1474,7 +1408,7 @@ void c_Solver::ScheduleHeatFlux(int cycle) {
     if (nop > 0) {
       heatFluxKernelUnsorted<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE),
                                DEFAULT_BLOCK_SIZE, 0, heatFluxStream>>>(
-          momentParamCUDAPtr[s], grid3DCUDACUDAPtr, heatFluxBulkCUDAPtr[s],
+          pclsArrayCUDAPtr[s], gridCUDA, heatFluxBulkCUDAPtr[s],
           heatFluxCUDAPtr[s], (cudaMomentType)col->getQOM(s),
           HEAT_FLUX_RHO_FLOOR);
     }
@@ -1606,9 +1540,9 @@ void c_Solver::initParticleControl() {
   if (!col->getParticleSplitting() && !col->getParticleMerging())
     return;
 
-  const grid3DCUDA& g = *grid3DCUDAHostPtr;
+  const grid3DCUDA& g = gridCUDA;
   const uint32_t cells = (g.nxc - 2) * (g.nyc - 2) * (g.nzc - 2);
-  const uint32_t keptCells = cellsOutsidePlanet(*grid, *moverParamHostPtr[0]);
+  const uint32_t keptCells = cellsOutsidePlanet(*grid, moverParams[0]);
   const int domainCells[3] = {col->getNxc(), col->getNyc(), col->getNzc()};
   const cudaParticleType start[3] = {g.xStart, g.yStart, g.zStart};
   const cudaParticleType d[3] = {g.dx, g.dy, g.dz};
@@ -1792,33 +1726,31 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
   // Note: moments memset must still run so the moment scatter
   // (gpuScatterMomentsD2D) copies zeros.
   const uint32_t nop = pclsArrayHostPtr[species]->getNOP();
+  const moverParameter& mover = moverParams[species];
   if (nop > 0) {
     if (doPlanet_)
       moverSubcyclesKernel<<<getGridSize((int)nop, kMoverBlockSize),
                              kMoverBlockSize, 0, streams[species]>>>(
-          moverParamCUDAPtr[species], fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+          mover, fieldForPclCUDAPtr, gridCUDA);
     else
       moverKernel<<<getGridSize((int)nop, kMoverBlockSize), kMoverBlockSize, 0,
-                    streams[species]>>>(moverParamCUDAPtr[species],
-                                        fieldForPclCUDAPtr, grid3DCUDACUDAPtr);
+                    streams[species]>>>(mover, fieldForPclCUDAPtr, gridCUDA);
 
     // The wall pass: the particles the mover left at a reflecting wall, then
     // the list is emptied for the next cycle.
-    if (moverParamHostPtr[species]->doReflect) {
+    if (mover.doReflect) {
       const int wallCapacity = fillerBufferArrayHostPtr[species]->getSize();
       if (wallCapacity > 0) {
         const int wallGrid = getGridSize(wallCapacity, kMoverBlockSize);
         if (doPlanet_)
           moverSubcyclesWallsKernel<<<wallGrid, kMoverBlockSize, 0,
                                       streams[species]>>>(
-              moverParamCUDAPtr[species], fieldForPclCUDAPtr,
-              grid3DCUDACUDAPtr);
+              mover, fieldForPclCUDAPtr, gridCUDA);
         else
           moverWallsKernel<<<wallGrid, kMoverBlockSize, 0, streams[species]>>>(
-              moverParamCUDAPtr[species], fieldForPclCUDAPtr,
-              grid3DCUDACUDAPtr);
+              mover, fieldForPclCUDAPtr, gridCUDA);
       }
-      cudaErrChk(cudaMemsetAsync(&moverParamCUDAPtr[species]->wallCount, 0,
+      cudaErrChk(cudaMemsetAsync(&moverCountersCUDAPtr[species].wallCount, 0,
                                  sizeof(uint32_t), streams[species]));
     }
   }
@@ -1835,9 +1767,9 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
     if (nop > 0)
       momentKernelStayed<<<getGridSize((int)nop, DEFAULT_BLOCK_SIZE),
                            DEFAULT_BLOCK_SIZE, 0, streams[species]>>>(
-          &(moverParamCUDAPtr[species]->openBCAppendCounters.accepted),
-          momentParamCUDAPtr[species], grid3DCUDACUDAPtr,
-          momentsCUDAPtr[species]);
+          pclsArrayCUDAPtr[species], departureArrayCUDAPtr[species],
+          &moverCountersCUDAPtr[species].openBCAppendCounters.accepted,
+          gridCUDA, momentsCUDAPtr[species]);
   }
   // Mark that momentKernelStayed has finished reading the accepted OpenBC
   // append count and pclsArrayCUDAPtr->nop_. This event is consumed below
@@ -1861,32 +1793,32 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
   counts.start(profiling::Region::MoverCounts, species);
 
   // Copy OpenBC append accounting to host.
-  if (moverParamHostPtr[species]->doOpenBC) {
+  if (mover.doOpenBC) {
     // This D->H read is non-destructive; it only needs mover ordering (event1
     // wait above) and may run in parallel with momentKernelStayed.
     cudaErrChk(
-        cudaMemcpyAsync(&moverParamHostPtr[species]->openBCAppendCounters,
-                        &moverParamCUDAPtr[species]->openBCAppendCounters,
+        cudaMemcpyAsync(&moverCountersHostPtr[species].openBCAppendCounters,
+                        &moverCountersCUDAPtr[species].openBCAppendCounters,
                         sizeof(OpenBCAppendCounters), cudaMemcpyDefault,
                         streams[species + ns]));
     // The next two operations are destructive for momentKernelStayed:
     //   - cudaMemsetAsync zeros the accepted count, which the kernel reads as
     //     `*appendCount` to compute totPcl = nop + appendCount.
     //   - The H->D rewrite of pclsArrayCUDAPtr below mutates pclsArray->nop_,
-    //     which the kernel reads via momentParam->pclsArray->getNOP().
+    //     which the kernel reads via pclsArray->getNOP().
     // Without the wait below, both can land while the kernel is still
     // iterating, silently dropping (memset wins) or double-counting (H->D
     // wins) the OpenBC-appended particles in the moment deposition.
     cudaErrChk(cudaStreamWaitEvent(streams[species + ns],
                                    stayedMomentsDoneEvt[species], 0));
     cudaErrChk(
-        cudaMemsetAsync(&moverParamCUDAPtr[species]->openBCAppendCounters, 0,
+        cudaMemsetAsync(&moverCountersCUDAPtr[species].openBCAppendCounters, 0,
                         sizeof(OpenBCAppendCounters), streams[species + ns]));
     cudaErrChk(cudaStreamSynchronize(streams[species + ns]));
 
     const uint32_t newPclAfterOBC =
         pclsArrayHostPtr[species]->getNOP() +
-        moverParamHostPtr[species]->openBCAppendCounters.accepted;
+        moverCountersHostPtr[species].openBCAppendCounters.accepted;
     pclsArrayHostPtr[species]->setNOE(newPclAfterOBC);
     cudaErrChk(cudaMemcpyAsync(
         pclsArrayCUDAPtr[species], pclsArrayHostPtr[species],
@@ -1931,7 +1863,7 @@ int c_Solver::cudaLauncherAsync(const int species, const int cycle,
   // reflecting walls it also holds the wall list of the mover, which keeps
   // its initial share of the particles when the species grows.
   const int fillerNeeded =
-      moverParamHostPtr[species]->doReflect
+      mover.doReflect
           ? std::max(hole, static_cast<int>(AUX_BUFFER_FRACTION * nop))
           : hole;
   if (fillerNeeded > fillerBufferArrayHostPtr[species]->getSize()) {
@@ -2240,12 +2172,13 @@ void c_Solver::processPlanetParticles() {
   // ======= Step 7: Reflect and compact surviving electrons =======
   // Diffuse by default (planetReflectionType = 1): Lambert (cosine-law)
   // direction on the outward hemisphere, speed kept; specular with 0.
+  const moverParameter& planet = moverParams[0]; // the same for all species
   PlanetReflection reflection;
-  reflection.originX = moverParamHostPtr[0]->sphereOrigin[0];
-  reflection.originY = moverParamHostPtr[0]->sphereOrigin[1];
-  reflection.originZ = moverParamHostPtr[0]->sphereOrigin[2];
-  reflection.radius = moverParamHostPtr[0]->sphereRadius;
-  reflection.doSphere = moverParamHostPtr[0]->doSphere;
+  reflection.originX = planet.sphereOrigin[0];
+  reflection.originY = planet.sphereOrigin[1];
+  reflection.originZ = planet.sphereOrigin[2];
+  reflection.radius = planet.sphereRadius;
+  reflection.doSphere = planet.doSphere;
   reflection.diffuse = col->getPlanetReflectionType() == 1;
   reflection.rngSeed = planetRngCycleCounter++;
 
@@ -2325,7 +2258,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
     for (int i = 0; i < ns; i++) {
       const int x = awaitTask(exitingResults[i], // holes
                               "particle mover of species " + std::to_string(i));
-      const auto& appendCounters = moverParamHostPtr[i]->openBCAppendCounters;
+      const auto& appendCounters = moverCountersHostPtr[i].openBCAppendCounters;
       if (appendCounters.rejected != 0) {
         openBCAppendRejected = true;
         const uint32_t postAppendNOP = pclsArrayHostPtr[i]->getNOP();
@@ -2356,12 +2289,12 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
   // Pre-expand the SoA for stayed + injected + estimated MPI incoming, set
   // NOP, and launch the GPU injection kernels, which write the SoA tail.
 
-  // Per-species injection count (cached; 0 unless this rank owns an
-  // open-inflow face and the species has rhoINJECT > 0).
+  // Per-species injection count (0 unless this rank owns an open-inflow face
+  // and the species has rhoINJECT > 0).
   // Declared at function scope so Phase 3G can also use it.
   std::vector<int> injectedBCS(ns, 0);
   for (int i = 0; i < ns; i++)
-    injectedBCS[i] = particlesCommInj[i]->computeInjectionCount();
+    injectedBCS[i] = injectionParams[i].totalInjected;
   {
     profiling::Range injection(profiling::Region::ParticleInjection);
 
@@ -2413,7 +2346,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
 
         injectionKernel<<<getGridSize(injectedBCS[i], DEFAULT_BLOCK_SIZE),
                           DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
-            pclsArrayCUDAPtr[i], injectionParamCUDAPtr[i],
+            pclsArrayCUDAPtr[i], injectionParams[i],
             (uint32_t)stayedParticle[i], rngSeed);
       }
     }
@@ -2430,7 +2363,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
     // below.
     for (int i = 0; i < ns; i++) {
       cellSorters[i].enqueueSortAsync(
-          pclsArrayHostPtr[i], grid3DCUDACUDAPtr,
+          pclsArrayHostPtr[i], gridCUDA,
           stayedParticle[i] + injectedBCS[i], // sort stayed + injected
           streams[i]);
     }
@@ -2459,8 +2392,8 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
       // Every rank participates, including ranks with no local particles.
       if (gpuCycleDiagnosticsStateCycle(cycle))
         gpuCycleDiagnostics_.reportCellSorterBeforeScatter(
-            cycle, i, cellSorters[i], *pclsArrayHostPtr[i], *grid3DCUDAHostPtr,
-            grid3DCUDACUDAPtr, true, streams[i], vct->getParticleComm());
+            cycle, i, cellSorters[i], *pclsArrayHostPtr[i], gridCUDA, true,
+            streams[i], vct->getParticleComm());
 #endif
       cellSorters[i].finishSort(streams[i]);
 #if defined(IPIC3D_GPU_CYCLE_DIAGNOSTICS)
@@ -2469,8 +2402,8 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
       // each sorted cell range contains particles classified to that cell.
       if (gpuCycleDiagnosticsStateCycle(cycle))
         gpuCycleDiagnostics_.reportCellSorterAfterScatter(
-            cycle, i, cellSorters[i], *pclsArrayHostPtr[i], *grid3DCUDAHostPtr,
-            grid3DCUDACUDAPtr, streams[i], vct->getParticleComm());
+            cycle, i, cellSorters[i], *pclsArrayHostPtr[i], gridCUDA,
+            streams[i], vct->getParticleComm());
 #endif
       // Re-sync the device-side metadata after the host-side pointer swap.
       cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[i], pclsArrayHostPtr[i],
@@ -2583,20 +2516,18 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
       const uint32_t numSorted = sortedCount;
       if (numSorted > 0) {
         const int numCells = cellSorters[i].getNumCells();
-        const int warps = numCells;
-        const int threads = warps * WARP_SIZE;
+        const int threads = numCells * WARP_SIZE; // one warp per cell
         cellAwareMomentKernel<<<getGridSize(threads, DEFAULT_BLOCK_SIZE),
                                 DEFAULT_BLOCK_SIZE, 0, streams[i]>>>(
             cellSorters[i].getCellStartOffsets(), numCells, numSorted,
-            pclsArrayCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i]);
+            pclsArrayCUDAPtr[i], gridCUDA, momentsCUDAPtr[i]);
       }
 
       const int tailCount = newPclNum - sortedCount;
       if (tailCount > 0)
         momentKernelNew<<<getGridSize(tailCount, SMALL_BLOCK_SIZE),
                           SMALL_BLOCK_SIZE, 0, streams[i]>>>(
-            momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i],
-            sortedCount);
+            pclsArrayCUDAPtr[i], gridCUDA, momentsCUDAPtr[i], sortedCount);
     } else {
       // Unsorted path: the stayed prefix was already handled in
       // cudaLauncherAsync(). Only the injected + incoming tail needs
@@ -2605,7 +2536,7 @@ bool c_Solver::MoverAwaitAndPclExchange(int cycle) {
       if (tailCount > 0)
         momentKernelNew<<<getGridSize(tailCount, SMALL_BLOCK_SIZE),
                           SMALL_BLOCK_SIZE, 0, streams[i]>>>(
-            momentParamCUDAPtr[i], grid3DCUDACUDAPtr, momentsCUDAPtr[i],
+            pclsArrayCUDAPtr[i], gridCUDA, momentsCUDAPtr[i],
             stayedParticle[i]);
     }
 
@@ -3615,8 +3546,8 @@ void c_Solver::sortSpeciesByCell(int species) {
   particleArrayCUDA* pcls = pclsArrayHostPtr[species];
   CellSorter& sorter = cellSorters[species];
   if (!sorter.initialized)
-    sorter.init(*grid3DCUDAHostPtr, pcls->getCapacity(), streams[species]);
-  sorter.sort(pcls, grid3DCUDACUDAPtr, pcls->getNOP(), streams[species]);
+    sorter.init(gridCUDA, pcls->getCapacity(), streams[species]);
+  sorter.sort(pcls, gridCUDA, pcls->getNOP(), streams[species]);
   // the sort swapped the SoA pointers on the host
   cudaErrChk(cudaMemcpyAsync(pclsArrayCUDAPtr[species], pcls,
                              sizeof(particleArrayCUDA), cudaMemcpyDefault,

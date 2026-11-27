@@ -286,8 +286,8 @@ struct CellSorter {
    * `prepareBuffers()` must be called first.
    */
   __host__ void enqueueSortAsync(particleArrayCUDA* hostPtr,
-                                 const grid3DCUDA* deviceGrid,
-                                 uint32_t num_to_sort, cudaStream_t s);
+                                 const grid3DCUDA& grid, uint32_t num_to_sort,
+                                 cudaStream_t s);
 
   /**
    * @brief Host phase C: wait for stages 1-3, then execute GPU Stage 4.
@@ -301,7 +301,7 @@ struct CellSorter {
   /**
    * @brief Run host phases A-C sequentially for a complete synchronous sort.
    */
-  __host__ void sort(particleArrayCUDA* hostPtr, const grid3DCUDA* deviceGrid,
+  __host__ void sort(particleArrayCUDA* hostPtr, const grid3DCUDA& grid,
                      uint32_t num_to_sort, cudaStream_t s);
 
   // Accessors used by later cell-aware kernels after Stage 2 has completed.

@@ -2,85 +2,16 @@
 
 using commonType = cudaTypeDouble; // calculation type
 
-// ======= Particle-based moment deposition =======
+// ======= Nodes and weights, shared by the deposits =======
 
-__device__ __forceinline__ void depositParticleMomentsToNodes(
-    uint32_t pidx, particleArrayCUDA* pclsArray, grid3DCUDA* grid,
-    cudaTypeArray1<cudaMomentType> moments, commonType inv_dx,
-    commonType inv_dy, commonType inv_dz) {
-  const int nxn = grid->nxn;
-  const int nyn = grid->nyn;
-  const int nzn = grid->nzn;
-  const commonType xstart = grid->xStart;
-  const commonType ystart = grid->yStart;
-  const commonType zstart = grid->zStart;
-
-  // Load particle data from SoA
-  const commonType ui = pclsArray->getU()[pidx];
-  const commonType vi = pclsArray->getV()[pidx];
-  const commonType wi = pclsArray->getW()[pidx];
-  commonType xpcl = pclsArray->getX()[pidx];
-  commonType ypcl = pclsArray->getY()[pidx];
-  commonType zpcl = pclsArray->getZ()[pidx];
-  // A position outside the guarded subdomain, or NaN, is moved to its edge,
-  // as the mover and the cell sorter do: the cell below then contains the
-  // position, the weights stay in [0, 1] and the float-to-int conversion
-  // never sees a NaN.  A position inside is unchanged.
-  grid->make_position_safe(xpcl, ypcl, zpcl);
-  const commonType qi = pclsArray->getQ()[pidx];
-  const commonType velmoments[10] = {1.0, // charge density
-                                     ui,  // momentum density
-                                     vi,      wi,
-                                     ui * ui, // second-order moments
-                                     ui * vi, ui * wi, vi * vi,
-                                     vi * wi, wi * wi};
-
-  //
-  // compute the weights to distribute the moments
-  //
-  int ix = 2 + int(floor((xpcl - xstart) * inv_dx));
-  int iy = 2 + int(floor((ypcl - ystart) * inv_dy));
-  int iz = 2 + int(floor((zpcl - zstart) * inv_dz));
-  // The clamped position gives 1 <= ix <= nxn-1 (and so on); the clamp
-  // below only guards against round-off at the edges of that range, which
-  // would index outside the moments array.
-  if (ix < 1)
-    ix = 1;
-  if (ix > nxn - 1)
-    ix = nxn - 1;
-  if (iy < 1)
-    iy = 1;
-  if (iy > nyn - 1)
-    iy = nyn - 1;
-  if (iz < 1)
-    iz = 1;
-  if (iz > nzn - 1)
-    iz = nzn - 1;
-  const commonType xi0 = xpcl - grid->getXN(ix - 1);
-  const commonType eta0 = ypcl - grid->getYN(iy - 1);
-  const commonType zeta0 = zpcl - grid->getZN(iz - 1);
-  const commonType xi1 = grid->getXN(ix) - xpcl;
-  const commonType eta1 = grid->getYN(iy) - ypcl;
-  const commonType zeta1 = grid->getZN(iz) - zpcl;
-  const commonType invVOLqi = grid->invVOL * qi;
-  const commonType weight0 = invVOLqi * xi0;
-  const commonType weight1 = invVOLqi * xi1;
-  const commonType weight00 = weight0 * eta0;
-  const commonType weight01 = weight0 * eta1;
-  const commonType weight10 = weight1 * eta0;
-  const commonType weight11 = weight1 * eta1;
-  const commonType weights[8] = {
-      weight00 * zeta0 * grid->invVOL, // weight000
-      weight00 * zeta1 * grid->invVOL, // weight001
-      weight01 * zeta0 * grid->invVOL, // weight010
-      weight01 * zeta1 * grid->invVOL, // weight011
-      weight10 * zeta0 * grid->invVOL, // weight100
-      weight10 * zeta1 * grid->invVOL, // weight101
-      weight11 * zeta0 * grid->invVOL, // weight110
-      weight11 * zeta1 * grid->invVOL  // weight111
-  };
-
-  uint32_t posIndex[8];
+/** The 8 nodes of the cell whose upper corner is node (ix, iy, iz), in the
+ *  order of nodeWeights. */
+__device__ __forceinline__ void cellNodes(const grid3DCUDA& grid, int ix,
+                                          int iy, int iz,
+                                          uint32_t posIndex[8]) {
+  const int nxn = grid.nxn;
+  const int nyn = grid.nyn;
+  const int nzn = grid.nzn;
   posIndex[0] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz);
   posIndex[1] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz - 1);
   posIndex[2] = toOneDimIndex(nxn, nyn, nzn, ix, iy - 1, iz);
@@ -89,7 +20,111 @@ __device__ __forceinline__ void depositParticleMomentsToNodes(
   posIndex[5] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy, iz - 1);
   posIndex[6] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy - 1, iz);
   posIndex[7] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy - 1, iz - 1);
-  const uint32_t oneDensity = nxn * nyn * nzn;
+}
+
+/** The weights of charge qi on the nodes posIndex of cellNodes, qi invVOL^2
+ *  times the trilinear volume: an upper node gets the distances to the lower
+ *  node planes of the cell (xi0, eta0, zeta0), a lower node those to the
+ *  upper ones (xi1, eta1, zeta1); the labels below name the factors. */
+__device__ __forceinline__ void nodeWeights(commonType invVOL, commonType qi,
+                                            commonType xi0, commonType xi1,
+                                            commonType eta0, commonType eta1,
+                                            commonType zeta0, commonType zeta1,
+                                            commonType weights[8]) {
+  const commonType invVOLqi = invVOL * qi;
+  const commonType weight0 = invVOLqi * xi0;
+  const commonType weight1 = invVOLqi * xi1;
+  const commonType weight00 = weight0 * eta0;
+  const commonType weight01 = weight0 * eta1;
+  const commonType weight10 = weight1 * eta0;
+  const commonType weight11 = weight1 * eta1;
+  weights[0] = weight00 * zeta0 * invVOL; // weight000
+  weights[1] = weight00 * zeta1 * invVOL; // weight001
+  weights[2] = weight01 * zeta0 * invVOL; // weight010
+  weights[3] = weight01 * zeta1 * invVOL; // weight011
+  weights[4] = weight10 * zeta0 * invVOL; // weight100
+  weights[5] = weight10 * zeta1 * invVOL; // weight101
+  weights[6] = weight11 * zeta0 * invVOL; // weight110
+  weights[7] = weight11 * zeta1 * invVOL; // weight111
+}
+
+/** The 10 deposited moments of velocity (u, v, w): the charge density factor
+ *  one, then u, v, w, then uu, uv, uw, vv, vw, ww. */
+__device__ __forceinline__ void velocityMoments(commonType one, commonType u,
+                                                commonType v, commonType w,
+                                                commonType vm[10]) {
+  vm[0] = one;
+  vm[1] = u;
+  vm[2] = v;
+  vm[3] = w;
+  vm[4] = u * u;
+  vm[5] = u * v;
+  vm[6] = u * w;
+  vm[7] = v * v;
+  vm[8] = v * w;
+  vm[9] = w * w;
+}
+
+// ======= Particle-based moment deposition =======
+
+/** The nodes and weights of particle pidx of an unsorted deposit. */
+__device__ __forceinline__ void
+particleNodeWeights(uint32_t pidx, particleArrayCUDA* pclsArray,
+                    const grid3DCUDA& grid, uint32_t posIndex[8],
+                    commonType weights[8]) {
+  commonType xpcl = pclsArray->getX()[pidx];
+  commonType ypcl = pclsArray->getY()[pidx];
+  commonType zpcl = pclsArray->getZ()[pidx];
+  // A position outside the guarded subdomain, or NaN, is moved to its edge,
+  // as the mover and the cell sorter do: the cell below then contains the
+  // position, its distances to the node planes stay in [0, dx] and the
+  // float-to-int conversion never sees a NaN.
+  grid.make_position_safe(xpcl, ypcl, zpcl);
+
+  int ix = 2 + int(floor((xpcl - grid.xStart) * grid.invdx));
+  int iy = 2 + int(floor((ypcl - grid.yStart) * grid.invdy));
+  int iz = 2 + int(floor((zpcl - grid.zStart) * grid.invdz));
+  // The clamped position gives 1 <= ix <= nxn-1 (and so on); the clamp
+  // below only guards against round-off at the edges of that range, which
+  // would index outside the moments array.
+  if (ix < 1)
+    ix = 1;
+  if (ix > grid.nxn - 1)
+    ix = grid.nxn - 1;
+  if (iy < 1)
+    iy = 1;
+  if (iy > grid.nyn - 1)
+    iy = grid.nyn - 1;
+  if (iz < 1)
+    iz = 1;
+  if (iz > grid.nzn - 1)
+    iz = grid.nzn - 1;
+
+  cellNodes(grid, ix, iy, iz, posIndex);
+  const commonType xi0 = xpcl - grid.getXN(ix - 1);
+  const commonType eta0 = ypcl - grid.getYN(iy - 1);
+  const commonType zeta0 = zpcl - grid.getZN(iz - 1);
+  const commonType xi1 = grid.getXN(ix) - xpcl;
+  const commonType eta1 = grid.getYN(iy) - ypcl;
+  const commonType zeta1 = grid.getZN(iz) - zpcl;
+  nodeWeights(grid.invVOL, pclsArray->getQ()[pidx], xi0, xi1, eta0, eta1, zeta0,
+              zeta1, weights);
+}
+
+__device__ __forceinline__ void
+depositParticleMomentsToNodes(uint32_t pidx, particleArrayCUDA* pclsArray,
+                              const grid3DCUDA& grid,
+                              cudaTypeArray1<cudaMomentType> moments) {
+  const commonType ui = pclsArray->getU()[pidx];
+  const commonType vi = pclsArray->getV()[pidx];
+  const commonType wi = pclsArray->getW()[pidx];
+  uint32_t posIndex[8];
+  commonType weights[8];
+  particleNodeWeights(pidx, pclsArray, grid, posIndex, weights);
+  commonType velmoments[10];
+  velocityMoments(1.0, ui, vi, wi, velmoments);
+
+  const uint32_t oneDensity = grid.nxn * grid.nyn * grid.nzn;
   for (int m = 0; m < 10; m++)  // 10 densities
     for (int c = 0; c < 8; c++) // 8 grid nodes
     {
@@ -100,61 +135,41 @@ __device__ __forceinline__ void depositParticleMomentsToNodes(
     }
 }
 
-/**
- * @brief Deposit moments for the stayed-particle prefix plus newly appended
- * particles.
- *
- * The kernel iterates with a grid-stride loop over the active particle range
- * and atomically accumulates the 10 velocity moments onto the surrounding
- * eight nodes.
- *
- * @param appendCount Device pointer to the number of appended particles.
- * @param momentParam Device-side moment parameter bundle for one species.
- * @param grid Device-side grid descriptor.
- * @param moments Packed moment output buffer for this species.
- */
-__global__ void momentKernelStayed(const uint32_t* appendCount,
-                                   momentParameter* momentParam,
-                                   grid3DCUDA* grid,
+/** The deposit of the stayed particles (see momentKernel.cuh). */
+__global__ void momentKernelStayed(particleArrayCUDA* pclsArray,
+                                   departureArrayType* departureArray,
+                                   const uint32_t* appendCount,
+                                   const KERNEL_CONSTANT grid3DCUDA grid,
                                    cudaTypeArray1<cudaMomentType> moments) {
 
   const uint tidx = blockIdx.x * blockDim.x + threadIdx.x;
   const uint gridSize = blockDim.x * gridDim.x;
-  auto pclsArray = momentParam->pclsArray;
   const uint totPcl = pclsArray->getNOP() + *appendCount;
 
   for (uint pidx = tidx; pidx < totPcl; pidx += gridSize) {
-    if (momentParam->departureArray->getArray()[pidx].dest != 0)
+    if (departureArray->getArray()[pidx].dest != 0)
       continue; // skip particles already marked for departure
 
-    depositParticleMomentsToNodes(pidx, pclsArray, grid, moments, grid->invdx,
-                                  grid->invdy, grid->invdz);
+    depositParticleMomentsToNodes(pidx, pclsArray, grid, moments);
   }
 }
-/**
- * @brief Deposit moments for the unsorted tail appended after compaction.
- *
- * @param momentParam Device-side moment parameter bundle for one species.
- * @param grid Device-side grid descriptor.
- * @param moments Packed moment output buffer for this species.
- * @param stayedParticle Number of already-compacted stayed particles at the
- *        front of the SoA buffer.
- */
-__global__ void momentKernelNew(momentParameter* momentParam, grid3DCUDA* grid,
+/** The deposit of an unsorted tail (see momentKernel.cuh). */
+__global__ void momentKernelNew(particleArrayCUDA* pclsArray,
+                                const KERNEL_CONSTANT grid3DCUDA grid,
                                 cudaTypeArray1<cudaMomentType> moments,
                                 int stayedParticle) {
 
   uint pidx = stayedParticle + blockIdx.x * blockDim.x + threadIdx.x;
-  auto pclsArray = momentParam->pclsArray;
   if (pidx >= pclsArray->getNOP())
     return;
 
-  depositParticleMomentsToNodes(pidx, pclsArray, grid, moments, grid->invdx,
-                                grid->invdy, grid->invdz);
+  depositParticleMomentsToNodes(pidx, pclsArray, grid, moments);
 }
 
+/** The heat flux of an unsorted species (see momentKernel.cuh). */
 __global__ void
-heatFluxKernelUnsorted(momentParameter* momentParam, grid3DCUDA* grid,
+heatFluxKernelUnsorted(particleArrayCUDA* pclsArray,
+                       const KERNEL_CONSTANT grid3DCUDA grid,
                        const cudaTypeArray1<cudaMomentType> bulkMoments,
                        cudaTypeArray1<cudaMomentType> heatFlux,
                        cudaMomentType qom, cudaMomentType rhoFloor) {
@@ -162,80 +177,17 @@ heatFluxKernelUnsorted(momentParameter* momentParam, grid3DCUDA* grid,
     return;
 
   const uint pidx = blockIdx.x * blockDim.x + threadIdx.x;
-  auto pclsArray = momentParam->pclsArray;
   if (pidx >= pclsArray->getNOP())
     return;
-
-  const commonType inv_dx = 1.0 / grid->dx;
-  const commonType inv_dy = 1.0 / grid->dy;
-  const commonType inv_dz = 1.0 / grid->dz;
-  const int nxn = grid->nxn;
-  const int nyn = grid->nyn;
-  const int nzn = grid->nzn;
-  const commonType xstart = grid->xStart;
-  const commonType ystart = grid->yStart;
-  const commonType zstart = grid->zStart;
-  const uint32_t oneDensity = nxn * nyn * nzn;
 
   const commonType ui = pclsArray->getU()[pidx];
   const commonType vi = pclsArray->getV()[pidx];
   const commonType wi = pclsArray->getW()[pidx];
-  commonType xpcl = pclsArray->getX()[pidx];
-  commonType ypcl = pclsArray->getY()[pidx];
-  commonType zpcl = pclsArray->getZ()[pidx];
-  // A position outside the guarded subdomain, or NaN, is moved to its edge,
-  // as the mover and the cell sorter do: the cell below then contains the
-  // position, the weights stay in [0, 1] and the float-to-int conversion
-  // never sees a NaN.  A position inside is unchanged.
-  grid->make_position_safe(xpcl, ypcl, zpcl);
-  const commonType qi = pclsArray->getQ()[pidx];
-
-  int ix = 2 + int(floor((xpcl - xstart) * inv_dx));
-  int iy = 2 + int(floor((ypcl - ystart) * inv_dy));
-  int iz = 2 + int(floor((zpcl - zstart) * inv_dz));
-  if (ix < 1)
-    ix = 1;
-  if (ix > nxn - 1)
-    ix = nxn - 1;
-  if (iy < 1)
-    iy = 1;
-  if (iy > nyn - 1)
-    iy = nyn - 1;
-  if (iz < 1)
-    iz = 1;
-  if (iz > nzn - 1)
-    iz = nzn - 1;
-
-  const commonType xi0 = xpcl - grid->getXN(ix - 1);
-  const commonType eta0 = ypcl - grid->getYN(iy - 1);
-  const commonType zeta0 = zpcl - grid->getZN(iz - 1);
-  const commonType xi1 = grid->getXN(ix) - xpcl;
-  const commonType eta1 = grid->getYN(iy) - ypcl;
-  const commonType zeta1 = grid->getZN(iz) - zpcl;
-  const commonType invVOLqi = grid->invVOL * qi;
-  const commonType weight0 = invVOLqi * xi0;
-  const commonType weight1 = invVOLqi * xi1;
-  const commonType weight00 = weight0 * eta0;
-  const commonType weight01 = weight0 * eta1;
-  const commonType weight10 = weight1 * eta0;
-  const commonType weight11 = weight1 * eta1;
-
-  const commonType weights[8] = {
-      weight00 * zeta0 * grid->invVOL, weight00 * zeta1 * grid->invVOL,
-      weight01 * zeta0 * grid->invVOL, weight01 * zeta1 * grid->invVOL,
-      weight10 * zeta0 * grid->invVOL, weight10 * zeta1 * grid->invVOL,
-      weight11 * zeta0 * grid->invVOL, weight11 * zeta1 * grid->invVOL};
-
   uint32_t posIndex[8];
-  posIndex[0] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz);
-  posIndex[1] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz - 1);
-  posIndex[2] = toOneDimIndex(nxn, nyn, nzn, ix, iy - 1, iz);
-  posIndex[3] = toOneDimIndex(nxn, nyn, nzn, ix, iy - 1, iz - 1);
-  posIndex[4] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy, iz);
-  posIndex[5] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy, iz - 1);
-  posIndex[6] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy - 1, iz);
-  posIndex[7] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy - 1, iz - 1);
+  commonType weights[8];
+  particleNodeWeights(pidx, pclsArray, grid, posIndex, weights);
 
+  const uint32_t oneDensity = grid.nxn * grid.nyn * grid.nzn;
   for (int c = 0; c < 8; ++c) {
     const uint32_t node = posIndex[c];
     const commonType rho = bulkMoments[node];
@@ -264,26 +216,12 @@ heatFluxKernelUnsorted(momentParameter* momentParam, grid3DCUDA* grid,
 
 // ======= Cell-aware sorted moment deposition =======
 
-/**
- * @brief Deposit moments from the cell-sorted SoA prefix with one warp per
- * cell.
- *
- * Particles belonging to one cell are assumed contiguous in
- * `cell_start_offsets`. Contributions are reduced within the warp so the
- * kernel performs one atomic add per `(moment, node)` pair instead of one
- * per particle contribution.
- *
- * @param cell_start_offsets Device array of per-cell particle-start offsets.
- * @param num_cells Number of populated cells in the sorted prefix.
- * @param num_to_sort Number of particles in the sorted prefix.
- * @param pclsArray Device-side particle SoA container.
- * @param grid Device-side grid descriptor.
- * @param moments Packed moment output buffer for this species.
- */
+/** The deposit of the cell-sorted prefix, one warp per cell (see
+ *  momentKernel.cuh). */
 __global__ void
 cellAwareMomentKernel(const int* __restrict__ cell_start_offsets, int num_cells,
                       uint32_t num_to_sort, particleArrayCUDA* pclsArray,
-                      grid3DCUDA* grid,
+                      const KERNEL_CONSTANT grid3DCUDA grid,
                       cudaTypeArray1<cudaMomentType> moments) {
   const int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
   const int warp_id = global_tid / WARP_SIZE; // one warp per cell
@@ -301,52 +239,31 @@ cellAwareMomentKernel(const int* __restrict__ cell_start_offsets, int num_cells,
     return;
 
   // Recover node indices from the flat cell index.
-  const int nxc = grid->nxc;
-  const int nyc = grid->nyc;
-  const int nxn = grid->nxn;
-  const int nyn = grid->nyn;
-  const int nzn = grid->nzn;
+  const int nxc = grid.nxc;
+  const int nyc = grid.nyc;
 
   const int cz = cell / (nxc * nyc);
   const int rem = cell - cz * (nxc * nyc);
   const int cy = rem / nxc;
   const int cx = rem - cy * nxc;
 
-  // Node index = cell index + 1 (ghost cell offset)
+  // The upper corner node of the cell (cellNodes)
   const int ix = cx + 1;
   const int iy = cy + 1;
   const int iz = cz + 1;
 
   // 8 surrounding node flat indices (shared by all particles in this cell)
-  const uint32_t oneDensity = nxn * nyn * nzn;
+  const uint32_t oneDensity = grid.nxn * grid.nyn * grid.nzn;
   uint32_t posIndex[8];
-  posIndex[0] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz);
-  posIndex[1] = toOneDimIndex(nxn, nyn, nzn, ix, iy, iz - 1);
-  posIndex[2] = toOneDimIndex(nxn, nyn, nzn, ix, iy - 1, iz);
-  posIndex[3] = toOneDimIndex(nxn, nyn, nzn, ix, iy - 1, iz - 1);
-  posIndex[4] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy, iz);
-  posIndex[5] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy, iz - 1);
-  posIndex[6] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy - 1, iz);
-  posIndex[7] = toOneDimIndex(nxn, nyn, nzn, ix - 1, iy - 1, iz - 1);
+  cellNodes(grid, ix, iy, iz, posIndex);
 
-  // Cache grid constants used by the weight computation.
-  const commonType inv_vol = grid->invVOL;
-  const commonType _dx = grid->dx;
-  const commonType _dy = grid->dy;
-  const commonType _dz = grid->dz;
-  const commonType xstart = grid->xStart;
-  const commonType ystart = grid->yStart;
-  const commonType zstart = grid->zStart;
-
-  // Node positions for this cell (precomputed once, shared across all
-  // particles) getXN(ix-1) = xStart + (ix-2)*dx,  getXN(ix) = xStart +
-  // (ix-1)*dx
-  const commonType xn_lo = xstart + (ix - 2) * _dx;
-  const commonType xn_hi = xstart + (ix - 1) * _dx;
-  const commonType yn_lo = ystart + (iy - 2) * _dy;
-  const commonType yn_hi = ystart + (iy - 1) * _dy;
-  const commonType zn_lo = zstart + (iz - 2) * _dz;
-  const commonType zn_hi = zstart + (iz - 1) * _dz;
+  // The node planes of the cell, shared by its particles
+  const commonType xn_lo = grid.getXN(ix - 1);
+  const commonType xn_hi = grid.getXN(ix);
+  const commonType yn_lo = grid.getYN(iy - 1);
+  const commonType yn_hi = grid.getYN(iy);
+  const commonType zn_lo = grid.getZN(iz - 1);
+  const commonType zn_hi = grid.getZN(iz);
 
   // SoA pointers (read once from device struct)
   const commonType* __restrict__ px = pclsArray->getX();
@@ -377,42 +294,18 @@ cellAwareMomentKernel(const int* __restrict__ cell_start_offsets, int num_cells,
       zpcl = pz[pidx];
       // A particle outside this cell (the sorter puts one outside the
       // subdomain, or NaN, into an edge cell) is moved onto it, so that its
-      // weights stay in [0, 1].  A particle inside is unchanged.
+      // distances to the node planes stay in [0, dx].
       xpcl = fmin(fmax(xpcl, xn_lo), xn_hi);
       ypcl = fmin(fmax(ypcl, yn_lo), yn_hi);
       zpcl = fmin(fmax(zpcl, zn_lo), zn_hi);
     }
 
-    // Trilinear weights using the same arithmetic as momentKernelStayed.
-    const commonType xi0 = xpcl - xn_lo;
-    const commonType xi1 = xn_hi - xpcl;
-    const commonType eta0 = ypcl - yn_lo;
-    const commonType eta1 = yn_hi - ypcl;
-    const commonType zeta0 = zpcl - zn_lo;
-    const commonType zeta1 = zn_hi - zpcl;
+    commonType wt[8];
+    nodeWeights(grid.invVOL, qi, xpcl - xn_lo, xn_hi - xpcl, ypcl - yn_lo,
+                yn_hi - ypcl, zpcl - zn_lo, zn_hi - zpcl, wt);
 
-    const commonType invVOLqi = inv_vol * qi;
-    const commonType w0 = invVOLqi * xi0;
-    const commonType w1 = invVOLqi * xi1;
-    const commonType w00 = w0 * eta0;
-    const commonType w01 = w0 * eta1;
-    const commonType w10 = w1 * eta0;
-    const commonType w11 = w1 * eta1;
-
-    const commonType vm[10] = {active ? 1.0 : 0.0, // charge density
-                               ui,
-                               vi,
-                               wi,
-                               ui * ui,
-                               ui * vi,
-                               ui * wi,
-                               vi * vi,
-                               vi * wi,
-                               wi * wi};
-    const commonType wt[8] = {w00 * zeta0 * inv_vol, w00 * zeta1 * inv_vol,
-                              w01 * zeta0 * inv_vol, w01 * zeta1 * inv_vol,
-                              w10 * zeta0 * inv_vol, w10 * zeta1 * inv_vol,
-                              w11 * zeta0 * inv_vol, w11 * zeta1 * inv_vol};
+    commonType vm[10];
+    velocityMoments(active ? 1.0 : 0.0, ui, vi, wi, vm);
 
     // Warp reduction + single atomicAdd per (moment, node) pair
     for (int m = 0; m < 10; m++) {

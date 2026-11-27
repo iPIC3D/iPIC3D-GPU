@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
         cellAwareMomentKernel<<<getGridSize(threads, DEFAULT_BLOCK_SIZE),
                                 DEFAULT_BLOCK_SIZE, 0, profile.stream()>>>(
             sorter.getCellStartOffsets(), numCells, n,
-            profile.pclsArrayDevice(), profile.grid3DDevice(), moments);
+            profile.pclsArrayDevice(), profile.gridCUDA(), moments);
       });
   return profile.finish(profile.checkDepositedCharge(0, n));
 }

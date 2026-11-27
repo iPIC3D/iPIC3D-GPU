@@ -45,7 +45,7 @@ __global__ void macrocellSpectraKernel(
     const int* __restrict__ cellStartOffsets,
     const int* __restrict__ cellCounts, macrocell::MacrocellGeometry geometry,
     int slices, const cudaFieldType* __restrict__ fieldForPcls,
-    const grid3DCUDA* __restrict__ grid,
+    const KERNEL_CONSTANT grid3DCUDA grid,
     macrocellHistType* __restrict__ histOut, cudaCommonType vmax) {
   // One block per slice of a macrocell: its cells [first, end).
   const int m = blockIdx.x / slices;
@@ -72,10 +72,10 @@ __global__ void macrocellSpectraKernel(
     shHist[i] = (macrocellHistType)0;
   __syncthreads();
 
-  const int nxc = grid->nxc;
-  const int nyc = grid->nyc;
-  const int nzn = grid->nzn;
-  const int nyn = grid->nyn;
+  const int nxc = grid.nxc;
+  const int nyc = grid.nyc;
+  const int nzn = grid.nzn;
+  const int nyn = grid.nyn;
 
   // Iterate the cells of the slice. Interior indices are 0-based; the
   // sorter cell index uses the guarded layout (1-based for interior), whose
@@ -112,11 +112,11 @@ __global__ void macrocellSpectraKernel(
       const cudaCommonType zp = z[p];
 
       // the weights in cell (cx, cy, cz): the sort put the particle
-      // there with the same arithmetic (get_safe_cell), and a position
+      // there with the same arithmetic (get_safe_cell_index), and a position
       // that is not finite in a ghost cell, in no macrocell
       int ccx, ccy, ccz;
       cudaCommonType weights[8];
-      grid->get_safe_cell_and_weights(xp, yp, zp, ccx, ccy, ccz, weights);
+      grid.get_safe_cell_and_weights(xp, yp, zp, ccx, ccy, ccz, weights);
 
       cudaCommonType Bx = 0, By = 0, Bz = 0;
 #pragma unroll

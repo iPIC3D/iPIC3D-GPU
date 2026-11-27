@@ -30,7 +30,7 @@ macrocellSpectra2D::~macrocellSpectra2D() { cudaErrChk(cudaFree(dHist_)); }
 
 void macrocellSpectra2D::launch(particleArrayCUDA* pclsHostPtr,
                                 cudaFieldType* fieldForPclsCUDA,
-                                const grid3DCUDA* gridDevicePtr,
+                                const grid3DCUDA& grid,
                                 const int* cellStartOffsetsCUDA,
                                 const int* cellCountsCUDA, int species,
                                 cudaStream_t stream) {
@@ -53,7 +53,7 @@ void macrocellSpectra2D::launch(particleArrayCUDA* pclsHostPtr,
       pclsHostPtr->getX(), pclsHostPtr->getY(), pclsHostPtr->getZ(),
       pclsHostPtr->getU(), pclsHostPtr->getV(), pclsHostPtr->getW(),
       pclsHostPtr->getQ(), cellStartOffsetsCUDA, cellCountsCUDA,
-      part_.geometry(), slices_, fieldForPclsCUDA, gridDevicePtr, dHist_,
+      part_.geometry(), slices_, fieldForPclsCUDA, grid, dHist_,
       vmax_[species]);
   cudaErrChk(cudaGetLastError());
 }

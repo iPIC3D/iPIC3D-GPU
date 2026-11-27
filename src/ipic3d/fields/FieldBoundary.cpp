@@ -76,8 +76,11 @@ FieldBoundarySpec FieldBoundarySpec::build(const Collective& col,
   s.B0[0] = col.getB0x();
   s.B0[1] = col.getB0y();
   s.B0[2] = col.getB0z();
-  s.outflowXright = s.face[FACE_XR].open() && s.face[FACE_XR].bcP == 3;
-  s.outflowLayers = s.outflowXright ? std::max(3, s.salLayers) : s.salLayers;
+  s.outflowXright = s.face[FACE_XR].open() &&
+                    s.face[FACE_XR].bcP == BCparticles::OPEN_OUTFLOW;
+  s.outflowLayers = s.outflowXright
+                        ? std::max(BCparticles::kOpenFaceLayers, s.salLayers)
+                        : s.salLayers;
   s.outflowCopyLayers =
       s.outflowXright && col.getOutflowLayerSolved() ? 0 : s.outflowLayers;
   for (int r = 0; r < 4; r++) {

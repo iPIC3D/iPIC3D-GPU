@@ -112,7 +112,7 @@ public:
 
   particleArrayCUDA* pclsArrayHost() { return pclsArrayHost_; }
   particleArrayCUDA* pclsArrayDevice() { return pclsArrayDevice_; }
-  grid3DCUDA* grid3DDevice() { return grid3DDevice_; }
+  const grid3DCUDA& gridCUDA() const { return gridCUDA_; }
   departureArrayType* departureArrayDevice();
   hashedSum* hashedSumArrayHost();
   hashedSum* hashedSumArrayDevice();
@@ -201,8 +201,7 @@ private:
   cudaEvent_t stop_ = nullptr;
   particleArrayCUDA* pclsArrayHost_ = nullptr;
   particleArrayCUDA* pclsArrayDevice_ = nullptr;
-  grid3DCUDA* grid3DHost_ = nullptr;
-  grid3DCUDA* grid3DDevice_ = nullptr;
+  grid3DCUDA gridCUDA_{};
   departureArrayType* departureArrayHost_ = nullptr;
   departureArrayType* departureArrayDevice_ = nullptr;
   hashedSum* hashedSumArrayHost_ = nullptr;

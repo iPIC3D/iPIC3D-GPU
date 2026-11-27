@@ -14,8 +14,8 @@
  *  3. recommunicateParticlesUntilDone(): iterative flush/recv/Allreduce loop
  *  4. handleReceivedParticles(): receives AoS blocks, applies BCs, appends
  *     surviving particles to AoS comm buffer
- *  5. GPU injection uses computeInjectionCount() / fillInjectionParameter()
- *     to append boundary-injected particles directly into the device SoA
+ *  5. GPU injection uses makeInjectionParameter() to append
+ *     boundary-injected particles directly into the device SoA
  *  6. Caller reads commPcls for single H→D upload + scatterAoSToSoAKernel
  *
  * No persistent storage of "all" particles — only transient exchange buffer.
@@ -118,14 +118,9 @@ public:
 
   // ===== Boundary injection =====
 
-  /** Compute the number of particles the GPU injection kernel will create.
-   *  Used to pre-size device SoA arrays before launch. */
-  int computeInjectionCount() const;
-
-  /** Populate an injectionParameter struct for the GPU injection kernel.
-   *  The struct is fully initialized and ready for cudaMemcpy H→D.
-   *  Must be called once at init time (all fields are constant). */
-  void fillInjectionParameter(injectionParameter* param) const;
+  /** The parameters of the GPU injection kernel for this species, all
+   *  constant: built once at init. */
+  injectionParameter makeInjectionParameter() const;
 
   // ===== Append from external AoS (CPU-side: exosphere injection) =====
 
@@ -237,8 +232,11 @@ private:
     commPcls.pop_back();
   }
 
-  /** One-time computation of injection count (called from constructor). */
-  int computeInjectionCountImpl() const;
+  /** The injection faces of this rank, Xleft, Xright, Yleft, Yright, Zleft,
+   *  Zright, with nCells 0 where a face injects nothing: all of them for a
+   *  species without injection density or a rank without open-inflow faces.
+   */
+  void injectionFaces(InjectionFaceRange faces[6]) const;
 
   /** Velocity of a particle sent back into the domain by an open-inflow face
    *  normal to axis (0, 1, 2): Maxwellian tangential components, the
@@ -289,9 +287,6 @@ private:
 
   // --- RNG of the open-inflow BC (single-thread, few particles) ---
   std::mt19937_64 bcRng_;
-
-  // --- Cached injection count (constant across cycles, computed in ctor) ---
-  int cachedInjectionCount_;
 
   bool cVERBOSE_;
 };

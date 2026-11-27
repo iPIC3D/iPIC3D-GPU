@@ -61,6 +61,7 @@ E(n) stays in its array through steps 5 to 9, so the output of cycle n holds E, 
 - Stream priorities: halo exchange ≥ field solver > particle streams ≥ diagnostics (analysis and heat flux). The levels depend on the device's priority range. The halo stream exists only with `HaloOverlap = 1`.
 - Separate streams hold planet processing and output copies. Events order them against the solver and the mover.
 - Halo exchanges pack up to 26 neighbours into one MPI round. `HaloOverlap` [overlaps them](field-solver.md#overlapped-halo-exchange) with computation.
+- Kernels take the grid (`grid3DCUDA`) and, per species, the mover and injection parameters (`moverParameter`, `injectionParameter`) by value, built once at initialization: a warp reads a kernel parameter once for all its threads (`KERNEL_CONSTANT` in `src/include/CUDA/cudaTypeDef.cuh`). Kernel parameters are read-only, so the counters the movers update atomically (`MoverCounters`) live in device memory.
 
 ## Memory
 

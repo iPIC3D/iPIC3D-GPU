@@ -146,10 +146,6 @@ ParticleCommInjection::ParticleCommInjection(ParticleSoAHost& hostParticles)
   // Seed the open-inflow BC RNG (single-thread, few particles per cycle)
   bcRng_.seed(static_cast<uint64_t>(MPIdata::get_rank()) * 31 +
               static_cast<uint64_t>(speciesNumber_) * 127 + 9973);
-
-  // Compute injection count once (depends only on grid, BC, topology — all
-  // constant).
-  cachedInjectionCount_ = computeInjectionCountImpl();
 }
 
 ParticleCommInjection::~ParticleCommInjection() { MPI_Comm_free(&mpiComm_); }
@@ -842,221 +838,107 @@ void ParticleCommInjection::appendFromAoS(const SpeciesParticle* buffer,
   memcpy(commPcls.getList() + oldSize, buffer, count * sizeof(SpeciesParticle));
 }
 
-// ======= Injection count (read-only) =======
+// ======= GPU injection parameters (built once at init) =======
 
-int ParticleCommInjection::computeInjectionCount() const {
-  return cachedInjectionCount_;
-}
+void ParticleCommInjection::injectionFaces(InjectionFaceRange faces[6]) const {
+  for (int f = 0; f < 6; f++)
+    faces[f] = {};
 
-int ParticleCommInjection::computeInjectionCountImpl() const {
-  using namespace BCparticles;
+  // the layers of the open-inflow faces, which the mover empties for every
+  // species (deleteRepopulateInjection); only species with rhoINJECT > 0 are
+  // re-injected
+  bool inflow[6];
+  hostParticles_.openInflowFaces(inflow);
+  if (!(injectionDensity_ > 0.0) ||
+      std::none_of(inflow, inflow + 6, [](bool face) { return face; }))
+    return;
+  const bool repopXleft = inflow[0], repopXrght = inflow[1];
+  const bool repopYleft = inflow[2], repopYrght = inflow[3];
+  const bool repopZleft = inflow[4], repopZrght = inflow[5];
 
-  // only species with rhoINJECT > 0 are re-injected (all are deleted in the
-  // layers: deleteRepopulateInjection)
-  if (!vct_->isBoundaryProcess_P() || !(injectionDensity_ > 0.0))
-    return 0;
+  const int numLayers = BCparticles::kOpenFaceLayers;
+  const int upXstart = numCellsX_ - 1 - numLayers;
+  const int upYstart = numCellsY_ - 1 - numLayers;
+  const int upZstart = numCellsZ_ - 1 - numLayers;
 
-  const bool repopXleft =
-      (vct_->noXleftNeighbor_P() && bcPfaceXleft_ == OPEN_INFLOW);
-  const bool repopYleft =
-      (vct_->noYleftNeighbor_P() && bcPfaceYleft_ == OPEN_INFLOW);
-  const bool repopZleft =
-      (vct_->noZleftNeighbor_P() && bcPfaceZleft_ == OPEN_INFLOW);
-  const bool repopXrght =
-      (vct_->noXrghtNeighbor_P() && bcPfaceXright_ == OPEN_INFLOW);
-  const bool repopYrght =
-      (vct_->noYrghtNeighbor_P() && bcPfaceYright_ == OPEN_INFLOW);
-  const bool repopZrght =
-      (vct_->noZrghtNeighbor_P() && bcPfaceZright_ == OPEN_INFLOW);
+  int xbeg = 1, xend = numCellsX_ - 2;
+  int ybeg = 1, yend = numCellsY_ - 2;
+  int zbeg = 1, zend = numCellsZ_ - 2;
 
-  if (!(repopXleft || repopYleft || repopZleft || repopXrght || repopYrght ||
-        repopZrght))
-    return 0;
-
-  const int nxc = numCellsX_;
-  const int nyc = numCellsY_;
-  const int nzc = numCellsZ_;
-  const int numLayers = 3;
-
-  const int upXstart = nxc - 1 - numLayers;
-  const int upYstart = nyc - 1 - numLayers;
-  const int upZstart = nzc - 1 - numLayers;
-
-  int xbeg = 1, xend = nxc - 2;
-  int ybeg = 1, yend = nyc - 2;
-  int zbeg = 1, zend = nzc - 2;
-
-  auto faceCells = [&](int ixB, int ixE, int iyB, int iyE, int izB, int izE) {
-    return (ixE - ixB + 1) * (iyE - iyB + 1) * (izE - izB + 1);
+  // An injecting face narrows the faces after it, so that the edges and
+  // corners are injected once.
+  const auto setFace = [&](int f, int ixB, int ixE, int iyB, int iyE, int izB,
+                           int izE, bool active) {
+    const int nY = iyE - iyB + 1, nZ = izE - izB + 1;
+    faces[f] = {ixB, iyB, izB, nY, nZ, active ? (ixE - ixB + 1) * nY * nZ : 0};
   };
-
-  int total = 0;
-  // Xleft
-  if (repopXleft) {
-    total += faceCells(1, numLayers, ybeg, yend, zbeg, zend);
+  setFace(0, 1, numLayers, ybeg, yend, zbeg, zend, repopXleft);
+  if (repopXleft)
     xbeg += numLayers;
-  }
-  // Xrght
-  if (repopXrght) {
-    total += faceCells(upXstart, xend, ybeg, yend, zbeg, zend);
+  setFace(1, upXstart, xend, ybeg, yend, zbeg, zend, repopXrght);
+  if (repopXrght)
     xend -= numLayers;
-  }
-  // Yleft
-  if (repopYleft) {
-    total += faceCells(xbeg, xend, 1, numLayers, zbeg, zend);
+  setFace(2, xbeg, xend, 1, numLayers, zbeg, zend, repopYleft);
+  if (repopYleft)
     ybeg += numLayers;
-  }
-  // Yrght
-  if (repopYrght) {
-    total += faceCells(xbeg, xend, upYstart, yend, zbeg, zend);
+  setFace(3, xbeg, xend, upYstart, yend, zbeg, zend, repopYrght);
+  if (repopYrght)
     yend -= numLayers;
-  }
-  // Zleft
-  if (repopZleft)
-    total += faceCells(xbeg, xend, ybeg, yend, 1, numLayers);
-  // Zrght
-  if (repopZrght)
-    total += faceCells(xbeg, xend, ybeg, yend, upZstart, zend);
-
-  return total * numParticlesPerCell_;
+  setFace(4, xbeg, xend, ybeg, yend, 1, numLayers, repopZleft);
+  setFace(5, xbeg, xend, ybeg, yend, upZstart, zend, repopZrght);
 }
 
-// ======= Fill GPU injection parameter struct (called once at init) =======
+injectionParameter ParticleCommInjection::makeInjectionParameter() const {
+  injectionParameter param{}; // nothing to inject unless set below
+  if (hostParticles_.tracksParticleID())
+    param.particleIDGenerator = hostParticles_.getParticleIDGenerator();
 
-void ParticleCommInjection::fillInjectionParameter(
-    injectionParameter* param) const {
-  using namespace BCparticles;
-
-  // Zero-initialize the whole struct
-  memset(param, 0, sizeof(injectionParameter));
-
-  // Default: disabled
-  param->enabled = false;
-  param->totalInjected = 0;
-  if (hostParticles_.tracksParticleID()) {
-    param->particleIDGenerator = hostParticles_.getParticleIDGenerator();
+  // --- Face ranges and their cumulative particle offsets ---
+  injectionFaces(param.faces);
+  for (int f = 0; f < 6; f++) {
+    param.pclOffset[f] = param.totalInjected;
+    param.totalInjected += param.faces[f].nCells * numParticlesPerCell_;
   }
-
-  // computeInjectionCountImpl decides whether this rank injects the species
-  if (cachedInjectionCount_ == 0)
-    return;
-
-  const bool repopXleft =
-      (vct_->noXleftNeighbor_P() && bcPfaceXleft_ == OPEN_INFLOW);
-  const bool repopYleft =
-      (vct_->noYleftNeighbor_P() && bcPfaceYleft_ == OPEN_INFLOW);
-  const bool repopZleft =
-      (vct_->noZleftNeighbor_P() && bcPfaceZleft_ == OPEN_INFLOW);
-  const bool repopXrght =
-      (vct_->noXrghtNeighbor_P() && bcPfaceXright_ == OPEN_INFLOW);
-  const bool repopYrght =
-      (vct_->noYrghtNeighbor_P() && bcPfaceYright_ == OPEN_INFLOW);
-  const bool repopZrght =
-      (vct_->noZrghtNeighbor_P() && bcPfaceZright_ == OPEN_INFLOW);
-
-  if (!(repopXleft || repopYleft || repopZleft || repopXrght || repopYrght ||
-        repopZrght))
-    return;
+  if (param.totalInjected == 0)
+    return param;
 
   // --- Physics ---
-  param->thermalVelX = thermalVelocityX_;
-  param->thermalVelY = thermalVelocityY_;
-  param->thermalVelZ = thermalVelocityZ_;
-  param->driftVelX = driftVelocityX_;
-  param->driftVelY = driftVelocityY_;
-  param->driftVelZ = driftVelocityZ_;
-  param->speedOfLightSq = speedOfLight_ * speedOfLight_;
+  param.thermalVelX = thermalVelocityX_;
+  param.thermalVelY = thermalVelocityY_;
+  param.thermalVelZ = thermalVelocityZ_;
+  param.driftVelX = driftVelocityX_;
+  param.driftVelY = driftVelocityY_;
+  param.driftVelZ = driftVelocityZ_;
+  param.speedOfLightSq = speedOfLight_ * speedOfLight_;
 
   const double FourPI = 16.0 * atan(1.0);
-  param->chargePerParticle =
+  param.chargePerParticle =
       (chargeOverMass_ / fabs(chargeOverMass_)) *
       (injectionDensity_ / FourPI / numParticlesPerCell_) *
       (1.0 / grid_->getInvVOL());
 
   // --- Subcell grid ---
-  param->dxPerPcl = gridSpacingX_ / numPclPerCellX_;
-  param->dyPerPcl = gridSpacingY_ / numPclPerCellY_;
-  param->dzPerPcl = gridSpacingZ_ / numPclPerCellZ_;
-  param->numPclPerCellX = numPclPerCellX_;
-  param->numPclPerCellY = numPclPerCellY_;
-  param->numPclPerCellZ = numPclPerCellZ_;
-  param->numParticlesPerCell = numParticlesPerCell_;
+  param.dxPerPcl = gridSpacingX_ / numPclPerCellX_;
+  param.dyPerPcl = gridSpacingY_ / numPclPerCellY_;
+  param.dzPerPcl = gridSpacingZ_ / numPclPerCellZ_;
+  param.numPclPerCellY = numPclPerCellY_;
+  param.numPclPerCellZ = numPclPerCellZ_;
+  param.numParticlesPerCell = numParticlesPerCell_;
 
   // --- Domain bounds ---
-  param->domainLengthX = domainLengthX_;
-  param->domainLengthY = domainLengthY_;
-  param->domainLengthZ = domainLengthZ_;
+  param.domainLengthX = domainLengthX_;
+  param.domainLengthY = domainLengthY_;
+  param.domainLengthZ = domainLengthZ_;
 
   // --- Global cell indexing (cell corner = global cell * dx; RNG stream) ---
-  param->globalCellOffX = grid_->getCellOffsetX();
-  param->globalCellOffY = grid_->getCellOffsetY();
-  param->globalCellOffZ = grid_->getCellOffsetZ();
-  param->globalNumCellsY = col_->getNyc();
-  param->globalNumCellsZ = col_->getNzc();
+  param.globalCellOffX = grid_->getCellOffsetX();
+  param.globalCellOffY = grid_->getCellOffsetY();
+  param.globalCellOffZ = grid_->getCellOffsetZ();
+  param.globalNumCellsY = col_->getNyc();
+  param.globalNumCellsZ = col_->getNzc();
 
-  param->gridDx = gridSpacingX_;
-  param->gridDy = gridSpacingY_;
-  param->gridDz = gridSpacingZ_;
-
-  // --- Face ranges (same narrowing logic as computeInjectionCountImpl) ---
-  const int nxc = numCellsX_;
-  const int nyc = numCellsY_;
-  const int nzc = numCellsZ_;
-  const int numLayers = 3;
-
-  const int upXstart = nxc - 1 - numLayers;
-  const int upYstart = nyc - 1 - numLayers;
-  const int upZstart = nzc - 1 - numLayers;
-
-  int xbeg = 1, xend = nxc - 2;
-  int ybeg = 1, yend = nyc - 2;
-  int zbeg = 1, zend = nzc - 2;
-
-  auto setFace = [&](int faceIdx, int ixB, int ixE, int iyB, int iyE, int izB,
-                     int izE, bool active) {
-    param->faces[faceIdx].ixBeg = ixB;
-    param->faces[faceIdx].ixEnd = ixE;
-    param->faces[faceIdx].iyBeg = iyB;
-    param->faces[faceIdx].iyEnd = iyE;
-    param->faces[faceIdx].izBeg = izB;
-    param->faces[faceIdx].izEnd = izE;
-    param->faces[faceIdx].nY = iyE - iyB + 1;
-    param->faces[faceIdx].nZ = izE - izB + 1;
-    param->faces[faceIdx].nCells = active ? (ixE - ixB + 1) *
-                                                param->faces[faceIdx].nY *
-                                                param->faces[faceIdx].nZ
-                                          : 0;
-    param->faces[faceIdx].active = active;
-  };
-
-  // Xleft (face 0)
-  setFace(0, 1, numLayers, ybeg, yend, zbeg, zend, repopXleft);
-  if (repopXleft)
-    xbeg += numLayers;
-  // Xrght (face 1)
-  setFace(1, upXstart, xend, ybeg, yend, zbeg, zend, repopXrght);
-  if (repopXrght)
-    xend -= numLayers;
-  // Yleft (face 2)
-  setFace(2, xbeg, xend, 1, numLayers, zbeg, zend, repopYleft);
-  if (repopYleft)
-    ybeg += numLayers;
-  // Yrght (face 3)
-  setFace(3, xbeg, xend, upYstart, yend, zbeg, zend, repopYrght);
-  if (repopYrght)
-    yend -= numLayers;
-  // Zleft (face 4)
-  setFace(4, xbeg, xend, ybeg, yend, 1, numLayers, repopZleft);
-  // Zrght (face 5)
-  setFace(5, xbeg, xend, ybeg, yend, upZstart, zend, repopZrght);
-
-  // Cumulative particle offsets
-  int total = 0;
-  for (int faceIdx = 0; faceIdx < 6; faceIdx++) {
-    param->pclOffset[faceIdx] = total;
-    total += param->faces[faceIdx].nCells * numParticlesPerCell_;
-  }
-  assert_eq(total, cachedInjectionCount_);
-  param->totalInjected = total;
-  param->enabled = true;
+  param.gridDx = gridSpacingX_;
+  param.gridDy = gridSpacingY_;
+  param.gridDz = gridSpacingZ_;
+  return param;
 }

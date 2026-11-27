@@ -75,12 +75,11 @@ public:
    * The borrowed pointers must come from `c_Solver`:
    *   - `pclsHostPtr->getX()/Y()/Z()/U()/V()/W()/Q()` device pointers
    *   - `fieldForPclsCUDA`: packed mover field buffer (B in components 0..2)
-   *   - `gridDevicePtr`:    device-resident `grid3DCUDA`
    *   - `cellStartOffsetsCUDA`, `cellCountsCUDA`: from the per-species
    *      `CellSorter`. Particles must already be cell-sorted.
    */
   void launch(particleArrayCUDA* pclsHostPtr, cudaFieldType* fieldForPclsCUDA,
-              const grid3DCUDA* gridDevicePtr, const int* cellStartOffsetsCUDA,
+              const grid3DCUDA& grid, const int* cellStartOffsetsCUDA,
               const int* cellCountsCUDA, int species, cudaStream_t stream);
 
   /** The description of the records file of the spectra
@@ -132,7 +131,7 @@ __global__ void macrocellSpectraKernel(
     macrocell::MacrocellGeometry geometry, int slices,
     // Field & grid
     const cudaFieldType* __restrict__ fieldForPcls,
-    const grid3DCUDA* __restrict__ grid,
+    const KERNEL_CONSTANT grid3DCUDA grid,
     // Histogram parameters
     macrocellSpectra::macrocellHistType* __restrict__ histOut, // [M * bins]
     cudaCommonType vmax);

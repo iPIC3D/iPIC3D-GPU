@@ -18,28 +18,7 @@
 // [num_to_sort .. nop) is copied as-is by the scatter kernel.
 
 #include "cellSortBuffers.cuh"
-#include <cmath>
 #include <cstdio>
-#include <vector>
-
-// ======= Cell index helper =======
-
-/**
- * @brief Map one particle position to the flattened guarded-cell index.
- *
- * Delegates to `grid3DCUDA::get_safe_cell()` so the cell classification stays
- * aligned with the mover and moment kernels, including the NaN-safe clamping
- * path used before `floor()`. The linearization is
- * `cx + cy * nxc + cz * nxc * nyc` with x as the fastest-varying index.
- */
-__device__ __forceinline__ int compute_cell_idx(cudaPclType_X xp,
-                                                cudaPclType_Y yp,
-                                                cudaPclType_Z zp,
-                                                const grid3DCUDA* g) {
-  int cx, cy, cz;
-  g->get_safe_cell(xp, yp, zp, cx, cy, cz);
-  return cx + cy * g->nxc + cz * g->nxc * g->nyc;
-}
 
 // ======= Warp-aggregated histogram helper =======
 
@@ -83,7 +62,8 @@ static constexpr int SORT_BLOCK_SIZE = 256;
 __global__ void cell_sort_histogram_small_kernel(
     const cudaPclType_X* __restrict__ x, const cudaPclType_Y* __restrict__ y,
     const cudaPclType_Z* __restrict__ z, int* __restrict__ cell_counts,
-    const grid3DCUDA* __restrict__ grid, int num_cells, uint32_t num_to_sort) {
+    const KERNEL_CONSTANT grid3DCUDA grid, int num_cells,
+    uint32_t num_to_sort) {
   extern __shared__ int shmem_hist[];
 
   const size_t stride = size_t(gridDim.x) * blockDim.x;
@@ -96,7 +76,7 @@ __global__ void cell_sort_histogram_small_kernel(
   // Grid-stride loop over particles to sort
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < num_to_sort;
        tid += stride) {
-    int cell = compute_cell_idx(x[tid], y[tid], z[tid], grid);
+    int cell = grid.get_safe_cell_index(x[tid], y[tid], z[tid]);
     warp_aggregated_atomic_inc(shmem_hist, cell);
   }
   __syncthreads();
@@ -113,12 +93,12 @@ __global__ void cell_sort_histogram_small_kernel(
 __global__ void cell_sort_histogram_warp_agg_kernel(
     const cudaPclType_X* __restrict__ x, const cudaPclType_Y* __restrict__ y,
     const cudaPclType_Z* __restrict__ z, int* __restrict__ cell_counts,
-    const grid3DCUDA* __restrict__ grid, uint32_t num_to_sort) {
+    const KERNEL_CONSTANT grid3DCUDA grid, uint32_t num_to_sort) {
   const size_t stride = size_t(gridDim.x) * blockDim.x;
 
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < num_to_sort;
        tid += stride) {
-    int cell = compute_cell_idx(x[tid], y[tid], z[tid], grid);
+    int cell = grid.get_safe_cell_index(x[tid], y[tid], z[tid]);
     warp_aggregated_atomic_inc(cell_counts, cell);
   }
 }
@@ -129,7 +109,7 @@ __global__ void cell_sort_histogram_warp_agg_kernel(
 __host__ inline void
 launch_cell_sort_histogram(const cudaPclType_X* x, const cudaPclType_Y* y,
                            const cudaPclType_Z* z, int* cell_counts,
-                           const grid3DCUDA* deviceGrid, int num_cells,
+                           const grid3DCUDA& grid, int num_cells,
                            uint32_t num_to_sort, cudaStream_t stream) {
   if (num_to_sort == 0)
     return;
@@ -138,11 +118,11 @@ launch_cell_sort_histogram(const cudaPclType_X* x, const cudaPclType_Y* y,
   if (num_cells <= SORT_HISTOGRAM_SHMEM_LIMIT) {
     const size_t shmem = num_cells * sizeof(int);
     cell_sort_histogram_small_kernel<<<blocks, SORT_BLOCK_SIZE, shmem,
-                                       stream>>>(
-        x, y, z, cell_counts, deviceGrid, num_cells, num_to_sort);
+                                       stream>>>(x, y, z, cell_counts, grid,
+                                                 num_cells, num_to_sort);
   } else {
     cell_sort_histogram_warp_agg_kernel<<<blocks, SORT_BLOCK_SIZE, 0, stream>>>(
-        x, y, z, cell_counts, deviceGrid, num_to_sort);
+        x, y, z, cell_counts, grid, num_to_sort);
   }
 }
 
@@ -410,13 +390,13 @@ __global__ void cell_sort_sorted_indices_kernel(
     unsigned int* __restrict__ sorted_indices,
     int* __restrict__ cell_offsets, // mutated by atomics
     const cudaPclType_X* __restrict__ x, const cudaPclType_Y* __restrict__ y,
-    const cudaPclType_Z* __restrict__ z, const grid3DCUDA* __restrict__ grid,
+    const cudaPclType_Z* __restrict__ z, const KERNEL_CONSTANT grid3DCUDA grid,
     uint32_t num_to_sort) {
   const size_t stride = size_t(gridDim.x) * blockDim.x;
 
   for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < num_to_sort;
        tid += stride) {
-    int cell = compute_cell_idx(x[tid], y[tid], z[tid], grid);
+    int cell = grid.get_safe_cell_index(x[tid], y[tid], z[tid]);
     int dest = atomicAdd(&cell_offsets[cell], 1);
     sorted_indices[tid] = static_cast<unsigned int>(dest);
   }
@@ -425,15 +405,16 @@ __global__ void cell_sort_sorted_indices_kernel(
 /**
  * @brief Launch Stage 3 to fill the permutation used by the scatter pass.
  */
-__host__ inline void launch_cell_sort_sorted_indices(
-    unsigned int* sorted_indices, int* cell_offsets, const cudaPclType_X* x,
-    const cudaPclType_Y* y, const cudaPclType_Z* z,
-    const grid3DCUDA* deviceGrid, uint32_t num_to_sort, cudaStream_t stream) {
+__host__ inline void
+launch_cell_sort_sorted_indices(unsigned int* sorted_indices, int* cell_offsets,
+                                const cudaPclType_X* x, const cudaPclType_Y* y,
+                                const cudaPclType_Z* z, const grid3DCUDA& grid,
+                                uint32_t num_to_sort, cudaStream_t stream) {
   if (num_to_sort == 0)
     return;
   const int blocks = getGridSize(num_to_sort, (uint32_t)SORT_BLOCK_SIZE);
   cell_sort_sorted_indices_kernel<<<blocks, SORT_BLOCK_SIZE, 0, stream>>>(
-      sorted_indices, cell_offsets, x, y, z, deviceGrid, num_to_sort);
+      sorted_indices, cell_offsets, x, y, z, grid, num_to_sort);
 }
 
 // ======= Stage 4: Scatter =======
@@ -706,12 +687,7 @@ __host__ int CellSorter::diagnosticEnqueueAllocationMetadataMutationMask(
 
 #endif // IPIC3D_GPU_CYCLE_DIAGNOSTICS
 
-/**
- * @brief Host phase A: ensure all temporary sort buffers are large enough.
- *
- * This prepares the reusable storage needed by GPU stages 1-4 but does not
- * launch any kernels.
- */
+/** Host phase A (see cellSortBuffers.cuh). */
 __host__ void CellSorter::prepareBuffers(particleArrayCUDA* hostPtr,
                                          cudaStream_t s) {
   if (!initialized)
@@ -732,11 +708,9 @@ __host__ void CellSorter::prepareBuffers(particleArrayCUDA* hostPtr,
 
 // ======= CellSorter staging =======
 
-/**
- * @brief Host phase B: enqueue GPU stages 1-3 without waiting for Stage 4.
- */
+/** Host phase B (see cellSortBuffers.cuh). */
 __host__ void CellSorter::enqueueSortAsync(particleArrayCUDA* hostPtr,
-                                           const grid3DCUDA* deviceGrid,
+                                           const grid3DCUDA& grid,
                                            uint32_t num_to_sort,
                                            cudaStream_t s) {
   if (!initialized)
@@ -792,8 +766,8 @@ __host__ void CellSorter::enqueueSortAsync(particleArrayCUDA* hostPtr,
 
   // ======= Stage 1: Histogram =======
   buffers.zero_async(s);
-  launch_cell_sort_histogram(soa->x, soa->y, soa->z, buffers.cell_counts,
-                             deviceGrid, num_cells, num_to_sort, s);
+  launch_cell_sort_histogram(soa->x, soa->y, soa->z, buffers.cell_counts, grid,
+                             num_cells, num_to_sort, s);
 
   // ======= Stage 2: Prefix sum =======
   launch_cell_sort_prefix_sum(buffers.cell_offsets, buffers.cell_counts,
@@ -810,15 +784,12 @@ __host__ void CellSorter::enqueueSortAsync(particleArrayCUDA* hostPtr,
 
   // ======= Stage 3: Sorted indices =======
   launch_cell_sort_sorted_indices(buffers.sorted_indices, buffers.cell_offsets,
-                                  soa->x, soa->y, soa->z, deviceGrid,
-                                  num_to_sort, s);
+                                  soa->x, soa->y, soa->z, grid, num_to_sort, s);
 }
 
 // ======= CellSorter completion =======
 
-/**
- * @brief Host phase C: synchronize stages 1-3, then execute Stage 4.
- */
+/** Host phase C (see cellSortBuffers.cuh). */
 __host__ void CellSorter::finishSort(cudaStream_t s) {
   if (!sort_pending)
     return;
@@ -896,13 +867,11 @@ __host__ void CellSorter::finishSort(cudaStream_t s) {
 
 // ======= CellSorter convenience wrapper =======
 
-/**
- * @brief Execute host phases A-C in sequence for a complete sort.
- */
+/** Host phases A-C in sequence (see cellSortBuffers.cuh). */
 __host__ void CellSorter::sort(particleArrayCUDA* hostPtr,
-                               const grid3DCUDA* deviceGrid,
-                               uint32_t num_to_sort, cudaStream_t s) {
+                               const grid3DCUDA& grid, uint32_t num_to_sort,
+                               cudaStream_t s) {
   prepareBuffers(hostPtr, s);
-  enqueueSortAsync(hostPtr, deviceGrid, num_to_sort, s);
+  enqueueSortAsync(hostPtr, grid, num_to_sort, s);
   finishSort(s);
 }

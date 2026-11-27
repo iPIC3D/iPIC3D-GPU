@@ -141,16 +141,6 @@ Grid3DCU::Grid3DCU(CollectiveIO* col, VirtualTopology3D* vct) : _vct(*vct) {
 
 // set derived convenience parameters
 void Grid3DCU::init_derived_parameters() {
-  epsilon = (nxc + nyc + nzc) * 1e-15;
-  nxc_minus_epsilon = nxc - epsilon;
-  nyc_minus_epsilon = nyc - epsilon;
-  nzc_minus_epsilon = nzc - epsilon;
-  assert_lt(int(floor(nxc_minus_epsilon)), nxc);
-  assert_lt(int(floor(nyc_minus_epsilon)), nyc);
-  assert_lt(int(floor(nzc_minus_epsilon)), nzc);
-  xStart_g = xStart - dx;
-  yStart_g = yStart - dy;
-  zStart_g = zStart - dz;
   // calculation conveniences
   //
   VOL = dx * dy * dz;
@@ -162,9 +152,6 @@ void Grid3DCU::init_derived_parameters() {
   nxn = nxc + 1;
   nyn = nyc + 1;
   nzn = nzc + 1;
-  cxlast = nxc - 1;
-  cylast = nyc - 1;
-  czlast = nzc - 1;
 
   // arrays allocation: nodes ---> the first node has index 1, the last has
   // index nxn-2!

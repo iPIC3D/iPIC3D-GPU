@@ -21,16 +21,11 @@ int main(int argc, char** argv) {
   using namespace profileKernels;
   KernelProfile profile(argc, argv, "momentKernelNew", Order::Shuffled,
                         "--tail", 0);
-  const cudaStream_t stream = profile.stream();
   const std::uint32_t n = profile.particleCount();
   const std::uint32_t tail = std::max<std::uint32_t>(
       1, (std::uint32_t)std::llround(profile.options().tail * n));
   const std::uint32_t stayed = n - tail;
 
-  // the kernel reads no departure flag
-  momentParameter* param =
-      newHostPinnedObject<momentParameter>(profile.pclsArrayDevice(), nullptr);
-  momentParameter* paramDevice = copyToDevice(param, stream);
   cudaMomentType* moments = profile.moments();
 
   char fraction[32];
@@ -40,12 +35,9 @@ int main(int argc, char** argv) {
       [&] { profile.clearMoments(); },
       [&] {
         momentKernelNew<<<getGridSize((int)tail, SMALL_BLOCK_SIZE),
-                          SMALL_BLOCK_SIZE, 0, stream>>>(
-            paramDevice, profile.grid3DDevice(), moments, (int)stayed);
+                          SMALL_BLOCK_SIZE, 0, profile.stream()>>>(
+            profile.pclsArrayDevice(), profile.gridCUDA(), moments,
+            (int)stayed);
       });
-  const bool pass = profile.checkDepositedCharge(stayed, tail);
-
-  cudaFree(paramDevice);
-  deleteHostPinnedObject(param);
-  return profile.finish(pass);
+  return profile.finish(profile.checkDepositedCharge(stayed, tail));
 }

@@ -12,8 +12,6 @@
 
 using commonType = cudaParticleType;
 
-__device__ constexpr bool cap_velocity() { return false; }
-
 /** Safety cap of the particle speed, |v| < kVelocityCapOverC c. */
 constexpr commonType kVelocityCapOverC = 0.9999;
 
@@ -31,11 +29,11 @@ constexpr int kMaxSubcycles = 1024;
  * The particle state itself is left untouched; only the departure metadata is
  * updated so later compaction and communication stages can remove it safely.
  *
- * @param moverParam Device-side mover parameter bundle.
+ * @param moverParam The mover parameters of the species.
  * @param pidx Particle index in the species SoA buffer.
  */
-__device__ __forceinline__ void markForDeletion(moverParameter* moverParam,
-                                                uint32_t pidx) {
+__device__ __forceinline__ void
+markForDeletion(const moverParameter* moverParam, uint32_t pidx) {
   moverParam->departureArray->getArray()[pidx].dest =
       departureArrayElementType::DELETE;
   moverParam->departureArray->getArray()[pidx].hashedId =
@@ -57,13 +55,13 @@ __device__ __forceinline__ void markForDeletion(moverParameter* moverParam,
  * @param wfinal In-out z-velocity component.
  * @param v2max Square of the cap, in the units of the components
  *        ((kVelocityCapOverC c)^2 for physical velocities).
- * @param moverParam Device-side mover parameter bundle.
+ * @param moverParam The mover parameters of the species.
  * @param pidx Particle index in the species SoA buffer.
  * @return True if the particle was deleted and the caller should return.
  */
 __device__ __forceinline__ bool
 capVelocityOrDelete(commonType& ufinal, commonType& vfinal, commonType& wfinal,
-                    commonType v2max, moverParameter* moverParam,
+                    commonType v2max, const moverParameter* moverParam,
                     uint32_t pidx) {
   const commonType v2 = ufinal * ufinal + vfinal * vfinal + wfinal * wfinal;
   if (!(v2 < v2max)) {
@@ -86,7 +84,7 @@ capVelocityOrDelete(commonType& ufinal, commonType& vfinal, commonType& wfinal,
  * components each).
  */
 struct GridFields {
-  grid3DCUDA* grid;
+  const grid3DCUDA* grid;
   cudaTypeArray1<cudaFieldType> buffer;
 
   /** f = {Bx, By, Bz, Ex, Ey, Ez} at (x, y, z). */
@@ -107,31 +105,13 @@ struct GridFields {
 
 // ======= End inline mover helpers =======
 
-/**
- * @brief Classify a moved particle and update its departure metadata.
- *
- * @param xpcl Particle x position after the mover.
- * @param ypcl Particle y position after the mover.
- * @param zpcl Particle z position after the mover.
- * @param xstart Particle x position before the mover.
- * @param ystart Particle y position before the mover.
- * @param zstart Particle z position before the mover.
- * @param pclsArray Device-side particle SoA container.
- * @param pidx Particle index in the species SoA buffer.
- * @param moverParam Device-side mover parameter bundle.
- * @param departureArray Device-side departure metadata array.
- * @param grid Device-side grid descriptor.
- * @param hashedSumArray Device-side hashed-sum buckets for departure
- * compaction.
- */
-__device__ void prepareDepartureArray(commonType xpcl, commonType ypcl,
-                                      commonType zpcl, commonType xstart,
-                                      commonType ystart, commonType zstart,
-                                      particleArrayCUDA* pclsArray,
-                                      uint32_t pidx, moverParameter* moverParam,
-                                      departureArrayType* departureArray,
-                                      grid3DCUDA* grid,
-                                      hashedSum* hashedSumArray);
+/** Classify a moved particle (see the departure classification below). */
+static __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl,
+                                             commonType zpcl, commonType xstart,
+                                             commonType ystart,
+                                             commonType zstart, uint32_t pidx,
+                                             const moverParameter* moverParam,
+                                             const grid3DCUDA* grid);
 
 /** How the pushes of one particle over the step ended. */
 enum class PushEnd : int {
@@ -153,7 +133,7 @@ enum class PushEnd : int {
  *        particle.
  */
 template <bool kWalls, typename Push>
-__device__ __forceinline__ PushEnd pushToWalls(moverParameter* moverParam,
+__device__ __forceinline__ PushEnd pushToWalls(const moverParameter* moverParam,
                                                MoverState& s, commonType h,
                                                commonType speed,
                                                const Push& push) {
@@ -179,10 +159,9 @@ __device__ __forceinline__ PushEnd pushToWalls(moverParameter* moverParam,
  * @param end Output: the state after the push.
  */
 template <bool kWalls>
-__device__ __forceinline__ PushEnd pushStandard(moverParameter* moverParam,
-                                                const GridFields& fields,
-                                                uint32_t pidx,
-                                                MoverState& end) {
+__device__ __forceinline__ PushEnd
+pushStandard(const moverParameter* moverParam, const GridFields& fields,
+             uint32_t pidx, MoverState& end) {
   auto pclsArray = moverParam->pclsArray;
   end = {{pclsArray->getX()[pidx], pclsArray->getY()[pidx],
           pclsArray->getZ()[pidx]},
@@ -219,10 +198,9 @@ __device__ __forceinline__ PushEnd pushStandard(moverParameter* moverParam,
  * @param cur Output: the state after the push.
  */
 template <bool kWalls>
-__device__ __forceinline__ PushEnd pushSubcycled(moverParameter* moverParam,
-                                                 const GridFields& fields,
-                                                 uint32_t pidx,
-                                                 MoverState& cur) {
+__device__ __forceinline__ PushEnd
+pushSubcycled(const moverParameter* moverParam, const GridFields& fields,
+              uint32_t pidx, MoverState& cur) {
   // Load particle state from SoA and keep it in registers across all
   // subcycles.  The push works in units of c: cur.v holds beta = v / c
   // (gamma = 1 / sqrt(1 - beta^2), momentum u = gamma beta), and positions
@@ -312,20 +290,30 @@ struct WallPush {
   PushEnd how;
 };
 
+// pushAgainWithWalls is not inlined where the kernels pass it the address of
+// their parameters for free; elsewhere a call would copy the parameters to
+// local memory in every thread (see KERNEL_CONSTANT).
+#if KERNEL_CONSTANT_BY_ADDRESS
+#define WALL_PUSH_INLINING __noinline__
+#else
+#define WALL_PUSH_INLINING __forceinline__
+#endif
+
 /**
  * @brief The push of a particle whose push ended beyond a reflecting wall and
  * that the wall list has no room for: the whole push again, from its SoA
  * state, with the walls.
  *
- * Not inlined and without particle state in its arguments: a mover kernel is
- * at its register bound, and the particles that reach a wall must keep
- * nothing alive, in registers or on the stack, during the push of all the
- * others.  Internal linkage: the function is compiled with each kernel that
- * calls it, under that kernel's register bound.
+ * Not inlined where KERNEL_CONSTANT_BY_ADDRESS (WALL_PUSH_INLINING), and
+ * without particle state in its arguments: a mover kernel is at its register
+ * bound, and the particles that reach a wall must keep nothing alive, in
+ * registers or on the stack, during the push of all the others.  Internal
+ * linkage: the function is compiled with each kernel that calls it, under that
+ * kernel's register bound.
  */
 template <bool kRelativistic>
-static __device__ __noinline__ WallPush pushAgainWithWalls(
-    moverParameter* moverParam, GridFields fields, uint32_t pidx) {
+static __device__ WALL_PUSH_INLINING WallPush pushAgainWithWalls(
+    const moverParameter* moverParam, GridFields fields, uint32_t pidx) {
   WallPush w;
   if constexpr (kRelativistic)
     w.how = pushSubcycled<true>(moverParam, fields, pidx, w.end);
@@ -348,30 +336,30 @@ static __device__ __noinline__ WallPush pushAgainWithWalls(
  */
 template <bool kRelativistic, bool kWallPass>
 __device__ __forceinline__ void
-moveParticle(moverParameter* moverParam,
-             cudaTypeArray1<cudaFieldType> fieldForPcls, grid3DCUDA* grid) {
+moveParticle(const moverParameter* moverParam,
+             cudaTypeArray1<cudaFieldType> fieldForPcls,
+             const grid3DCUDA* grid) {
   const uint32_t thread = blockIdx.x * blockDim.x + threadIdx.x;
   auto pclsArray = moverParam->pclsArray;
   uint32_t pidx = thread;
   if constexpr (kWallPass) {
     // the thread's entry of the wall list
     const auto wallList = moverParam->wallList;
-    if (thread >= moverParam->wallCount || thread >= wallList->getSize())
+    if (thread >= moverParam->counters->wallCount ||
+        thread >= wallList->getSize())
       return;
     pidx = wallList->getArray()[thread];
   } else {
     if (pidx >= pclsArray->getNOP())
       return;
 
-    // Particles already deleted (e.g. during merging) are not moved: the
-    // position is both start and end
-    if (moverParam->departureArray->getArray()[pidx].dest != 0) {
-      const commonType x = pclsArray->getX()[pidx];
-      const commonType y = pclsArray->getY()[pidx];
-      const commonType z = pclsArray->getZ()[pidx];
-      prepareDepartureArray(x, y, z, x, y, z, pclsArray, pidx, moverParam,
-                            moverParam->departureArray, grid,
-                            moverParam->hashedSumArray);
+    // Particles already deleted (e.g. during merging) are not moved, only
+    // counted in the hashed sum of their departure
+    departureArrayElementType& departure =
+        moverParam->departureArray->getArray()[pidx];
+    if (departure.dest != 0) {
+      departure.hashedId =
+          moverParam->hashedSumArray[departure.dest - 1].add(pidx);
       return;
     }
   }
@@ -386,7 +374,7 @@ moveParticle(moverParameter* moverParam,
   if constexpr (!kWallPass) {
     if (how == PushEnd::Wall) {
       const auto wallList = moverParam->wallList;
-      const uint32_t slot = atomicAdd(&moverParam->wallCount, 1u);
+      const uint32_t slot = atomicAdd(&moverParam->counters->wallCount, 1u);
       if (slot < wallList->getSize()) {
         wallList->getArray()[slot] = pidx;
         return;
@@ -419,37 +407,39 @@ moveParticle(moverParameter* moverParam,
 
   // prepare the departure array
   prepareDepartureArray(end.x[0], end.x[1], end.x[2], xstart, ystart, zstart,
-                        pclsArray, pidx, moverParam, moverParam->departureArray,
-                        grid, moverParam->hashedSumArray);
+                        pidx, moverParam, grid);
 }
 
 /** The standard mover (see moverKernel.cuh). */
 __global__ void MOVER_LAUNCH_BOUNDS
-moverKernel(moverParameter* moverParam,
-            cudaTypeArray1<cudaFieldType> fieldForPcls, grid3DCUDA* grid) {
-  moveParticle<false, false>(moverParam, fieldForPcls, grid);
+moverKernel(const KERNEL_CONSTANT moverParameter moverParam,
+            cudaTypeArray1<cudaFieldType> fieldForPcls,
+            const KERNEL_CONSTANT grid3DCUDA grid) {
+  moveParticle<false, false>(&moverParam, fieldForPcls, &grid);
 }
 
 /** The subcycled relativistic mover (see moverKernel.cuh). */
-__global__ void MOVER_LAUNCH_BOUNDS moverSubcyclesKernel(
-    moverParameter* moverParam, cudaTypeArray1<cudaFieldType> fieldForPcls,
-    grid3DCUDA* grid) {
-  moveParticle<true, false>(moverParam, fieldForPcls, grid);
+__global__ void MOVER_LAUNCH_BOUNDS
+moverSubcyclesKernel(const KERNEL_CONSTANT moverParameter moverParam,
+                     cudaTypeArray1<cudaFieldType> fieldForPcls,
+                     const KERNEL_CONSTANT grid3DCUDA grid) {
+  moveParticle<true, false>(&moverParam, fieldForPcls, &grid);
 }
 
-/** The wall pass of moverKernel. */
-__global__ void moverWallsKernel(moverParameter* moverParam,
-                                 cudaTypeArray1<cudaFieldType> fieldForPcls,
-                                 grid3DCUDA* grid) {
-  moveParticle<false, true>(moverParam, fieldForPcls, grid);
-}
-
-/** The wall pass of moverSubcyclesKernel. */
+/** The wall pass of moverKernel (see moverKernel.cuh). */
 __global__ void
-moverSubcyclesWallsKernel(moverParameter* moverParam,
+moverWallsKernel(const KERNEL_CONSTANT moverParameter moverParam,
+                 cudaTypeArray1<cudaFieldType> fieldForPcls,
+                 const KERNEL_CONSTANT grid3DCUDA grid) {
+  moveParticle<false, true>(&moverParam, fieldForPcls, &grid);
+}
+
+/** The wall pass of moverSubcyclesKernel (see moverKernel.cuh). */
+__global__ void
+moverSubcyclesWallsKernel(const KERNEL_CONSTANT moverParameter moverParam,
                           cudaTypeArray1<cudaFieldType> fieldForPcls,
-                          grid3DCUDA* grid) {
-  moveParticle<true, true>(moverParam, fieldForPcls, grid);
+                          const KERNEL_CONSTANT grid3DCUDA grid) {
+  moveParticle<true, true>(&moverParam, fieldForPcls, &grid);
 }
 
 // ======= Boundary classification helpers =======
@@ -464,14 +454,12 @@ moverSubcyclesWallsKernel(moverParameter* moverParam,
  * @param xpcl Particle x position after the mover.
  * @param ypcl Particle y position after the mover.
  * @param zpcl Particle z position after the mover.
- * @param moverParam Device-side mover parameter bundle.
- * @param grid Device-side grid descriptor.
+ * @param moverParam The mover parameters of the species.
  * @return `DELETE` when the particle should be removed, otherwise 0.
  */
-__device__ uint32_t deleteRepopulateInjection(commonType xpcl, commonType ypcl,
-                                              commonType zpcl,
-                                              moverParameter* moverParam,
-                                              grid3DCUDA* grid) {
+static __device__ uint32_t
+deleteRepopulateInjection(commonType xpcl, commonType ypcl, commonType zpcl,
+                          const moverParameter* moverParam) {
   if (!moverParam->doRepopulateInjection)
     return 0;
 
@@ -498,33 +486,29 @@ __device__ uint32_t deleteRepopulateInjection(commonType xpcl, commonType ypcl,
  * @param pos Position of the new particle.
  * @param vel Velocity of the new particle.
  * @param charge Charge of the new particle.
- * @param pclsArray Device-side particle SoA container.
- * @param moverParam Device-side mover parameter bundle.
- * @param departureArray Device-side departure metadata array.
- * @param grid Device-side grid descriptor.
- * @param hashedSumArray Device-side hashed-sum buckets for departure
- * compaction.
+ * @param moverParam The mover parameters of the species.
+ * @param grid The grid descriptor.
  * @return False when the append tail is full (the run then aborts).
  */
-__device__ bool appendOpenBCCopy(const commonType pos[3],
-                                 const commonType vel[3], commonType charge,
-                                 particleArrayCUDA* pclsArray,
-                                 moverParameter* moverParam,
-                                 departureArrayType* departureArray,
-                                 grid3DCUDA* grid, hashedSum* hashedSumArray) {
+static __device__ bool appendOpenBCCopy(const commonType pos[3],
+                                        const commonType vel[3],
+                                        commonType charge,
+                                        const moverParameter* moverParam,
+                                        const grid3DCUDA* grid) {
+  particleArrayCUDA* const pclsArray = moverParam->pclsArray;
   const uint32_t appendBase = pclsArray->getNOP();
   const uint32_t capacity = pclsArray->getCapacity();
   const uint32_t appendCapacity =
       appendBase < capacity ? capacity - appendBase : 0u;
   const uint32_t appendOffset =
-      atomicAdd(&moverParam->openBCAppendCounters.accepted, 1u);
+      atomicAdd(&moverParam->counters->openBCAppendCounters.accepted, 1u);
 
   if (appendOffset >= appendCapacity) {
     // Keep the final accepted count equal to the dense initialized
     // append prefix. The rejected ticket is necessarily outside that
     // prefix, so rollback cannot make a valid slot available twice.
-    atomicSub(&moverParam->openBCAppendCounters.accepted, 1u);
-    atomicAdd(&moverParam->openBCAppendCounters.rejected, 1u);
+    atomicSub(&moverParam->counters->openBCAppendCounters.accepted, 1u);
+    atomicAdd(&moverParam->counters->openBCAppendCounters.rejected, 1u);
     return false;
   }
 
@@ -557,12 +541,12 @@ __device__ bool appendOpenBCCopy(const commonType pos[3],
     element.dest = departureArrayElementType::STAY;
 
   if (element.dest != 0) {
-    element.hashedId = hashedSumArray[element.dest - 1].add(index);
+    element.hashedId = moverParam->hashedSumArray[element.dest - 1].add(index);
   } else {
     element.hashedId = 0;
   }
 
-  departureArray->getArray()[index] = element;
+  moverParam->departureArray->getArray()[index] = element;
   return true;
 }
 
@@ -570,12 +554,13 @@ __device__ bool appendOpenBCCopy(const commonType pos[3],
  * @brief Delete particles beyond an open outflow face, and append the
  * particles that enter through it.
  *
- * Beyond each open outflow face the plasma is the band of the last 3 cells
- * shifted 3 cells outward (zero-gradient continuation), and its particles move
- * as their sources in the band.  A particle that crosses the inner edge of the
- * band inward during the push therefore re-enters through the face: a copy
- * with its velocity and charge is appended at its end position shifted 3
- * cells outward, and pushed from the next cycle.  Beyond an edge or a corner
+ * Beyond each open outflow face the plasma is the band of its particle layer
+ * (BCparticles::kOpenFaceLayers cells, openBoundary) shifted outward by its
+ * width (zero-gradient continuation), and its particles move as their sources
+ * in the band.  A particle that crosses the inner edge of the band inward
+ * during the push therefore re-enters through the face: a copy with its
+ * velocity and charge is appended at its end position shifted outward by the
+ * band width, and pushed from the next cycle.  Beyond an edge or a corner
  * of the domain the plasma is the band shifted across each of its faces, so a
  * particle that crosses the band edges of several faces gives one copy for
  * each set of them.  A copy is kept if it lies inside the domain and outside
@@ -587,21 +572,15 @@ __device__ bool appendOpenBCCopy(const commonType pos[3],
  * @param xstart Particle x position before the mover.
  * @param ystart Particle y position before the mover.
  * @param zstart Particle z position before the mover.
- * @param pclsArray Device-side particle SoA container.
  * @param pidx Particle index in the species SoA buffer.
- * @param moverParam Device-side mover parameter bundle.
- * @param departureArray Device-side departure metadata array.
- * @param grid Device-side grid descriptor.
- * @param hashedSumArray Device-side hashed-sum buckets for departure
- * compaction.
+ * @param moverParam The mover parameters of the species.
+ * @param grid The grid descriptor.
  * @return `DELETE` for a particle beyond an open outflow face, otherwise 0.
  */
-__device__ uint32_t deleteAppendOpenBCOutflow(
+static __device__ uint32_t deleteAppendOpenBCOutflow(
     commonType xpcl, commonType ypcl, commonType zpcl, commonType xstart,
-    commonType ystart, commonType zstart, particleArrayCUDA* pclsArray,
-    uint32_t pidx, moverParameter* moverParam,
-    departureArrayType* departureArray, grid3DCUDA* grid,
-    hashedSum* hashedSumArray) {
+    commonType ystart, commonType zstart, uint32_t pidx,
+    const moverParameter* moverParam, const grid3DCUDA* grid) {
 
   if (!moverParam->doOpenBC)
     return 0;
@@ -646,6 +625,7 @@ __device__ uint32_t deleteAppendOpenBCOutflow(
     return 0;
 
   // Velocity (already the new one) and charge from SoA for the copies
+  particleArrayCUDA* const pclsArray = moverParam->pclsArray;
   const commonType vel[3] = {pclsArray->getU()[pidx], pclsArray->getV()[pidx],
                              pclsArray->getW()[pidx]};
   const commonType charge = pclsArray->getQ()[pidx];
@@ -660,12 +640,10 @@ __device__ uint32_t deleteAppendOpenBCOutflow(
     if (!(newPos[0] > delBdry[0] && newPos[0] < delBdry[1] &&
           newPos[1] > delBdry[2] && newPos[1] < delBdry[3] &&
           newPos[2] > delBdry[4] && newPos[2] < delBdry[5]) ||
-        deleteRepopulateInjection(newPos[0], newPos[1], newPos[2], moverParam,
-                                  grid))
+        deleteRepopulateInjection(newPos[0], newPos[1], newPos[2], moverParam))
       continue;
 
-    if (!appendOpenBCCopy(newPos, vel, charge, pclsArray, moverParam,
-                          departureArray, grid, hashedSumArray))
+    if (!appendOpenBCCopy(newPos, vel, charge, moverParam, grid))
       return departureArrayElementType::DELETE;
   }
 
@@ -681,22 +659,19 @@ __device__ uint32_t deleteAppendOpenBCOutflow(
  * @param xpcl Particle x position after the mover.
  * @param ypcl Particle y position after the mover.
  * @param zpcl Particle z position after the mover.
- * @param moverParam Device-side mover parameter bundle.
- * @param grid Device-side grid descriptor.
+ * @param moverParam The mover parameters of the species.
  * @return `PLANET` when the particle is inside the body, otherwise 0.
  */
-__device__ uint32_t deleteInsideSphere(commonType xpcl, commonType ypcl,
-                                       commonType zpcl,
-                                       moverParameter* moverParam,
-                                       grid3DCUDA* grid) {
+static __device__ uint32_t
+deleteInsideSphere(commonType xpcl, commonType ypcl, commonType zpcl,
+                   const moverParameter* moverParam) {
 
   if (moverParam->doSphere == 0)
     return 0;
 
+  const auto& sphereOrigin = moverParam->sphereOrigin;
+  const auto& sphereRadius = moverParam->sphereRadius;
   if (moverParam->doSphere == 1) { // 3D sphere
-    const auto& sphereOrigin = moverParam->sphereOrigin;
-    const auto& sphereRadius = moverParam->sphereRadius;
-
     const auto dx = xpcl - sphereOrigin[0];
     const auto dy = ypcl - sphereOrigin[1];
     const auto dz = zpcl - sphereOrigin[2];
@@ -705,9 +680,6 @@ __device__ uint32_t deleteInsideSphere(commonType xpcl, commonType ypcl,
       return departureArrayElementType::PLANET;
     }
   } else if (moverParam->doSphere == 2) { // 2D sphere
-    const auto& sphereOrigin = moverParam->sphereOrigin;
-    const auto& sphereRadius = moverParam->sphereRadius;
-
     const auto dx = xpcl - sphereOrigin[0];
     const auto dz = zpcl - sphereOrigin[2];
 
@@ -733,40 +705,24 @@ __device__ uint32_t deleteInsideSphere(commonType xpcl, commonType ypcl,
  * @param xstart Particle x position before the mover.
  * @param ystart Particle y position before the mover.
  * @param zstart Particle z position before the mover.
- * @param pclsArray Device-side particle SoA container.
  * @param pidx Particle index in the species SoA buffer.
- * @param moverParam Device-side mover parameter bundle.
- * @param departureArray Device-side departure metadata array.
- * @param grid Device-side grid descriptor.
- * @param hashedSumArray Device-side hashed-sum buckets for departure
- * compaction.
+ * @param moverParam The mover parameters of the species.
+ * @param grid The grid descriptor.
  */
-__device__ void prepareDepartureArray(commonType xpcl, commonType ypcl,
-                                      commonType zpcl, commonType xstart,
-                                      commonType ystart, commonType zstart,
-                                      particleArrayCUDA* pclsArray,
-                                      uint32_t pidx, moverParameter* moverParam,
-                                      departureArrayType* departureArray,
-                                      grid3DCUDA* grid,
-                                      hashedSum* hashedSumArray) {
-
-  if (departureArray->getArray()[pidx].dest != 0) {
-    departureArray->getArray()[pidx].hashedId =
-        hashedSumArray[departureArray->getArray()[pidx].dest - 1].add(pidx);
-
-    return;
-  }
+static __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl,
+                                             commonType zpcl, commonType xstart,
+                                             commonType ystart,
+                                             commonType zstart, uint32_t pidx,
+                                             const moverParameter* moverParam,
+                                             const grid3DCUDA* grid) {
+  departureArrayType* const departureArray = moverParam->departureArray;
+  hashedSum* const hashedSumArray = moverParam->hashedSumArray;
 
   // Safety: NaN positions bypass all comparison-based boundary checks
   // (IEEE 754: NaN < x and NaN > x are both false), so a NaN particle
   // would fall through to STAY and deposit NaN into the moments array.
   if (!isfinite(xpcl) || !isfinite(ypcl) || !isfinite(zpcl)) {
-    departureArrayElementType element;
-    element.dest = departureArrayElementType::DELETE;
-    element.hashedId =
-        hashedSumArray[departureArrayElementType::DELETE_HASHEDSUM_INDEX].add(
-            pidx);
-    departureArray->getArray()[pidx] = element;
+    markForDeletion(moverParam, pidx);
     return;
   }
 
@@ -775,20 +731,18 @@ __device__ void prepareDepartureArray(commonType xpcl, commonType ypcl,
   do {
 
     // OpenBC_outflow
-    element.dest = deleteAppendOpenBCOutflow(
-        xpcl, ypcl, zpcl, xstart, ystart, zstart, pclsArray, pidx, moverParam,
-        departureArray, grid, hashedSumArray);
+    element.dest = deleteAppendOpenBCOutflow(xpcl, ypcl, zpcl, xstart, ystart,
+                                             zstart, pidx, moverParam, grid);
     if (element.dest != 0)
       break;
 
     // INJECT
-    element.dest =
-        deleteRepopulateInjection(xpcl, ypcl, zpcl, moverParam, grid);
+    element.dest = deleteRepopulateInjection(xpcl, ypcl, zpcl, moverParam);
     if (element.dest != 0)
       break;
 
     // sphere
-    element.dest = deleteInsideSphere(xpcl, ypcl, zpcl, moverParam, grid);
+    element.dest = deleteInsideSphere(xpcl, ypcl, zpcl, moverParam);
     if (element.dest != 0)
       break;
 

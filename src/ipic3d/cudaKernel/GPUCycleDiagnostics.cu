@@ -592,13 +592,6 @@ struct CellSortPointerSnapshot {
   int expectFullSort = 0;
 };
 
-__device__ __forceinline__ int diagnosticCellIndex(double x, double y, double z,
-                                                   const grid3DCUDA* grid) {
-  int cx, cy, cz;
-  grid->get_safe_cell(x, y, z, cx, cy, cz);
-  return cx + cy * grid->nxc + cz * grid->nxc * grid->nyc;
-}
-
 __global__ void reduceSortHistogram(const int* counts, int numCells,
                                     CellSortBlockReport* results) {
   __shared__ SortHistogramPartial shared[DIAG_THREADS];
@@ -930,7 +923,8 @@ __global__ void reduceSortBlockPrefixes(const int* blockPrefixes,
 __global__ void reduceSortPermutation(const unsigned int* indices,
                                       const double* x, const double* y,
                                       const double* z, const int* starts,
-                                      const int* counts, const grid3DCUDA* grid,
+                                      const int* counts,
+                                      const KERNEL_CONSTANT grid3DCUDA grid,
                                       int numCells, std::uint32_t numToSort,
                                       CellSortBlockReport* results) {
   __shared__ SortPermutationPartial shared[DIAG_THREADS];
@@ -972,7 +966,7 @@ __global__ void reduceSortPermutation(const unsigned int* indices,
         local.firstNonfiniteZ = pz;
       }
     }
-    const int cell = diagnosticCellIndex(px, py, pz, grid);
+    const int cell = grid.get_safe_cell_index(px, py, pz);
     if (source == local.firstNonfiniteSource)
       local.firstNonfiniteCell = cell;
     if (cell < 0 || cell >= numCells) {
@@ -1067,9 +1061,9 @@ __global__ void reduceSortOccupancy(const std::uint32_t* occupancy,
 
 __global__ void reducePostSortLayout(const double* x, const double* y,
                                      const double* z, const int* starts,
-                                     const int* counts, int numCells,
-                                     std::uint32_t numToSort,
-                                     const grid3DCUDA* grid,
+                                     const int* counts,
+                                     const KERNEL_CONSTANT grid3DCUDA grid,
+                                     int numCells, std::uint32_t numToSort,
                                      CellSortBlockReport* results) {
   __shared__ SortPostPartial shared[DIAG_THREADS];
   SortPostPartial local = emptySortPostPartial();
@@ -1101,7 +1095,7 @@ __global__ void reducePostSortLayout(const double* x, const double* y,
             local.firstNonfinitePosition)
           local.firstNonfinitePosition = position;
       }
-      const int actualCell = diagnosticCellIndex(px, py, pz, grid);
+      const int actualCell = grid.get_safe_cell_index(px, py, pz);
       if (actualCell != static_cast<int>(cell)) {
         ++local.cellMismatchCount;
         if (static_cast<unsigned long long>(position) <
@@ -2159,9 +2153,8 @@ void GPUCycleDiagnostics::reportParticleRange(
 
 void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
     int cycle, int species, CellSorter& sorter,
-    const particleArrayCUDA& particles, const grid3DCUDA& hostGrid,
-    const grid3DCUDA* deviceGrid, bool expectFullSort, cudaStream_t stream,
-    MPI_Comm comm) {
+    const particleArrayCUDA& particles, const grid3DCUDA& grid,
+    bool expectFullSort, cudaStream_t stream, MPI_Comm comm) {
   if (!impl_)
     impl_ = new Impl();
   impl_->ensureCellSortStorage();
@@ -2191,9 +2184,9 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
   local.scratchBytes = sorter.diagnosticScratchBytes();
   local.numCells = sorter.getNumCells();
   local.numScanBlocks = sorter.diagnosticNumScanBlocks();
-  local.nxc = hostGrid.nxc;
-  local.nyc = hostGrid.nyc;
-  local.nzc = hostGrid.nzc;
+  local.nxc = grid.nxc;
+  local.nyc = grid.nyc;
+  local.nzc = grid.nzc;
   local.pendingHostMatches =
       !local.sortPending || sorter.diagnosticPendingHostPointer() == &particles;
   local.compileWarpSize = WARP_SIZE;
@@ -2234,7 +2227,7 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
   if (local.nop > local.scratchBytes / sizeof(std::uint64_t))
     local.metadataFlags |= 1 << 5;
   const long long gridCells =
-      static_cast<long long>(hostGrid.nxc) * hostGrid.nyc * hostGrid.nzc;
+      static_cast<long long>(grid.nxc) * grid.nyc * grid.nzc;
   const int expectedScanBlocks =
       local.numCells > 0 ? (local.numCells + SORT_SCAN_ELEMENTS_PER_BLOCK - 1) /
                                SORT_SCAN_ELEMENTS_PER_BLOCK
@@ -2354,10 +2347,9 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
       local.numScanBlocks == expectedScanBlocks && sorterPointersValid &&
       local.enqueueSortBufferMutationMask == 0 &&
       local.enqueueAllocationMetadataMutationMask == 0;
-  const bool permutationReadable = invariantsReadable &&
-                                   local.pendingHostMatches &&
-                                   local.enqueuePointerMutationMask == 0 &&
-                                   soa->x && soa->y && soa->z && deviceGrid;
+  const bool permutationReadable =
+      invariantsReadable && local.pendingHostMatches &&
+      local.enqueuePointerMutationMask == 0 && soa->x && soa->y && soa->z;
   int cellBlocks = 0;
   int tileBlocks = 0;
   int blockBlocks = 0;
@@ -2405,7 +2397,7 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
       local.permutationChecked = 1;
       reduceSortPermutation<<<permutationBlocks, DIAG_THREADS, 0, stream>>>(
           sorter.diagnosticSortedIndices(), soa->x, soa->y, soa->z,
-          sorter.getCellStartOffsets(), sorter.getCellCounts(), deviceGrid,
+          sorter.getCellStartOffsets(), sorter.getCellCounts(), grid,
           local.numCells, static_cast<std::uint32_t>(local.expectedParticles),
           impl_->dCellSortPartials);
       cudaErrChk(cudaGetLastError());
@@ -3268,8 +3260,8 @@ void GPUCycleDiagnostics::reportCellSorterBeforeScatter(
 
 void GPUCycleDiagnostics::reportCellSorterAfterScatter(
     int cycle, int species, const CellSorter& sorter,
-    const particleArrayCUDA& particles, const grid3DCUDA& hostGrid,
-    const grid3DCUDA* deviceGrid, cudaStream_t stream, MPI_Comm comm) {
+    const particleArrayCUDA& particles, const grid3DCUDA& grid,
+    cudaStream_t stream, MPI_Comm comm) {
   if (!impl_)
     impl_ = new Impl();
   impl_->ensureCellSortStorage();
@@ -3288,9 +3280,9 @@ void GPUCycleDiagnostics::reportCellSorterAfterScatter(
   local.expectFullSort = snapshot.expectFullSort;
   local.stage4FieldCount = sorter.diagnosticStage4FieldCount();
   local.expectedFieldCount = snapshot.fieldCount;
-  local.nxc = hostGrid.nxc;
-  local.nyc = hostGrid.nyc;
-  local.nzc = hostGrid.nzc;
+  local.nxc = grid.nxc;
+  local.nyc = grid.nyc;
+  local.nzc = grid.nzc;
   const ParticleSoADevice* soa = particles.getSoA();
   const void* fields[CELL_SORT_DIAGNOSTIC_MAX_FIELDS] = {
       soa->u, soa->v, soa->w, soa->q, soa->x, soa->y, soa->z, soa->id};
@@ -3341,14 +3333,13 @@ void GPUCycleDiagnostics::reportCellSorterAfterScatter(
                                  soa->z && sorter.getCellStartOffsets() &&
                                  sorter.getCellCounts();
   if (snapshot.active && !local.contextMismatch && impl_->postSortLayoutSafe &&
-      postPointersValid && snapshot.expectedParticles <= UINT32_MAX &&
-      deviceGrid) {
+      postPointersValid && snapshot.expectedParticles <= UINT32_MAX) {
     postBlocks = reductionBlocks(sorter.getNumCells());
     local.postLayoutChecked = postBlocks > 0;
     reducePostSortLayout<<<postBlocks, DIAG_THREADS, 0, stream>>>(
         soa->x, soa->y, soa->z, sorter.getCellStartOffsets(),
-        sorter.getCellCounts(), sorter.getNumCells(),
-        static_cast<std::uint32_t>(snapshot.expectedParticles), deviceGrid,
+        sorter.getCellCounts(), grid, sorter.getNumCells(),
+        static_cast<std::uint32_t>(snapshot.expectedParticles),
         impl_->dCellSortPartials);
     cudaErrChk(cudaGetLastError());
     cudaErrChk(cudaMemcpyAsync(impl_->hCellSortPartials,

@@ -29,7 +29,8 @@
 #include <mpi.h>
 #include <vector>
 
-#include "Alloc.h" // array3_int
+#include "Alloc.h"       // array3_int
+#include "BCparticles.h" // BCparticles::Enum, kOpenFaceLayers
 #include "ParticleIDGenerator.cuh"
 #include "aligned_vector.h" // vector_cudaParticleType_registered (pinned Larray)
 #include "cudaTypeDef.cuh"  // cudaParticleType, cudaCommonType
@@ -39,15 +40,6 @@
 
 // Forward declarations
 class moverParameter;
-
-namespace BCparticles {
-enum Enum {
-  EXIT = 0,
-  PERFECT_MIRROR = 1,
-  OPEN_INFLOW = 2,
-  OPEN_OUTFLOW = 3,
-};
-}
 
 /**
  * @brief Pinned-memory SoA host container for all particle data on a single
@@ -430,9 +422,16 @@ public:
 
   // ===== BC configuration queries (for GPU kernel setup) =====
 
+  /** The open-inflow faces of this rank, those with bcPface OPEN_INFLOW and
+   *  no neighbour across (so not on a periodic axis), in the order Xleft,
+   *  Xright, Yleft, Yright, Zleft, Zright: the faces whose layers the mover
+   *  empties and the injection refills. */
+  void openInflowFaces(bool faces[6]) const;
+
   /**
-   * @brief Fill the repopulation layers of the GPU mover: the 3 cells before
-   * each open-inflow face of this rank (deleteRepopulateInjection).
+   * @brief Fill the repopulation layers of the GPU mover: the
+   * BCparticles::kOpenFaceLayers cells before each open-inflow face of this
+   * rank (deleteRepopulateInjection).
    *
    * @param doRepopulateInjection Output flag that enables the deletion.
    * @param doRepopulateInjectionSide Output per-face enable flags.
@@ -595,14 +594,6 @@ private:
   double speedOfLight_ = 0.0;   // c
   int numMoverIterations_ = 0;  // NiterMover
   double reconThickness_ = 0.0; // delta
-
-  // ===== Velocity caps =====
-  double velocityCapMaxX_ = 0.0; // umax
-  double velocityCapMaxY_ = 0.0; // vmax
-  double velocityCapMaxZ_ = 0.0; // wmax
-  double velocityCapMinX_ = 0.0; // umin
-  double velocityCapMinY_ = 0.0; // vmin
-  double velocityCapMinZ_ = 0.0; // wmin
 
   // ===== Injection / open BC parameters =====
   double injectionVelocity_ = 0.0; // Vinj

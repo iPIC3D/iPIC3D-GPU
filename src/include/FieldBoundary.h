@@ -31,6 +31,7 @@
  * ZL, ZR (face f: axis f / 2, high side f % 2).
  */
 
+#include "BCparticles.h"   // OPEN_INFLOW, kOpenFaceLayers
 #include "cudaTypeDef.cuh" // cudaSolverType
 
 class Collective;
@@ -94,8 +95,8 @@ struct FieldBoundarySpec {
   // its layers L: node planes nxn-1-L..nxn-1 (cells nxc-1-L..nxc-1) take
   // the values of plane nxn-2-L (nxc-2-L).  The neutralized charge, the
   // copied moments and, with OutflowLayerFields = copy, E and B share
-  // L = max(3, n_layers_sal), so that the L cells between the reference
-  // plane and the face contain the 3-cell particle open layer
+  // L = max(BCparticles::kOpenFaceLayers, n_layers_sal), so that the L cells
+  // between the reference plane and the face contain the particle open layer
   int outflowLayers = 0;
   // layers over which E and B are copied after a solve: outflowLayers,
   // except with OutflowLayerFields = solved, where it is 0 (only the ghost
@@ -116,7 +117,8 @@ struct FieldBoundarySpec {
   /** Face f carries an inflow face's rows and layers: open, bcPface = 2,
    *  not X-right (an open X-right face keeps its operator rows). */
   bool inflow(int f) const {
-    return face[f].open() && face[f].bcP == 2 && f != FACE_XR;
+    return face[f].open() && face[f].bcP == BCparticles::OPEN_INFLOW &&
+           f != FACE_XR;
   }
   /** The B layers of open face f are treated: the local cell count along
    *  its normal, ghosts included, is above 10 (an inherited gate). */
